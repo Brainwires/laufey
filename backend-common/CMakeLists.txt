@@ -50,6 +50,7 @@ if(APPLE)
     src/permissions_mac.mm
     src/keymap_mac.mm
     src/dock_mac.mm
+    src/open_url_mac.mm
     src/menu_mac.mm
     src/tray_mac.mm
   )
