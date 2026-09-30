@@ -126,11 +126,11 @@ const cases = [
 pub fn serve(req: SchemeRequest, received: &Received) -> Option<SchemeRequest> {
   let path = req.url.split(['?', '#']).next().unwrap_or("").to_string();
   if path == PAGE_PREFIX || path == PAGE_URL {
+    // No charset parameter: the page declares it with <meta charset>, and a
+    // CEF backend that takes the whole Content-Type value as the MIME type
+    // would otherwise load an empty document.
     let headers = vec![
-      (
-        "content-type".to_string(),
-        "text/html; charset=utf-8".to_string(),
-      ),
+      ("content-type".to_string(), "text/html".to_string()),
       ("cache-control".to_string(), "no-store".to_string()),
     ];
     req.exchange.begin(200, &headers);

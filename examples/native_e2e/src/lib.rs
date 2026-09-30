@@ -100,6 +100,15 @@ async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
     na("custom-scheme request bodies (backend has no web engine)");
     return None;
   }
+  // CEF on this base registers app:// as a fetch-enabled scheme only in the
+  // browser process, not in the renderer, so fetch() from an app:// page
+  // fails before it reaches the scheme handler (fixed separately by the
+  // registered custom schemes change). CEF buffers request bodies up front
+  // (scheme_handler.cc), so the round trip applies once fetch works.
+  if std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("cef") {
+    na("custom-scheme request bodies (CEF: fetch() to app:// is not enabled in the renderer on this base)");
+    return None;
+  }
   let reports: body_echo::Reports = Arc::new(Mutex::new(HashMap::new()));
   let win = Window::new(320, 240)
     .title("native-e2e-body")

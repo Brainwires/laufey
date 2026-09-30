@@ -178,7 +178,10 @@ over 1 MB, and an empty body) to the scheme handler, which reads each one with
 `read_body` and echoes it. The battery checks that the handler received exactly
 the bytes sent and that the page got an identical echo
 (`examples/native_e2e/src/body_echo.rs`). `LAUFEY_E2E_ONLY=scheme-body`
-(`native-e2e-run.sh <backend> --scheme-body`) runs only this check.
+(`native-e2e-run.sh <backend> --scheme-body`) runs only this check. CEF reports
+it N/A for now: it registers `app://` as fetch-enabled only in the browser
+process, so a `fetch()` from an `app://` page fails in the renderer before it
+reaches the handler.
 
 ### D. OS-observer introspection — _for chrome with no getter_
 
