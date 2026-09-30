@@ -21,5 +21,6 @@
 - [Permissions](permissions.md)
 - [App data & web storage](app-data.md)
 - [Packaging & distribution](distribution.md)
+- [Launch configuration](launch-config.md)
 - [Building](building.md)
 - [End-to-end testing](e2e-testing.md)

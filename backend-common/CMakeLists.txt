@@ -39,6 +39,7 @@ set(LAUFEY_COMMON_SRCS
   src/test_hooks.cc
   src/scheme_registry.cc
   src/data_dir.cc
+  src/launch_config.cc
 )
 
 if(APPLE)
