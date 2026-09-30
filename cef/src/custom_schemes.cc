@@ -1,0 +1,76 @@
+// Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
+
+#include "custom_schemes.h"
+
+#include <cstdlib>
+#include <iostream>
+
+#include "laufey_scheme_registry.h"
+
+namespace laufey_schemes {
+
+const char kSwitch[] = "laufey-custom-schemes";
+const char kEnv[] = "LAUFEY_CUSTOM_SCHEMES";
+
+namespace {
+
+std::vector<std::string> ComputeDeclared() {
+  std::vector<std::string> lists;
+  CefRefPtr<CefCommandLine> command_line =
+      CefCommandLine::GetGlobalCommandLine();
+  if (command_line && command_line->HasSwitch(kSwitch)) {
+    lists.push_back(command_line->GetSwitchValue(kSwitch).ToString());
+  }
+  if (const char* env = std::getenv(kEnv)) {
+    lists.push_back(env);
+  }
+  std::vector<std::string> rejected;
+  std::vector<std::string> declared =
+      laufey_common::MergeSchemeLists(lists, &rejected);
+  for (const std::string& bad : rejected) {
+    std::cerr << "laufey: ignoring invalid URL scheme name \"" << bad
+              << "\" in --" << kSwitch << " / " << kEnv << std::endl;
+  }
+  return declared;
+}
+
+}  // namespace
+
+std::vector<std::string> Declared() {
+  // Computed once per process: the command line and environment are fixed by
+  // the time OnRegisterCustomSchemes runs, and the invalid-name warnings
+  // should not repeat on every call.
+  static const std::vector<std::string> declared = ComputeDeclared();
+  return declared;
+}
+
+bool IsDeclared(const std::string& scheme) {
+  std::string normalized = laufey_common::NormalizeSchemeName(scheme);
+  for (const std::string& declared : Declared()) {
+    if (declared == normalized) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void RegisterAll(CefRawPtr<CefSchemeRegistrar> registrar) {
+  for (const std::string& scheme : Declared()) {
+    registrar->AddCustomScheme(scheme, CEF_SCHEME_OPTION_STANDARD |
+                                           CEF_SCHEME_OPTION_SECURE |
+                                           CEF_SCHEME_OPTION_CORS_ENABLED |
+                                           CEF_SCHEME_OPTION_FETCH_ENABLED);
+  }
+}
+
+void ForwardToChild(CefRefPtr<CefCommandLine> command_line) {
+  if (!command_line || command_line->HasSwitch(kSwitch)) {
+    return;
+  }
+  std::string joined = laufey_common::JoinForwardedSchemes(Declared());
+  if (!joined.empty()) {
+    command_line->AppendSwitchWithValue(kSwitch, joined);
+  }
+}
+
+}  // namespace laufey_schemes
