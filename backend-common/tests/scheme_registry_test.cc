@@ -14,6 +14,7 @@
 
 using laufey_common::IsValidSchemeName;
 using laufey_common::JoinForwardedSchemes;
+using laufey_common::MergeForwardedSchemes;
 using laufey_common::MergeSchemeLists;
 using laufey_common::NormalizeSchemeName;
 using laufey_common::ParseSchemeList;
@@ -215,6 +216,23 @@ static void TestJoinForwardedSchemes() {
   EXPECT(MergeSchemeLists({JoinForwardedSchemes(declared)}) == declared);
 }
 
+static void TestMergeForwardedSchemes() {
+  // No switch on the child yet: the declared list, as JoinForwardedSchemes.
+  EXPECT(MergeForwardedSchemes("", {"app", "myapp"}) == "myapp");
+  EXPECT(MergeForwardedSchemes("", {"app"}).empty());
+  // The child already has some: keep them, add the rest, no duplicates.
+  EXPECT(MergeForwardedSchemes("myapp", {"app", "myapp", "other"}) ==
+         "myapp,other");
+  EXPECT(MergeForwardedSchemes("other,myapp", {"app", "myapp", "third"}) ==
+         "other,myapp,third");
+  // Case-insensitive, and "app" / invalid entries on the child are dropped.
+  EXPECT(MergeForwardedSchemes("MyApp,app,not ok", {"app", "myapp"}) ==
+         "myapp");
+  // Nothing to add leaves the child's value as it was.
+  EXPECT(MergeForwardedSchemes("myapp,other", {"app", "other"}) ==
+         "myapp,other");
+}
+
 int main() {
   TestSchemeNameGrammar();
   TestRegistryDefaults();
@@ -224,6 +242,7 @@ int main() {
   TestParseSchemeList();
   TestMergeSchemeLists();
   TestJoinForwardedSchemes();
+  TestMergeForwardedSchemes();
   std::printf("scheme_registry_test: all tests passed\n");
   return 0;
 }
