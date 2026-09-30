@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 35
+#define LAUFEY_API_VERSION 36
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -144,6 +144,20 @@ typedef void (*laufey_dock_reopen_fn)(void* user_data,
 // NOT validated: the embedder must check the scheme against the ones it
 // registered before acting on it.
 typedef void (*laufey_open_url_fn)(void* user_data, const char* url);
+
+// How many second-instance launches a backend buffers while no handler is
+// registered (see set_second_instance_handler); older ones are discarded.
+#define LAUFEY_MAX_PENDING_SECOND_INSTANCES 16
+
+// Callback fired in the running instance when the app is launched again while
+// single-instance mode is on (see set_second_instance_handler). `argv` holds
+// the `argc` arguments the new launch got after the executable name, `cwd`
+// its working directory, all UTF-8 and valid only for the duration of the
+// call. They are NOT validated beyond that: any process of the same user can
+// send them.
+typedef void (*laufey_second_instance_fn)(void* user_data,
+                                          const char* const* argv, size_t argc,
+                                          const char* cwd);
 
 // Callback fired when the user left-clicks a tray / status-bar icon.
 // (Right-click is reserved for the tray's menu.)
@@ -931,6 +945,39 @@ struct laufey_backend_api {
   // non-macOS backend); callers should treat a NULL hook as unavailable,
   // like test_click_menu_item.
   bool (*test_trigger_open_url)(void* backend_data, const char* url);
+
+  // --- Single instance (API >= 36) -------------------------------------------
+  //
+  // Register a callback invoked in the running instance when the app is
+  // launched again. Single-instance mode is opt-in and decided before the
+  // runtime loads: "singleInstance": true in laufey-launch.json, or
+  // LAUFEY_SINGLE_INSTANCE=1, together with an app id (LAUFEY_APP_ID /
+  // "appId"). The second launch forwards its arguments and working directory
+  // to the running instance and exits 0 without starting a web engine or the
+  // runtime; the running instance brings its window to the front and calls
+  // this handler. See docs/deep-links.md.
+  //
+  // This is how a deep link or a file reaches an app that is already running
+  // on Windows and Linux (the OS starts `app "<url>"`) and on macOS when the
+  // binary is exec'd directly; on macOS LaunchServices uses
+  // set_open_url_handler instead. laufey does not parse the arguments: the
+  // embedder decides what is a URL, a file or a flag, as it does with its own
+  // argv at a cold start.
+  //
+  // Delivery contract (as set_open_url_handler):
+  //   - The callback fires on the backend UI thread.
+  //   - Launches that arrive before a handler is registered are buffered (at
+  //     most LAUFEY_MAX_PENDING_SECOND_INSTANCES, oldest dropped) and
+  //     delivered, in order, on the registering thread when one is.
+  //   - Passing a NULL `fn` clears the handler and re-arms buffering.
+  //
+  // Set on the CEF and WebView backends on every desktop OS (the handler
+  // simply never fires unless single-instance mode is on). NULL on the Winit
+  // backend, which has no single-instance lock, and on backends older than
+  // API version 36; callers must null-check.
+  void (*set_second_instance_handler)(void* backend_data,
+                                      laufey_second_instance_fn fn,
+                                      void* user_data);
 };
 
 #ifdef __cplusplus

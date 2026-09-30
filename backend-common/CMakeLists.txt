@@ -40,7 +40,14 @@ set(LAUFEY_COMMON_SRCS
   src/scheme_registry.cc
   src/data_dir.cc
   src/launch_config.cc
+  src/single_instance.cc
 )
+
+if(WIN32)
+  list(APPEND LAUFEY_COMMON_SRCS src/single_instance_win.cc)
+else()
+  list(APPEND LAUFEY_COMMON_SRCS src/single_instance_posix.cc)
+endif()
 
 if(APPLE)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -53,6 +60,7 @@ if(APPLE)
     src/open_url_mac.mm
     src/menu_mac.mm
     src/tray_mac.mm
+    src/single_instance_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -90,6 +98,7 @@ if(WIN32)
     shell32
     gdi32
     user32
+    advapi32
   )
 elseif(APPLE)
   find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
@@ -121,6 +130,10 @@ elseif(UNIX)
   )
 endif()
 
+# The single-instance server runs on its own thread.
+find_package(Threads REQUIRED)
+target_link_libraries(laufey_backend_common PUBLIC Threads::Threads)
+
 set_target_properties(laufey_backend_common PROPERTIES
   POSITION_INDEPENDENT_CODE ON
 )
@@ -134,7 +147,6 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_scheme_registry_test PRIVATE
     laufey_backend_common
   )
-  find_package(Threads REQUIRED)
   target_link_libraries(laufey_scheme_registry_test PRIVATE Threads::Threads)
   add_test(NAME laufey_scheme_registry_test
            COMMAND laufey_scheme_registry_test)
@@ -146,4 +158,12 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_launch_config_test
            COMMAND laufey_launch_config_test)
+
+  # Takes (and releases) real single-instance locks under per-run app ids.
+  add_executable(laufey_single_instance_test tests/single_instance_test.cc)
+  target_link_libraries(laufey_single_instance_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_single_instance_test
+           COMMAND laufey_single_instance_test)
 endif()

@@ -29,7 +29,7 @@ pub use mouse::*;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 35;
+pub const LAUFEY_API_VERSION: u32 = 36;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -71,6 +71,9 @@ static DOCK_REOPEN_HANDLER: OnceLock<
 static OPEN_URL_HANDLER: OnceLock<
   Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
 > = OnceLock::new();
+type SecondInstanceHandler = Box<dyn Fn(&[String], &str) + Send + Sync>;
+static SECOND_INSTANCE_HANDLER: OnceLock<Mutex<Option<SecondInstanceHandler>>> =
+  OnceLock::new();
 static TRAY_MENU_HANDLERS: OnceLock<
   Mutex<HashMap<u32, Box<dyn Fn(&str) + Send + Sync>>>,
 > = OnceLock::new();
@@ -2075,6 +2078,82 @@ where
       f(
         api.backend_data,
         Some(open_url_callback),
+        std::ptr::null_mut(),
+      );
+    }
+  }
+}
+
+// --- Single instance ---
+
+fn second_instance_handler() -> &'static Mutex<Option<SecondInstanceHandler>> {
+  SECOND_INSTANCE_HANDLER.get_or_init(|| Mutex::new(None))
+}
+
+unsafe extern "C" fn second_instance_callback(
+  _user_data: *mut c_void,
+  argv: *const *const c_char,
+  argc: usize,
+  cwd: *const c_char,
+) {
+  // The backend validated the strings as UTF-8; convert lossily anyway, the
+  // source is another process.
+  let mut args = Vec::with_capacity(argc);
+  if !argv.is_null() {
+    for i in 0..argc {
+      let arg = *argv.add(i);
+      if !arg.is_null() {
+        args.push(CStr::from_ptr(arg).to_string_lossy().into_owned());
+      }
+    }
+  }
+  let cwd = if cwd.is_null() {
+    String::new()
+  } else {
+    CStr::from_ptr(cwd).to_string_lossy().into_owned()
+  };
+  if let Some(handler) = second_instance_handler().lock().unwrap().as_ref() {
+    handler(&args, &cwd);
+  }
+}
+
+/// Register a callback invoked in the running instance when the app is
+/// launched again, with the new launch's arguments (after the executable
+/// name) and working directory — like Electron's `second-instance` event.
+///
+/// Single-instance mode is opt-in and decided by the backend before the
+/// runtime loads: `"singleInstance": true` in `laufey-launch.json` (or
+/// `LAUFEY_SINGLE_INSTANCE=1`) together with an app id (`"appId"` /
+/// `LAUFEY_APP_ID`). The second launch then forwards its arguments to this
+/// process and exits without starting; this process brings its window to the
+/// front and calls `handler` on the UI thread. Launches that arrive before
+/// the handler is registered are buffered and delivered when it is.
+///
+/// This is how a deep link or a file reaches an already-running app on
+/// Windows and Linux (the OS starts `app "<url>"`); on macOS, LaunchServices
+/// uses [`on_open_url`] instead. laufey doesn't interpret the arguments: they
+/// come from another process of the same user, so treat them as untrusted
+/// input, as you would your own `std::env::args()` at a cold start.
+///
+/// No-op on backends without single-instance support (Winit) and on
+/// backends older than API 36. See `docs/deep-links.md`.
+pub fn on_second_instance<F>(handler: F)
+where
+  F: Fn(&[String], &str) + Send + Sync + 'static,
+{
+  // As in on_open_url: install first, the backend flushes buffered launches
+  // synchronously inside the call below.
+  {
+    let mut slot = second_instance_handler().lock().unwrap();
+    *slot = Some(Box::new(handler));
+  }
+
+  let api = api();
+  if let Some(f) = api.set_second_instance_handler {
+    unsafe {
+      f(
+        api.backend_data,
+        Some(second_instance_callback),
         std::ptr::null_mut(),
       );
     }

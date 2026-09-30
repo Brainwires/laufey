@@ -34,7 +34,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 35;
+pub const LAUFEY_API_VERSION: u32 = 36;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -582,6 +582,25 @@ pub struct LaufeyBackendApi {
   >,
   pub test_trigger_open_url:
     Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> bool>,
+
+  // --- Single instance (API >= 36) ---
+  // Not implemented by the winit backends (no single-instance lock; see
+  // docs/deep-links.md), so always None. Declared to keep the struct layout
+  // in sync with `laufey_backend_api`.
+  pub set_second_instance_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<
+        unsafe extern "C" fn(
+          *mut c_void,
+          *const *const c_char,
+          usize,
+          *const c_char,
+        ),
+      >,
+      *mut c_void,
+    ),
+  >,
 }
 
 unsafe impl Send for LaufeyBackendApi {}
@@ -1227,6 +1246,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     // Deep links (API >= 35): filled by fill_common_api on macOS only.
     set_open_url_handler: None,
     test_trigger_open_url: None,
+    // Single instance (API >= 36): not supported by winit backends.
+    set_second_instance_handler: None,
   }
 }
 

@@ -47,6 +47,7 @@ constexpr int kMaxJsonDepth = 32;
 struct JsonValue {
   enum class Type { kNull, kBool, kNumber, kString, kArray, kObject };
   Type type = Type::kNull;
+  bool boolean = false;
   std::string string;
   std::vector<JsonValue> array;
   std::vector<std::pair<std::string, JsonValue>> object;
@@ -133,8 +134,14 @@ class JsonReader {
       out->type = JsonValue::Type::kNumber;
       return ParseNumber();
     }
-    if (Consume("true") || Consume("false")) {
+    if (Consume("true")) {
       out->type = JsonValue::Type::kBool;
+      out->boolean = true;
+      return true;
+    }
+    if (Consume("false")) {
+      out->type = JsonValue::Type::kBool;
+      out->boolean = false;
       return true;
     }
     if (Consume("null")) {
@@ -514,6 +521,16 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
         }
         config.custom_schemes.push_back(item.string);
       }
+    } else if (key == "singleInstance") {
+      config.has_single_instance = false;
+      if (value.type != JsonValue::Type::kBool) {
+        Warn(warnings, std::string("\"singleInstance\" must be a boolean, "
+                                   "not ") +
+                           TypeName(value.type) + "; ignoring it");
+        continue;
+      }
+      config.has_single_instance = true;
+      config.single_instance = value.boolean;
     } else {
       Warn(warnings, "unknown key \"" + key + "\"; ignoring it");
     }
@@ -622,6 +639,32 @@ std::string LaunchDataDir() {
   const LaunchConfig& file = ProcessLaunchConfig();
   return LaunchSettingFrom(GetEnvUtf8("LAUFEY_DATA_DIR"), file.has_data_dir,
                            file.data_dir);
+}
+
+bool LaunchBoolSettingFrom(const std::string& env_name,
+                           const std::string& env_value, bool file_has,
+                           bool file_value, std::string* warning) {
+  if (!env_value.empty()) {
+    if (env_value == "1" || env_value == "true")
+      return true;
+    if (env_value == "0" || env_value == "false")
+      return false;
+    if (warning)
+      *warning = env_name + "=\"" + env_value +
+                 "\" is not 1, 0, true or false; ignoring it";
+  }
+  return file_has && file_value;
+}
+
+bool LaunchSingleInstance() {
+  const LaunchConfig& file = ProcessLaunchConfig();
+  std::string warning;
+  bool on = LaunchBoolSettingFrom(
+      "LAUFEY_SINGLE_INSTANCE", GetEnvUtf8("LAUFEY_SINGLE_INSTANCE"),
+      file.has_single_instance, file.single_instance, &warning);
+  if (!warning.empty())
+    std::cerr << "laufey: " << warning << std::endl;
+  return on;
 }
 
 std::string LaunchCustomSchemes() {
