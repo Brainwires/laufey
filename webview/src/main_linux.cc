@@ -1,6 +1,7 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
 #include "laufey_launch_config.h"
+#include "laufey_single_instance.h"
 #include "runtime_loader.h"
 
 #include <gtk/gtk.h>
@@ -12,8 +13,54 @@
 #include <iostream>
 #include <string>
 
+// Brings the app to the front for a forwarded launch: presents the focused
+// (else the first visible) application window. Hidden windows stay hidden.
+// GTK main thread.
+static void ActivateApp(void*) {
+  GList* toplevels = gtk_window_list_toplevels();
+  GtkWindow* target = nullptr;
+  for (GList* l = toplevels; l; l = l->next) {
+    GtkWindow* window = GTK_WINDOW(l->data);
+    if (gtk_window_get_window_type(window) != GTK_WINDOW_TOPLEVEL ||
+        !gtk_widget_get_visible(GTK_WIDGET(window)))
+      continue;
+    if (!target || gtk_window_is_active(window))
+      target = window;
+  }
+  g_list_free(toplevels);
+  if (target)
+    gtk_window_present(target);
+}
+
 int main(int argc, char* argv[]) {
+  // Single-instance mode (docs/deep-links.md): a second launch forwards its
+  // arguments to the running instance and exits here, before any web
+  // engine or the runtime starts.
+  int single_instance_exit = 0;
+  if (!laufey_common::SingleInstanceStartup(argc, argv,
+                                            &single_instance_exit)) {
+    return single_instance_exit;
+  }
+
   gtk_init(&argc, &argv);
+
+  laufey_common::SecondInstanceUiHooks single_instance_hooks;
+  single_instance_hooks.post = [](void*, void (*task)(void*), void* data) {
+    struct Task {
+      void (*task)(void*);
+      void* data;
+    };
+    g_idle_add(
+        [](gpointer p) -> gboolean {
+          auto* t = static_cast<Task*>(p);
+          t->task(t->data);
+          delete t;
+          return G_SOURCE_REMOVE;
+        },
+        new Task{task, data});
+  };
+  single_instance_hooks.activate = ActivateApp;
+  laufey_common::SetSecondInstanceUiHooks(single_instance_hooks);
 
   // Application identity for the window manager. The embedder (e.g. deno
   // desktop) passes LAUFEY_APP_ID (the reverse-DNS identifier it also uses for

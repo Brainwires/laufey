@@ -5,6 +5,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
+#include "laufey_single_instance.h"
 #include "scheme_handler.h"
 
 #include <iostream>
@@ -492,6 +493,47 @@ bool LaufeyHandleAlreadyRunningAppRelaunch() {
                "instance's web data directory)"
             << std::endl;
   return true;
+}
+
+#if !defined(__APPLE__)
+namespace {
+
+// Brings the app to the front for a forwarded launch: the first (oldest)
+// window that isn't hidden. CEF UI thread. (macOS: ActivateAppMac.)
+void ActivateAppCef(void*) {
+  for (const CefRefPtr<CefBrowser>& browser :
+       RuntimeLoader::GetInstance()->GetAllBrowsers()) {
+    CefRefPtr<CefBrowserView> view = CefBrowserView::GetForBrowser(browser);
+    CefRefPtr<CefWindow> window = view ? view->GetWindow() : nullptr;
+    if (!window || !window->IsVisible())
+      continue;
+    if (window->IsMinimized())
+      window->Restore();
+    window->Activate();
+    return;
+  }
+}
+
+}  // namespace
+#endif  // !defined(__APPLE__)
+
+void LaufeyInstallSecondInstanceHooks() {
+#if defined(__APPLE__)
+  // [NSApp run] drains the main dispatch queue (see main_mac.mm).
+  laufey_common::InstallSecondInstanceHooksMac();
+#else
+  laufey_common::SecondInstanceUiHooks hooks;
+  hooks.post = [](void*, void (*task)(void*), void* data) {
+    CefPostTask(TID_UI, base::BindOnce([](void (*t)(void*), void* d) { t(d); },
+                                       task, data));
+  };
+  hooks.activate = ActivateAppCef;
+  laufey_common::SetSecondInstanceUiHooks(hooks);
+#endif
+}
+
+void LaufeyClearSecondInstanceHooks() {
+  laufey_common::SetSecondInstanceUiHooks({});
 }
 
 void LaufeyReportCefInitializeFailure(const std::string& root_cache_path) {

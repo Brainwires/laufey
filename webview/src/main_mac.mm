@@ -4,6 +4,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_single_instance.h"
 
 #include <iostream>
 #include <string>
@@ -145,6 +146,23 @@ void EnsureEditMenu(NSMenu* menubar) {
   return NO;
 }
 
+// Deep links. AppKit routes the kAEGetURL Apple Event here for every scheme
+// the bundle claims in CFBundleURLTypes, both at launch and while running.
+// Implementing this selector is what makes AppKit install its own handler for
+// that event, so there's no NSAppleEventManager registration to do.
+//
+// A launch URL lands before the runtime finished loading on its worker
+// thread, so FireOpenUrlMac buffers until a handler registers.
+- (void)application:(NSApplication*)application
+           openURLs:(NSArray<NSURL*>*)urls {
+  for (NSURL* url in urls) {
+    NSString* absolute = [url absoluteString];
+    if (absolute) {
+      laufey_common::FireOpenUrlMac([absolute UTF8String]);
+    }
+  }
+}
+
 - (NSMenu*)applicationDockMenu:(NSApplication*)sender {
   return laufey_common::GetDockMenuMac();
 }
@@ -227,6 +245,15 @@ int main(int argc, char* argv[]) {
     return run_headless(runtimePathArg ? [runtimePathArg UTF8String] : nullptr);
   }
 
+  // Single-instance mode (docs/deep-links.md): a second launch forwards its
+  // arguments to the running instance and exits here, before any web
+  // engine or the runtime starts.
+  int single_instance_exit = 0;
+  if (!laufey_common::SingleInstanceStartup(argc, argv,
+                                            &single_instance_exit)) {
+    return single_instance_exit;
+  }
+
   @autoreleasepool {
     // Allow the host to override the user-visible app name (menu-bar app
     // menu, Dock, Cmd-Tab) at launch, e.g. the project name during
@@ -258,6 +285,12 @@ int main(int argc, char* argv[]) {
     delegate.runtimePath = runtimePathArg;
 
     [NSApp setDelegate:delegate];
+
+    // Files and URLs reach the runtime through argv (direct exec) or the
+    // open-url handler (LaunchServices), never both; forwarded launches are
+    // delivered on the main queue once [NSApp run] starts.
+    laufey_common::DisableArgvOpenEventsMac();
+    laufey_common::InstallSecondInstanceHooksMac();
 
     NSMenu* menubar = [[NSMenu alloc] init];
     NSMenuItem* appMenuItem = [[NSMenuItem alloc] init];

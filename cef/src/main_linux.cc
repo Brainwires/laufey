@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 #include <cstring>
 #include <cstdlib>
 #include <unistd.h>
@@ -20,6 +21,7 @@
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_launch_config.h"
+#include "laufey_single_instance.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
 
@@ -786,7 +788,16 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
 };
 
 int main(int argc, char* argv[]) {
-  CefMainArgs main_args(argc, argv);
+  // CEF gets its own copy of argv. Chromium sets the process title by
+  // rewriting the argv strings in place (setproctitle), which garbles the
+  // arguments the runtime later reads with std::env::args() or its
+  // equivalent (they point at the original argv); see docs/deep-links.md.
+  std::vector<std::string> cef_arg_storage(argv, argv + argc);
+  std::vector<char*> cef_argv;
+  for (std::string& arg : cef_arg_storage)
+    cef_argv.push_back(&arg[0]);
+  cef_argv.push_back(nullptr);
+  CefMainArgs main_args(argc, cef_argv.data());
 
   // Single-exe model: check if we are a subprocess first
   CefRefPtr<LaufeyCombinedApp> app(new LaufeyCombinedApp());
@@ -833,6 +844,16 @@ int main(int argc, char* argv[]) {
     return run_headless(g_runtime_path);
   }
 
+  // Single-instance mode (docs/deep-links.md): a second launch forwards its
+  // arguments to the running instance and exits here, before CefInitialize
+  // (so CEF's own profile singleton is never reached) and before the runtime
+  // loads.
+  int single_instance_exit = 0;
+  if (!laufey_common::SingleInstanceStartup(argc, argv,
+                                            &single_instance_exit)) {
+    return single_instance_exit;
+  }
+
   CefSettings settings;
   settings.no_sandbox = true;
   settings.log_severity = LaufeyCefLogSeverity();
@@ -861,9 +882,11 @@ int main(int argc, char* argv[]) {
     LaufeyReportCefInitializeFailure(cache_path);
     return 1;
   }
+  LaufeyInstallSecondInstanceHooks();
 
   CefRunMessageLoop();
 
+  LaufeyClearSecondInstanceHooks();
   RuntimeLoader::GetInstance()->Shutdown();
 
   CefShutdown();

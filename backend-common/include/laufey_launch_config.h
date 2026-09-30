@@ -18,7 +18,8 @@
 //
 //   { "appId": "com.example.app",
 //     "customSchemes": ["myapp"],
-//     "dataDir": "/absolute/path" }
+//     "dataDir": "/absolute/path",
+//     "singleInstance": true }
 //
 // Every key is optional. Each key stands in for its environment variable: an
 // environment variable that is set (non-empty) wins over the file, key by
@@ -49,6 +50,8 @@ struct LaunchConfig {
   std::string data_dir;
   bool has_custom_schemes = false;
   std::vector<std::string> custom_schemes;
+  bool has_single_instance = false;
+  bool single_instance = false;
 };
 
 // Parses and validates the text of a launch file. Reads nothing from the
@@ -94,6 +97,19 @@ std::string LaunchAppId();          // LAUFEY_APP_ID  / "appId"
 std::string LaunchDataDir();        // LAUFEY_DATA_DIR / "dataDir"
 std::string LaunchCustomSchemes();  // LAUFEY_CUSTOM_SCHEMES / "customSchemes"
                                     // (comma-separated)
+
+// Precedence step behind LaunchSingleInstance, exposed for tests: a non-empty
+// `env_value` of "1"/"true" or "0"/"false" wins; any other non-empty value is
+// reported in `warning` (naming `env_name`) and ignored; then the file's
+// value if `file_has`; else false.
+bool LaunchBoolSettingFrom(const std::string& env_name,
+                           const std::string& env_value, bool file_has,
+                           bool file_value, std::string* warning);
+
+// Whether single-instance mode is on: LAUFEY_SINGLE_INSTANCE ("1"/"0",
+// also "true"/"false") if set, else the launch file's "singleInstance", else
+// false. An invalid environment value is reported on stderr and ignored.
+bool LaunchSingleInstance();
 
 }  // namespace laufey_common
 

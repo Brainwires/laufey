@@ -30,7 +30,11 @@ matrix over the C ABI surface, and a phased rollout.
 > `set_close_requested_handler`'s defer-until-close_window contract is
 > implemented for all backends and verified green under Winit and WebView on
 > macOS; it rides the same pre-existing CI exclusions above for CEF and the
-> Windows/Linux webview combos, so those aren't gated by it yet.
+> Windows/Linux webview combos, so those aren't gated by it yet. The
+> `test_trigger_open_url` hook (API 35, `§8`) for deep-link delivery is
+> implemented wherever deep links are — macOS, for all three backends — and
+> verified green under Winit and WebView there; it reports `N/A` on every other
+> platform, where the ABI pointer is NULL by design.
 
 ---
 
@@ -430,6 +434,31 @@ but ride the pre-existing `native-e2e` CI exclusions for those combos (`§`
 status note above) — not gated by this change, but not covered by CI for it
 either.
 
+**Implemented (API 35):**
+
+```c
+// Synthesizes a deep-link delivery of `url` through the same dispatch path
+// a real OS-routed URL takes, buffer included: called before any handler is
+// registered, the URL is replayed on registration exactly like a cold-start
+// launch link. Returns true if a handler consumed it, false if it was
+// buffered. NULL on every non-macOS backend (see docs/deep-links.md).
+bool (*test_trigger_open_url)(void* backend_data, const char* url);
+```
+
+Deep links can't be exercised for real without registering a URL scheme with the
+OS and driving it from outside the process — exactly the kind of setup this
+strategy avoids. The hook routes through `FireOpenUrlMac` (CEF + WebView) /
+`open_url::fire` (Winit), the same functions each backend's
+`application:openURLs:` delegate method calls, so the buffer-and-flush behavior
+under test is the shipping one.
+
+The capi exposes `laufey::test_trigger_open_url(url)`. The `native_e2e` runtime
+triggers one URL _before_ registering a handler — the position every cold-start
+launch URL is in — then registers, and asserts the buffered URL was replayed,
+that a subsequent URL is delivered live, and that neither was duplicated or
+lost. Verified green under WebView and Winit on macOS; `N/A` everywhere else,
+where the pointer is NULL by design rather than by omission.
+
 **Not yet added** (future hooks, same append-and-`N/A` pattern):
 
 ```c
@@ -573,3 +602,34 @@ profile. The driver asserts:
 The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, and on
 the webview/Linux leg, where the Layer-0 battery is excluded (see the status
 note above) and only the request-body round trip runs before it.
+
+---
+
+## 15. Single instance and opened files (`single_instance_e2e`)
+
+The [single-instance lock](deep-links.md#single-instance) and the arguments a
+runtime sees need real processes, so they have their own runtime,
+`examples/single_instance_e2e`, and driver,
+`scripts/single-instance-e2e-run.sh <webview|cef>`. The driver asserts:
+
+- cold start: the runtime reads the backend's command-line arguments (a URL
+  among them) with `std::env::args()`;
+- with `"singleInstance": true` in the launch file, a second launch from another
+  working directory (with arguments containing spaces, a URL and non-ASCII text)
+  exits 0 within seconds without loading the runtime (on Linux it runs with no
+  display at all), and the first instance receives `second_instance` with
+  exactly those arguments and that directory;
+- `LAUFEY_SINGLE_INSTANCE=0` overrides the file, and single-instance mode
+  without an app id warns and runs unlocked;
+- without single-instance mode two instances run side by side (on CEF with
+  different data directories; one CEF profile admits one process, which
+  `storage-e2e-run.sh` covers);
+- macOS: files opened with the bundle through LaunchServices (`open -a`) reach
+  `on_open_url` as `file://` URLs, both when they start the app and while it
+  runs, and a file on the command line of a directly exec'd binary reaches
+  `argv` only.
+
+The buffered `open_url` round trip (`test_trigger_open_url`) stays in Layer 0
+(`native-e2e-run.sh`). The lock's framing, limits and naming are unit-tested in
+`backend-common/tests/single_instance_test.cc` (ctest). The Winit backend has no
+single-instance lock, so the driver doesn't run there.

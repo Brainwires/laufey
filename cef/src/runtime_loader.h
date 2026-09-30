@@ -11,6 +11,7 @@
 #include <queue>
 #include <map>
 #include <set>
+#include <vector>
 
 #include "include/cef_browser.h"
 #include "include/cef_values.h"
@@ -78,6 +79,15 @@ class RuntimeLoader {
   bool IsCloseAllowed(uint32_t window_id) {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     return close_allowed_.count(window_id) > 0;
+  }
+
+  // Every open browser, in window id (creation) order.
+  std::vector<CefRefPtr<CefBrowser>> GetAllBrowsers() {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    std::vector<CefRefPtr<CefBrowser>> all;
+    for (const auto& entry : browsers_)
+      all.push_back(entry.second);
+    return all;
   }
 
   CefRefPtr<CefBrowser> GetBrowserForWindow(uint32_t window_id) {

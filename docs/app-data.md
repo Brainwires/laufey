@@ -78,10 +78,14 @@ Chromium locks its profile: only one process may use a given `root_cache_path`.
 Launching a second instance of the same app (same `LAUFEY_APP_ID` or
 `LAUFEY_DATA_DIR`) while one is running makes the second one exit during startup
 with `another instance is already running with the web data directory …` on
-stderr; the running instance keeps going and ignores the relaunch. laufey has no
-single-instance API yet, so an embedder that wants to focus the existing window
-or forward arguments has to do that itself. The WebView backends don't enforce
-one instance per profile.
+stderr; the running instance keeps going and ignores the relaunch. To focus the
+existing window and forward the arguments instead, turn on single-instance mode
+(`"singleInstance": true` in the [launch file](launch-config.md), or
+`LAUFEY_SINGLE_INSTANCE=1`; see
+[single instance](deep-links.md#single-instance)): the second launch then hands
+its arguments to the running instance and exits before CEF starts. The WebView
+backends don't enforce one instance per profile, but support the same
+single-instance mode.
 
 ## Without a data directory
 

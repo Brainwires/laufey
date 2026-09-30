@@ -1,6 +1,7 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
 #include "laufey_backend_common.h"
+#include "laufey_single_instance.h"
 #include "runtime_loader.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -13,8 +14,39 @@
 #include <iostream>
 #include <string>
 
+// Brings the app to the front for a forwarded launch: restores and
+// foregrounds this thread's front-most visible top-level window. Hidden
+// windows stay hidden. UI thread (EnumThreadWindows sees its own windows).
+static void ActivateApp(void*) {
+  HWND target = nullptr;
+  EnumThreadWindows(
+      GetCurrentThreadId(),
+      [](HWND hwnd, LPARAM out) -> BOOL {
+        if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) ||
+            (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW))
+          return TRUE;
+        *reinterpret_cast<HWND*>(out) = hwnd;
+        return FALSE;
+      },
+      reinterpret_cast<LPARAM>(&target));
+  if (!target)
+    return;
+  if (IsIconic(target))
+    ShowWindow(target, SW_RESTORE);
+  SetForegroundWindow(target);
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
+  // Single-instance mode (docs/deep-links.md): a second launch forwards its
+  // command line to the running instance and exits here, before WebView2 or
+  // the runtime starts. The arguments are read from GetCommandLineW().
+  int single_instance_exit = 0;
+  if (!laufey_common::SingleInstanceStartup(0, nullptr,
+                                            &single_instance_exit)) {
+    return single_instance_exit;
+  }
+
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -79,6 +111,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   RuntimeLoader* loader = RuntimeLoader::GetInstance();
   loader->SetBackend(backend);
 
+  laufey_common::SecondInstanceUiHooks single_instance_hooks;
+  single_instance_hooks.post = [](void* ctx, void (*task)(void*), void* data) {
+    static_cast<LaufeyBackend*>(ctx)->PostUiTask(task, data);
+  };
+  single_instance_hooks.activate = ActivateApp;
+  single_instance_hooks.ctx = backend;
+  laufey_common::SetSecondInstanceUiHooks(single_instance_hooks);
+
   if (!loader->Load(runtimePath)) {
     // The path is UTF-8; show it through the wide API so non-ASCII
     // characters render correctly in the dialog.
@@ -87,6 +127,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                  laufey_common::Utf8ToWide(runtimePath))
                     .c_str(),
                 L"LAUFEY Webview Error", MB_OK | MB_ICONERROR);
+    laufey_common::SetSecondInstanceUiHooks({});
     delete backend;
     CoUninitialize();
     return 1;
@@ -95,6 +136,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   if (!loader->Start()) {
     MessageBoxW(nullptr, L"Failed to start runtime", L"LAUFEY Webview Error",
                 MB_OK | MB_ICONERROR);
+    laufey_common::SetSecondInstanceUiHooks({});
     delete backend;
     CoUninitialize();
     return 1;
@@ -103,6 +145,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   backend->Run();
 
   loader->Shutdown();
+  laufey_common::SetSecondInstanceUiHooks({});
   delete backend;
 
   CoUninitialize();

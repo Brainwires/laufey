@@ -7,6 +7,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
 #include "laufey_scheme_registry.h"
@@ -86,6 +87,10 @@ class WKWebViewBackend : public LaufeyBackend {
   void Hide(uint32_t window_id) override;
   void Focus(uint32_t window_id) override;
   void PostUiTask(void (*task)(void*), void* data) override;
+  void SetSecondInstanceHandler(laufey_second_instance_fn handler,
+                                void* user_data) override {
+    laufey_common::SetSecondInstanceHandler(handler, user_data);
+  }
 
   void InvokeJsCallback(uint32_t window_id, uint64_t callback_id,
                         laufey::ValuePtr args) override;
@@ -131,6 +136,9 @@ class WKWebViewBackend : public LaufeyBackend {
   void SetDockVisible(bool visible) override;
   void SetDockReopenHandler(laufey_dock_reopen_fn handler,
                             void* user_data) override;
+
+  void SetOpenUrlHandler(laufey_open_url_fn handler, void* user_data) override;
+  bool TestTriggerOpenUrl(const char* url) override;
 
   uint32_t CreateTrayIcon() override;
   void DestroyTrayIcon(uint32_t tray_id) override;
@@ -2183,6 +2191,20 @@ void WKWebViewBackend::SetDockVisible(bool visible) {
 void WKWebViewBackend::SetDockReopenHandler(laufey_dock_reopen_fn handler,
                                             void* user_data) {
   laufey_common::SetDockReopenHandlerMac(handler, user_data);
+}
+
+// --- Deep links / custom URL schemes (macOS) ---
+//
+// Storage and the cold-start buffer live in backend-common; AppDelegate's
+// application:openURLs: (main_mac.mm) is what feeds them.
+
+void WKWebViewBackend::SetOpenUrlHandler(laufey_open_url_fn handler,
+                                         void* user_data) {
+  laufey_common::SetOpenUrlHandlerMac(handler, user_data);
+}
+
+bool WKWebViewBackend::TestTriggerOpenUrl(const char* url) {
+  return laufey_common::TestTriggerOpenUrlMac(url);
 }
 
 // --- Tray / status-bar icon (macOS) ---

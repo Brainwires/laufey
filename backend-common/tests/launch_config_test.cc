@@ -53,7 +53,8 @@ static LaunchConfig Parse(const std::string& text, size_t* warning_count) {
 
 static bool IsEmpty(const LaunchConfig& c) {
   return !c.has_app_id && !c.has_data_dir && !c.has_custom_schemes &&
-         c.app_id.empty() && c.data_dir.empty() && c.custom_schemes.empty();
+         !c.has_single_instance && !c.single_instance && c.app_id.empty() &&
+         c.data_dir.empty() && c.custom_schemes.empty();
 }
 
 static void TestValid() {
@@ -205,6 +206,45 @@ static void TestPrecedence() {
   EXPECT(LaunchSettingFrom("", false, "") == "");
 }
 
+static void TestSingleInstance() {
+  size_t w = 0;
+  LaunchConfig c = Parse("{\"singleInstance\": true}", &w);
+  EXPECT(w == 0 && c.has_single_instance && c.single_instance);
+  c = Parse("{\"singleInstance\": false}", &w);
+  EXPECT(w == 0 && c.has_single_instance && !c.single_instance);
+  // Only a JSON boolean counts.
+  const char* wrong[] = {
+      "{\"singleInstance\": 1}", "{\"singleInstance\": \"true\"}",
+      "{\"singleInstance\": null}", "{\"singleInstance\": [true]}"};
+  for (const char* text : wrong) {
+    c = Parse(text, &w);
+    EXPECT(w == 1 && !c.has_single_instance && !c.single_instance);
+  }
+  // The last duplicate wins; a wrong last value leaves it unset.
+  c = Parse("{\"singleInstance\": true, \"singleInstance\": false}", &w);
+  EXPECT(w == 1 && c.has_single_instance && !c.single_instance);
+  c = Parse("{\"singleInstance\": true, \"singleInstance\": 0}", &w);
+  EXPECT(w == 2 && !c.has_single_instance);
+
+  // Environment precedence: 1/true/0/false win; anything else is reported
+  // and the file decides.
+  std::string warning;
+  EXPECT(LaunchBoolSettingFrom("V", "1", false, false, &warning));
+  EXPECT(LaunchBoolSettingFrom("V", "true", false, false, &warning));
+  EXPECT(!LaunchBoolSettingFrom("V", "0", true, true, &warning));
+  EXPECT(!LaunchBoolSettingFrom("V", "false", true, true, &warning));
+  EXPECT(warning.empty());
+  EXPECT(LaunchBoolSettingFrom("V", "", true, true, &warning));
+  EXPECT(!LaunchBoolSettingFrom("V", "", false, true, &warning));
+  EXPECT(!LaunchBoolSettingFrom("V", "", true, false, &warning));
+  EXPECT(warning.empty());
+  EXPECT(LaunchBoolSettingFrom("V", "yes", true, true, &warning));
+  EXPECT(warning.find("V=\"yes\"") != std::string::npos);
+  warning.clear();
+  EXPECT(!LaunchBoolSettingFrom("V", "TRUE", false, false, &warning));
+  EXPECT(!warning.empty());
+}
+
 static void TestPaths() {
   EXPECT(MacBundleResourcesDir("/Applications/My App.app/Contents/MacOS/My") ==
          "/Applications/My App.app/Contents/Resources");
@@ -274,18 +314,21 @@ static void TestProcessLaunchConfig() {
     return;
   std::fputs("{\"appId\": \"dev.laufey.test\", \"dataDir\": \"" ABS
              "/from/file\","
-             " \"customSchemes\": [\"one\", \"two\"], \"extra\": 1}",
+             " \"customSchemes\": [\"one\", \"two\"], \"extra\": 1,"
+             " \"singleInstance\": true}",
              f);
   std::fclose(f);
 
   SetEnv("LAUFEY_APP_ID", nullptr);
   SetEnv("LAUFEY_DATA_DIR", "");  // set but empty counts as unset
   SetEnv("LAUFEY_CUSTOM_SCHEMES", nullptr);
+  SetEnv("LAUFEY_SINGLE_INSTANCE", nullptr);
   const LaunchConfig& c = ProcessLaunchConfig();
   EXPECT(c.has_app_id && c.app_id == "dev.laufey.test");
   EXPECT(LaunchAppId() == "dev.laufey.test");
   EXPECT(LaunchDataDir() == ABS "/from/file");
   EXPECT(LaunchCustomSchemes() == "one,two");
+  EXPECT(LaunchSingleInstance());
 
   // The environment wins, key by key.
   SetEnv("LAUFEY_APP_ID", "from.env");
@@ -293,6 +336,11 @@ static void TestProcessLaunchConfig() {
   EXPECT(LaunchAppId() == "from.env");
   EXPECT(LaunchDataDir() == ABS "/from/file");
   EXPECT(LaunchCustomSchemes() == "envscheme");
+  SetEnv("LAUFEY_SINGLE_INSTANCE", "0");
+  EXPECT(!LaunchSingleInstance());
+  SetEnv("LAUFEY_SINGLE_INSTANCE", "bogus");  // reported, file decides
+  EXPECT(LaunchSingleInstance());
+  SetEnv("LAUFEY_SINGLE_INSTANCE", nullptr);
   SetEnv("LAUFEY_APP_ID", nullptr);
   SetEnv("LAUFEY_DATA_DIR", nullptr);
   SetEnv("LAUFEY_CUSTOM_SCHEMES", nullptr);
@@ -311,6 +359,7 @@ int main() {
   TestMalformed();
   TestSchema();
   TestPrecedence();
+  TestSingleInstance();
   TestPaths();
   TestProcessLaunchConfig();
   if (g_failures) {
