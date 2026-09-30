@@ -1759,9 +1759,10 @@ void WebKitGTKBackend::RegisterSchemeHandler(const std::string& scheme) {
   }
 
   // Register on the web context shared by all webviews (LaufeyWebContext).
-  // Must run on the GTK main thread; the runtime calls this from its own thread. Window
-  // creation is queued on the same main loop, so a scheme registered before
-  // the first CreateWindow is installed before that window's web view exists.
+  // Must run on the GTK main thread; the runtime calls this from its own
+  // thread. Window creation is queued on the same main loop, so a scheme
+  // registered before the first CreateWindow is installed before that window's
+  // web view exists.
   g_idle_add(
       [](gpointer) -> gboolean {
         // Main thread only. Install every registered scheme that isn't yet
