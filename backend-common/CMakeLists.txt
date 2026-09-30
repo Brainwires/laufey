@@ -38,6 +38,7 @@ set(LAUFEY_COMMON_SRCS
   src/laufey_value.cc
   src/test_hooks.cc
   src/scheme_registry.cc
+  src/data_dir.cc
 )
 
 if(APPLE)

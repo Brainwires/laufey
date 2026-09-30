@@ -18,6 +18,7 @@
 
 #include "app.h"
 #include "custom_schemes.h"
+#include "laufey_backend_common.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
 
@@ -689,6 +690,12 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     laufey_schemes::ForwardToChild(command_line);
   }
 
+  bool OnAlreadyRunningAppRelaunch(
+      CefRefPtr<CefCommandLine> command_line,
+      const CefString& current_directory) override {
+    return LaufeyHandleAlreadyRunningAppRelaunch();
+  }
+
   void OnBeforeCommandLineProcessing(
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
@@ -832,9 +839,18 @@ int main(int argc, char* argv[]) {
   settings.no_sandbox = true;
   settings.log_severity = LaufeyCefLogSeverity();
 
-  // Set cache path
-  std::string cache_path = "/tmp/laufey_cef_" + std::to_string(getpid());
-  CefString(&settings.root_cache_path) = cache_path;
+  // Set cache path. With a per-app data dir (LAUFEY_DATA_DIR / LAUFEY_APP_ID)
+  // the profile persists there; cache_path must be set too (equal to the root)
+  // or CEF runs the browser "incognito" and keeps localStorage/cookies in
+  // memory. Without one, keep the throwaway per-process temp root.
+  std::string cache_path = laufey_common::AppDataSubdir("CEF");
+  if (!cache_path.empty()) {
+    CefString(&settings.root_cache_path) = cache_path;
+    CefString(&settings.cache_path) = cache_path;
+  } else {
+    cache_path = "/tmp/laufey_cef_" + std::to_string(getpid());
+    CefString(&settings.root_cache_path) = cache_path;
+  }
 
   if (const char* port_env = getenv("LAUFEY_REMOTE_DEBUGGING_PORT")) {
     int port = atoi(port_env);
@@ -844,6 +860,7 @@ int main(int argc, char* argv[]) {
   }
 
   if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
+    LaufeyReportCefInitializeFailure(cache_path);
     return 1;
   }
 
