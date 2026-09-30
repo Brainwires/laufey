@@ -5,6 +5,7 @@
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_single_instance.h"
 #include "scheme_handler.h"
 
 #ifndef _WIN32
@@ -715,6 +716,12 @@ static void Backend_PostUiTask(void* data, void (*task)(void*),
     CefPostTask(TID_UI, base::BindOnce([](void (*t)(void*), void* d) { t(d); },
                                        task, task_data));
   }
+}
+
+static void Backend_SetSecondInstanceHandler(void* /*data*/,
+                                             laufey_second_instance_fn handler,
+                                             void* user_data) {
+  laufey_common::SetSecondInstanceHandler(handler, user_data);
 }
 
 // --- CefValue <-> laufey::Value conversion (IPC boundary only) ---
@@ -1905,6 +1912,10 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_dock_badge = Backend_SetDockBadge_TitlePrefix;
   // Menu/visible/reopen: left nullptr (no clean Linux analog).
 #endif
+
+  // Single instance (API >= 36), every OS: forwarded launches from
+  // laufey_single_instance (see docs/deep-links.md).
+  backend_api_.set_second_instance_handler = Backend_SetSecondInstanceHandler;
 
   // --- Tray / status bar ---
 #if defined(__APPLE__)

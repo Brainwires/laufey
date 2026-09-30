@@ -7,6 +7,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
 #include "laufey_scheme_registry.h"
@@ -86,6 +87,10 @@ class WKWebViewBackend : public LaufeyBackend {
   void Hide(uint32_t window_id) override;
   void Focus(uint32_t window_id) override;
   void PostUiTask(void (*task)(void*), void* data) override;
+  void SetSecondInstanceHandler(laufey_second_instance_fn handler,
+                                void* user_data) override {
+    laufey_common::SetSecondInstanceHandler(handler, user_data);
+  }
 
   void InvokeJsCallback(uint32_t window_id, uint64_t callback_id,
                         laufey::ValuePtr args) override;

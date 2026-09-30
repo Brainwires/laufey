@@ -74,8 +74,18 @@ extern std::string g_app_id;
 //
 // Called from each platform's OnAlreadyRunningAppRelaunch in the running
 // instance. Returns true (handled) so CEF doesn't open a default Chrome-style
-// window; the relaunch is otherwise ignored until a single-instance API lands.
+// window; the relaunch is otherwise ignored. It is only a fallback: with
+// single-instance mode on (docs/deep-links.md) a second launch forwards its
+// arguments and exits in main() before CefInitialize, so CEF's own singleton
+// never sees it.
 bool LaufeyHandleAlreadyRunningAppRelaunch();
+
+// Single-instance delivery (laufey_single_instance.h): installs the UI hooks
+// that post forwarded launches to the CEF UI thread and bring the app's
+// first visible window to the front. Call after CefInitialize succeeded; call
+// LaufeyClearSecondInstanceHooks before CefShutdown.
+void LaufeyInstallSecondInstanceHooks();
+void LaufeyClearSecondInstanceHooks();
 
 // Called in the launching process when CefInitialize fails; explains the
 // "another instance owns this profile" case on stderr.

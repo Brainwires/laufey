@@ -20,6 +20,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_single_instance.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
 
@@ -320,6 +321,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   if (argv)
     LocalFree(argv);
 
+  // Single-instance mode (docs/deep-links.md): a second launch forwards its
+  // command line (GetCommandLineW) to the running instance and exits here,
+  // before CefInitialize (so CEF's own profile singleton is never reached)
+  // and before the runtime loads.
+  int single_instance_exit = 0;
+  if (!laufey_common::SingleInstanceStartup(0, nullptr,
+                                            &single_instance_exit)) {
+    return single_instance_exit;
+  }
+
   CefSettings settings;
   settings.no_sandbox = true;
   settings.log_severity = LaufeyCefLogSeverity();
@@ -363,9 +374,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     LaufeyReportCefInitializeFailure(cache_path);
     return 1;
   }
+  LaufeyInstallSecondInstanceHooks();
 
   CefRunMessageLoop();
 
+  LaufeyClearSecondInstanceHooks();
   RuntimeLoader::GetInstance()->Shutdown();
 
   CefShutdown();

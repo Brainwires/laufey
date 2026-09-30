@@ -523,6 +523,13 @@ class LaufeyBackend {
     return false;
   }
 
+  // --- Single instance ---
+  // Desktop backends forward to laufey_common::SetSecondInstanceHandler
+  // (backend-common, which iOS doesn't link); the default no-op leaves the
+  // handler inert.
+  virtual void SetSecondInstanceHandler(laufey_second_instance_fn /*handler*/,
+                                        void* /*user_data*/) {}
+
   // --- Tray / status-bar icon ---
   virtual uint32_t CreateTrayIcon() {
     return 0;

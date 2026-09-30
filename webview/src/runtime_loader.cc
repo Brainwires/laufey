@@ -666,6 +666,17 @@ static bool Backend_TestTriggerOpenUrl(void* data, const char* url) {
 
 #endif  // defined(__APPLE__)
 
+// --- Single instance ---
+
+static void Backend_SetSecondInstanceHandler(void* data,
+                                             laufey_second_instance_fn handler,
+                                             void* user_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend()) {
+    backend->SetSecondInstanceHandler(handler, user_data);
+  }
+}
+
 // --- Tray / status bar ---
 
 static uint32_t Backend_CreateTrayIcon(void* data) {
@@ -872,6 +883,10 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_open_url_handler = Backend_SetOpenUrlHandler;
   backend_api_.test_trigger_open_url = Backend_TestTriggerOpenUrl;
 #endif
+
+  // Single instance (API >= 36): see docs/deep-links.md. The desktop
+  // backends implement it on every OS; iOS keeps the no-op default.
+  backend_api_.set_second_instance_handler = Backend_SetSecondInstanceHandler;
 
   backend_api_.create_tray_icon = Backend_CreateTrayIcon;
   backend_api_.destroy_tray_icon = Backend_DestroyTrayIcon;

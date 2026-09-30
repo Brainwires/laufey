@@ -13,6 +13,7 @@
 #include "app.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_single_instance.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
   @autoreleasepool {
@@ -359,6 +360,16 @@ int main(int argc, char* argv[]) {
     return run_headless(runtimePathArg ? [runtimePathArg UTF8String] : nullptr);
   }
 
+  // Single-instance mode (docs/deep-links.md): a second launch forwards its
+  // arguments to the running instance and exits here, before CefInitialize
+  // (so CEF's own profile singleton is never reached) and before the runtime
+  // loads.
+  int single_instance_exit = 0;
+  if (!laufey_common::SingleInstanceStartup(argc, argv,
+                                            &single_instance_exit)) {
+    return single_instance_exit;
+  }
+
   CefScopedLibraryLoader library_loader;
   if (!library_loader.LoadInMain()) {
     return 1;
@@ -448,6 +459,12 @@ int main(int argc, char* argv[]) {
     static LaufeyAppDelegate* delegate = [[LaufeyAppDelegate alloc] init];
     NSApp.delegate = delegate;
 
+    // Files and URLs reach the runtime through argv (direct exec) or the
+    // open-url handler (LaunchServices), never both; forwarded launches are
+    // delivered on the main queue, which [NSApp run] drains.
+    laufey_common::DisableArgvOpenEventsMac();
+    LaufeyInstallSecondInstanceHooks();
+
     [NSApp activateIgnoringOtherApps:YES];
 
     // Drive CEF from the main NSRunLoop (external_message_pump). Unlike
@@ -455,6 +472,7 @@ int main(int argc, char* argv[]) {
     [g_pump start];  // begin the steady pump so the runtime starts
     [NSApp run];
 
+    LaufeyClearSecondInstanceHooks();
     RuntimeLoader::GetInstance()->Shutdown();
 
     CefShutdown();
