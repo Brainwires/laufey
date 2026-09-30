@@ -30,7 +30,7 @@
 //! exit code), so the driver judges each step by the OVERALL line.
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -56,33 +56,50 @@ fn env(name: &str) -> Option<String> {
 }
 
 /// Serves the same tiny page for every request on 127.0.0.1:`port`.
+///
+/// Each connection gets its own thread. A persistent profile remembers this
+/// origin, so on a relaunch Chromium's loading predictor preconnects idle
+/// sockets to it alongside the navigation's own connection; a server that
+/// handles one connection at a time can block reading an idle preconnect and
+/// never answer the request waiting on the other socket.
 fn serve(port: u16) -> std::io::Result<()> {
   let listener = TcpListener::bind(("127.0.0.1", port))?;
   std::thread::spawn(move || {
     for stream in listener.incoming() {
-      let Ok(mut stream) = stream else { continue };
-      let mut buf = [0u8; 4096];
-      let mut req = Vec::new();
-      while let Ok(n) = stream.read(&mut buf) {
-        if n == 0 {
-          break;
-        }
-        req.extend_from_slice(&buf[..n]);
-        if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 65536 {
-          break;
-        }
-      }
-      let body = "<!doctype html><title>storage-e2e</title><p>storage-e2e</p>";
-      let _ = write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-         Content-Length: {}\r\nCache-Control: no-store\r\n\
-         Connection: close\r\n\r\n{body}",
-        body.len()
-      );
+      let Ok(stream) = stream else { continue };
+      std::thread::spawn(move || answer(stream));
     }
   });
   Ok(())
+}
+
+/// Reads one request's headers from `stream` and answers with the page. A
+/// connection that sends nothing (an unused preconnect) is dropped once the
+/// peer closes it or the read times out.
+fn answer(mut stream: TcpStream) {
+  let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+  let mut buf = [0u8; 4096];
+  let mut req = Vec::new();
+  loop {
+    match stream.read(&mut buf) {
+      Ok(0) | Err(_) => break,
+      Ok(n) => req.extend_from_slice(&buf[..n]),
+    }
+    if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 65536 {
+      break;
+    }
+  }
+  if req.is_empty() {
+    return;
+  }
+  let body = "<!doctype html><title>storage-e2e</title><p>storage-e2e</p>";
+  let _ = write!(
+    stream,
+    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+     Content-Length: {}\r\nCache-Control: no-store\r\n\
+     Connection: close\r\n\r\n{body}",
+    body.len()
+  );
 }
 
 /// Serves the page for every request on the custom scheme.
