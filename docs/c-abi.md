@@ -144,6 +144,11 @@ embedded browser over an in-memory byte channel instead of a TCP loopback.
    (returns >0 bytes, 0 at EOF, <0 on error), then streams the response:
    `scheme_response_begin(status, headers)` once, `scheme_response_write(bytes)`
    any number of times, and `scheme_response_finish` to release the exchange.
+   Every web-engine backend buffers the whole request body before it invokes
+   `handler`, so `scheme_request_read_body` returns immediately. On Linux this
+   needs WebKitGTK 2.40 or newer (`webkit_uri_scheme_request_get_http_body`); a
+   WebView backend built against an older WebKitGTK forwards every request with
+   an empty body.
 
 If the webview cancels (navigation away, window closed) before the response
 finishes, `scheme_response_write` / `scheme_request_read_body` return negative;

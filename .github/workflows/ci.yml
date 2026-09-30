@@ -143,7 +143,8 @@ jobs:
   #   - winit / linux : the winit backend doesn't support Linux menus and panics
   #                     building a muda menu with no GTK init.
   #   - webview / linux: WebKitGTK/Xlib isn't thread-safe under the worker-thread
-  #                      runtime (xcb_xlib_threads_sequence_lost).
+  #                      runtime (xcb_xlib_threads_sequence_lost); only the
+  #                      custom-scheme request-body round trip runs there.
   #   - cef|webview / windows: CEF's Windows dist extraction and the WebView2
   #                            run are flaky in this job; need hands-on debugging.
   native-e2e:
@@ -159,9 +160,9 @@ jobs:
           - { os: windows-latest, backend: winit }
           - { os: windows-latest, backend: webview }
           - { os: ubuntu-22.04, backend: cef }
-          # Storage e2e only: the Layer-0 battery is excluded on webview/linux
-          # (see above).
-          - { os: ubuntu-22.04, backend: webview, storage_only: true }
+          # The Layer-0 battery is excluded on webview/linux (see above); the
+          # storage e2e and the request-body round trip run there.
+          - { os: ubuntu-22.04, backend: webview, layer0_excluded: true }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -250,7 +251,7 @@ jobs:
           fi
 
       - name: Layer 0 — readback / events / clipboard / menu+tray clicks
-        if: ${{ !matrix.storage_only }}
+        if: ${{ !matrix.layer0_excluded }}
         shell: bash
         env:
           # On the cef/linux leg the Ayatana runtime lib is installed above, so
@@ -258,6 +259,13 @@ jobs:
           # instead of reporting N/A (issue #63).
           LAUFEY_E2E_REQUIRE_TRAY: ${{ (runner.os == 'Linux' && matrix.backend == 'cef') && '1' || '' }}
         run: scripts/native-e2e-run.sh ${{ matrix.backend }}
+
+      # POST/PUT/PATCH bodies (text, binary, >1 MB, empty) from the page reach
+      # the app:// scheme handler intact. Part of Layer 0 on the other legs.
+      - name: Custom-scheme request bodies
+        if: ${{ matrix.layer0_excluded }}
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --scheme-body
 
       # Per-app web storage (LAUFEY_APP_ID / LAUFEY_DATA_DIR): persistence
       # across relaunches, isolation between apps, unchanged defaults. See

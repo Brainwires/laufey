@@ -18,17 +18,19 @@ matrix over the C ABI surface, and a phased rollout.
 > known headless-CI backend limitations (follow-ups, not harness bugs):
 > winit/Linux (the winit backend doesn't support Linux menus and panics building
 > a muda menu with no GTK init), webview/Linux (WebKitGTK/Xlib isn't thread-safe
-> under the worker-thread runtime), and cef|webview/Windows (CEF dist extraction
-> / WebView2 run flakiness). The `test_click_menu_item` hook (`§8`) is
-> implemented for the Winit backend (Rust) and the C++ `backend-common` shared
-> by CEF/WebView. The macOS self-accessibility approach (`§7.2`) is verified
-> standalone but not yet embedded (it needs the backend's main thread — see
-> `§8`). Implementing the hook exposed and fixed a pre-existing self-deadlock in
-> the Winit menu-callback registration. The `test_trigger_close_requested` hook
-> (API 31, `§8`) for `set_close_requested_handler`'s defer-until-close_window
-> contract is implemented for all backends and verified green under Winit and
-> WebView on macOS; it rides the same pre-existing CI exclusions above for CEF
-> and the Windows/Linux webview combos, so those aren't gated by it yet.
+> under the worker-thread runtime; that leg runs only the custom-scheme
+> request-body round trip, `native-e2e-run.sh webview --scheme-body`, and the
+> storage e2e), and cef|webview/Windows (CEF dist extraction / WebView2 run
+> flakiness). The `test_click_menu_item` hook (`§8`) is implemented for the
+> Winit backend (Rust) and the C++ `backend-common` shared by CEF/WebView. The
+> macOS self-accessibility approach (`§7.2`) is verified standalone but not yet
+> embedded (it needs the backend's main thread — see `§8`). Implementing the
+> hook exposed and fixed a pre-existing self-deadlock in the Winit menu-callback
+> registration. The `test_trigger_close_requested` hook (API 31, `§8`) for
+> `set_close_requested_handler`'s defer-until-close_window contract is
+> implemented for all backends and verified green under Winit and WebView on
+> macOS; it rides the same pre-existing CI exclusions above for CEF and the
+> Windows/Linux webview combos, so those aren't gated by it yet.
 
 ---
 
@@ -186,6 +188,14 @@ schemes before the runtime loads; the script also starts the CEF host with
 `--disable-features=LocalNetworkAccessChecks`, since Chromium otherwise holds
 the page's fetch to the loopback echo server for a permission prompt the host
 never shows.
+
+Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
+and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body
+over 1 MB, and an empty body) to the scheme handler, which reads each one with
+`read_body` and echoes it. The battery checks that the handler received exactly
+the bytes sent and that the page got an identical echo
+(`examples/native_e2e/src/body_echo.rs`). `LAUFEY_E2E_ONLY=scheme-body`
+(`native-e2e-run.sh <backend> --scheme-body`) runs only this check.
 
 ### D. OS-observer introspection — _for chrome with no getter_
 
@@ -554,6 +564,6 @@ profile. The driver asserts:
 - CEF only: a second instance of a running app exits during startup and the
   first is unaffected.
 
-The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, plus a
-storage-only webview/Linux leg (the Layer-0 battery is excluded there, see the
-status note above).
+The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, and on
+the webview/Linux leg, where the Layer-0 battery is excluded (see the status
+note above) and only the request-body round trip runs before it.

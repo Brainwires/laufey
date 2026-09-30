@@ -14,9 +14,11 @@
 //! menu/tray *click* round-trips via the `test_click_menu_item` C ABI hook
 //! (API 30+; `N/A` on backends without it), the close-handler round-trip
 //! via `test_trigger_close_requested` (API 31+; `N/A` on backends without
-//! it), and the custom-scheme origin contract (a page served over the
+//! it), the custom-scheme origin contract (a page served over the
 //! battery's own `laufey-e2e://` scheme is a secure `<scheme>://<host>`
-//! origin; `N/A` on engine-less backends). OS-observer *structure* checks
+//! origin; `N/A` on engine-less backends), and a request-body round trip over
+//! the `app://` scheme (see `body_echo.rs`; `N/A` on engine-less backends).
+//! OS-observer *structure* checks
 //! (Layer 1: the Linux D-Bus driver; macOS/Windows pending a backend hook)
 //! live outside this runtime. See docs/e2e-testing.md.
 //!
@@ -24,6 +26,9 @@
 //! event-loop pump, PASS/FAIL + exit code) so the existing runtime loader drives
 //! it unchanged.
 
+mod body_echo;
+
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -373,6 +378,83 @@ fn start_origin_echo_server() -> Option<String> {
   Some(format!("http://127.0.0.1:{port}/echo"))
 }
 
+/// Request-body round trip over `app://` (see body_echo.rs). Opens its own
+/// window and returns it so the caller keeps it alive until exit. The page
+/// and echo routes are served by the battery's shared scheme handler.
+async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
+  if !laufey::scheme_handlers_supported() {
+    na("custom-scheme request bodies (backend has no scheme handler support)");
+    return None;
+  }
+  let reports: body_echo::Reports = Arc::new(Mutex::new(HashMap::new()));
+  let win = Window::new(320, 240)
+    .title("native-e2e-body")
+    .bind("bodyReport", {
+      let reports = reports.clone();
+      move |call| {
+        let a = &call.args;
+        let len = match a.get(2) {
+          Some(Value::Int(n)) => *n as i64,
+          Some(Value::Double(d)) => *d as i64,
+          _ => -1,
+        };
+        reports
+          .lock()
+          .unwrap()
+          .insert(arg_string(a, 0), (arg_bool(a, 1), len, arg_string(a, 3)));
+        call.resolve(Value::Bool(true));
+      }
+    })
+    .load(body_echo::PAGE_URL);
+
+  let cases = body_echo::cases();
+  let done = wait_for(
+    || {
+      let r = reports.lock().unwrap();
+      r.contains_key("script") || cases.iter().all(|c| r.contains_key(c.label))
+    },
+    300,
+    100,
+  )
+  .await;
+  check("request-body page reported every case", done);
+  let reports = reports.lock().unwrap().clone();
+  if let Some((_, _, detail)) = reports.get("script") {
+    check(&format!("request-body page script ran ({detail})"), false);
+  }
+  let received = received.lock().unwrap().clone();
+  for c in &cases {
+    let (method, body) = received
+      .get(c.label)
+      .cloned()
+      .unwrap_or_else(|| (String::new(), Vec::new()));
+    check(
+      &format!(
+        "{} {} body reaches the scheme handler intact ({} bytes sent, {} received, method {:?})",
+        c.method,
+        c.label,
+        c.body.len(),
+        body.len(),
+        method
+      ),
+      received.contains_key(c.label) && method == c.method && body == c.body,
+    );
+    let (same, len, detail) = reports.get(c.label).cloned().unwrap_or((
+      false,
+      -1,
+      "no report".to_string(),
+    ));
+    check(
+      &format!(
+        "{} echo is byte-identical in the page ({len} bytes, {detail})",
+        c.label
+      ),
+      same && len == c.body.len() as i64,
+    );
+  }
+  Some(win)
+}
+
 fn e2e_main() {
   let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
   rt.block_on(async move {
@@ -387,19 +469,36 @@ fn e2e_main() {
     let scheme_supported = laufey::scheme_handlers_supported();
     let echo_url = start_origin_echo_server();
     let seen_urls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // What the request-body round trip's echo routes received (body_echo.rs).
+    let body_received: body_echo::Received =
+      Arc::new(Mutex::new(HashMap::new()));
     let make_handler = {
       let echo = echo_url.clone().unwrap_or_default();
       let seen = seen_urls.clone();
+      let received = body_received.clone();
       move || {
-        let (echo, seen) = (echo.clone(), seen.clone());
-        move |req: SchemeRequest| serve_scheme_request(req, &echo, &seen)
+        let (echo, seen, received) =
+          (echo.clone(), seen.clone(), received.clone());
+        move |req: SchemeRequest| {
+          if let Some(req) = body_echo::serve(req, &received) {
+            serve_scheme_request(req, &echo, &seen)
+          }
+        }
       }
     };
     laufey::register_scheme_handler(E2E_SCHEME, make_handler());
+
+    // LAUFEY_E2E_ONLY=scheme-body runs just the request-body round trip.
+    // Used where the full battery can't run (webview/linux in CI).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("scheme-body") {
+      let body_win = body_round_trip(&body_received).await;
+      let _ = &body_win;
+      finish();
+    }
     let scheme_report: Arc<Mutex<Option<SchemeReport>>> =
       Arc::new(Mutex::new(None));
-    let scheme_probes: Arc<Mutex<std::collections::HashMap<String, String>>> =
-      Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let scheme_probes: Arc<Mutex<HashMap<String, String>>> =
+      Arc::new(Mutex::new(HashMap::new()));
 
     // ---- window creation + event-callback wiring -------------------------
     // Resize / move / focus handlers record the last event so we can drive the
@@ -902,6 +1001,9 @@ fn e2e_main() {
       }
     }
 
+    // ---- request body over the custom scheme -----------------------------
+    let body_win = body_round_trip(&body_received).await;
+
     // ---- close-requested handler round-trip --------------------------------
     // A second window (kept separate from `win`, which must survive to
     // shutdown). Registers an on_close_requested handler that *stashes* the
@@ -1018,14 +1120,19 @@ fn e2e_main() {
     // down on the backend's main thread can crash or race and clobber the exit
     // code (e.g. SIGTRAP -> 133), which would corrupt the CI signal. The OS
     // reclaims everything on exit. `_ = &win;` keeps the window alive to here.
-    let _ = &win;
-    let failed = FAILED.load(Ordering::SeqCst);
-    eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
-    let _ = std::io::Write::flush(&mut std::io::stderr());
-    // _exit avoids running C++ static destructors / atexit handlers in the
-    // backend, which is where the teardown crash lives.
-    unsafe { libc_exit(if failed { 1 } else { 0 }) };
+    let _ = (&win, &body_win);
+    finish();
   });
+}
+
+/// Report the overall result and exit immediately (see "shutdown" above).
+fn finish() -> ! {
+  let failed = FAILED.load(Ordering::SeqCst);
+  eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
+  let _ = std::io::Write::flush(&mut std::io::stderr());
+  // _exit avoids running C++ static destructors / atexit handlers in the
+  // backend, which is where the teardown crash lives.
+  unsafe { libc_exit(if failed { 1 } else { 0 }) };
 }
 
 extern "C" {
