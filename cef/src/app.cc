@@ -495,14 +495,12 @@ bool LaufeyHandleAlreadyRunningAppRelaunch() {
   return true;
 }
 
+#if !defined(__APPLE__)
 namespace {
 
-// Brings the app to the front for a forwarded launch. CEF UI thread.
+// Brings the app to the front for a forwarded launch: the first (oldest)
+// window that isn't hidden. CEF UI thread. (macOS: ActivateAppMac.)
 void ActivateAppCef(void*) {
-#if defined(__APPLE__)
-  laufey_common::ActivateAppMac();
-#else
-  // The first (oldest) window that isn't hidden.
   for (const CefRefPtr<CefBrowser>& browser :
        RuntimeLoader::GetInstance()->GetAllBrowsers()) {
     CefRefPtr<CefBrowserView> view = CefBrowserView::GetForBrowser(browser);
@@ -514,10 +512,10 @@ void ActivateAppCef(void*) {
     window->Activate();
     return;
   }
-#endif
 }
 
 }  // namespace
+#endif  // !defined(__APPLE__)
 
 void LaufeyInstallSecondInstanceHooks() {
 #if defined(__APPLE__)

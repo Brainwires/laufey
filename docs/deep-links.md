@@ -67,7 +67,10 @@ its own arguments, and in a running app from the arguments the
 process, so it sees the backend's own process arguments: `std::env::args()` in a
 Rust runtime, `Deno.args` / `process.argv` in a JavaScript one. They are the
 arguments the OS or the launcher gave the backend executable, including any
-backend options (such as `--runtime <path>`) that were on that command line.
+backend options (such as `--runtime <path>`) that were on that command line. (On
+Linux the CEF backend hands Chromium a copy of `argv`: Chromium sets the process
+title by rewriting the argument strings in place, which would otherwise garble
+what the runtime reads.)
 
 On macOS a file or URL on the command line of a directly exec'd binary is only
 in `argv`. The WebView and CEF backends also turn off AppKit's
