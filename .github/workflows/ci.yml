@@ -156,8 +156,6 @@ jobs:
   #   - webview / linux: WebKitGTK/Xlib isn't thread-safe under the worker-thread
   #                      runtime (xcb_xlib_threads_sequence_lost); only the
   #                      custom-scheme request-body round trip runs there.
-  #   - cef|webview / windows: CEF's Windows dist extraction and the WebView2
-  #                            run are flaky in this job; need hands-on debugging.
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -170,6 +168,7 @@ jobs:
           - { os: macos-14, backend: cef }
           - { os: windows-latest, backend: winit }
           - { os: windows-latest, backend: webview }
+          - { os: windows-latest, backend: cef }
           - { os: ubuntu-22.04, backend: cef }
           # The Layer-0 battery is excluded on webview/linux (see above); the
           # storage e2e and the request-body round trip run there.
