@@ -716,8 +716,9 @@ struct laufey_backend_api {
   // The engines read their scheme tables when a web view is created (WKWebView
   // configuration, WebKitGTK web context, WebView2 environment — WebView2 in
   // particular fixes the set for the process at its first environment), so a
-  // scheme registered after a window exists is not served by that window and
-  // may not be served at all; backends log a warning. The CEF backend goes
+  // scheme registered after a window exists is not served by that window
+  // (WebKitGTK, whose web context is shared, is the lenient exception) and,
+  // on WebView2, not at all; backends log a warning. The CEF backend goes
   // further: Chromium learns custom schemes at process start, before the
   // runtime is loaded, so the embedder must also declare them when launching
   // the CEF host — `--laufey-custom-schemes=myapp,other` or

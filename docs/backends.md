@@ -39,7 +39,7 @@ Custom schemes: Chromium registers them at process start, before the runtime is
 loaded, so besides calling `register_scheme_handler` the embedder declares them
 when launching the host — `--laufey-custom-schemes=myapp` or
 `LAUFEY_CUSTOM_SCHEMES=myapp` (`cef/src/custom_schemes.h`). See
-[C ABI → Registered schemes are real origins](c-abi.md#registered-schemes-are-real-origins).
+[Custom URL schemes](custom-schemes.md).
 
 ## WebView
 
@@ -58,9 +58,9 @@ engine — a `WKURLSchemeHandler` per scheme on the `WKWebViewConfiguration`,
 `webkit_web_context_register_uri_scheme` plus the security manager's secure/CORS
 flags on WebKitGTK, `CoreWebView2CustomSchemeRegistration` (TreatAsSecure,
 HasAuthorityComponent) on the WebView2 environment — so each is a real
-`<scheme>://<host>` origin. All three read the set when the first web view is
-created; register schemes before the first window. See
-[C ABI → Registered schemes are real origins](c-abi.md#registered-schemes-are-real-origins).
+`<scheme>://<host>` origin. WKWebView and WebView2 read the set when a web view
+(WebView2: the first one) is created; register schemes before the first window.
+See [Custom URL schemes](custom-schemes.md).
 
 ## Winit
 

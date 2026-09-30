@@ -29,6 +29,9 @@ export LAUFEY_RUNTIME_PATH="$rt"
 # process start (before the runtime is loaded) and must be told up front —
 # see custom_schemes.h. Harmless for the other backends.
 export LAUFEY_CUSTOM_SCHEMES=laufey-e2e
+# Lets the battery tell backends that share a target OS apart (the late
+# scheme registration check differs between WebKitGTK and CEF on Linux).
+export LAUFEY_E2E_BACKEND="$backend"
 
 # Resolve the backend binary (handles macOS .app bundles).
 case "$backend" in

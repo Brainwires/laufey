@@ -344,10 +344,11 @@ class RuntimeLoader {
   // --- Custom URL scheme handler (API >= 26) ---
   // Store the runtime's scheme request handler and install the CEF scheme
   // handler factory (on the UI thread) for `scheme` the first time that
-  // scheme is registered. One handler serves every registered scheme; the
-  // runtime dispatches on the request URL. A scheme that was not declared at
-  // process start (see custom_schemes.h) is still served, but as a
-  // non-standard scheme — a warning is logged.
+  // scheme is registered (and for the built-in "app" alongside the first
+  // one). One handler serves every registered scheme; the runtime dispatches
+  // on the request URL. A scheme that was not declared at process start (see
+  // custom_schemes.h) is still served, but as a non-standard scheme — a
+  // warning is logged.
   void SetSchemeRequestHandler(const std::string& scheme,
                                laufey_scheme_request_fn handler,
                                laufey_scheme_cancel_fn on_cancel,

@@ -169,7 +169,9 @@ on Windows — so a scheme registered after a window exists is not served by tha
 window. WebView2 goes further: all environments in a process share one user data
 folder and must carry identical custom-scheme registrations, so the backend
 freezes the set at the first window and later registrations are logged and
-ignored. Backends warn on stderr when the contract is broken.
+ignored. WebKitGTK is the lenient one: its schemes live on the shared web
+context, so a late registration reaches existing windows too — portable code
+must not rely on it. Backends warn on stderr when the contract is broken.
 
 The CEF backend needs one more step. Chromium learns custom schemes in
 `CefApp::OnRegisterCustomSchemes`, which runs during `CefInitialize` in every

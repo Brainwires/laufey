@@ -175,10 +175,14 @@ working `crypto.subtle.digest`, `localStorage` set/get, a same-origin `fetch`
 whose streamed body arrives intact, and a cross-origin `fetch` to a loopback
 echo server that proves the `Origin: laufey-e2e://app` header. A second window
 loads `app://e2e/` to prove the built-in scheme still works next to the
-registered one. `N/A` on engine-less backends. The CEF host must be told the
-scheme up front (`LAUFEY_CUSTOM_SCHEMES=laufey-e2e`, set by
-`scripts/native-e2e-run.sh`) because Chromium registers custom schemes before
-the runtime loads.
+registered one. Two negative checks follow: a `fetch` to a scheme nobody
+registered must fail without reaching the handler, and a scheme registered only
+after the window exists must not be served in it (reported, not asserted, on
+WebKitGTK, whose shared web context applies late registrations to existing
+views). `N/A` on engine-less backends. The CEF host must be told the scheme up
+front (`LAUFEY_CUSTOM_SCHEMES=laufey-e2e`, set by `scripts/native-e2e-run.sh`,
+which also exports `LAUFEY_E2E_BACKEND`) because Chromium registers custom
+schemes before the runtime loads.
 
 ### D. OS-observer introspection — _for chrome with no getter_
 

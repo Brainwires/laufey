@@ -98,6 +98,11 @@ fn expected_handle_type() -> (&'static str, &'static [i32]) {
 /// scripts/native-e2e-run.sh) — see custom_schemes.h in cef/src.
 const E2E_SCHEME: &str = "laufey-e2e";
 const E2E_ORIGIN: &str = "laufey-e2e://app";
+/// Never registered: fetching it must fail without reaching the handler.
+const UNREGISTERED_SCHEME: &str = "laufey-e2e-unregistered";
+/// Registered only after the first window exists, breaking the ordering
+/// contract on purpose: that window must not serve it.
+const LATE_SCHEME: &str = "laufey-e2e-late";
 /// Body of `/stream`, sent as three separate writes with pauses in between.
 const STREAM_CHUNKS: [&str; 3] = ["chunk-1|", "chunk-2|", "chunk-3|"];
 
@@ -243,10 +248,16 @@ fn respond(req: SchemeRequest, status: i32, content_type: &str, body: &[u8]) {
 
 /// Scheme handler for both `laufey-e2e://app/...` and `app://e2e/...`. One
 /// handler serves every registered scheme (the C ABI contract), so dispatch
-/// on the URL. Runs on a backend thread; the streamed route hops to its own
-/// thread so it never blocks the caller.
-fn serve_scheme_request(req: SchemeRequest, echo_url: &str) {
+/// on the URL. Every URL it sees is appended to `seen` so the negative checks
+/// can prove a request never reached it. Runs on a backend thread; the
+/// streamed route hops to its own thread so it never blocks the caller.
+fn serve_scheme_request(
+  req: SchemeRequest,
+  echo_url: &str,
+  seen: &Mutex<Vec<String>>,
+) {
   let url = req.url.clone();
+  seen.lock().unwrap().push(url.clone());
   // Strip an optional query/fragment; the routes below don't use them.
   let path = url.split(['?', '#']).next().unwrap_or("");
   match path {
@@ -280,8 +291,38 @@ fn serve_scheme_request(req: SchemeRequest, echo_url: &str) {
       "text/html; charset=utf-8",
       APP_PAGE_HTML.as_bytes(),
     ),
+    // Target of the negative probes. CORS-open so that, were the engine to
+    // serve the (cross-origin) request, the page's fetch would resolve
+    // rather than fail on CORS — only a real refusal reads as "rejected".
+    p if p.ends_with("://app/probe") => {
+      let headers = vec![
+        ("content-type".to_string(), "text/plain".to_string()),
+        ("access-control-allow-origin".to_string(), "*".to_string()),
+      ];
+      req.exchange.begin(200, &headers);
+      req.exchange.write(b"probe");
+      req.exchange.finish();
+    }
     _ => respond(req, 404, "text/plain", b"not found"),
   }
+}
+
+/// Script run in the custom-scheme window: fetch `url` and report through the
+/// `schemeProbe` binding whether the engine served it (`served:<status>`) or
+/// rejected the request (`rejected`).
+fn fetch_probe_js(label: &str, url: &str) -> String {
+  format!(
+    r#"(async () => {{
+  let out;
+  try {{
+    const res = await fetch({url:?});
+    out = 'served:' + res.status;
+  }} catch (e) {{
+    out = 'rejected';
+  }}
+  await Laufey.schemeProbe({label:?}, out);
+}})();"#
+  )
 }
 
 /// A minimal loopback HTTP server that echoes the request's `Origin` header
@@ -343,12 +384,20 @@ fn e2e_main() {
     // contract, not a convenience. "app" is served by the same handler.
     let scheme_supported = laufey::scheme_handlers_supported();
     let echo_url = start_origin_echo_server();
-    let echo_for_handler = echo_url.clone().unwrap_or_default();
-    laufey::register_scheme_handler(E2E_SCHEME, move |req| {
-      serve_scheme_request(req, &echo_for_handler);
-    });
+    let seen_urls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let make_handler = {
+      let echo = echo_url.clone().unwrap_or_default();
+      let seen = seen_urls.clone();
+      move || {
+        let (echo, seen) = (echo.clone(), seen.clone());
+        move |req: SchemeRequest| serve_scheme_request(req, &echo, &seen)
+      }
+    };
+    laufey::register_scheme_handler(E2E_SCHEME, make_handler());
     let scheme_report: Arc<Mutex<Option<SchemeReport>>> =
       Arc::new(Mutex::new(None));
+    let scheme_probes: Arc<Mutex<std::collections::HashMap<String, String>>> =
+      Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // ---- window creation + event-callback wiring -------------------------
     // Resize / move / focus handlers record the last event so we can drive the
@@ -399,6 +448,17 @@ fn e2e_main() {
             stream_chunks: arg_int(a, 7),
             echo_body: arg_string(a, 8),
           });
+          call.resolve(Value::Bool(true));
+        }
+      })
+      // Negative probes (unregistered / late scheme) report here.
+      .bind("schemeProbe", {
+        let probes = scheme_probes.clone();
+        move |call| {
+          probes
+            .lock()
+            .unwrap()
+            .insert(arg_string(&call.args, 0), arg_string(&call.args, 1));
           call.resolve(Value::Bool(true));
         }
       })
@@ -785,6 +845,58 @@ fn e2e_main() {
           ),
           None => na("cross-origin Origin header (could not bind a loopback echo server)"),
         }
+      }
+
+      // Negative: a scheme nobody registered is not served — the fetch
+      // fails and the request never reaches the handler.
+      let probe = |label: &'static str, url: String| {
+        let probes = scheme_probes.clone();
+        win.execute_js(&fetch_probe_js(label, &url), None::<fn(_)>);
+        async move {
+          wait_for(|| probes.lock().unwrap().contains_key(label), 100, 100)
+            .await;
+          probes.lock().unwrap().get(label).cloned().unwrap_or_default()
+        }
+      };
+      let reached = |scheme: &str| {
+        let prefix = format!("{scheme}:");
+        seen_urls
+          .lock()
+          .unwrap()
+          .iter()
+          .any(|u| u.starts_with(&prefix))
+      };
+      let got = probe(
+        "unregistered",
+        format!("{UNREGISTERED_SCHEME}://app/probe"),
+      )
+      .await;
+      check(
+        &format!("an unregistered scheme is not served (fetch: {got:?})"),
+        got == "rejected" && !reached(UNREGISTERED_SCHEME),
+      );
+
+      // Negative: registering a scheme after the window exists breaks the
+      // ordering contract, so that window must not serve it (the backend
+      // logs a warning on stderr). WebKitGTK is the exception: its schemes
+      // live on the shared web context, which applies a late registration to
+      // existing web views too — reported, not asserted, there.
+      laufey::register_scheme_handler(LATE_SCHEME, make_handler());
+      tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+      let got = probe("late", format!("{LATE_SCHEME}://app/probe")).await;
+      let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+      if cfg!(target_os = "linux") && backend == "webview" {
+        eprintln!(
+          "[e2e] INFO WebKitGTK serves a scheme registered after the first \
+           window in that window too (fetch: {got:?})"
+        );
+      } else {
+        check(
+          &format!(
+            "a scheme registered after the first window is not served by it (fetch: {got:?})"
+          ),
+          got == "rejected" && !reached(LATE_SCHEME),
+        );
       }
     }
 

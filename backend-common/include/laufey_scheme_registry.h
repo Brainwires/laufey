@@ -72,8 +72,7 @@ inline bool IsValidSchemeName(const std::string& scheme) {
 // Split a comma-separated list ("myapp, other") into normalized, valid,
 // deduplicated scheme names, preserving first-seen order. Whitespace around
 // entries is ignored; invalid entries are appended to `rejected` (if given)
-// and skipped. Used by the CEF backend to read --laufey-custom-schemes /
-// LAUFEY_CUSTOM_SCHEMES and by tests.
+// and skipped.
 inline std::vector<std::string> ParseSchemeList(
     const std::string& list, std::vector<std::string>* rejected = nullptr) {
   std::vector<std::string> out;
@@ -102,6 +101,43 @@ inline std::vector<std::string> ParseSchemeList(
     start = end + 1;
   }
   return out;
+}
+
+// The custom schemes a CEF process declares at startup: "app" first, then the
+// valid names from each of `lists` (the --laufey-custom-schemes switch value,
+// then LAUFEY_CUSTOM_SCHEMES) in order, normalized and deduplicated. Invalid
+// entries are appended to `rejected` (if given) and skipped.
+inline std::vector<std::string> MergeSchemeLists(
+    const std::vector<std::string>& lists,
+    std::vector<std::string>* rejected = nullptr) {
+  std::vector<std::string> out = {kDefaultAppScheme};
+  std::set<std::string> seen = {kDefaultAppScheme};
+  for (const std::string& list : lists) {
+    for (const std::string& scheme : ParseSchemeList(list, rejected)) {
+      if (seen.insert(scheme).second) {
+        out.push_back(scheme);
+      }
+    }
+  }
+  return out;
+}
+
+// `schemes` joined with commas, without the built-in "app" (every process
+// declares it anyway): the --laufey-custom-schemes value the CEF browser
+// process forwards to its children. Empty when there is nothing to forward.
+inline std::string JoinForwardedSchemes(
+    const std::vector<std::string>& schemes) {
+  std::string joined;
+  for (const std::string& scheme : schemes) {
+    if (scheme == kDefaultAppScheme) {
+      continue;
+    }
+    if (!joined.empty()) {
+      joined += ',';
+    }
+    joined += scheme;
+  }
+  return joined;
 }
 
 // Thread-safe set of scheme names an embedder registered. "app" is always a

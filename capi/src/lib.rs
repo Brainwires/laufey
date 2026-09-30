@@ -647,11 +647,27 @@ unsafe extern "C" fn scheme_request_trampoline(
 ///
 /// Register every scheme **before creating the first window**: the web
 /// engines read their scheme tables when a web view is created, so a later
-/// registration is not served by existing windows (WebView2 fixes the set
-/// for the whole process). The CEF backend additionally needs the schemes
+/// registration is not served by existing windows (WebKitGTK excepted;
+/// WebView2 fixes the set for the whole process). The CEF backend additionally needs the schemes
 /// declared at launch — `--laufey-custom-schemes=myapp` or
 /// `LAUFEY_CUSTOM_SCHEMES=myapp` — because Chromium registers them before the
 /// runtime is loaded.
+///
+/// ```no_run
+/// // Before the first window: the engines read their scheme tables then.
+/// laufey::register_scheme_handler("myapp", |req| {
+///   let (status, body): (i32, &[u8]) = match req.url.as_str() {
+///     "myapp://app/" => (200, b"<!doctype html><h1>Hello</h1>"),
+///     _ => (404, b"not found"),
+///   };
+///   let headers = [("content-type".to_string(), "text/html".to_string())];
+///   req.exchange.begin(status, &headers);
+///   req.exchange.write(body);
+///   req.exchange.finish();
+/// });
+/// // location.origin in this window is "myapp://app".
+/// let _window = laufey::Window::new(800, 600).load("myapp://app/");
+/// ```
 pub fn register_scheme_handler<F>(scheme: &str, handler: F)
 where
   F: Fn(SchemeRequest) + Send + Sync + 'static,
@@ -676,8 +692,18 @@ where
 /// web engine). `false` on engine-less backends such as Winit, where
 /// [`register_scheme_handler`] is a no-op. Lets capability-probed tests tell
 /// "unsupported here" from "supported but broken".
+///
+/// ```no_run
+/// if !laufey::scheme_handlers_supported() {
+///   // Engine-less backend: serve the app over a loopback socket instead.
+/// }
+/// ```
 pub fn scheme_handlers_supported() -> bool {
-  api().register_scheme_handler.is_some()
+  supports_scheme_handlers(api())
+}
+
+fn supports_scheme_handlers(api: &LaufeyBackendApi) -> bool {
+  api.register_scheme_handler.is_some()
 }
 
 pub fn quit() {
@@ -3242,6 +3268,28 @@ mod tests {
       PermissionKind::Notifications as i32,
       LAUFEY_PERMISSION_NOTIFICATIONS
     );
+  }
+
+  unsafe extern "C" fn fake_register_scheme_handler(
+    _backend_data: *mut c_void,
+    _scheme: *const std::os::raw::c_char,
+    _handler: ffi::laufey_scheme_request_fn,
+    _on_cancel: ffi::laufey_scheme_cancel_fn,
+    _user_data: *mut c_void,
+  ) {
+  }
+
+  // scheme_handlers_supported() reports whether the backend filled in
+  // register_scheme_handler: NULL on engine-less backends (Winit) and on
+  // backends predating API 26, set on every web-engine backend. Checked
+  // against local vtables because BACKEND_API is a set-once global owned by
+  // the pdf tests below.
+  #[test]
+  fn scheme_handlers_supported_follows_the_vtable() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    assert!(!supports_scheme_handlers(&fake));
+    fake.register_scheme_handler = Some(fake_register_scheme_handler);
+    assert!(supports_scheme_handlers(&fake));
   }
 
   // Fake print_to_pdf backend shared by the pdf tests, dispatching on

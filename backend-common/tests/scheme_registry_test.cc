@@ -13,6 +13,8 @@
 #include <vector>
 
 using laufey_common::IsValidSchemeName;
+using laufey_common::JoinForwardedSchemes;
+using laufey_common::MergeSchemeLists;
 using laufey_common::NormalizeSchemeName;
 using laufey_common::ParseSchemeList;
 using laufey_common::SchemeRegistry;
@@ -97,8 +99,8 @@ static void TestRegistryConcurrentAdd() {
   // Hammer Add/Snapshot from several threads and check the final set is
   // exactly the union, with each name present once.
   SchemeRegistry registry;
-  constexpr int kThreads = 8;
-  constexpr int kPerThread = 200;
+  static constexpr int kThreads = 8;
+  static constexpr int kPerThread = 200;
   std::vector<std::thread> threads;
   for (int t = 0; t < kThreads; ++t) {
     threads.emplace_back([&registry, t]() {
@@ -165,6 +167,54 @@ static void TestParseSchemeList() {
   EXPECT(quiet.size() == 1 && quiet[0] == "ok");
 }
 
+// The CEF backend's startup declaration (cef/src/custom_schemes.cc): the
+// --laufey-custom-schemes switch value and LAUFEY_CUSTOM_SCHEMES are merged
+// behind the built-in "app", and the result minus "app" is forwarded to child
+// processes.
+static void TestMergeSchemeLists() {
+  std::vector<std::string> rejected;
+
+  // Nothing declared: just "app".
+  std::vector<std::string> none = MergeSchemeLists({}, &rejected);
+  EXPECT(none.size() == 1 && none[0] == "app");
+  EXPECT(MergeSchemeLists({"", " , "}, &rejected).size() == 1);
+  EXPECT(rejected.empty());
+
+  // Switch then env: "app" stays first, order is first-seen, case and
+  // duplicates (within and across the two sources, "app" included) collapse.
+  std::vector<std::string> merged =
+      MergeSchemeLists({"MyApp,app,other", "other, THIRD ,myapp"}, &rejected);
+  EXPECT(merged.size() == 4);
+  EXPECT(merged[0] == "app");
+  EXPECT(merged[1] == "myapp");
+  EXPECT(merged[2] == "other");
+  EXPECT(merged[3] == "third");
+  EXPECT(rejected.empty());
+
+  // Invalid names from either source are reported and dropped.
+  std::vector<std::string> mixed =
+      MergeSchemeLists({"good,bad name", "1bad,fine"}, &rejected);
+  EXPECT(mixed.size() == 3);
+  EXPECT(mixed[1] == "good" && mixed[2] == "fine");
+  EXPECT(rejected.size() == 2);
+  EXPECT(rejected[0] == "bad name" && rejected[1] == "1bad");
+
+  // A null `rejected` is allowed.
+  EXPECT(MergeSchemeLists({"ok,not ok"}).size() == 2);
+}
+
+static void TestJoinForwardedSchemes() {
+  // "app" alone forwards nothing (children declare it themselves).
+  EXPECT(JoinForwardedSchemes({"app"}).empty());
+  EXPECT(JoinForwardedSchemes({}).empty());
+  EXPECT(JoinForwardedSchemes({"app", "myapp"}) == "myapp");
+  EXPECT(JoinForwardedSchemes({"app", "myapp", "other"}) == "myapp,other");
+  // The forwarded value parses back to the same declaration in the child.
+  std::vector<std::string> declared =
+      MergeSchemeLists({"myapp,other", "third"});
+  EXPECT(MergeSchemeLists({JoinForwardedSchemes(declared)}) == declared);
+}
+
 int main() {
   TestSchemeNameGrammar();
   TestRegistryDefaults();
@@ -172,6 +222,8 @@ int main() {
   TestRegistryConcurrentAdd();
   TestGlobalInstance();
   TestParseSchemeList();
+  TestMergeSchemeLists();
+  TestJoinForwardedSchemes();
   std::printf("scheme_registry_test: all tests passed\n");
   return 0;
 }

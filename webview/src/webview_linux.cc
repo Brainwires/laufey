@@ -447,6 +447,10 @@ class WebKitGTKBackend : public LaufeyBackend {
 
   std::map<uint32_t, LinuxWindowState> windows_;
   std::mutex windows_mutex_;
+
+  // Set once the first web view exists; a RegisterSchemeHandler after that
+  // point breaks the (cross-backend) ordering contract and warns.
+  std::atomic<bool> any_web_view_created_{false};
 };
 
 // Static instance pointer for GTK callbacks
@@ -740,6 +744,7 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
 
     WebKitWebView* webview = WEBKIT_WEB_VIEW(
         webkit_web_view_new_with_user_content_manager(content_manager));
+    any_web_view_created_.store(true);
 
     g_signal_connect(webview, "script-dialog", G_CALLBACK(on_script_dialog),
                      nullptr);
@@ -1704,7 +1709,17 @@ void WebKitGTKBackend::RegisterSchemeHandler(const std::string& scheme) {
     return;
   }
   std::string normalized = laufey_common::NormalizeSchemeName(scheme);
-  laufey_common::SchemeRegistry::GetInstance()->Add(normalized);
+  bool added = laufey_common::SchemeRegistry::GetInstance()->Add(normalized);
+  if (added && any_web_view_created_.load()) {
+    // WebKitGTK applies the registration to existing web views too (the
+    // schemes live on the shared web context), but the other engines do not;
+    // flag the portability hazard.
+    std::cerr << "laufey: scheme \"" << normalized
+              << "\" was registered after a window was created; WebKitGTK "
+                 "serves it, but other backends will not (register schemes "
+                 "before the first window)"
+              << std::endl;
+  }
 
   // Register on the default web context (shared by all webviews). Must run on
   // the GTK main thread; the runtime calls this from its own thread. Window
