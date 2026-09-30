@@ -168,6 +168,13 @@ process started without `XDG_RUNTIME_DIR` (from some service managers or
 `sudo -u`) uses the `/tmp` fallback and does not see a primary that uses
 `$XDG_RUNTIME_DIR`.
 
+On macOS, LaunchServices normally sends a link or file to the running app
+instead of starting another one. If it does start a new process anyway
+(`open
+-n`, or a second copy of the app at another path), that process forwards
+its `argv` and exits before `[NSApp run]`, so a URL or file delivered to it as
+an Apple Event is not forwarded.
+
 On Wayland, a compositor may refuse to give a window focus without an activation
 token from the launching app; the primary still presents its window, but it may
 only be marked as wanting attention.
