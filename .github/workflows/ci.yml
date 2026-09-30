@@ -252,6 +252,7 @@ jobs:
         if: runner.os == 'Windows' && matrix.backend != 'winit'
 
       - name: Build backend
+        if: ${{ !(runner.os == 'Windows' && matrix.backend == 'cef') }}
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ] && [ "${{ matrix.backend }}" = "webview" ]; then
@@ -259,6 +260,13 @@ jobs:
           else
             make ${{ matrix.backend }}
           fi
+
+      # As in build-cef: run make from the default shell (pwsh), where the
+      # Windows tar extracts the CEF dist. Under Git bash, GNU tar reads the
+      # "D:/..." archive path as a remote host and the extraction fails.
+      - name: Build backend (Windows, cef)
+        if: runner.os == 'Windows' && matrix.backend == 'cef'
+        run: make cef
 
       - name: Layer 0 — readback / events / clipboard / menu+tray clicks
         if: ${{ !matrix.layer0_excluded }}
