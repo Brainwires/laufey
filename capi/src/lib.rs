@@ -638,6 +638,20 @@ unsafe extern "C" fn scheme_request_trampoline(
 /// scheme name only, e.g. `"app"`). The handler runs on a backend-internal
 /// thread and must not block it; offload work (e.g. onto a tokio task).
 /// Requires a backend built against laufey API version 26 or newer.
+///
+/// Call it once per scheme (the built-in `"app"` plus any of your own). One
+/// handler serves every registered scheme — a later call replaces the handler
+/// for all of them and adds the new scheme — so dispatch on `request.url`.
+/// Each registered scheme is a real origin in the page (`<scheme>://<host>`,
+/// secure context, CORS, per-origin storage).
+///
+/// Register every scheme **before creating the first window**: the web
+/// engines read their scheme tables when a web view is created, so a later
+/// registration is not served by existing windows (WebView2 fixes the set
+/// for the whole process). The CEF backend additionally needs the schemes
+/// declared at launch — `--laufey-custom-schemes=myapp` or
+/// `LAUFEY_CUSTOM_SCHEMES=myapp` — because Chromium registers them before the
+/// runtime is loaded.
 pub fn register_scheme_handler<F>(scheme: &str, handler: F)
 where
   F: Fn(SchemeRequest) + Send + Sync + 'static,
@@ -656,6 +670,14 @@ where
       );
     }
   }
+}
+
+/// Whether the backend implements custom scheme handlers (API >= 26 and a
+/// web engine). `false` on engine-less backends such as Winit, where
+/// [`register_scheme_handler`] is a no-op. Lets capability-probed tests tell
+/// "unsupported here" from "supported but broken".
+pub fn scheme_handlers_supported() -> bool {
+  api().register_scheme_handler.is_some()
 }
 
 pub fn quit() {

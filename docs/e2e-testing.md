@@ -167,8 +167,18 @@ fires with the right arguments. No OS input required.
 
 ### C. Custom scheme / IPC
 
-Navigate to a custom-scheme URL and assert the registered handler served the
-expected bytes. Same shape as the existing binding round-trip.
+Register a custom scheme _before the first window_, serve a page over it, and
+assert the registered handler served it **as a real origin**. `native_e2e`
+registers `laufey-e2e`, loads `laufey-e2e://app/`, and the page reports back
+through a binding: `location.origin == "laufey-e2e://app"`, `isSecureContext`, a
+working `crypto.subtle.digest`, `localStorage` set/get, a same-origin `fetch`
+whose streamed body arrives intact, and a cross-origin `fetch` to a loopback
+echo server that proves the `Origin: laufey-e2e://app` header. A second window
+loads `app://e2e/` to prove the built-in scheme still works next to the
+registered one. `N/A` on engine-less backends. The CEF host must be told the
+scheme up front (`LAUFEY_CUSTOM_SCHEMES=laufey-e2e`, set by
+`scripts/native-e2e-run.sh`) because Chromium registers custom schemes before
+the runtime loads.
 
 ### D. OS-observer introspection — _for chrome with no getter_
 

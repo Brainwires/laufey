@@ -23,6 +23,13 @@ done
 [ -n "$rt" ] || { echo "native_e2e_runtime cdylib not found (build it first)"; exit 1; }
 export LAUFEY_RUNTIME_PATH="$rt"
 
+# The battery serves a page over its own custom scheme (laufey-e2e://app/)
+# and asserts it is a real origin. WebView backends learn the scheme from the
+# runtime's register_scheme_handler call, but CEF registers custom schemes at
+# process start (before the runtime is loaded) and must be told up front —
+# see custom_schemes.h. Harmless for the other backends.
+export LAUFEY_CUSTOM_SCHEMES=laufey-e2e
+
 # Resolve the backend binary (handles macOS .app bundles).
 case "$backend" in
   winit)

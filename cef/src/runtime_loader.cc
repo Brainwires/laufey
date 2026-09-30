@@ -2,7 +2,9 @@
 
 #include "runtime_loader.h"
 #include "app.h"
+#include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_scheme_registry.h"
 #include "scheme_handler.h"
 
 #ifndef _WIN32
@@ -2179,14 +2181,28 @@ void RuntimeLoader::SetSchemeRequestHandler(const std::string& scheme,
     scheme_request_handler_ = handler;
     scheme_cancel_handler_ = on_cancel;
     scheme_user_data_ = user_data;
-    scheme_name_ = scheme;
-    if (handler && !scheme_factory_registered_) {
-      scheme_factory_registered_ = true;
-      need_register = true;
-      scheme_to_register = scheme;
+    if (handler) {
+      if (!laufey_common::IsValidSchemeName(scheme)) {
+        std::cerr << "laufey: ignoring invalid URL scheme name \"" << scheme
+                  << "\" passed to register_scheme_handler" << std::endl;
+      } else {
+        scheme_to_register = laufey_common::NormalizeSchemeName(scheme);
+        need_register = scheme_factories_.insert(scheme_to_register).second;
+      }
     }
   }
   if (need_register) {
+    if (!laufey_schemes::IsDeclared(scheme_to_register)) {
+      // The factory still serves the scheme, but Chromium registered its
+      // standard/secure/CORS flags at startup, so an undeclared scheme gets
+      // an opaque origin and no secure context.
+      std::cerr << "laufey: scheme \"" << scheme_to_register
+                << "\" was not declared at startup (--"
+                << laufey_schemes::kSwitch << " / " << laufey_schemes::kEnv
+                << "); pages served over it will not be a secure "
+                   "`<scheme>://<host>` origin"
+                << std::endl;
+    }
     // CefRegisterSchemeHandlerFactory must run on the UI thread.
     CefPostTask(TID_UI, base::BindOnce(
                             [](std::string s) {
