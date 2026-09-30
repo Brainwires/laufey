@@ -447,6 +447,12 @@ void SetTrayDoubleClickHandlerLinux(uint32_t tray_id,
 // Each backend stores its profile in its own subdirectory (CEF/, WebView2/,
 // WebKitGTK/) so two engines never share one profile. See docs/app-data.md.
 
+// The value of environment variable `name` as UTF-8, or "" when it is unset
+// (or empty). On Windows it is read wide (GetEnvironmentVariableW) and
+// converted, so non-ASCII values survive whatever the active codepage is.
+// Shared by the app data directory and launch file readers.
+std::string GetEnvUtf8(const char* name);
+
 // The resolved directory (UTF-8, absolute, no trailing separator), or "" when
 // none is configured. Resolved once per process; warnings go to stderr on the
 // first call. Does not create the directory.

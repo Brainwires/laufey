@@ -45,24 +45,6 @@ std::string StripTrailingSeparators(std::string path) {
   return path;
 }
 
-std::string GetEnvUtf8(const char* name) {
-#ifdef _WIN32
-  std::wstring wname = Utf8ToWide(name);
-  DWORD len = GetEnvironmentVariableW(wname.c_str(), nullptr, 0);
-  if (len == 0)
-    return std::string();
-  std::wstring value(len, L'\0');
-  len = GetEnvironmentVariableW(wname.c_str(), &value[0], len);
-  if (len == 0 || len >= value.size())
-    return std::string();
-  value.resize(len);
-  return WideToUtf8(value);
-#else
-  const char* value = getenv(name);
-  return value ? std::string(value) : std::string();
-#endif
-}
-
 // The per-user base directory app ids are resolved under, or "" if it can't
 // be determined.
 std::string PlatformAppDataBase() {
@@ -100,6 +82,24 @@ std::string PlatformAppDataBase() {
 }
 
 }  // namespace
+
+std::string GetEnvUtf8(const char* name) {
+#ifdef _WIN32
+  std::wstring wname = Utf8ToWide(name);
+  DWORD len = GetEnvironmentVariableW(wname.c_str(), nullptr, 0);
+  if (len == 0)
+    return std::string();
+  std::wstring value(len, L'\0');
+  len = GetEnvironmentVariableW(wname.c_str(), &value[0], len);
+  if (len == 0 || len >= value.size())
+    return std::string();
+  value.resize(len);
+  return WideToUtf8(value);
+#else
+  const char* value = getenv(name);
+  return value ? std::string(value) : std::string();
+#endif
+}
 
 bool IsSafeAppId(const std::string& id) {
   if (id.empty() || id == "." || id == "..")

@@ -371,24 +371,6 @@ bool CheckString(const std::string& key, const JsonValue& value,
   return true;
 }
 
-std::string GetEnv(const char* name) {
-#ifdef _WIN32
-  std::wstring wname = Utf8ToWide(name);
-  DWORD len = GetEnvironmentVariableW(wname.c_str(), nullptr, 0);
-  if (len == 0)
-    return std::string();
-  std::wstring value(len, L'\0');
-  len = GetEnvironmentVariableW(wname.c_str(), &value[0], len);
-  if (len == 0 || len >= value.size())
-    return std::string();
-  value.resize(len);
-  return WideToUtf8(value);
-#else
-  const char* value = std::getenv(name);
-  return value ? std::string(value) : std::string();
-#endif
-}
-
 bool IsPathSeparator(char c) {
 #ifdef _WIN32
   return c == '/' || c == '\\';
@@ -632,13 +614,13 @@ std::string LaunchSettingFrom(const std::string& env_value, bool file_has,
 
 std::string LaunchAppId() {
   const LaunchConfig& file = ProcessLaunchConfig();
-  return LaunchSettingFrom(GetEnv("LAUFEY_APP_ID"), file.has_app_id,
+  return LaunchSettingFrom(GetEnvUtf8("LAUFEY_APP_ID"), file.has_app_id,
                            file.app_id);
 }
 
 std::string LaunchDataDir() {
   const LaunchConfig& file = ProcessLaunchConfig();
-  return LaunchSettingFrom(GetEnv("LAUFEY_DATA_DIR"), file.has_data_dir,
+  return LaunchSettingFrom(GetEnvUtf8("LAUFEY_DATA_DIR"), file.has_data_dir,
                            file.data_dir);
 }
 
@@ -650,7 +632,7 @@ std::string LaunchCustomSchemes() {
       joined.push_back(',');
     joined += scheme;
   }
-  return LaunchSettingFrom(GetEnv("LAUFEY_CUSTOM_SCHEMES"),
+  return LaunchSettingFrom(GetEnvUtf8("LAUFEY_CUSTOM_SCHEMES"),
                            file.has_custom_schemes, joined);
 }
 
