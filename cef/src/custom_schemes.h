@@ -11,10 +11,13 @@
 //
 //   laufey --laufey-custom-schemes=myapp,other --runtime ...
 //   LAUFEY_CUSTOM_SCHEMES=myapp,other laufey --runtime ...
+//   "customSchemes": ["myapp", "other"] in laufey-launch.json next to the
+//   executable (laufey_launch_config.h; LAUFEY_CUSTOM_SCHEMES wins if set)
 //
-// Both spellings are read in every process (the switch is forwarded to child
-// processes in OnBeforeChildProcessLaunch; the environment is inherited), and
-// "app" is always declared. Registering a scheme at runtime that was not
+// All three are read in every process (the switch is forwarded to child
+// processes in OnBeforeChildProcessLaunch; the environment is inherited; the
+// launch file is found from each process's executable), and "app" is always
+// declared. Registering a scheme at runtime that was not
 // declared still installs a handler factory for it, but Chromium then treats
 // the scheme as non-standard (opaque origin, insecure context); the runtime
 // loader logs a warning in that case.
@@ -37,7 +40,8 @@ extern const char kEnv[];
 
 // The schemes declared for this process: "app" first, then the valid,
 // normalized, deduplicated names from --laufey-custom-schemes and
-// LAUFEY_CUSTOM_SCHEMES (in that order). Invalid entries are logged once and
+// LAUFEY_CUSTOM_SCHEMES (or, when that is unset, the launch file's
+// "customSchemes"), in that order. Invalid entries are logged once and
 // skipped. Safe to call in any process once the CEF command line exists
 // (i.e. inside OnRegisterCustomSchemes and later).
 std::vector<std::string> Declared();

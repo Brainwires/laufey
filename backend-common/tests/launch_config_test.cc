@@ -1,9 +1,10 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 //
 // Unit tests for the launch configuration reader (src/launch_config.cc). No
-// test framework: compile this file with src/launch_config.cc (plus
-// src/strings_win.cc on Windows), with backend-common/include on the include
-// path, and run it. CI does this in the `test` job. Exits non-zero if any
+// test framework: compile this file with src/launch_config.cc and
+// src/data_dir.cc (plus src/strings_win.cc and shell32.lib ole32.lib on
+// Windows), with backend-common/include and capi/include on the include path,
+// and run it. CI does this in the `test` job. Exits non-zero if any
 // expectation fails.
 //
 // The last test writes a laufey-launch.json next to this test binary to
@@ -26,6 +27,14 @@
 using namespace laufey_common;
 
 static int g_failures = 0;
+
+// An absolute directory on this platform, as written in the JSON text and as
+// parsed ('/' is a separator on Windows too).
+#ifdef _WIN32
+#define ABS "C:/data"
+#else
+#define ABS "/data"
+#endif
 
 #define EXPECT(cond)                                                       \
   do {                                                                     \
@@ -52,11 +61,11 @@ static void TestValid() {
   LaunchConfig c = Parse(
       "{ \"appId\": \"com.example.app\",\n"
       "  \"customSchemes\": [\"myapp\", \"other\"],\n"
-      "  \"dataDir\": \"/srv/data/my app\" }\n",
+      "  \"dataDir\": \"" ABS "/my app\" }\n",
       &w);
   EXPECT(w == 0);
   EXPECT(c.has_app_id && c.app_id == "com.example.app");
-  EXPECT(c.has_data_dir && c.data_dir == "/srv/data/my app");
+  EXPECT(c.has_data_dir && c.data_dir == ABS "/my app");
   EXPECT(c.has_custom_schemes && c.custom_schemes.size() == 2);
   EXPECT(c.custom_schemes.size() == 2 && c.custom_schemes[0] == "myapp" &&
          c.custom_schemes[1] == "other");
@@ -147,16 +156,32 @@ static void TestSchema() {
   EXPECT(w == 3 && IsEmpty(c));
 
   // Empty strings and embedded NULs are rejected.
-  c = Parse("{\"appId\": \"\", \"dataDir\": \"/a\\u0000b\"}", &w);
+  c = Parse("{\"appId\": \"\", \"dataDir\": \"" ABS "/a\\u0000b\"}", &w);
   EXPECT(w == 2 && IsEmpty(c));
+
+  // The same rules as the environment variables: IsSafeAppId for appId,
+  // IsAbsolutePath for dataDir, IsValidSchemeName for scheme entries.
+  const char* bad_ids[] = {"..", ".", "a/b", "a\\\\b", "my app", "caf\\u00e9"};
+  for (const char* id : bad_ids) {
+    c = Parse(std::string("{\"appId\": \"") + id + "\"}", &w);
+    EXPECT(w == 1 && IsEmpty(c));
+  }
+  c = Parse("{\"appId\": \"com.Example_app-2\"}", &w);
+  EXPECT(w == 0 && c.app_id == "com.Example_app-2");
+  const char* bad_dirs[] = {"relative/dir", "./x", "~/x", "data"};
+  for (const char* dir : bad_dirs) {
+    c = Parse(std::string("{\"dataDir\": \"") + dir + "\"}", &w);
+    EXPECT(w == 1 && IsEmpty(c));
+  }
 
   // Bad scheme entries are skipped one by one; the rest are kept.
   c = Parse(
-      "{\"customSchemes\": [\"good\", 1, \"\", \"a,b\", null, \"also-good\"]}",
+      "{\"customSchemes\": [\"good\", 1, \"\", \"a,b\", null, \"1bad\","
+      " \"my app\", \"x://y\", \" pad\", \"Also-Good+1.x\"]}",
       &w);
-  EXPECT(w == 4 && c.has_custom_schemes && c.custom_schemes.size() == 2);
+  EXPECT(w == 8 && c.has_custom_schemes && c.custom_schemes.size() == 2);
   EXPECT(c.custom_schemes.size() == 2 && c.custom_schemes[0] == "good" &&
-         c.custom_schemes[1] == "also-good");
+         c.custom_schemes[1] == "Also-Good+1.x");
 
   // Duplicate keys: reported, the last one wins.
   c = Parse("{\"appId\": \"first\", \"appId\": \"second\"}", &w);
@@ -166,9 +191,10 @@ static void TestSchema() {
   EXPECT(w == 2 && !c.has_app_id);
 
   // Escapes decode to UTF-8.
-  c = Parse("{\"dataDir\": \"/d/caf\\u00e9/\\ud83d\\ude00/\\\"q\\\"\\\\\\/\"}",
+  c = Parse("{\"dataDir\": \"" ABS
+            "/caf\\u00e9/\\ud83d\\ude00/\\\"q\\\"\\\\\\/\"}",
             &w);
-  EXPECT(w == 0 && c.data_dir == "/d/caf\xC3\xA9/\xF0\x9F\x98\x80/\"q\"\\/");
+  EXPECT(w == 0 && c.data_dir == ABS "/caf\xC3\xA9/\xF0\x9F\x98\x80/\"q\"\\/");
 }
 
 static void TestPrecedence() {
@@ -246,10 +272,10 @@ static void TestProcessLaunchConfig() {
   EXPECT(f != nullptr);
   if (!f)
     return;
-  std::fputs(
-      "{\"appId\": \"dev.laufey.test\", \"dataDir\": \"/from/file\","
-      " \"customSchemes\": [\"one\", \"two\"], \"extra\": 1}",
-      f);
+  std::fputs("{\"appId\": \"dev.laufey.test\", \"dataDir\": \"" ABS
+             "/from/file\","
+             " \"customSchemes\": [\"one\", \"two\"], \"extra\": 1}",
+             f);
   std::fclose(f);
 
   SetEnv("LAUFEY_APP_ID", nullptr);
@@ -258,14 +284,14 @@ static void TestProcessLaunchConfig() {
   const LaunchConfig& c = ProcessLaunchConfig();
   EXPECT(c.has_app_id && c.app_id == "dev.laufey.test");
   EXPECT(LaunchAppId() == "dev.laufey.test");
-  EXPECT(LaunchDataDir() == "/from/file");
+  EXPECT(LaunchDataDir() == ABS "/from/file");
   EXPECT(LaunchCustomSchemes() == "one,two");
 
   // The environment wins, key by key.
   SetEnv("LAUFEY_APP_ID", "from.env");
   SetEnv("LAUFEY_CUSTOM_SCHEMES", "envscheme");
   EXPECT(LaunchAppId() == "from.env");
-  EXPECT(LaunchDataDir() == "/from/file");
+  EXPECT(LaunchDataDir() == ABS "/from/file");
   EXPECT(LaunchCustomSchemes() == "envscheme");
   SetEnv("LAUFEY_APP_ID", nullptr);
   SetEnv("LAUFEY_DATA_DIR", nullptr);

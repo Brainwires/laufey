@@ -562,7 +562,13 @@ profile. The driver asserts:
 - on-disk layout: `<dir>/CEF`, `<dir>/WebView2` or `<dir>/WebKitGTK` (with
   `data/cookies.sqlite`), created `0700` on Unix; no directory for WKWebView;
 - CEF only: a second instance of a running app exits during startup and the
-  first is unaffected.
+  first is unaffected;
+- [launch file](launch-config.md): with only a `laufey-launch.json` next to the
+  executable (no `LAUFEY_*` in the environment), the file's `appId` gives a
+  persistent per-app store and profile directory. On CEF the page is served over
+  a custom scheme that only the file's `customSchemes` declares, and it must be
+  a secure origin. `LAUFEY_APP_ID` in the environment overrides the file, and a
+  malformed file is reported and ignored.
 
 The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, and on
 the webview/Linux leg, where the Layer-0 battery is excluded (see the status

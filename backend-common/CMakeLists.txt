@@ -137,4 +137,12 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_scheme_registry_test PRIVATE Threads::Threads)
   add_test(NAME laufey_scheme_registry_test
            COMMAND laufey_scheme_registry_test)
+
+  # Writes (and removes) a laufey-launch.json next to the test binary.
+  add_executable(laufey_launch_config_test tests/launch_config_test.cc)
+  target_link_libraries(laufey_launch_config_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_launch_config_test
+           COMMAND laufey_launch_config_test)
 endif()

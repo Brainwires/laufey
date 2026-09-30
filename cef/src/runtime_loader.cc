@@ -2206,7 +2206,8 @@ void RuntimeLoader::SetSchemeRequestHandler(const std::string& scheme,
       std::cerr << "laufey: scheme \"" << s
                 << "\" was not declared at startup (--"
                 << laufey_schemes::kSwitch << " / " << laufey_schemes::kEnv
-                << "); pages served over it will not be a secure "
+                << " / \"customSchemes\" in laufey-launch.json); pages "
+                   "served over it will not be a secure "
                    "`<scheme>://<host>` origin"
                 << std::endl;
     }

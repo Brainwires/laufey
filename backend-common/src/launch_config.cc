@@ -12,11 +12,12 @@
 #include <iostream>
 #include <utility>
 
+#include "laufey_backend_common.h"
+#include "laufey_scheme_registry.h"
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-
-#include "laufey_backend_common.h"
 #else
 #include <climits>
 #include <unistd.h>
@@ -343,6 +344,10 @@ class JsonReader {
 };
 
 // --- Schema -----------------------------------------------------------------
+//
+// Values are validated with the same rules as their environment variables:
+// IsSafeAppId (appId), IsAbsolutePath (dataDir) and IsValidSchemeName
+// (customSchemes entries).
 
 void Warn(std::vector<std::string>* warnings, const std::string& message) {
   if (warnings)
@@ -486,16 +491,27 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
       seen.push_back(key);
     if (key == "appId") {
       config.has_app_id = false;
-      if (CheckString(key, value, warnings)) {
-        config.has_app_id = true;
-        config.app_id = value.string;
+      if (!CheckString(key, value, warnings))
+        continue;
+      if (!IsSafeAppId(value.string)) {
+        Warn(warnings, "\"appId\" \"" + value.string +
+                           "\" is not a safe directory name (allowed: A-Z "
+                           "a-z 0-9 . _ -); ignoring it");
+        continue;
       }
+      config.has_app_id = true;
+      config.app_id = value.string;
     } else if (key == "dataDir") {
       config.has_data_dir = false;
-      if (CheckString(key, value, warnings)) {
-        config.has_data_dir = true;
-        config.data_dir = value.string;
+      if (!CheckString(key, value, warnings))
+        continue;
+      if (!IsAbsolutePath(value.string)) {
+        Warn(warnings, "\"dataDir\" must be an absolute path; ignoring \"" +
+                           value.string + "\"");
+        continue;
       }
+      config.has_data_dir = true;
+      config.data_dir = value.string;
     } else if (key == "customSchemes") {
       config.has_custom_schemes = false;
       config.custom_schemes.clear();
@@ -509,10 +525,9 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
       for (const JsonValue& item : value.array) {
         if (!CheckString("customSchemes[]", item, warnings))
           continue;
-        // The value stands in for the comma-separated LAUFEY_CUSTOM_SCHEMES.
-        if (item.string.find(',') != std::string::npos) {
+        if (!IsValidSchemeName(item.string)) {
           Warn(warnings, "\"customSchemes\" entry \"" + item.string +
-                             "\" contains ','; ignoring it");
+                             "\" is not a valid URL scheme name; ignoring it");
           continue;
         }
         config.custom_schemes.push_back(item.string);

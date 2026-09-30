@@ -87,10 +87,15 @@ if(OS_MAC)
     src/main_mac.mm
   )
 
+  # The helpers read the launch file's custom schemes (custom_schemes.cc ->
+  # launch_config.cc, which validates with data_dir.cc) without linking all of
+  # laufey_backend_common.
   set(LAUFEY_HELPER_SRCS
     src/helper.cc
     src/custom_schemes.cc
     src/custom_schemes.h
+    ../backend-common/src/launch_config.cc
+    ../backend-common/src/data_dir.cc
     ${LAUFEY_RENDERER_SRCS}
   )
 
@@ -153,8 +158,9 @@ if(OS_MAC)
     add_executable(${_helper_target} MACOSX_BUNDLE ${LAUFEY_HELPER_SRCS})
     SET_EXECUTABLE_TARGET_PROPERTIES(${_helper_target})
     target_link_libraries(${_helper_target} libcef_dll_wrapper ${CEF_STANDARD_LIBS})
-    # backend-common/include for the header-only scheme-name helpers used by
-    # custom_schemes.cc; the helper does not link laufey_backend_common.
+    # backend-common/include for the scheme-name helpers and launch file
+    # reader used by custom_schemes.cc; the helper does not link
+    # laufey_backend_common (see LAUFEY_HELPER_SRCS).
     target_include_directories(${_helper_target} PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
       "${LAUFEY_INCLUDE_DIR}"

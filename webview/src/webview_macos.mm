@@ -8,6 +8,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_json.h"
+#include "laufey_launch_config.h"
 #include "laufey_scheme_registry.h"
 #include "init_script.h"
 
@@ -470,13 +471,13 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
     const std::string& dir = laufey_common::AppDataDir();
     if (dir.empty())
       return;
-    // AppDataDir() is non-empty, so it came from a valid LAUFEY_DATA_DIR or,
-    // failing that, from a valid LAUFEY_APP_ID.
-    const char* data_dir = getenv("LAUFEY_DATA_DIR");
-    const char* app_id = getenv("LAUFEY_APP_ID");
-    std::string name = (data_dir && laufey_common::IsAbsolutePath(data_dir))
+    // AppDataDir() is non-empty, so it came from a valid data dir or,
+    // failing that, from a valid app id (each from its environment variable
+    // or the launch file, see laufey_launch_config.h).
+    std::string data_dir = laufey_common::LaunchDataDir();
+    std::string name = laufey_common::IsAbsolutePath(data_dir)
                            ? dir
-                           : std::string(app_id ? app_id : "");
+                           : laufey_common::LaunchAppId();
     if (@available(macOS 14.0, *)) {
       store =
           [WKWebsiteDataStore dataStoreForIdentifier:LaufeyNameBasedUUID(name)];

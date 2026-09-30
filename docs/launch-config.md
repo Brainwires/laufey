@@ -33,17 +33,24 @@ The directory comes from the running executable's real path
 
 Every key is optional, and each key stands in for one environment variable:
 
-| Key             | Environment variable    | Value                                   |
-| --------------- | ----------------------- | --------------------------------------- |
-| `appId`         | `LAUFEY_APP_ID`         | non-empty string                        |
-| `customSchemes` | `LAUFEY_CUSTOM_SCHEMES` | array of scheme names (no `,` in names) |
-| `dataDir`       | `LAUFEY_DATA_DIR`       | non-empty string                        |
+| Key             | Environment variable    | Value                                                             |
+| --------------- | ----------------------- | ----------------------------------------------------------------- |
+| `appId`         | `LAUFEY_APP_ID`         | `A-Z a-z 0-9 . _ -` only, not `.` or `..`                         |
+| `customSchemes` | `LAUFEY_CUSTOM_SCHEMES` | array of URL scheme names (a letter, then letters, digits, `+-.`) |
+| `dataDir`       | `LAUFEY_DATA_DIR`       | absolute path                                                     |
 
-`appId` sets the Wayland `app_id` and X11 `WM_CLASS` on Linux (WebView and CEF
-backends), exactly like `LAUFEY_APP_ID`. `customSchemes` and `dataDir` are read
-and validated and are available to the backends through `LaunchCustomSchemes()`
-and `LaunchDataDir()`. This version has no backend feature that consumes them
-yet.
+Values follow the same rules as the environment variables, and each key does
+what its variable does:
+
+- `appId` selects the per-app data directory ([App data](app-data.md)) on every
+  backend. On Linux it also sets the Wayland `app_id` and X11 `WM_CLASS`
+  (WebView and CEF).
+- `dataDir` overrides that directory ([App data](app-data.md)).
+- `customSchemes` declares the CEF backend's custom schemes at startup
+  ([Custom URL schemes](custom-schemes.md)). CEF's helper processes read the
+  same file, and the browser process also forwards the list to them. The WebView
+  backends learn their schemes from `register_scheme_handler` and don't need
+  this key.
 
 ## Precedence
 
@@ -51,6 +58,12 @@ For each key separately, an environment variable that is set to a non-empty
 value wins over the file. So a launcher can still force a value, and setups that
 rely on the environment keep working unchanged. A key absent from the file and
 from the environment is simply unset. The file is read once per process.
+
+The keys are resolved one at a time before they are combined. For example, a
+file with `dataDir` launched with `LAUFEY_APP_ID` set still uses the file's
+`dataDir`, because `LAUFEY_DATA_DIR` isn't set and a data dir outranks an app id
+([App data](app-data.md)). CEF's `--laufey-custom-schemes` switch is added to
+the list from `LAUFEY_CUSTOM_SCHEMES` or `customSchemes`.
 
 ## Validation
 
@@ -63,8 +76,9 @@ A problem with the file never stops the app. It is reported on stderr as
 - A file larger than 64 KiB is ignored.
 - An unknown key is reported and ignored, so newer files keep working with older
   hosts.
-- A value of the wrong type, an empty string or a string containing NUL is
-  reported, and that key is ignored.
+- A value of the wrong type, an empty string, a string containing NUL, or a
+  value that breaks the rules above (an unsafe `appId`, a relative `dataDir`) is
+  reported, and that key is ignored. It behaves as if it were absent.
 - An invalid entry in `customSchemes` is reported and skipped. The other entries
   are kept.
 - If a key appears more than once, the last one wins, and this is reported.

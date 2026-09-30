@@ -54,7 +54,10 @@ struct LaunchConfig {
 // Parses and validates the text of a launch file. Reads nothing from the
 // environment or filesystem. Malformed JSON (or a top level that is not an
 // object) yields an empty config; an unknown key or an invalid value is
-// skipped. Appends a message to `warnings` (if non-null) for each problem.
+// skipped. Values are held to the same rules as the environment variables:
+// IsSafeAppId for "appId", IsAbsolutePath for "dataDir", IsValidSchemeName
+// for each "customSchemes" entry. Appends a message to `warnings` (if
+// non-null) for each problem.
 LaunchConfig ParseLaunchConfig(const std::string& text,
                                std::vector<std::string>* warnings);
 

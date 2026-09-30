@@ -3,13 +3,16 @@
 # Per-app web storage e2e: relaunches a backend with the storage_e2e_runtime
 # under different LAUFEY_APP_ID / LAUFEY_DATA_DIR settings and asserts that
 # localStorage + cookies persist per app, stay isolated between apps, and that
-# an unconfigured launch behaves as before. See docs/app-data.md.
+# an unconfigured launch behaves as before. See docs/app-data.md. Then does the
+# same from a launch file (laufey-launch.json next to the executable, no
+# LAUFEY_* environment; docs/launch-config.md), on CEF over a custom scheme the
+# file declares.
 #
 #   scripts/storage-e2e-run.sh <webview|cef>
 #
 # Build first: `cargo build --release -p storage_e2e_runtime` and the backend.
-# Uses fixed app ids (dev.laufey.e2e.storage-{a,b}) and removes their data
-# directories when done; every run writes a fresh random value, so data left
+# Uses fixed app ids (dev.laufey.e2e.storage-{a,b,launch}) and removes their
+# data directories and the launch file when done; every run writes a fresh random value, so data left
 # by an earlier run can't make a check pass.
 set -euo pipefail
 
@@ -80,6 +83,12 @@ esac
 
 id_a=dev.laufey.e2e.storage-a
 id_b=dev.laufey.e2e.storage-b
+id_f=dev.laufey.e2e.storage-launch
+# Where the backend looks for its launch file (docs/launch-config.md).
+case "$platform" in
+  macos) launch_file="${bin%/MacOS/*}/Resources/laufey-launch.json" ;;
+  *) launch_file="$(dirname "$bin")/laufey-launch.json" ;;
+esac
 explicit="$scratch/explicit-dir"
 if [ "$platform" = windows ]; then
   explicit_native="$(cygpath -w "$explicit")"
@@ -99,12 +108,15 @@ remove() {
   echo "[storage-e2e] warning: could not remove $1"
 }
 cleanup() {
+  rm -f "$launch_file"
   remove "$base/$id_a"
   remove "$base/$id_b"
+  remove "$base/$id_f"
   [ -n "${KEEP_SCRATCH:-}" ] || remove "$scratch"
 }
 trap cleanup EXIT
-rm -rf "$base/$id_a" "$base/$id_b"
+rm -rf "$base/$id_a" "$base/$id_b" "$base/$id_f"
+rm -f "$launch_file"
 
 failed=0
 pass() { echo "[storage-e2e] PASS $*"; }
@@ -116,8 +128,9 @@ launch() {
   local name="$1" secs="$2"
   shift 2
   local log="$scratch/logs/$name.log"
-  local cmd=(env -u LAUFEY_APP_ID -u LAUFEY_DATA_DIR -u LAUFEY_E2E_STORAGE_EXPECT
-    -u LAUFEY_E2E_STORAGE_EXPECT_NOT -u LAUFEY_E2E_STORAGE_HOLD_MS
+  local cmd=(env -u LAUFEY_APP_ID -u LAUFEY_DATA_DIR -u LAUFEY_CUSTOM_SCHEMES
+    -u LAUFEY_E2E_STORAGE_EXPECT -u LAUFEY_E2E_STORAGE_EXPECT_NOT
+    -u LAUFEY_E2E_STORAGE_HOLD_MS -u LAUFEY_E2E_STORAGE_SCHEME
     LAUFEY_E2E_STORAGE_PORT="$port" "$@")
   if [ "$platform" = linux ]; then
     cmd+=(xvfb-run -a dbus-run-session -- "$bin")
@@ -223,6 +236,43 @@ if [ "$backend" = cef ]; then
     fail "first instance (see $scratch/logs/hold-a.log)"
   fi
 fi
+
+# (d) Launch file: the same configuration from laufey-launch.json next to the
+# executable, with no LAUFEY_* variable in the environment (an app started
+# directly). On CEF the page is served over a custom scheme that only the file
+# declares, so it must come up as a secure `<scheme>://app` origin.
+launch_scheme=laufey-e2e-launch
+scheme_env=()
+if [ "$backend" = cef ]; then
+  scheme_env=(LAUFEY_E2E_STORAGE_SCHEME="$launch_scheme")
+fi
+mkdir -p "$(dirname "$launch_file")"
+printf '{ "appId": "%s", "customSchemes": ["%s"] }\n' "$id_f" "$launch_scheme" \
+  >"$launch_file"
+echo "== launch file $launch_file: $(cat "$launch_file")"
+step file-write ${scheme_env[@]+"${scheme_env[@]}"} \
+  LAUFEY_E2E_STORAGE_MODE=write LAUFEY_E2E_STORAGE_VALUE="${value}f"
+step file-read ${scheme_env[@]+"${scheme_env[@]}"} \
+  LAUFEY_E2E_STORAGE_MODE=read LAUFEY_E2E_STORAGE_EXPECT="${value}f"
+if [ -n "$sub" ]; then
+  if [ -d "$base/$id_f/$sub" ]; then pass "launch file appId: profile at <app data>/$id_f/$sub"; else fail "launch file appId: no profile at $base/$id_f/$sub"; fi
+fi
+# The environment wins over the file: LAUFEY_APP_ID selects app b's store,
+# which doesn't have the value (the file's schemes still apply).
+step file-env-override ${scheme_env[@]+"${scheme_env[@]}"} \
+  LAUFEY_APP_ID="$id_b" LAUFEY_E2E_STORAGE_MODE=read \
+  LAUFEY_E2E_STORAGE_EXPECT_NOT="${value}f"
+# A malformed file is reported and ignored: the app starts with the
+# unconfigured default store.
+printf '{ "appId": ' >"$launch_file"
+step file-malformed LAUFEY_E2E_STORAGE_MODE=read \
+  LAUFEY_E2E_STORAGE_EXPECT_NOT="${value}f"
+if grep -q 'laufey-launch.json: not valid JSON' "$scratch/logs/file-malformed.log"; then
+  pass "malformed launch file reported on stderr"
+else
+  fail "malformed launch file not reported (see $scratch/logs/file-malformed.log)"
+fi
+rm -f "$launch_file"
 
 if [ "$failed" = 0 ]; then
   echo "[storage-e2e] OVERALL PASS"

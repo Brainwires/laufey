@@ -1,8 +1,8 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 //
 // Unit tests for the app data directory resolver (src/data_dir.cc). No test
-// framework: compile this file with src/data_dir.cc (plus src/strings_win.cc
-// and shell32.lib ole32.lib on Windows), with backend-common/include and
+// framework: compile this file with src/data_dir.cc and src/launch_config.cc
+// (plus src/strings_win.cc and shell32.lib ole32.lib on Windows), with backend-common/include and
 // capi/include on the include path, and run it. CI does this in the `test`
 // job. Exits non-zero if any expectation fails.
 

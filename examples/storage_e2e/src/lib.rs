@@ -17,6 +17,14 @@
 //! `LAUFEY_E2E_STORAGE_HOLD_MS` keeps the launch alive that long before it
 //! quits (used to start a second instance against a running one).
 //!
+//! `LAUFEY_E2E_STORAGE_SCHEME=<name>` serves the page over that custom scheme
+//! (`<name>://app/`, registered with `register_scheme_handler`) instead of
+//! loopback HTTP, and also requires it to be a secure context. Used for CEF,
+//! which only makes a scheme a real origin when it was declared at startup
+//! (e.g. by the launch file). Cookies are not used in this mode: custom
+//! schemes are not cookie-enabled on every engine, and on CEF touching
+//! `document.cookie` there takes the renderer down.
+//!
 //! Emits `[e2e] PASS/FAIL <name>` lines and a final `[e2e] OVERALL PASS|FAIL`.
 //! The process exits through the backend's normal quit path (which owns the
 //! exit code), so the driver judges each step by the OVERALL line.
@@ -26,7 +34,7 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use laufey::{Value, Window};
+use laufey::{SchemeRequest, Value, Window};
 use tokio::sync::oneshot;
 
 static FAILED: AtomicBool = AtomicBool::new(false);
@@ -77,6 +85,21 @@ fn serve(port: u16) -> std::io::Result<()> {
   Ok(())
 }
 
+/// Serves the page for every request on the custom scheme.
+fn serve_scheme(req: SchemeRequest) {
+  let body = "<!doctype html><title>storage-e2e</title><p>storage-e2e</p>";
+  let headers = vec![
+    (
+      "content-type".to_string(),
+      "text/html; charset=utf-8".to_string(),
+    ),
+    ("cache-control".to_string(), "no-store".to_string()),
+  ];
+  req.exchange.begin(200, &headers);
+  req.exchange.write(body.as_bytes());
+  req.exchange.finish();
+}
+
 /// Runs `script` in the page and returns its string result, if any.
 async fn eval_string(win: &Window, script: &str) -> Option<String> {
   let (tx, rx) = oneshot::channel::<Result<Value, Value>>();
@@ -99,6 +122,10 @@ const READ_JS: &str = r#"(() => {
     (m ? decodeURIComponent(m[1]) : "");
 })()"#;
 
+/// `"<localStorage value>|"`: READ_JS without the cookie.
+const READ_LS_JS: &str =
+  r#"((localStorage.getItem("laufey-e2e-storage") || "") + "|")"#;
+
 fn split(pair: &str) -> (String, String) {
   let mut it = pair.splitn(2, '|');
   let ls = it.next().unwrap_or("").to_string();
@@ -115,14 +142,24 @@ fn e2e_main() {
     let port: u16 = env("LAUFEY_E2E_STORAGE_PORT")
       .and_then(|p| p.parse().ok())
       .unwrap_or(0);
+    let scheme = env("LAUFEY_E2E_STORAGE_SCHEME");
     eprintln!(
-      "[e2e] storage mode={mode} port={port} LAUFEY_APP_ID={:?} LAUFEY_DATA_DIR={:?}",
+      "[e2e] storage mode={mode} port={port} scheme={scheme:?} LAUFEY_APP_ID={:?} LAUFEY_DATA_DIR={:?}",
       env("LAUFEY_APP_ID"),
       env("LAUFEY_DATA_DIR")
     );
 
-    let origin = format!("http://127.0.0.1:{port}");
-    let served = port != 0 && serve(port).is_ok();
+    let (origin, served) = match &scheme {
+      Some(name) => {
+        // Registered before the first window, as the scheme contract requires.
+        laufey::register_scheme_handler(name, serve_scheme);
+        (format!("{name}://app"), true)
+      }
+      None => (
+        format!("http://127.0.0.1:{port}"),
+        port != 0 && serve(port).is_ok(),
+      ),
+    };
     check(&format!("serve {origin}"), served);
 
     let win = Window::new(480, 320)
@@ -144,39 +181,67 @@ fn e2e_main() {
       }
     }
     check(&format!("page loaded at {origin}"), ready);
+    if ready && scheme.is_some() {
+      check(
+        "custom-scheme page is a secure context",
+        eval_string(&win, "String(window.isSecureContext)")
+          .await
+          .as_deref()
+          == Some("true"),
+      );
+    }
+    // Cookies are only used over loopback HTTP (see the module docs).
+    let check_cookie = scheme.is_none();
+    let read_js = if check_cookie { READ_JS } else { READ_LS_JS };
 
     if ready {
       match mode.as_str() {
         "write" => {
           let value = env("LAUFEY_E2E_STORAGE_VALUE").unwrap_or_default();
+          let set_cookie = if check_cookie {
+            format!(
+              r#"document.cookie = "{COOKIE}=" + encodeURIComponent("{value}") +
+    "; max-age=86400; path=/; samesite=lax";"#
+            )
+          } else {
+            String::new()
+          };
           let script = format!(
             r#"(() => {{
   localStorage.setItem("{KEY}", "{value}");
-  document.cookie = "{COOKIE}=" + encodeURIComponent("{value}") +
-    "; max-age=86400; path=/; samesite=lax";
-  return {READ_JS};
+  {set_cookie}
+  return {read_js};
 }})()"#
           );
           let got = eval_string(&win, &script).await.unwrap_or_default();
           let (ls, cookie) = split(&got);
           eprintln!("[e2e] wrote localStorage={ls:?} cookie={cookie:?}");
           check("localStorage write reads back", !value.is_empty() && ls == value);
-          check("cookie write reads back", !value.is_empty() && cookie == value);
+          if check_cookie {
+            check(
+              "cookie write reads back",
+              !value.is_empty() && cookie == value,
+            );
+          }
           // Give the engine a moment to commit before the normal quit below.
           tokio::time::sleep(Duration::from_millis(1500)).await;
         }
         "read" => {
-          let got = eval_string(&win, READ_JS).await;
+          let got = eval_string(&win, read_js).await;
           check("read storage", got.is_some());
           let (ls, cookie) = split(&got.unwrap_or_default());
           eprintln!("[e2e] read localStorage={ls:?} cookie={cookie:?}");
           if let Some(want) = env("LAUFEY_E2E_STORAGE_EXPECT") {
             check(&format!("localStorage is {want:?}"), ls == want);
-            check(&format!("cookie is {want:?}"), cookie == want);
+            if check_cookie {
+              check(&format!("cookie is {want:?}"), cookie == want);
+            }
           }
           if let Some(not) = env("LAUFEY_E2E_STORAGE_EXPECT_NOT") {
             check(&format!("localStorage is not {not:?}"), ls != not);
-            check(&format!("cookie is not {not:?}"), cookie != not);
+            if check_cookie {
+              check(&format!("cookie is not {not:?}"), cookie != not);
+            }
           }
         }
         other => check(&format!("known mode (got {other:?})"), false),

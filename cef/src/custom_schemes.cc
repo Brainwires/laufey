@@ -2,9 +2,9 @@
 
 #include "custom_schemes.h"
 
-#include <cstdlib>
 #include <iostream>
 
+#include "laufey_launch_config.h"
 #include "laufey_scheme_registry.h"
 
 namespace laufey_schemes {
@@ -21,8 +21,13 @@ std::vector<std::string> ComputeDeclared() {
   if (command_line && command_line->HasSwitch(kSwitch)) {
     lists.push_back(command_line->GetSwitchValue(kSwitch).ToString());
   }
-  if (const char* env = std::getenv(kEnv)) {
-    lists.push_back(env);
+  // LAUFEY_CUSTOM_SCHEMES if set, else the launch file's "customSchemes"
+  // (laufey_launch_config.h). Every process reads it, CEF's helper apps on
+  // macOS included, so children get the list even when the switch isn't
+  // forwarded.
+  std::string env_or_file = laufey_common::LaunchCustomSchemes();
+  if (!env_or_file.empty()) {
+    lists.push_back(env_or_file);
   }
   std::vector<std::string> rejected;
   std::vector<std::string> declared =

@@ -30,6 +30,11 @@ as `LAUFEY_APP_ID` and `LAUFEY_APP_NAME`:
 3. Otherwise nothing is configured and every backend keeps the storage it had
    before this feature existed (see [below](#without-a-data-directory)).
 
+A packaged app that is started directly (Explorer, a Start menu shortcut, the
+Dock, `exec`), with nothing to set the environment, can ship both values in its
+[launch file](launch-config.md) as `"dataDir"` and `"appId"`. Each environment
+variable that is set wins over the file.
+
 Missing directories are created, owner-only (`0700`) on macOS and Linux; on
 Windows they inherit the ACL of `%LOCALAPPDATA%` (or of the parent of
 `LAUFEY_DATA_DIR`). If the directory can't be created, the backend warns and

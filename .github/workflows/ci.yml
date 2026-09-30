@@ -66,14 +66,17 @@ jobs:
           c++ -std=c++17 -Wall -Wextra -Werror \
             -Ibackend-common/include -Icapi/include \
             backend-common/tests/data_dir_test.cc backend-common/src/data_dir.cc \
+            backend-common/src/launch_config.cc \
             -o "$RUNNER_TEMP/data_dir_test"
           "$RUNNER_TEMP/data_dir_test"
-      # backend-common's launch file reader (plain C++, no deps).
+      # backend-common's launch file reader (plain C++, no deps; validates
+      # values with data_dir.cc's rules).
       - name: backend-common launch_config_test
         run: |
-          c++ -std=c++17 -Wall -Wextra -Werror -Ibackend-common/include \
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
             backend-common/tests/launch_config_test.cc \
-            backend-common/src/launch_config.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/launch_config_test"
           "$RUNNER_TEMP/launch_config_test"
 

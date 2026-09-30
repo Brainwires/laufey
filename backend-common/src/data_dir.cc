@@ -4,6 +4,7 @@
 // laufey_backend_common.h and docs/app-data.md.
 
 #include "laufey_backend_common.h"
+#include "laufey_launch_config.h"
 
 #include <iostream>
 
@@ -177,8 +178,9 @@ std::string ResolveAppDataDirFrom(const std::string& data_dir_env,
 
 const std::string& AppDataDir() {
   static const std::string dir = [] {
-    std::string data_dir = GetEnvUtf8("LAUFEY_DATA_DIR");
-    std::string app_id = GetEnvUtf8("LAUFEY_APP_ID");
+    // Environment variable if set, else the launch file (laufey-launch.json).
+    std::string data_dir = LaunchDataDir();
+    std::string app_id = LaunchAppId();
     std::string base;
     if (!app_id.empty())
       base = PlatformAppDataBase();

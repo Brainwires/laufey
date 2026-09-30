@@ -70,16 +70,18 @@ the backend logs a warning. Each backend installs the schemes in its own way:
   in every process during startup, before the runtime library is loaded. The
   embedder therefore also declares the schemes when it launches the host, with
   `--laufey-custom-schemes=myapp,other` or `LAUFEY_CUSTOM_SCHEMES=myapp,other`
-  (comma-separated; `app` is always declared). The browser process forwards the
-  list to its child processes. A declared scheme is served in every window from
-  the moment it is registered. A scheme that is registered but was not declared
-  is still served, but Chromium treats it as a non-standard scheme with an
-  opaque origin and no secure context, and the backend logs a warning. The CEF
-  host keeps its profile in a per-process temporary directory, so storage does
-  not outlive the process. Chromium's Local Network Access checks also treat a
-  custom-scheme page as a public origin: its requests to loopback or
-  private-network addresses wait for a permission prompt that the CEF host does
-  not show.
+  (comma-separated; `app` is always declared), or ships them as
+  `"customSchemes"` in the app's [launch file](launch-config.md), which also
+  works when nothing sets the environment (the app is started directly). The
+  browser process forwards the list to its child processes. A declared scheme is
+  served in every window from the moment it is registered. A scheme that is
+  registered but was not declared is still served, but Chromium treats it as a
+  non-standard scheme with an opaque origin and no secure context, and the
+  backend logs a warning. The CEF host keeps its profile in a per-process
+  temporary directory, so storage does not outlive the process. Chromium's Local
+  Network Access checks also treat a custom-scheme page as a public origin: its
+  requests to loopback or private-network addresses wait for a permission prompt
+  that the CEF host does not show.
 
 ```sh
 laufey --laufey-custom-schemes=myapp --runtime ./libmyapp.so

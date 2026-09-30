@@ -431,8 +431,10 @@ void SetTrayDoubleClickHandlerLinux(uint32_t tray_id,
 //
 // One directory per process holds the web engine's profile (localStorage,
 // IndexedDB, cookies, caches), so storage is per app and survives relaunches.
-// Resolved from the environment, like LAUFEY_APP_ID, because CEF and WebView2
-// need it before the runtime library is loaded:
+// Resolved at process start, because CEF and WebView2 need it before the
+// runtime library is loaded. Each of LAUFEY_DATA_DIR / LAUFEY_APP_ID below is
+// the environment variable if set, else the launch file's "dataDir" / "appId"
+// (laufey_launch_config.h):
 //
 //   1. LAUFEY_DATA_DIR, if set and absolute (a relative value is ignored with
 //      a warning);
