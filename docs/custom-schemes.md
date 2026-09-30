@@ -77,11 +77,15 @@ the backend logs a warning. Each backend installs the schemes in its own way:
   served in every window from the moment it is registered. A scheme that is
   registered but was not declared is still served, but Chromium treats it as a
   non-standard scheme with an opaque origin and no secure context, and the
-  backend logs a warning. The CEF host keeps its profile in a per-process
-  temporary directory, so storage does not outlive the process. Chromium's Local
-  Network Access checks also treat a custom-scheme page as a public origin: its
-  requests to loopback or private-network addresses wait for a permission prompt
-  that the CEF host does not show.
+  backend logs a warning. Storage on a custom-scheme origin lives in the CEF
+  profile: with an app data directory (`LAUFEY_APP_ID` / `LAUFEY_DATA_DIR`, or
+  `"appId"` / `"dataDir"` in the [launch file](launch-config.md)) that profile
+  is `<dir>/CEF` and persists across launches (see
+  [App data & web storage](app-data.md)); without one the host uses a fresh
+  temporary profile per process, so storage does not outlive it. Chromium's
+  Local Network Access checks also treat a custom-scheme page as a public
+  origin: its requests to loopback or private-network addresses wait for a
+  permission prompt that the CEF host does not show.
 
 ```sh
 laufey --laufey-custom-schemes=myapp --runtime ./libmyapp.so
