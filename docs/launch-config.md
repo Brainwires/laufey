@@ -27,17 +27,19 @@ The directory comes from the running executable's real path
 {
   "appId": "com.example.myapp",
   "customSchemes": ["myapp"],
-  "dataDir": "/absolute/path"
+  "dataDir": "/absolute/path",
+  "singleInstance": true
 }
 ```
 
 Every key is optional, and each key stands in for one environment variable:
 
-| Key             | Environment variable    | Value                                                             |
-| --------------- | ----------------------- | ----------------------------------------------------------------- |
-| `appId`         | `LAUFEY_APP_ID`         | `A-Z a-z 0-9 . _ -` only, not `.` or `..`                         |
-| `customSchemes` | `LAUFEY_CUSTOM_SCHEMES` | array of URL scheme names (a letter, then letters, digits, `+-.`) |
-| `dataDir`       | `LAUFEY_DATA_DIR`       | absolute path                                                     |
+| Key              | Environment variable     | Value                                                             |
+| ---------------- | ------------------------ | ----------------------------------------------------------------- |
+| `appId`          | `LAUFEY_APP_ID`          | `A-Z a-z 0-9 . _ -` only, not `.` or `..`                         |
+| `customSchemes`  | `LAUFEY_CUSTOM_SCHEMES`  | array of URL scheme names (a letter, then letters, digits, `+-.`) |
+| `dataDir`        | `LAUFEY_DATA_DIR`        | absolute path                                                     |
+| `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
@@ -51,6 +53,12 @@ what its variable does:
   same file, and the browser process also forwards the list to them. The WebView
   backends learn their schemes from `register_scheme_handler` and don't need
   this key.
+- `singleInstance` turns on the single-instance lock: a second launch of the app
+  forwards its arguments to the running one and exits
+  ([Deep links, opened files and single instance](deep-links.md#single-instance)).
+  It needs an app id (`appId` or `LAUFEY_APP_ID`); without one the backend warns
+  and runs unlocked. The WebView and CEF backends read it; the Winit backend
+  does not.
 
 ## Precedence
 
@@ -76,6 +84,8 @@ A problem with the file never stops the app. It is reported on stderr as
 - A file larger than 64 KiB is ignored.
 - An unknown key is reported and ignored, so newer files keep working with older
   hosts.
+- `LAUFEY_SINGLE_INSTANCE` set to anything but `1`, `0`, `true` or `false` is
+  reported and ignored, and the file's value applies.
 - A value of the wrong type, an empty string, a string containing NUL, or a
   value that breaks the rules above (an unsafe `appId`, a relative `dataDir`) is
   reported, and that key is ignored. It behaves as if it were absent.

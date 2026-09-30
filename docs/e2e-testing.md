@@ -602,3 +602,34 @@ profile. The driver asserts:
 The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, and on
 the webview/Linux leg, where the Layer-0 battery is excluded (see the status
 note above) and only the request-body round trip runs before it.
+
+---
+
+## 15. Single instance and opened files (`single_instance_e2e`)
+
+The [single-instance lock](deep-links.md#single-instance) and the arguments a
+runtime sees need real processes, so they have their own runtime,
+`examples/single_instance_e2e`, and driver,
+`scripts/single-instance-e2e-run.sh <webview|cef>`. The driver asserts:
+
+- cold start: the runtime reads the backend's command-line arguments (a URL
+  among them) with `std::env::args()`;
+- with `"singleInstance": true` in the launch file, a second launch from another
+  working directory (with arguments containing spaces, a URL and non-ASCII text)
+  exits 0 within seconds without loading the runtime (on Linux it runs with no
+  display at all), and the first instance receives `second_instance` with
+  exactly those arguments and that directory;
+- `LAUFEY_SINGLE_INSTANCE=0` overrides the file, and single-instance mode
+  without an app id warns and runs unlocked;
+- without single-instance mode two instances run side by side (on CEF with
+  different data directories; one CEF profile admits one process, which
+  `storage-e2e-run.sh` covers);
+- macOS: files opened with the bundle through LaunchServices (`open -a`) reach
+  `on_open_url` as `file://` URLs, both when they start the app and while it
+  runs, and a file on the command line of a directly exec'd binary reaches
+  `argv` only.
+
+The buffered `open_url` round trip (`test_trigger_open_url`) stays in Layer 0
+(`native-e2e-run.sh`). The lock's framing, limits and naming are unit-tested in
+`backend-common/tests/single_instance_test.cc` (ctest). The Winit backend has no
+single-instance lock, so the driver doesn't run there.
