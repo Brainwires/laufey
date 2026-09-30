@@ -1654,6 +1654,14 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
         soup_message_headers_new(SOUP_MESSAGE_HEADERS_RESPONSE);
     for (const auto& [k, v] : d->headers) {
       soup_message_headers_append(hdrs, k.c_str(), v.c_str());
+      // WebKit takes the response's MIME type from the content type set on
+      // the WebKitURISchemeResponse, not from the HTTP header list. Without
+      // it the type is empty, the default response policy treats the
+      // navigation as a download, and the load fails with "Frame load
+      // interrupted" — so mirror the Content-Type header into it.
+      if (g_ascii_strcasecmp(k.c_str(), "content-type") == 0) {
+        webkit_uri_scheme_response_set_content_type(resp, v.c_str());
+      }
     }
     // set_http_headers takes ownership of `hdrs`.
     webkit_uri_scheme_response_set_http_headers(resp, hdrs);
