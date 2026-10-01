@@ -541,6 +541,14 @@ Because the runtime is written once and the observers are backend-agnostic, the
 _incremental_ cost of "all backends" is mostly build time and matrix legs, not
 new test code.
 
+When a run goes wrong in CI it leaves evidence: `native-e2e-run.sh` streams the
+backend's output (so a hang shows how far the battery got) and prints its exit
+status, and a watchdog (`LAUFEY_E2E_WATCHDOG_SECS`, default 300) prints every
+thread's stack (macOS `sample`, Linux `gdb` when installed) of a run that hasn't
+exited and kills it. Every e2e step has its own `timeout-minutes` besides. On
+macOS the `Crash reports` step waits for ReportCrash and prints the exception
+and the crashed thread of each report (`scripts/print-crash-report.py`).
+
 ---
 
 ## 11. Rollout
@@ -634,7 +642,8 @@ runtime sees need real processes, so they have their own runtime,
   without an app id warns and runs unlocked;
 - without single-instance mode two instances run side by side (on CEF with
   different data directories; one CEF profile admits one process, which
-  `storage-e2e-run.sh` covers);
+  `storage-e2e-run.sh` covers); the first one stays up until the driver releases
+  it through `LAUFEY_E2E_SI_HOLD_FILE`, however long the second takes to start;
 - macOS: files opened with the bundle through LaunchServices (`open -a`) reach
   `on_open_url` as `file://` URLs, both when they start the app and while it
   runs, and a file on the command line of a directly exec'd binary reaches
@@ -670,8 +679,8 @@ one that doesn't must refuse (setters return `false`).
 
 `--lifetime` (its own run, since it ends the process): with keep-alive on, the
 last window closes and the loop survives (no runtime shutdown), a new window
-opens, then `quit()` must end the loop, observed as the backend calling the
-runtime's shutdown.
+opens, then `quit()` with a window open must end the loop, observed as the
+backend calling the runtime's shutdown.
 
 On Linux the CI legs run without a window manager; biscuits runs `--window-api`
 under xfwm4 for the state checks.
