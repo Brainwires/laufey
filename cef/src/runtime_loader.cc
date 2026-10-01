@@ -143,6 +143,13 @@ void ConfigureWin32WindowAsPanel(void* hwnd_ptr) {
 
 // Helper to run a callback synchronously on the CEF UI thread.
 // If already on the UI thread, runs immediately.
+//
+// The UI thread notifies while still holding the mutex: the waiter can return
+// (destroying mtx / cv, which live in its frame) as soon as it sees `done`,
+// so a notify after the unlock could reach a condition variable that is
+// already gone, or a new one at the same stack address in the next call. On
+// macOS that corrupted the next wait, which then never woke (the e2e hung in
+// screens()) or crashed.
 template <typename F>
 static void cef_invoke_sync(F&& fn) {
   if (CefCurrentlyOn(TID_UI)) {
@@ -156,10 +163,8 @@ static void cef_invoke_sync(F&& fn) {
                           [](F* fn, std::mutex* mtx,
                              std::condition_variable* cv, bool* done) {
                             (*fn)();
-                            {
-                              std::lock_guard<std::mutex> lock(*mtx);
-                              *done = true;
-                            }
+                            std::lock_guard<std::mutex> lock(*mtx);
+                            *done = true;
                             cv->notify_one();
                           },
                           &fn, &mtx, &cv, &done));
@@ -1820,8 +1825,8 @@ static uint32_t Backend_CreateWindowImpl(void* data, uint32_t flags) {
   auto* loader = RuntimeLoader::GetInstance();
   uint32_t window_id = loader->AllocateWindowId();
 
-  CefPostTask(TID_UI,
-              base::BindOnce(
+  bool posted = CefPostTask(
+      TID_UI, base::BindOnce(
                   [](uint32_t wid, uint32_t window_flags) {
                     auto* handler = LaufeyHandler::GetInstance();
                     if (!handler)
@@ -1848,8 +1853,18 @@ static uint32_t Backend_CreateWindowImpl(void* data, uint32_t flags) {
                   window_id, flags));
 
   // Block until the browser is registered by OnAfterCreated, so that
-  // subsequent calls (navigate, set_title, etc.) can find it.
-  loader->WaitForBrowser(window_id);
+  // subsequent calls (navigate, set_title, etc.) can find it: until then they
+  // are dropped. The wait returns as soon as the browser exists; its bound
+  // only guards against a creation that never completes. A cold start on a
+  // slow machine takes several seconds per browser (over 5 s, the old bound,
+  // on a Windows CI runner, which dropped the window's first navigation).
+  // (Nothing to wait for when CEF is no longer taking UI tasks.)
+  constexpr int kBrowserCreateTimeoutMs = 30000;
+  if (posted && !loader->WaitForBrowser(window_id, kBrowserCreateTimeoutMs)) {
+    std::cerr << "laufey: the browser for window " << window_id
+              << " was not created within " << kBrowserCreateTimeoutMs / 1000
+              << " s; calls on the window are ignored until it is" << std::endl;
+  }
 
   return window_id;
 }

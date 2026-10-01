@@ -741,8 +741,20 @@ fn e2e_main() {
       );
     }
 
-    // Give the backend a moment to realize the window on screen.
+    // Give the backend a moment to realize the windows on screen, then wait
+    // until the last one created has a size. Backends that create windows on
+    // their UI thread do it in order, and WebView2 blocks that thread while
+    // it creates its first environment: from under a second to over four on
+    // a cold CI runner (CreateCoreWebView2EnvironmentWithOptions completing
+    // inside the call). Every setter below queues behind that, so a round
+    // trip timed from here would measure the engine's start-up instead.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let realize_start = std::time::Instant::now();
+    let realized = wait_for(|| frameless.get_size() != (0, 0), 600, 50).await;
+    eprintln!(
+      "[e2e] INFO windows realized: {realized} ({} ms after the first 300 ms)",
+      realize_start.elapsed().as_millis()
+    );
 
     let settled_scale = win.get_scale_factor();
     check("scale factor is still positive after realize", settled_scale > 0.0);
@@ -993,6 +1005,29 @@ fn e2e_main() {
       40,
     )
     .await;
+    if !sized {
+      // Say what was read and whether the size only arrived late, so a
+      // failure tells "slow" apart from "wrong".
+      let t0 = std::time::Instant::now();
+      let late = wait_for(
+        || {
+          let (w, h) = win.get_size();
+          (w - 640).abs() <= 2 && (h - 480).abs() <= 2
+        },
+        200,
+        50,
+      )
+      .await;
+      eprintln!(
+        "[e2e] INFO set_size(640, 480): get_size {:?}; {}",
+        win.get_size(),
+        if late {
+          format!("converged {} ms after the 2 s wait", t0.elapsed().as_millis())
+        } else {
+          "never converged within 10 s more".to_string()
+        }
+      );
+    }
     check("set_size -> get_size round-trips", sized);
 
     // Position is advisory: window managers may constrain it. Assert loosely.
@@ -2109,6 +2144,12 @@ async fn lifetime_checks() -> ! {
   } else {
     na("keep-alive (not supported by this backend)");
   }
+  // Quit with a window open, the usual case. The runtime must still be told
+  // before the process ends: macOS WKWebView used to return from main under
+  // it, unless AppKit's terminate-after-last-window check happened to run
+  // first (which a closed last window above can schedule).
+  let open_at_quit = Window::new(300, 200).title("native-e2e-lifetime-3");
+  let _ = wait_for(|| open_at_quit.get_size().0 != 0, 100, 50).await;
   laufey::quit();
   let ended = wait_for(laufey::should_shutdown, 300, 50).await;
   check(

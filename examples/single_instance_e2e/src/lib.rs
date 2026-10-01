@@ -17,7 +17,11 @@
 //!   LAUFEY_E2E_SI_NO_OPEN_URL=1
 //!       no `open_url` callback at all during the wait.
 //!   LAUFEY_E2E_SI_HOLD_MS
-//!       stay up at least this long (so another instance can run alongside).
+//!       stay up at least this long.
+//!   LAUFEY_E2E_SI_HOLD_FILE
+//!       stay up until this file exists (at most 120 s), so the driver can
+//!       run another instance alongside however long that one takes to
+//!       start, then release this one.
 //!
 //! Emits `[e2e] PASS/FAIL <name>` lines and a final `[e2e] OVERALL
 //! PASS|FAIL`, then quits through the backend's normal path.
@@ -112,6 +116,9 @@ fn e2e_main() {
       Duration::from_millis(env_num("LAUFEY_E2E_SI_HOLD_MS").unwrap_or(0));
     let wait =
       Duration::from_millis(env_num("LAUFEY_E2E_SI_WAIT_MS").unwrap_or(30000));
+    let hold_file =
+      env("LAUFEY_E2E_SI_HOLD_FILE").map(std::path::PathBuf::from);
+    let hold_file_limit = Duration::from_secs(120);
 
     let start = Instant::now();
     loop {
@@ -121,7 +128,13 @@ fn e2e_main() {
           && s.urls.len() >= url_count
       };
       let elapsed = start.elapsed();
-      if (done && elapsed >= hold) || elapsed >= wait.max(hold) {
+      let released = hold_file.as_ref().is_none_or(|f| f.exists());
+      if !released {
+        if elapsed >= hold_file_limit {
+          check("released through LAUFEY_E2E_SI_HOLD_FILE", false);
+          break;
+        }
+      } else if (done && elapsed >= hold) || elapsed >= wait.max(hold) {
         break;
       }
       tokio::time::sleep(Duration::from_millis(100)).await;

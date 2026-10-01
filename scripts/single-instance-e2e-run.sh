@@ -232,9 +232,12 @@ fi
 finish primary "$primary_pid" 60
 
 # LAUFEY_SINGLE_INSTANCE=0 wins over the file: two instances (CEF: separate
-# profiles).
+# profiles). The first stays up until released through its hold file, not for
+# a fixed time: a second instance on a fresh profile can take several seconds
+# to start on a slow runner, and a timed hold then ran out before it finished.
 start env-off-a LAUFEY_SINGLE_INSTANCE=0 \
-  LAUFEY_DATA_DIR="$(native "$scratch/data-off-a")" LAUFEY_E2E_SI_HOLD_MS=6000 --
+  LAUFEY_DATA_DIR="$(native "$scratch/data-off-a")" \
+  LAUFEY_E2E_SI_HOLD_FILE="$(native "$scratch/release-env-off-a")" --
 a_pid=$started_pid
 if wait_for env-off-a '^\[e2e\] ready' 90; then
   start env-off-b LAUFEY_SINGLE_INSTANCE=0 \
@@ -248,6 +251,7 @@ if wait_for env-off-a '^\[e2e\] ready' 90; then
 else
   fail "env-off-a never became ready"
 fi
+touch "$scratch/release-env-off-a"
 finish env-off-a "$a_pid" 60
 rm -f "$launch_file"
 
@@ -267,7 +271,8 @@ if [ "$backend" = webview ]; then
   # Same app and data dir: nothing stops a second WebView instance.
   side_b_dir=("${side_a_dir[@]}")
 fi
-start side-a LAUFEY_APP_ID="$app_id" "${side_a_dir[@]}" LAUFEY_E2E_SI_HOLD_MS=6000 --
+start side-a LAUFEY_APP_ID="$app_id" "${side_a_dir[@]}" \
+  LAUFEY_E2E_SI_HOLD_FILE="$(native "$scratch/release-side-a")" --
 a_pid=$started_pid
 if wait_for side-a '^\[e2e\] ready' 90; then
   start side-b LAUFEY_APP_ID="$app_id" "${side_b_dir[@]}" LAUFEY_E2E_SI_HOLD_MS=500 --
@@ -280,6 +285,7 @@ if wait_for side-a '^\[e2e\] ready' 90; then
 else
   fail "side-a never became ready"
 fi
+touch "$scratch/release-side-a"
 finish side-a "$a_pid" 60
 
 # --- (e): macOS LaunchServices ------------------------------------------------

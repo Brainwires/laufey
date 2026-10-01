@@ -96,12 +96,14 @@ void WinIoInit() {
       HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
                                   HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
       {
+        // Notify under the lock: once `ready` is seen WinIoInit returns and
+        // m / cv (its stack frame) are gone.
         std::lock_guard<std::mutex> lock(m);
         g_io_thread = GetCurrentThreadId();
         g_io_hwnd = hwnd;
         ready = true;
+        cv.notify_one();
       }
-      cv.notify_one();
       if (!hwnd)
         return;
       MSG msg;

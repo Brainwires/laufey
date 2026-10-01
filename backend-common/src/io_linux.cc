@@ -73,10 +73,10 @@ void GtkRunSync(const std::function<void()>& fn) {
   bool done = false;
   GtkRunAsync([&] {
     fn();
-    {
-      std::lock_guard<std::mutex> lock(mtx);
-      done = true;
-    }
+    // Notify under the lock: once `done` is seen the waiter returns and
+    // mtx / cv (its stack frame) are gone.
+    std::lock_guard<std::mutex> lock(mtx);
+    done = true;
     cv.notify_one();
   });
   std::unique_lock<std::mutex> lock(mtx);

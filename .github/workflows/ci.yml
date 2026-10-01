@@ -172,6 +172,8 @@ jobs:
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Backstop; each e2e step below has its own, much shorter, timeout.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -282,8 +284,12 @@ jobs:
         if: runner.os == 'Windows' && matrix.backend == 'cef'
         run: make cef
 
+      # Every e2e step has a timeout: a backend that hangs would otherwise
+      # hold the runner for the 6-hour job limit. native-e2e-run.sh's own
+      # watchdog (5 min) fires first and prints the hung process's stacks.
       - name: Layer 0 — readback / events / clipboard / menu+tray clicks
         if: ${{ !matrix.layer0_excluded }}
+        timeout-minutes: 10
         shell: bash
         env:
           # On the cef/linux leg the Ayatana runtime lib is installed above, so
@@ -296,23 +302,15 @@ jobs:
       # the app:// scheme handler intact. Part of Layer 0 on the other legs.
       - name: Custom-scheme request bodies
         if: ${{ matrix.layer0_excluded }}
+        timeout-minutes: 10
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --scheme-body
-
-      # A backend that crashed mid-battery leaves only "exited before
-      # reporting an overall result"; print the crash report it left.
-      - name: Crash reports (macOS)
-        if: failure() && runner.os == 'macOS'
-        shell: bash
-        run: |
-          for f in $(ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -3); do
-            echo "== $f"; head -c 60000 "$f"; echo
-          done
 
       # App lifetime (API 38): keep-alive with no window, then quit() ending
       # the event loop. Ends the process, so it runs on its own. Every leg,
       # webview/linux included (no clipboard involved).
       - name: App lifetime — keep-alive and quit
+        timeout-minutes: 10
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --lifetime
 
@@ -331,6 +329,7 @@ jobs:
       # docs/app-data.md.
       - name: Storage — per-app persistence / isolation
         if: matrix.backend != 'winit'
+        timeout-minutes: 15
         shell: bash
         run: scripts/storage-e2e-run.sh ${{ matrix.backend }}
 
@@ -340,8 +339,27 @@ jobs:
       # no single-instance lock.
       - name: Single instance / opened files
         if: matrix.backend != 'winit'
+        timeout-minutes: 15
         shell: bash
         run: scripts/single-instance-e2e-run.sh ${{ matrix.backend }}
+
+      # A backend that crashed mid-run leaves only "exited before reporting
+      # an overall result"; print the crash report it left (any e2e step).
+      - name: Crash reports (macOS)
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          # ReportCrash writes the report a few seconds after the process
+          # dies; give it time before concluding there is none.
+          for _ in $(seq 1 30); do
+            ls ~/Library/Logs/DiagnosticReports/*.ips >/dev/null 2>&1 && break
+            sleep 2
+          done
+          # The exception and the crashed + main threads' backtraces; a
+          # whole report is too long for the log.
+          ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -3 |
+            while read -r f; do python3 scripts/print-crash-report.py "$f"; done
 
       # Layer 1 (Linux D-Bus StatusNotifier/dbusmenu observer) is built above
       # (compile-checked on real Linux) but not run here yet: the cef leg now
