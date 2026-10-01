@@ -50,10 +50,10 @@ static void gtk_invoke_sync(F&& fn) {
       [](gpointer data) -> gboolean {
         auto* c = static_cast<Ctx*>(data);
         (*c->fn)();
-        {
-          std::lock_guard<std::mutex> lock(*c->mtx);
-          *c->done = true;
-        }
+        // Notify under the lock: once `done` is seen the waiter returns and
+        // ctx / mtx / cv (its stack frame) are gone.
+        std::lock_guard<std::mutex> lock(*c->mtx);
+        *c->done = true;
         c->cv->notify_one();
         return G_SOURCE_REMOVE;
       },

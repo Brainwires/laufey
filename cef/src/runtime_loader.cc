@@ -143,6 +143,13 @@ void ConfigureWin32WindowAsPanel(void* hwnd_ptr) {
 
 // Helper to run a callback synchronously on the CEF UI thread.
 // If already on the UI thread, runs immediately.
+//
+// The UI thread notifies while still holding the mutex: the waiter can return
+// (destroying mtx / cv, which live in its frame) as soon as it sees `done`,
+// so a notify after the unlock could reach a condition variable that is
+// already gone, or a new one at the same stack address in the next call. On
+// macOS that corrupted the next wait, which then never woke (the e2e hung in
+// screens()) or crashed.
 template <typename F>
 static void cef_invoke_sync(F&& fn) {
   if (CefCurrentlyOn(TID_UI)) {
@@ -156,10 +163,8 @@ static void cef_invoke_sync(F&& fn) {
                           [](F* fn, std::mutex* mtx,
                              std::condition_variable* cv, bool* done) {
                             (*fn)();
-                            {
-                              std::lock_guard<std::mutex> lock(*mtx);
-                              *done = true;
-                            }
+                            std::lock_guard<std::mutex> lock(*mtx);
+                            *done = true;
                             cv->notify_one();
                           },
                           &fn, &mtx, &cv, &done));
