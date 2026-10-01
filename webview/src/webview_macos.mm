@@ -12,6 +12,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_window.h"
 #include "init_script.h"
 
 #include <atomic>
@@ -179,6 +180,30 @@ class WKWebViewBackend : public LaufeyBackend {
                        void* user_data) override;
   void RequestPermission(int kind, laufey_permission_callback_fn cb,
                          void* user_data) override;
+
+  // Window state, constraints, screens and chrome (API >= 38).
+  uint32_t WindowCapabilities() override;
+  void SetWindowState(uint32_t window_id, int action) override;
+  uint32_t GetWindowState(uint32_t window_id) override;
+  void SetWindowStateHandler(laufey_window_state_fn handler,
+                             void* user_data) override;
+  void SetWindowSizeConstraints(uint32_t window_id, int min_width,
+                                int min_height, int max_width,
+                                int max_height) override;
+  void GetWindowSizeConstraints(uint32_t window_id, int* min_width,
+                                int* min_height, int* max_width,
+                                int* max_height) override;
+  size_t GetScreens(laufey_screen_t* out, size_t capacity) override;
+  int64_t GetWindowScreen(uint32_t window_id) override;
+  void SetDisplayChangedHandler(laufey_display_changed_fn handler,
+                                void* user_data) override;
+  bool SetWindowTitlebarStyle(uint32_t window_id, int style) override;
+  bool SetWindowTrafficLightPosition(uint32_t window_id, int x, int y) override;
+  bool SetWindowBackdrop(uint32_t window_id, int backdrop,
+                         int material) override;
+  bool GetWindowNormalBounds(uint32_t window_id, int* x, int* y, int* width,
+                             int* height) override;
+  void SetQuitOnLastWindowClosed(bool quit) override;
 
   void HandleJsMessage(uint32_t window_id, uint64_t call_id,
                        const std::string& method, laufey::ValuePtr args);
@@ -836,10 +861,13 @@ void WKWebViewBackend::RemoveWindowState(uint32_t window_id) {
     if (state.webview)
       [state.webview.configuration.userContentController
           removeScriptMessageHandlerForName:@"laufey"];
-    if (state.window)
+    if (state.window) {
       [state.window setDelegate:nil];
+      laufey_common::MacUnwatchWindowState((__bridge void*)state.window);
+    }
     UnregisterNSWindow(state.window);
   }
+  laufey_common::ForgetWindow(window_id);
   windows_.erase(it);
 }
 
@@ -1242,6 +1270,8 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       [window makeFirstResponder:webview];
 
       RegisterNSWindow(window, window_id);
+      // Window-state events and the normal-bounds tracker (API 38).
+      laufey_common::MacWatchWindowState((__bridge void*)window, window_id);
 
       // Per-window notification observers
       id focus_obs = [[NSNotificationCenter defaultCenter]
@@ -1615,6 +1645,7 @@ void WKWebViewBackend::PasskeyRequest(uint32_t window_id, uint32_t kind,
 }
 
 void WKWebViewBackend::Quit() {
+  laufey_common::MarkQuitting();
   dispatch_async(dispatch_get_main_queue(), ^{
     [NSApp stop:nil];
     NSEvent* event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
@@ -1652,7 +1683,10 @@ void WKWebViewBackend::SetWindowSize(uint32_t window_id, int width,
         // setting the *frame* size here made setSize(w, h) produce a window
         // whose page area was smaller than an identically-sized CreateWindow
         // by the title-bar height (denoland/deno#36119).
-        [state->window setContentSize:NSMakeSize(width, height)];
+        int w = width, h = height;
+        // -setContentSize: ignores contentMinSize / contentMaxSize.
+        laufey_common::ClampSizeForWindow(window_id, &w, &h);
+        [state->window setContentSize:NSMakeSize(w, h)];
       }
     }
   });
@@ -2394,6 +2428,220 @@ bool WKWebViewBackend::TestTriggerOpenUrl(const char* url) {
 // --- Tray / status-bar icon (macOS) ---
 //
 // Thin trampolines over backend-common/src/tray_mac.mm.
+
+// --- Window state, constraints, screens and chrome (API >= 38) ---
+//
+// The NSWindow work is laufey_common's (window_mac.mm, shared with CEF);
+// these resolve the window on the main thread and hand it over.
+
+namespace {
+void RunOnMainSync(dispatch_block_t block) {
+  if ([NSThread isMainThread]) {
+    block();
+  } else {
+    dispatch_sync(dispatch_get_main_queue(), block);
+  }
+}
+}  // namespace
+
+uint32_t WKWebViewBackend::WindowCapabilities() {
+  return LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
+         LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS | LAUFEY_WINDOW_CAP_SCREENS |
+         LAUFEY_WINDOW_CAP_DISPLAY_EVENTS | LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN |
+         LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN_INSET |
+         LAUFEY_WINDOW_CAP_TRAFFIC_LIGHT_POSITION | LAUFEY_WINDOW_CAP_VIBRANCY |
+         LAUFEY_WINDOW_CAP_NORMAL_BOUNDS | LAUFEY_WINDOW_CAP_KEEP_ALIVE |
+         LAUFEY_WINDOW_CAP_SET_POSITION;
+}
+
+void WKWebViewBackend::SetWindowState(uint32_t window_id, int action) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* window = nil;
+      {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id))
+          window = state->window;
+      }
+      // Outside the lock: zoom / miniaturize post notifications whose
+      // observers take it.
+      if (window)
+        laufey_common::MacSetWindowState((__bridge void*)window, action);
+    }
+  });
+}
+
+uint32_t WKWebViewBackend::GetWindowState(uint32_t window_id) {
+  __block uint32_t result = 0;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (window)
+      result = laufey_common::MacGetWindowState((__bridge void*)window);
+  });
+  return result;
+}
+
+void WKWebViewBackend::SetWindowStateHandler(laufey_window_state_fn handler,
+                                             void* user_data) {
+  laufey_common::SetWindowStateHandler(handler, user_data);
+}
+
+void WKWebViewBackend::SetWindowSizeConstraints(uint32_t window_id,
+                                                int min_width, int min_height,
+                                                int max_width, int max_height) {
+  laufey_common::SizeConstraints c = laufey_common::SetSizeConstraints(
+      window_id, min_width, min_height, max_width, max_height);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* window = nil;
+      {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id))
+          window = state->window;
+      }
+      if (window)
+        laufey_common::MacApplySizeConstraints((__bridge void*)window, c);
+    }
+  });
+}
+
+void WKWebViewBackend::GetWindowSizeConstraints(uint32_t window_id,
+                                                int* min_width, int* min_height,
+                                                int* max_width,
+                                                int* max_height) {
+  laufey_common::SizeConstraints c =
+      laufey_common::GetSizeConstraints(window_id);
+  if (min_width)
+    *min_width = c.min_width;
+  if (min_height)
+    *min_height = c.min_height;
+  if (max_width)
+    *max_width = c.max_width;
+  if (max_height)
+    *max_height = c.max_height;
+}
+
+size_t WKWebViewBackend::GetScreens(laufey_screen_t* out, size_t capacity) {
+  return laufey_common::CopyScreens(laufey_common::MacGetScreens(), out,
+                                    capacity);
+}
+
+int64_t WKWebViewBackend::GetWindowScreen(uint32_t window_id) {
+  __block int64_t result = 0;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (window)
+      result = laufey_common::MacScreenForWindow((__bridge void*)window);
+  });
+  return result;
+}
+
+void WKWebViewBackend::SetDisplayChangedHandler(
+    laufey_display_changed_fn handler, void* user_data) {
+  laufey_common::SetDisplayChangedHandler(handler, user_data);
+  if (handler)
+    laufey_common::MacInstallDisplayWatcher();
+}
+
+bool WKWebViewBackend::SetWindowTitlebarStyle(uint32_t window_id, int style) {
+  __block bool result = false;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (window)
+      result =
+          laufey_common::MacSetTitlebarStyle((__bridge void*)window, style);
+  });
+  return result;
+}
+
+bool WKWebViewBackend::SetWindowTrafficLightPosition(uint32_t window_id, int x,
+                                                     int y) {
+  __block bool result = false;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (window)
+      result = laufey_common::MacSetTrafficLightPosition((__bridge void*)window,
+                                                         x, y);
+  });
+  return result;
+}
+
+bool WKWebViewBackend::SetWindowBackdrop(uint32_t window_id, int backdrop,
+                                         int material) {
+  __block bool result = false;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    WKWebView* webview = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id)) {
+        window = state->window;
+        webview = state->webview;
+      }
+    }
+    if (window && webview)
+      result = laufey_common::MacSetVibrancy(
+          (__bridge void*)window, (__bridge void*)webview, backdrop, material);
+  });
+  return result;
+}
+
+bool WKWebViewBackend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
+                                             int* width, int* height) {
+  __block bool found = false;
+  __block laufey_common::Bounds bounds;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (!window)
+      return;
+    found = true;
+    if (laufey_common::MacGetWindowState((__bridge void*)window) == 0) {
+      bounds = laufey_common::MacWindowBounds((__bridge void*)window);
+    } else if (!laufey_common::GetCommittedNormalBounds(window_id, &bounds)) {
+      bounds = laufey_common::MacWindowBounds((__bridge void*)window);
+    }
+  });
+  if (!found)
+    return false;
+  if (x)
+    *x = bounds.x;
+  if (y)
+    *y = bounds.y;
+  if (width)
+    *width = bounds.width;
+  if (height)
+    *height = bounds.height;
+  return true;
+}
+
+void WKWebViewBackend::SetQuitOnLastWindowClosed(bool quit) {
+  laufey_common::SetQuitOnLastWindowClosed(quit);
+}
 
 uint32_t WKWebViewBackend::CreateTrayIcon() {
   return laufey_common::CreateTrayIconMac();

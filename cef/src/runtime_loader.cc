@@ -7,6 +7,7 @@
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_single_instance.h"
+#include "laufey_window.h"
 #include "scheme_handler.h"
 
 #ifndef _WIN32
@@ -20,6 +21,7 @@
 #include <mach-o/dyld.h>
 #endif
 
+#include <algorithm>
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -237,12 +239,35 @@ static void Backend_ExecuteJs(void* data, uint32_t window_id,
                   browser, eval_id, script_str));
 }
 
+// Ends the loop the way closing the last window does: every browser is
+// closed (marked close-allowed, so no close-requested negotiation) and
+// LaufeyHandler::OnBeforeClose ends the loop when the last one is gone. With
+// no window open the loop ends right away. Quitting the loop directly with
+// live browsers would leave CEF to shut down under them; and on macOS the
+// loop is [NSApp run], which CefQuitMessageLoop does not stop.
 static void Backend_Quit(void* data) {
-  CefPostTask(TID_UI, base::BindOnce([]() { CefQuitMessageLoop(); }));
+  laufey_common::MarkQuitting();
+  CefPostTask(TID_UI, base::BindOnce([]() {
+                auto* loader = RuntimeLoader::GetInstance();
+                std::vector<CefRefPtr<CefBrowser>> browsers =
+                    loader->GetAllBrowsers();
+                if (browsers.empty()) {
+                  LaufeyQuitMainLoop();
+                  return;
+                }
+                for (const auto& browser : browsers) {
+                  uint32_t wid = loader->GetLaufeyIdForBrowser(browser);
+                  if (wid > 0)
+                    loader->MarkCloseAllowed(wid);
+                  browser->GetHost()->CloseBrowser(true);
+                }
+              }));
 }
 
 static void Backend_SetWindowSize(void* data, uint32_t window_id, int width,
                                   int height) {
+  // Programmatic resizes are clamped to the size constraints (API 38).
+  laufey_common::ClampSizeForWindow(window_id, &width, &height);
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
@@ -1965,6 +1990,375 @@ static bool Backend_TestInjectInput(void* data, uint32_t window_id,
   return laufey_common::TestInjectInput(window_id, event, sink);
 }
 
+// --- Window state, constraints, screens and chrome (API >= 38) ---
+//
+// Cross-platform through the CEF Views API (CefWindow / CefDisplay), in its
+// units: DIP, CefWindow::GetPosition / GetSize. The OS notices state changes
+// first; each platform hook (NSWindow notifications on macOS, a WM_SIZE
+// subclass on Windows, the window delegate's bounds / activation /
+// fullscreen callbacks everywhere) schedules CefRecheckWindowState, which
+// reads the state back from CefWindow and reports it; duplicates are dropped
+// in laufey_common::ReportWindowState.
+
+// windowsx.h defines IsMaximized / IsMinimized as function-like macros
+// (IsZoomed / IsIconic); `(window->IsMaximized)()` keeps them from expanding.
+static CefRefPtr<CefWindow> CefWindowForId(uint32_t window_id) {
+  CefRefPtr<CefBrowser> browser =
+      RuntimeLoader::GetInstance()->GetBrowserForWindow(window_id);
+  if (!browser)
+    return nullptr;
+  auto browser_view = CefBrowserView::GetForBrowser(browser);
+  return browser_view ? browser_view->GetWindow() : nullptr;
+}
+
+static uint32_t CefStateOf(CefRefPtr<CefWindow> window) {
+  uint32_t state = 0;
+  if (window->IsFullscreen())
+    state |= LAUFEY_WINDOW_STATE_FULLSCREEN;
+  else if ((window->IsMaximized)())
+    state |= LAUFEY_WINDOW_STATE_MAXIMIZED;
+  if ((window->IsMinimized)())
+    state |= LAUFEY_WINDOW_STATE_MINIMIZED;
+  return state;
+}
+
+static laufey_common::Bounds CefBoundsOf(CefRefPtr<CefWindow> window) {
+  laufey_common::Bounds b;
+  CefPoint pos = window->GetPosition();
+  CefSize size = window->GetSize();
+  b.x = pos.x;
+  b.y = pos.y;
+  b.width = size.width;
+  b.height = size.height;
+  return b;
+}
+
+// UI thread.
+void CefRecheckWindowState(uint32_t window_id) {
+  CefRefPtr<CefWindow> window = CefWindowForId(window_id);
+  if (!window || window->IsClosed())
+    return;
+  uint32_t state = CefStateOf(window);
+  int64_t now = laufey_common::MonotonicMs();
+  if (state != 0 && laufey_common::LastReportedWindowState(window_id) == 0)
+    laufey_common::NoteWindowLeftNormal(window_id, now);
+  laufey_common::NoteWindowGeometry(window_id, CefBoundsOf(window), state == 0,
+                                    now);
+  laufey_common::ReportWindowState(window_id, state);
+}
+
+// Any thread: a recheck now and a few more while the OS animates the change
+// (Linux window managers apply state asynchronously; macOS animates
+// zoom / fullscreen).
+void CefScheduleWindowStateRecheck(uint32_t window_id) {
+  auto task = [](uint32_t wid) { CefRecheckWindowState(wid); };
+  CefPostTask(TID_UI, base::BindOnce(task, window_id));
+  for (int64_t delay : {150, 600, 1500}) {
+    CefPostDelayedTask(TID_UI, base::BindOnce(task, window_id), delay);
+  }
+}
+
+static uint32_t Backend_WindowCapabilities(void* /*data*/) {
+  uint32_t caps = LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
+                  LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS |
+                  LAUFEY_WINDOW_CAP_SCREENS | LAUFEY_WINDOW_CAP_DISPLAY_EVENTS |
+                  LAUFEY_WINDOW_CAP_NORMAL_BOUNDS |
+                  LAUFEY_WINDOW_CAP_KEEP_ALIVE;
+#if defined(__APPLE__)
+  // Titled NSWindow chrome is AppKit's; vibrancy is not available: the CEF
+  // browser view paints an opaque background in windowed mode.
+  caps |= LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN |
+          LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN_INSET |
+          LAUFEY_WINDOW_CAP_TRAFFIC_LIGHT_POSITION |
+          LAUFEY_WINDOW_CAP_SET_POSITION;
+#elif defined(_WIN32)
+  // No Mica / Acrylic: the CEF browser view paints an opaque background in
+  // windowed mode, so a DWM backdrop could never show through the page.
+  caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
+#else
+  // Ozone/Wayland (chosen when WAYLAND_DISPLAY is set, see main_linux.cc)
+  // can't place windows.
+  const char* wayland = getenv("WAYLAND_DISPLAY");
+  if (!(wayland && *wayland))
+    caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
+#endif
+  return caps;
+}
+
+static void Backend_SetWindowState(void* /*data*/, uint32_t window_id,
+                                   int action) {
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](uint32_t wid, int act) {
+                            CefRefPtr<CefWindow> window = CefWindowForId(wid);
+                            if (!window)
+                              return;
+                            switch (act) {
+                              case LAUFEY_WINDOW_ACTION_MAXIMIZE:
+                                if (!window->IsFullscreen())
+                                  window->Maximize();
+                                break;
+                              case LAUFEY_WINDOW_ACTION_UNMAXIMIZE:
+                                if ((window->IsMaximized)())
+                                  window->Restore();
+                                break;
+                              case LAUFEY_WINDOW_ACTION_MINIMIZE:
+                                window->Minimize();
+                                break;
+                              case LAUFEY_WINDOW_ACTION_RESTORE:
+                                if ((window->IsMinimized)())
+                                  window->Restore();
+                                break;
+                              case LAUFEY_WINDOW_ACTION_ENTER_FULLSCREEN:
+                                window->SetFullscreen(true);
+                                break;
+                              case LAUFEY_WINDOW_ACTION_LEAVE_FULLSCREEN:
+                                window->SetFullscreen(false);
+                                break;
+                              default:
+                                return;
+                            }
+                            CefScheduleWindowStateRecheck(wid);
+                          },
+                          window_id, action));
+}
+
+static uint32_t Backend_GetWindowState(void* /*data*/, uint32_t window_id) {
+  uint32_t state = 0;
+  cef_invoke_sync([&] {
+    if (CefRefPtr<CefWindow> window = CefWindowForId(window_id))
+      state = CefStateOf(window);
+  });
+  return state;
+}
+
+static void Backend_SetWindowStateHandler(void* /*data*/,
+                                          laufey_window_state_fn handler,
+                                          void* user_data) {
+  laufey_common::SetWindowStateHandler(handler, user_data);
+}
+
+static void Backend_SetWindowSizeConstraints(void* /*data*/, uint32_t window_id,
+                                             int min_width, int min_height,
+                                             int max_width, int max_height) {
+  laufey_common::SizeConstraints c = laufey_common::SetSizeConstraints(
+      window_id, min_width, min_height, max_width, max_height);
+  CefPostTask(TID_UI,
+              base::BindOnce(
+                  [](uint32_t wid, laufey_common::SizeConstraints c) {
+                    CefRefPtr<CefWindow> window = CefWindowForId(wid);
+                    if (!window)
+                      return;
+#if defined(__APPLE__)
+                    // LaufeyWindowDelegate::GetMinimumSize / GetMaximumSize
+                    // answer Chromium when it asks; AppKit enforces the frame
+                    // limits during a live resize.
+                    laufey_common::MacApplyFrameSizeConstraints(
+                        NSWindowForCefHandle(window->GetWindowHandle()), c);
+#endif
+                    // Have Chromium ask the delegate again.
+                    window->InvalidateLayout();
+                    if ((window->IsMaximized)() || (window->IsMinimized)() ||
+                        window->IsFullscreen())
+                      return;
+                    CefSize size = window->GetSize();
+                    int w = size.width, h = size.height;
+                    if (laufey_common::ClampSize(c, &w, &h))
+                      window->SetSize(CefSize(w, h));
+                  },
+                  window_id, c));
+}
+
+static void Backend_GetWindowSizeConstraints(void* /*data*/, uint32_t window_id,
+                                             int* min_width, int* min_height,
+                                             int* max_width, int* max_height) {
+  laufey_common::SizeConstraints c =
+      laufey_common::GetSizeConstraints(window_id);
+  if (min_width)
+    *min_width = c.min_width;
+  if (min_height)
+    *min_height = c.min_height;
+  if (max_width)
+    *max_width = c.max_width;
+  if (max_height)
+    *max_height = c.max_height;
+}
+
+// CEF display ids are int64; keep them in the JS-safe range the ABI promises.
+static int64_t CefSafeDisplayId(int64_t id) {
+  if (id > 0 && id < (int64_t{1} << 53))
+    return id;
+  std::string s = std::to_string(id);
+  return laufey_common::HashDisplayName(s.data(), s.size());
+}
+
+// UI thread.
+static std::vector<laufey_screen_t> CefCollectScreens() {
+  std::vector<laufey_screen_t> screens;
+  std::vector<CefRefPtr<CefDisplay>> displays;
+  CefDisplay::GetAllDisplays(displays);
+  CefRefPtr<CefDisplay> primary = CefDisplay::GetPrimaryDisplay();
+  int64_t primary_id = primary ? primary->GetID() : 0;
+  for (const auto& d : displays) {
+    laufey_screen_t s = {};
+    s.id = CefSafeDisplayId(d->GetID());
+    CefRect b = d->GetBounds();
+    CefRect w = d->GetWorkArea();
+    s.x = b.x;
+    s.y = b.y;
+    s.width = b.width;
+    s.height = b.height;
+    s.work_x = w.x;
+    s.work_y = w.y;
+    s.work_width = w.width;
+    s.work_height = w.height;
+    s.scale_factor = d->GetDeviceScaleFactor();
+    s.is_primary = d->GetID() == primary_id;
+    screens.push_back(s);
+  }
+  std::stable_partition(screens.begin(), screens.end(),
+                        [](const laufey_screen_t& s) { return s.is_primary; });
+  return screens;
+}
+
+static size_t Backend_GetScreens(void* /*data*/, laufey_screen_t* out,
+                                 size_t capacity) {
+  std::vector<laufey_screen_t> screens;
+  cef_invoke_sync([&] { screens = CefCollectScreens(); });
+  return laufey_common::CopyScreens(screens, out, capacity);
+}
+
+static int64_t Backend_GetWindowScreen(void* /*data*/, uint32_t window_id) {
+  int64_t id = 0;
+  cef_invoke_sync([&] {
+    CefRefPtr<CefWindow> window = CefWindowForId(window_id);
+    if (!window)
+      return;
+    if (CefRefPtr<CefDisplay> display = window->GetDisplay())
+      id = CefSafeDisplayId(display->GetID());
+  });
+  return id;
+}
+
+#if !defined(__APPLE__) && !defined(_WIN32)
+// Linux: CEF reports no display changes, so compare the layout every 2 s
+// while a handler is registered.
+static std::string CefScreensSignature() {
+  std::string sig;
+  for (const auto& s : CefCollectScreens()) {
+    sig += std::to_string(s.id) + ":" + std::to_string(s.x) + "," +
+           std::to_string(s.y) + "," + std::to_string(s.width) + "x" +
+           std::to_string(s.height) + "/" + std::to_string(s.work_x) + "," +
+           std::to_string(s.work_y) + "," + std::to_string(s.work_width) + "x" +
+           std::to_string(s.work_height) + "@" +
+           std::to_string(s.scale_factor) + (s.is_primary ? "p" : "") + ";";
+  }
+  return sig;
+}
+
+static void CefPollDisplays(std::string last) {
+  std::string now = CefScreensSignature();
+  if (now != last)
+    laufey_common::NotifyDisplayChanged();
+  CefPostDelayedTask(TID_UI, base::BindOnce(&CefPollDisplays, now), 2000);
+}
+#endif
+
+static void Backend_SetDisplayChangedHandler(void* /*data*/,
+                                             laufey_display_changed_fn handler,
+                                             void* user_data) {
+  laufey_common::SetDisplayChangedHandler(handler, user_data);
+  if (!handler)
+    return;
+  static std::atomic<bool> installed{false};
+  if (installed.exchange(true))
+    return;
+#if defined(__APPLE__)
+  laufey_common::MacInstallDisplayWatcher();
+#elif defined(_WIN32)
+  CefPostTask(TID_UI, base::BindOnce(
+                          [] { laufey_common::WinInstallDisplayWatcher(); }));
+#else
+  CefPostTask(TID_UI,
+              base::BindOnce([] { CefPollDisplays(CefScreensSignature()); }));
+#endif
+}
+
+static bool Backend_SetWindowTitlebarStyle(void* /*data*/, uint32_t window_id,
+                                           int style) {
+#if defined(__APPLE__)
+  bool ok = false;
+  cef_invoke_sync([&] {
+    if (CefRefPtr<CefWindow> window = CefWindowForId(window_id)) {
+      ok = laufey_common::MacSetTitlebarStyle(
+          NSWindowForCefHandle(window->GetWindowHandle()), style);
+    }
+  });
+  return ok;
+#else
+  (void)window_id;
+  (void)style;
+  return false;
+#endif
+}
+
+static bool Backend_SetWindowTrafficLightPosition(void* /*data*/,
+                                                  uint32_t window_id, int x,
+                                                  int y) {
+#if defined(__APPLE__)
+  bool ok = false;
+  cef_invoke_sync([&] {
+    if (CefRefPtr<CefWindow> window = CefWindowForId(window_id)) {
+      ok = laufey_common::MacSetTrafficLightPosition(
+          NSWindowForCefHandle(window->GetWindowHandle()), x, y);
+    }
+  });
+  return ok;
+#else
+  (void)window_id;
+  (void)x;
+  (void)y;
+  return false;
+#endif
+}
+
+static bool Backend_SetWindowBackdrop(void* /*data*/, uint32_t /*window_id*/,
+                                      int backdrop, int /*material*/) {
+  // See Backend_WindowCapabilities: nothing can show through the CEF view.
+  return backdrop == LAUFEY_BACKDROP_NONE;
+}
+
+static bool Backend_GetWindowNormalBounds(void* /*data*/, uint32_t window_id,
+                                          int* x, int* y, int* width,
+                                          int* height) {
+  bool found = false;
+  laufey_common::Bounds b;
+  cef_invoke_sync([&] {
+    CefRefPtr<CefWindow> window = CefWindowForId(window_id);
+    if (!window)
+      return;
+    found = true;
+    if (CefStateOf(window) != 0 &&
+        laufey_common::GetCommittedNormalBounds(window_id, &b))
+      return;
+    b = CefBoundsOf(window);
+  });
+  if (!found)
+    return false;
+  if (x)
+    *x = b.x;
+  if (y)
+    *y = b.y;
+  if (width)
+    *width = b.width;
+  if (height)
+    *height = b.height;
+  return true;
+}
+
+static void Backend_SetQuitOnLastWindowClosed(void* /*data*/, bool quit) {
+  laufey_common::SetQuitOnLastWindowClosed(quit);
+}
+
 void RuntimeLoader::InitializeBackendApi() {
   memset(&backend_api_, 0, sizeof(backend_api_));
   backend_api_.version = LAUFEY_API_VERSION;
@@ -2043,6 +2437,24 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_close_requested_handler = Backend_SetCloseRequestedHandler;
   backend_api_.test_trigger_close_requested = Backend_TestTriggerCloseRequested;
   backend_api_.test_inject_input = Backend_TestInjectInput;
+
+  // Window state, constraints, screens and chrome (API >= 38).
+  backend_api_.set_window_state = Backend_SetWindowState;
+  backend_api_.get_window_state = Backend_GetWindowState;
+  backend_api_.set_window_state_handler = Backend_SetWindowStateHandler;
+  backend_api_.set_window_size_constraints = Backend_SetWindowSizeConstraints;
+  backend_api_.get_window_size_constraints = Backend_GetWindowSizeConstraints;
+  backend_api_.get_screens = Backend_GetScreens;
+  backend_api_.get_window_screen = Backend_GetWindowScreen;
+  backend_api_.set_display_changed_handler = Backend_SetDisplayChangedHandler;
+  backend_api_.window_capabilities = Backend_WindowCapabilities;
+  backend_api_.set_window_titlebar_style = Backend_SetWindowTitlebarStyle;
+  backend_api_.set_window_traffic_light_position =
+      Backend_SetWindowTrafficLightPosition;
+  backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;
+  backend_api_.get_window_normal_bounds = Backend_GetWindowNormalBounds;
+  backend_api_.set_quit_on_last_window_closed =
+      Backend_SetQuitOnLastWindowClosed;
 
   backend_api_.poll_js_calls = [](void* data) {
     RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);

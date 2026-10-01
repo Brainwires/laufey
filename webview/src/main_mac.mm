@@ -5,6 +5,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_single_instance.h"
+#include "laufey_window.h"
 
 #include <iostream>
 #include <string>
@@ -138,7 +139,9 @@ void EnsureEditMenu(NSMenu* menubar) {
   // A menu-bar-only app uses the Accessory activation policy. Its windows can
   // be transient (for example, a tray popover), so closing the last one must
   // not terminate the process and remove its status item.
-  return [sender activationPolicy] != NSApplicationActivationPolicyAccessory;
+  // A tray / menu-bar app can also ask to keep running with no window
+  // (set_quit_on_last_window_closed(false)); quit() ends it either way.
+  return laufey_common::ShouldQuitAfterLastWindowMac() ? YES : NO;
 }
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)sender

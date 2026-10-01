@@ -6,6 +6,7 @@
 #include "laufey_json.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_window.h"
 #include "init_script.h"
 #include <win32_menu.h>
 
@@ -95,6 +96,9 @@ struct WinWindowState {
   bool webview_ready = false;
   std::wstring pending_url;
   std::wstring pending_title;
+  // LAUFEY_BACKDROP_* behind the page (API 38); not NONE means the client
+  // area is left unpainted and the web view background is transparent.
+  int backdrop = LAUFEY_BACKDROP_NONE;
 };
 
 // Custom window message for UI tasks
@@ -339,6 +343,35 @@ class WebView2Backend : public LaufeyBackend {
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
   void Focus(uint32_t window_id) override;
+
+  // Window state, constraints, screens and backdrop (API >= 38).
+  uint32_t WindowCapabilities() override;
+  void SetWindowState(uint32_t window_id, int action) override;
+  uint32_t GetWindowState(uint32_t window_id) override;
+  void SetWindowStateHandler(laufey_window_state_fn handler,
+                             void* user_data) override {
+    laufey_common::SetWindowStateHandler(handler, user_data);
+  }
+  void SetWindowSizeConstraints(uint32_t window_id, int min_width,
+                                int min_height, int max_width,
+                                int max_height) override;
+  void GetWindowSizeConstraints(uint32_t window_id, int* min_width,
+                                int* min_height, int* max_width,
+                                int* max_height) override;
+  size_t GetScreens(laufey_screen_t* out, size_t capacity) override {
+    return laufey_common::CopyScreens(laufey_common::WinGetScreens(), out,
+                                      capacity);
+  }
+  int64_t GetWindowScreen(uint32_t window_id) override;
+  void SetDisplayChangedHandler(laufey_display_changed_fn handler,
+                                void* user_data) override;
+  bool SetWindowBackdrop(uint32_t window_id, int backdrop,
+                         int material) override;
+  bool GetWindowNormalBounds(uint32_t window_id, int* x, int* y, int* width,
+                             int* height) override;
+  void SetQuitOnLastWindowClosed(bool quit) override {
+    laufey_common::SetQuitOnLastWindowClosed(quit);
+  }
   void PostUiTask(void (*task)(void*), void* data) override;
   void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                                 void* user_data) override {
@@ -505,9 +538,38 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         GetClientRect(hwnd, &rect);
         RuntimeLoader::GetInstance()->DispatchResizeEvent(
             wid, rect.right - rect.left, rect.bottom - rect.top);
+        // SIZE_MAXIMIZED / SIZE_MINIMIZED / SIZE_RESTORED: one source of the
+        // window-state events (API 38); duplicates are dropped there.
+        laufey_common::ReportWindowState(
+            wid, laufey_common::WinGetWindowState(hwnd, wid));
       }
       return 0;
     }
+    case WM_GETMINMAXINFO:
+      // Size constraints (API 38) are in this backend's set_window_size
+      // units: outer window pixels.
+      if (wid > 0 && laufey_common::WinApplyMinMaxInfo(
+                         reinterpret_cast<void*>(lParam),
+                         laufey_common::GetSizeConstraints(wid), 1.0, 0, 0)) {
+        return 0;
+      }
+      break;
+    case WM_ERASEBKGND:
+      // With a backdrop the client area must stay unpainted (black is
+      // transparent over an extended DWM frame) for it to show through.
+      if (g_win_backend && wid > 0) {
+        std::lock_guard<std::recursive_mutex> lock(
+            g_win_backend->windows_mutex_);
+        auto* state = g_win_backend->GetWindow(wid);
+        if (state && state->backdrop != LAUFEY_BACKDROP_NONE) {
+          RECT rect;
+          GetClientRect(hwnd, &rect);
+          FillRect(reinterpret_cast<HDC>(wParam), &rect,
+                   static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+          return 1;
+        }
+      }
+      break;
     case WM_MOVE:
       if (wid > 0) {
         RuntimeLoader::GetInstance()->DispatchMoveEvent(
@@ -617,8 +679,13 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       // closes and for CloseWindow()'s direct DestroyWindow alike, so a
       // deferred close resolved via close_window still quits the message
       // loop when the last window goes away.
+      if (wid > 0)
+        laufey_common::ForgetWindow(wid);
       std::lock_guard<std::recursive_mutex> lock(g_hwnd_mutex);
-      if (g_hwnd_to_laufey_id.erase(hwnd) > 0 && g_hwnd_to_laufey_id.empty()) {
+      // A tray app can keep running with no window
+      // (set_quit_on_last_window_closed(false)); quit() ends it anyway.
+      if (g_hwnd_to_laufey_id.erase(hwnd) > 0 && g_hwnd_to_laufey_id.empty() &&
+          laufey_common::ShouldEndLoopAfterLastWindow()) {
         PostQuitMessage(0);
       }
       return 0;
@@ -1219,6 +1286,13 @@ void WebView2Backend::ExecuteJs(uint32_t window_id, const std::string& script,
 }
 
 void WebView2Backend::Quit() {
+  laufey_common::MarkQuitting();
+  // PostQuitMessage posts to the CALLING thread's queue; the loop to end is
+  // the UI thread's.
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    PostThreadMessageW(ui_thread_id_, WM_QUIT, 0, 0);
+    return;
+  }
   PostQuitMessage(0);
 }
 
@@ -1239,6 +1313,8 @@ void WebView2Backend::SetWindowSize(uint32_t window_id, int width, int height) {
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (state) {
+    // SetWindowPos ignores WM_GETMINMAXINFO; clamp to the constraints here.
+    laufey_common::ClampSizeForWindow(window_id, &width, &height);
     SetWindowPos(state->hwnd, nullptr, 0, 0, width, height,
                  SWP_NOMOVE | SWP_NOZORDER);
   }
@@ -1513,6 +1589,122 @@ void WebView2Backend::Focus(uint32_t window_id) {
     SetForegroundWindow(state->hwnd);
     SetFocus(state->hwnd);
   }
+}
+
+// --- Window state, constraints, screens and backdrop (API >= 38) ---
+//
+// The HWND work is laufey_common's (window_win.cc, shared with CEF). Sizes
+// and positions here are this backend's: outer window pixels.
+
+uint32_t WebView2Backend::WindowCapabilities() {
+  return LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
+         LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS | LAUFEY_WINDOW_CAP_SCREENS |
+         LAUFEY_WINDOW_CAP_DISPLAY_EVENTS | LAUFEY_WINDOW_CAP_NORMAL_BOUNDS |
+         LAUFEY_WINDOW_CAP_KEEP_ALIVE | LAUFEY_WINDOW_CAP_SET_POSITION |
+         laufey_common::WinBackdropCapabilities();
+}
+
+void WebView2Backend::SetWindowState(uint32_t window_id, int action) {
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    RunOnUiThread(
+        [this, window_id, action] { SetWindowState(window_id, action); });
+    return;
+  }
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  if (state)
+    laufey_common::WinSetWindowState(state->hwnd, window_id, action);
+}
+
+uint32_t WebView2Backend::GetWindowState(uint32_t window_id) {
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  return state ? laufey_common::WinGetWindowState(state->hwnd, window_id) : 0;
+}
+
+void WebView2Backend::SetWindowSizeConstraints(uint32_t window_id,
+                                               int min_width, int min_height,
+                                               int max_width, int max_height) {
+  laufey_common::SetSizeConstraints(window_id, min_width, min_height, max_width,
+                                    max_height);
+  RunOnUiThread([this, window_id] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || IsZoomed(state->hwnd) || IsIconic(state->hwnd) ||
+        laufey_common::WinIsFullscreen(window_id))
+      return;
+    RECT rect;
+    if (!GetWindowRect(state->hwnd, &rect))
+      return;
+    int w = rect.right - rect.left;
+    int h = rect.bottom - rect.top;
+    // A window outside its new range is brought into it.
+    if (laufey_common::ClampSizeForWindow(window_id, &w, &h)) {
+      SetWindowPos(state->hwnd, nullptr, 0, 0, w, h,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+  });
+}
+
+void WebView2Backend::GetWindowSizeConstraints(uint32_t window_id,
+                                               int* min_width, int* min_height,
+                                               int* max_width,
+                                               int* max_height) {
+  laufey_common::SizeConstraints c =
+      laufey_common::GetSizeConstraints(window_id);
+  if (min_width)
+    *min_width = c.min_width;
+  if (min_height)
+    *min_height = c.min_height;
+  if (max_width)
+    *max_width = c.max_width;
+  if (max_height)
+    *max_height = c.max_height;
+}
+
+int64_t WebView2Backend::GetWindowScreen(uint32_t window_id) {
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  return state ? laufey_common::WinScreenForWindow(state->hwnd) : 0;
+}
+
+void WebView2Backend::SetDisplayChangedHandler(
+    laufey_display_changed_fn handler, void* user_data) {
+  laufey_common::SetDisplayChangedHandler(handler, user_data);
+  if (handler)
+    RunOnUiThread([] { laufey_common::WinInstallDisplayWatcher(); });
+}
+
+bool WebView2Backend::SetWindowBackdrop(uint32_t window_id, int backdrop,
+                                        int /*material*/) {
+  bool ok = false;
+  RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || !laufey_common::WinSetBackdrop(state->hwnd, backdrop))
+      return;
+    state->backdrop = backdrop;
+    // The web view paints white by default; a transparent default lets a
+    // page with a transparent background show the backdrop.
+    ComPtr<ICoreWebView2Controller2> controller2;
+    if (state->controller && SUCCEEDED(state->controller.As(&controller2)) &&
+        controller2) {
+      COREWEBVIEW2_COLOR color = {255, 255, 255, 255};
+      if (backdrop != LAUFEY_BACKDROP_NONE)
+        color = {0, 0, 0, 0};
+      controller2->put_DefaultBackgroundColor(color);
+    }
+    ok = true;
+  });
+  return ok;
+}
+
+bool WebView2Backend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
+                                            int* width, int* height) {
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  return state && laufey_common::WinGetNormalRect(state->hwnd, window_id, x, y,
+                                                  width, height);
 }
 
 void WebView2Backend::PasskeyRequest(uint32_t window_id, uint32_t kind,

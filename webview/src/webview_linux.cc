@@ -4,6 +4,7 @@
 #include <gdk/gdkkeysyms.h>
 
 #include "runtime_loader.h"
+#include "laufey_window.h"
 #include "laufey_backend_common.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
@@ -283,7 +284,88 @@ static gboolean on_configure_event(GtkWidget* widget, GdkEventConfigure* event,
   RuntimeLoader::GetInstance()->DispatchResizeEvent(wid, event->width,
                                                     event->height);
   RuntimeLoader::GetInstance()->DispatchMoveEvent(wid, event->x, event->y);
+  // Normal-bounds tracker (API 38), in the get_window_position /
+  // get_window_size convention.
+  laufey_common::Bounds b;
+  gtk_window_get_position(GTK_WINDOW(widget), &b.x, &b.y);
+  gtk_window_get_size(GTK_WINDOW(widget), &b.width, &b.height);
+  laufey_common::NoteWindowGeometry(
+      wid, b, laufey_common::LastReportedWindowState(wid) == 0,
+      laufey_common::MonotonicMs());
   return FALSE;
+}
+
+// GDK window state bits to LAUFEY_WINDOW_STATE_*.
+static uint32_t LaufeyStateFromGdk(GdkWindowState s) {
+  uint32_t state = 0;
+  if (s & GDK_WINDOW_STATE_FULLSCREEN)
+    state |= LAUFEY_WINDOW_STATE_FULLSCREEN;
+  else if (s & GDK_WINDOW_STATE_MAXIMIZED)
+    state |= LAUFEY_WINDOW_STATE_MAXIMIZED;
+  if (s & GDK_WINDOW_STATE_ICONIFIED)
+    state |= LAUFEY_WINDOW_STATE_MINIMIZED;
+  return state;
+}
+
+static gboolean on_window_state_event(GtkWidget* widget,
+                                      GdkEventWindowState* event,
+                                      gpointer /*user_data*/) {
+  uint32_t wid = LaufeyIdForWidget(widget);
+  if (wid == 0)
+    return FALSE;
+  uint32_t state = LaufeyStateFromGdk(event->new_window_state);
+  if (state != 0 && laufey_common::LastReportedWindowState(wid) == 0)
+    laufey_common::NoteWindowLeftNormal(wid, laufey_common::MonotonicMs());
+  laufey_common::ReportWindowState(wid, state);
+  return FALSE;
+}
+
+// Display ids: GDK has no stable monitor id, so hash what identifies the
+// panel (manufacturer, model) plus its index among identical ones.
+static int64_t LaufeyMonitorId(GdkDisplay* display, GdkMonitor* monitor) {
+  const char* make = gdk_monitor_get_manufacturer(monitor);
+  const char* model = gdk_monitor_get_model(monitor);
+  std::string key = std::string(make ? make : "") + "/" + (model ? model : "");
+  int same = 0;
+  int n = gdk_display_get_n_monitors(display);
+  for (int i = 0; i < n; ++i) {
+    GdkMonitor* other = gdk_display_get_monitor(display, i);
+    if (other == monitor)
+      break;
+    const char* omake = gdk_monitor_get_manufacturer(other);
+    const char* omodel = gdk_monitor_get_model(other);
+    if (std::string(omake ? omake : "") + "/" + (omodel ? omodel : "") == key)
+      ++same;
+  }
+  key += "#" + std::to_string(same);
+  return laufey_common::HashDisplayName(key.data(), key.size());
+}
+
+static bool LaufeyIsWaylandDisplay(GdkDisplay* display) {
+  return display &&
+         g_strcmp0(G_OBJECT_TYPE_NAME(display), "GdkWaylandDisplay") == 0;
+}
+
+static void on_display_monitors_changed() {
+  laufey_common::NotifyDisplayChanged();
+}
+
+static void LaufeyWatchMonitor(GdkMonitor* monitor) {
+  g_signal_connect(monitor, "notify::workarea",
+                   G_CALLBACK(+[](GObject*, GParamSpec*, gpointer) {
+                     on_display_monitors_changed();
+                   }),
+                   nullptr);
+  g_signal_connect(monitor, "notify::scale-factor",
+                   G_CALLBACK(+[](GObject*, GParamSpec*, gpointer) {
+                     on_display_monitors_changed();
+                   }),
+                   nullptr);
+  g_signal_connect(monitor, "notify::geometry",
+                   G_CALLBACK(+[](GObject*, GParamSpec*, gpointer) {
+                     on_display_monitors_changed();
+                   }),
+                   nullptr);
 }
 
 // The web context every webview (and every URI scheme registration) uses.
@@ -398,6 +480,31 @@ class WebKitGTKBackend : public LaufeyBackend {
   void GetWindowOuterSize(uint32_t window_id, int* width, int* height) override;
   double GetWindowScaleFactor(uint32_t window_id) override;
   void SetWindowPosition(uint32_t window_id, int x, int y) override;
+  // Window state, constraints and screens (API >= 38). No title bar styles
+  // or backdrops: GTK has no API for either (see
+  // docs/window-management.md), so those keep the base class's "false".
+  uint32_t WindowCapabilities() override;
+  void SetWindowState(uint32_t window_id, int action) override;
+  uint32_t GetWindowState(uint32_t window_id) override;
+  void SetWindowStateHandler(laufey_window_state_fn handler,
+                             void* user_data) override {
+    laufey_common::SetWindowStateHandler(handler, user_data);
+  }
+  void SetWindowSizeConstraints(uint32_t window_id, int min_width,
+                                int min_height, int max_width,
+                                int max_height) override;
+  void GetWindowSizeConstraints(uint32_t window_id, int* min_width,
+                                int* min_height, int* max_width,
+                                int* max_height) override;
+  size_t GetScreens(laufey_screen_t* out, size_t capacity) override;
+  int64_t GetWindowScreen(uint32_t window_id) override;
+  void SetDisplayChangedHandler(laufey_display_changed_fn handler,
+                                void* user_data) override;
+  bool GetWindowNormalBounds(uint32_t window_id, int* x, int* y, int* width,
+                             int* height) override;
+  void SetQuitOnLastWindowClosed(bool quit) override {
+    laufey_common::SetQuitOnLastWindowClosed(quit);
+  }
   void GetWindowPosition(uint32_t window_id, int* x, int* y) override;
   void GetWindowInnerPosition(uint32_t window_id, int* x, int* y) override;
   void SetResizable(uint32_t window_id, bool resizable) override;
@@ -529,11 +636,14 @@ static void on_window_destroy(GtkWidget* widget, gpointer user_data) {
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid > 0) {
     UnregisterWidget(widget);
+    laufey_common::ForgetWindow(wid);
   }
-  // If no more windows, quit
+  // If no more windows, quit -- unless the app keeps running without one
+  // (set_quit_on_last_window_closed(false)); quit() ends it anyway.
   {
     std::lock_guard<std::mutex> lock(g_widget_mutex);
-    if (g_widget_to_laufey_id.empty()) {
+    if (g_widget_to_laufey_id.empty() &&
+        laufey_common::ShouldEndLoopAfterLastWindow()) {
       gtk_main_quit();
     }
   }
@@ -775,6 +885,8 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                      nullptr);
     g_signal_connect(window, "focus-out-event", G_CALLBACK(on_focus_out_event),
                      nullptr);
+    g_signal_connect(window, "window-state-event",
+                     G_CALLBACK(on_window_state_event), nullptr);
     g_signal_connect(window, "configure-event", G_CALLBACK(on_configure_event),
                      nullptr);
 
@@ -862,6 +974,7 @@ void WebKitGTKBackend::CloseWindow(uint32_t window_id) {
           state->content_manager, "laufey");
       g_content_manager_to_laufey_id.erase(state->content_manager);
       UnregisterWidget(state->window);
+      laufey_common::ForgetWindow(window_id);
       gtk_widget_destroy(state->window);
       windows_.erase(window_id);
     }
@@ -980,6 +1093,7 @@ void WebKitGTKBackend::ExecuteJs(uint32_t window_id, const std::string& script,
 }
 
 void WebKitGTKBackend::Quit() {
+  laufey_common::MarkQuitting();
   g_idle_add(
       [](gpointer) -> gboolean {
         gtk_main_quit();
@@ -994,7 +1108,9 @@ void WebKitGTKBackend::SetWindowSize(uint32_t window_id, int width,
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
-      gtk_window_resize(GTK_WINDOW(state->window), width, height);
+      int w = width, h = height;
+      laufey_common::ClampSizeForWindow(window_id, &w, &h);
+      gtk_window_resize(GTK_WINDOW(state->window), w, h);
     }
   });
 }
@@ -1092,6 +1208,239 @@ void WebKitGTKBackend::GetWindowPosition(uint32_t window_id, int* x, int* y) {
     *x = wx;
   if (y)
     *y = wy;
+}
+
+// --- Window state, constraints and screens (API >= 38) ---
+
+uint32_t WebKitGTKBackend::WindowCapabilities() {
+  uint32_t caps = LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
+                  LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS |
+                  LAUFEY_WINDOW_CAP_SCREENS | LAUFEY_WINDOW_CAP_DISPLAY_EVENTS |
+                  LAUFEY_WINDOW_CAP_NORMAL_BOUNDS |
+                  LAUFEY_WINDOW_CAP_KEEP_ALIVE;
+  bool wayland = false;
+  gtk_invoke_sync(
+      [&] { wayland = LaufeyIsWaylandDisplay(gdk_display_get_default()); });
+  // Wayland clients can't place their windows.
+  if (!wayland)
+    caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
+  return caps;
+}
+
+void WebKitGTKBackend::SetWindowState(uint32_t window_id, int action) {
+  gtk_invoke_sync([&] {
+    GtkWindow* window = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = GTK_WINDOW(state->window);
+    }
+    if (!window)
+      return;
+    switch (action) {
+      case LAUFEY_WINDOW_ACTION_MAXIMIZE:
+        gtk_window_maximize(window);
+        break;
+      case LAUFEY_WINDOW_ACTION_UNMAXIMIZE:
+        gtk_window_unmaximize(window);
+        break;
+      case LAUFEY_WINDOW_ACTION_MINIMIZE:
+        gtk_window_iconify(window);
+        break;
+      case LAUFEY_WINDOW_ACTION_RESTORE:
+        gtk_window_deiconify(window);
+        break;
+      case LAUFEY_WINDOW_ACTION_ENTER_FULLSCREEN:
+        gtk_window_fullscreen(window);
+        break;
+      case LAUFEY_WINDOW_ACTION_LEAVE_FULLSCREEN:
+        gtk_window_unfullscreen(window);
+        break;
+      default:
+        break;
+    }
+  });
+}
+
+uint32_t WebKitGTKBackend::GetWindowState(uint32_t window_id) {
+  uint32_t result = 0;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state)
+      return;
+    GdkWindow* gw = gtk_widget_get_window(state->window);
+    if (gw)
+      result = LaufeyStateFromGdk(gdk_window_get_state(gw));
+  });
+  return result;
+}
+
+void WebKitGTKBackend::SetWindowSizeConstraints(uint32_t window_id,
+                                                int min_width, int min_height,
+                                                int max_width, int max_height) {
+  laufey_common::SizeConstraints c = laufey_common::SetSizeConstraints(
+      window_id, min_width, min_height, max_width, max_height);
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state)
+      return;
+    GdkGeometry geometry = {};
+    int mask = 0;
+    if (c.min_width > 0 || c.min_height > 0) {
+      geometry.min_width = c.min_width;
+      geometry.min_height = c.min_height;
+      mask |= GDK_HINT_MIN_SIZE;
+    }
+    if (c.max_width > 0 || c.max_height > 0) {
+      geometry.max_width = c.max_width > 0 ? c.max_width : G_MAXSHORT;
+      geometry.max_height = c.max_height > 0 ? c.max_height : G_MAXSHORT;
+      mask |= GDK_HINT_MAX_SIZE;
+    }
+    gtk_window_set_geometry_hints(GTK_WINDOW(state->window), nullptr,
+                                  mask ? &geometry : nullptr,
+                                  static_cast<GdkWindowHints>(mask));
+    int w = 0, h = 0;
+    gtk_window_get_size(GTK_WINDOW(state->window), &w, &h);
+    if (laufey_common::ClampSize(c, &w, &h))
+      gtk_window_resize(GTK_WINDOW(state->window), w, h);
+  });
+}
+
+void WebKitGTKBackend::GetWindowSizeConstraints(uint32_t window_id,
+                                                int* min_width, int* min_height,
+                                                int* max_width,
+                                                int* max_height) {
+  laufey_common::SizeConstraints c =
+      laufey_common::GetSizeConstraints(window_id);
+  if (min_width)
+    *min_width = c.min_width;
+  if (min_height)
+    *min_height = c.min_height;
+  if (max_width)
+    *max_width = c.max_width;
+  if (max_height)
+    *max_height = c.max_height;
+}
+
+size_t WebKitGTKBackend::GetScreens(laufey_screen_t* out, size_t capacity) {
+  std::vector<laufey_screen_t> screens;
+  gtk_invoke_sync([&] {
+    GdkDisplay* display = gdk_display_get_default();
+    if (!display)
+      return;
+    int n = gdk_display_get_n_monitors(display);
+    bool any_primary = false;
+    for (int i = 0; i < n; ++i) {
+      GdkMonitor* m = gdk_display_get_monitor(display, i);
+      if (!m)
+        continue;
+      laufey_screen_t s = {};
+      s.id = LaufeyMonitorId(display, m);
+      GdkRectangle g, w;
+      gdk_monitor_get_geometry(m, &g);
+      gdk_monitor_get_workarea(m, &w);
+      s.x = g.x;
+      s.y = g.y;
+      s.width = g.width;
+      s.height = g.height;
+      s.work_x = w.x;
+      s.work_y = w.y;
+      s.work_width = w.width;
+      s.work_height = w.height;
+      s.scale_factor = gdk_monitor_get_scale_factor(m);
+      s.is_primary = gdk_monitor_is_primary(m);
+      any_primary |= s.is_primary;
+      screens.push_back(s);
+    }
+    // Wayland has no primary monitor; the first one stands in for it.
+    if (!any_primary && !screens.empty())
+      screens[0].is_primary = true;
+    std::stable_partition(
+        screens.begin(), screens.end(),
+        [](const laufey_screen_t& s) { return s.is_primary; });
+  });
+  return laufey_common::CopyScreens(screens, out, capacity);
+}
+
+int64_t WebKitGTKBackend::GetWindowScreen(uint32_t window_id) {
+  int64_t result = 0;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state)
+      return;
+    GdkWindow* gw = gtk_widget_get_window(state->window);
+    GdkDisplay* display = gdk_display_get_default();
+    if (!gw || !display)
+      return;
+    GdkMonitor* m = gdk_display_get_monitor_at_window(display, gw);
+    if (m)
+      result = LaufeyMonitorId(display, m);
+  });
+  return result;
+}
+
+void WebKitGTKBackend::SetDisplayChangedHandler(
+    laufey_display_changed_fn handler, void* user_data) {
+  laufey_common::SetDisplayChangedHandler(handler, user_data);
+  if (!handler)
+    return;
+  gtk_invoke_sync([] {
+    static bool installed = false;
+    if (installed)
+      return;
+    installed = true;
+    GdkDisplay* display = gdk_display_get_default();
+    if (!display)
+      return;
+    int n = gdk_display_get_n_monitors(display);
+    for (int i = 0; i < n; ++i)
+      LaufeyWatchMonitor(gdk_display_get_monitor(display, i));
+    g_signal_connect(display, "monitor-added",
+                     G_CALLBACK(+[](GdkDisplay*, GdkMonitor* m, gpointer) {
+                       LaufeyWatchMonitor(m);
+                       on_display_monitors_changed();
+                     }),
+                     nullptr);
+    g_signal_connect(display, "monitor-removed",
+                     G_CALLBACK(+[](GdkDisplay*, GdkMonitor*, gpointer) {
+                       on_display_monitors_changed();
+                     }),
+                     nullptr);
+  });
+}
+
+bool WebKitGTKBackend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
+                                             int* width, int* height) {
+  bool found = false;
+  laufey_common::Bounds b;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state)
+      return;
+    found = true;
+    uint32_t s = 0;
+    if (GdkWindow* gw = gtk_widget_get_window(state->window))
+      s = LaufeyStateFromGdk(gdk_window_get_state(gw));
+    if (s != 0 && laufey_common::GetCommittedNormalBounds(window_id, &b))
+      return;
+    gtk_window_get_position(GTK_WINDOW(state->window), &b.x, &b.y);
+    gtk_window_get_size(GTK_WINDOW(state->window), &b.width, &b.height);
+  });
+  if (!found)
+    return false;
+  if (x)
+    *x = b.x;
+  if (y)
+    *y = b.y;
+  if (width)
+    *width = b.width;
+  if (height)
+    *height = b.height;
+  return true;
 }
 
 void WebKitGTKBackend::SetResizable(uint32_t window_id, bool resizable) {

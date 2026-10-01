@@ -145,6 +145,12 @@ impl App {
     });
     laufey_backend_winit_common::store_window_handles(window_id, &window);
 
+    // Screens and the initial state (API 38).
+    laufey_backend_winit_common::window_api::refresh_window_screen(
+      window_id, &window,
+    );
+    laufey_backend_winit_common::window_api::report(window_id, &window);
+
     let winit_id = window.id();
     self.winit_to_laufey.insert(winit_id, window_id);
     self.windows.insert(
@@ -157,6 +163,7 @@ impl App {
   }
 
   fn close_window(&mut self, window_id: u32) {
+    laufey_backend_winit_common::window_api::forget(window_id);
     if let Some(info) = self.windows.remove(&window_id) {
       self.winit_to_laufey.remove(&info.window.id());
       laufey_backend_winit_common::remove_window_handles(window_id);
@@ -172,8 +179,13 @@ impl App {
 }
 
 impl ApplicationHandler<UserEvent> for App {
-  fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
-    // Windows are created on-demand via CreateWindow events
+  fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    // Windows are created on-demand via CreateWindow events. The screens are
+    // known before any window exists (a tray app has none).
+    laufey_backend_winit_common::window_api::refresh_screens(
+      event_loop.available_monitors(),
+      event_loop.primary_monitor(),
+    );
   }
 
   fn user_event(
@@ -191,7 +203,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         CommonEvent::CloseWindow { window_id } => {
           self.close_window(*window_id);
-          if self.windows.is_empty() {
+          // A tray app keeps running with no window
+          // (set_quit_on_last_window_closed(false)); quit() ends it anyway.
+          if self.windows.is_empty()
+            && laufey_backend_winit_common::window_api::should_end_loop_after_last_window()
+          {
             event_loop.exit();
           }
         }
@@ -218,7 +234,9 @@ impl ApplicationHandler<UserEvent> for App {
             | CommonEvent::Hide { window_id }
             | CommonEvent::Focus { window_id }
             | CommonEvent::SetApplicationMenu { window_id }
-            | CommonEvent::ShowContextMenu { window_id } => *window_id,
+            | CommonEvent::ShowContextMenu { window_id }
+            | CommonEvent::SetWindowState { window_id }
+            | CommonEvent::SetSizeConstraints { window_id } => *window_id,
             _ => return,
           };
           if let Some(info) = self.windows.get(&wid) {
@@ -283,6 +301,58 @@ impl ApplicationHandler<UserEvent> for App {
       None => return,
     };
 
+    // Any of these can reveal a maximize / minimize / fullscreen change or a
+    // move to another monitor (API 38); read the state back after handling.
+    let recheck_state = matches!(
+      event,
+      WindowEvent::Resized(_)
+        | WindowEvent::Moved(_)
+        | WindowEvent::Focused(_)
+        | WindowEvent::Occluded(_)
+        | WindowEvent::ScaleFactorChanged { .. }
+    );
+    let refresh_screens = matches!(
+      event,
+      WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }
+    );
+
+    self.handle_window_event(
+      event_loop,
+      laufey_id,
+      state,
+      scale_factor,
+      modifiers,
+      event,
+    );
+
+    if recheck_state {
+      if let Some(info) = self.windows.get(&laufey_id) {
+        if refresh_screens {
+          laufey_backend_winit_common::window_api::refresh_window_screen(
+            laufey_id,
+            &info.window,
+          );
+        }
+        laufey_backend_winit_common::window_api::report(
+          laufey_id,
+          &info.window,
+        );
+      }
+    }
+  }
+}
+
+impl App {
+  #[allow(clippy::too_many_arguments)]
+  fn handle_window_event(
+    &mut self,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+    laufey_id: u32,
+    state: &'static BackendState,
+    scale_factor: f64,
+    modifiers: winit::keyboard::ModifiersState,
+    event: WindowEvent,
+  ) {
     match event {
       WindowEvent::CloseRequested => {
         let proceed =
@@ -292,7 +362,9 @@ impl ApplicationHandler<UserEvent> for App {
           );
         if proceed {
           self.close_window(laufey_id);
-          if self.windows.is_empty() {
+          if self.windows.is_empty()
+            && laufey_backend_winit_common::window_api::should_end_loop_after_last_window()
+          {
             event_loop.exit();
           }
         }
@@ -604,5 +676,11 @@ fn main() -> Result<(), Box<dyn Error>> {
   laufey_backend_winit_common::load_and_start_runtime(create_backend_api());
 
   let mut app = App::new();
-  Ok(event_loop.run_app(&mut app)?)
+  let result = event_loop.run_app(&mut app);
+  // The loop ended (last window closed, or quit()): let the runtime shut
+  // down, like the CEF and WebView backends do.
+  laufey_backend_winit_common::shutdown_runtime(
+    std::time::Duration::from_secs(5),
+  );
+  Ok(result?)
 }

@@ -101,6 +101,17 @@ fn check_inner_vs_frame(
   }
 }
 
+/// The WebView2 and CEF backends on Windows report `get_size` as the outer
+/// window rectangle (see "Units" in docs/window-management.md), so a content
+/// vs outer comparison can't tell chrome apart there.
+fn size_is_outer_rect() -> bool {
+  cfg!(target_os = "windows")
+    && matches!(
+      std::env::var("LAUFEY_E2E_BACKEND").as_deref(),
+      Ok("webview") | Ok("cef")
+    )
+}
+
 fn check_outer_vs_inner(
   name: &str,
   inner: (i32, i32),
@@ -109,6 +120,12 @@ fn check_outer_vs_inner(
 ) {
   if inner == (0, 0) && outer == (0, 0) {
     na(&format!("{name} (size not available yet)"));
+    return;
+  }
+  if expect_chrome && size_is_outer_rect() {
+    na(&format!(
+      "{name} (get_size is the outer window rect on this backend)"
+    ));
     return;
   }
   if expect_chrome {
@@ -554,6 +571,17 @@ fn e2e_main() {
       let _ = &body_win;
       finish();
     }
+    // LAUFEY_E2E_ONLY=lifetime: keep-alive with no window, then quit()
+    // (both end the process, so they can't share the main battery's run).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("lifetime") {
+      lifetime_checks().await;
+    }
+    // LAUFEY_E2E_ONLY=window-api: only the API 38 window checks (e.g. under a
+    // real window manager, where the rest of the battery assumes none).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("window-api") {
+      window_api_checks().await;
+      finish();
+    }
     let scheme_report: Arc<Mutex<Option<SchemeReport>>> =
       Arc::new(Mutex::new(None));
     let scheme_probes: Arc<Mutex<HashMap<String, String>>> =
@@ -636,10 +664,19 @@ fn e2e_main() {
     let early_scale = win.get_scale_factor();
     check("early scale factor is positive", early_scale > 0.0);
     let (early_w, early_h) = win.get_size();
-    check(
-      "constructor size is readable immediately",
-      (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
-    );
+    if (early_w, early_h) == (0, 0)
+      && cfg!(target_os = "windows")
+      && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
+    {
+      // WebView2 creates the HWND on its UI thread after create_window
+      // returns; until then there is no size to read.
+      na("constructor size is readable immediately (WebView2 creates the window asynchronously)");
+    } else {
+      check(
+        "constructor size is readable immediately",
+        (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
+      );
+    }
 
     let decorated = Window::new(400, 300).title("native-e2e-chrome");
     decorated.set_position(240, 160);
@@ -800,7 +837,7 @@ fn e2e_main() {
           modifiers: 0,
         },
       );
-      let enter_before_move = last_enter.lock().unwrap().clone();
+      let enter_before_move = *last_enter.lock().unwrap();
       let _ = laufey::test_inject_input(
         input_id,
         &TestInput::MouseMove {
@@ -809,7 +846,7 @@ fn e2e_main() {
           modifiers: 0,
         },
       );
-      let enter_after_move = last_enter.lock().unwrap().clone();
+      let enter_after_move = *last_enter.lock().unwrap();
       match (enter_before_move, enter_after_move) {
         (None, Some(e)) if e.entered && (e.x - 40.0).abs() < 0.5 && (e.y - 50.0).abs() < 0.5 => {
           check("mouseenter waits for the first move", true);
@@ -1501,6 +1538,9 @@ fn e2e_main() {
       );
     }
 
+    // ---- Window state, constraints, screens, chrome (API >= 38) ----------
+    window_api_checks().await;
+
     // ---- Passkeys (API >= 37) --------------------------------------------
     passkey_checks(win.id()).await;
 
@@ -1537,6 +1577,464 @@ fn e2e_main() {
     let _ = (&win, &body_win);
     finish();
   });
+}
+
+// ---- Window state, constraints, screens, chrome (API >= 38) ---------------
+
+fn rect_inside(inner: &laufey::Rect, outer: &laufey::Rect) -> bool {
+  inner.x >= outer.x
+    && inner.y >= outer.y
+    && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height
+}
+
+async fn wait_state<F: Fn(laufey::WindowState) -> bool>(
+  w: &Window,
+  f: F,
+  timeout_ms: u64,
+) -> bool {
+  wait_for(|| f(w.get_state()), (timeout_ms / 50) as u32, 50).await
+}
+
+/// Every check is capability-probed: a backend that reports a capability must
+/// honour it, and one that doesn't must refuse honestly (setters return
+/// false). Window-manager-dependent state changes (Linux under a bare X
+/// server has no window manager to apply them) are N/A when nothing changed
+/// at all, never when the state changed wrongly.
+async fn window_api_checks() {
+  let caps = laufey::window_capabilities();
+  eprintln!("[e2e] window capabilities = {:#x}", caps.bits);
+  check("window capabilities are reported (API 38)", caps.bits != 0);
+
+  let w = Window::new(520, 420).title("native-e2e-window-api");
+  let id = w.id();
+  w.show();
+  let sized = wait_for(|| w.get_size().0 != 0, 100, 50).await;
+  if !sized {
+    check("window-api window reports a size", false);
+    return;
+  }
+
+  // -- screens --------------------------------------------------------------
+  if caps.screens() {
+    let screens = laufey::screens();
+    check("screens(): at least one display", !screens.is_empty());
+    check(
+      "screens(): exactly one primary, listed first",
+      screens.iter().filter(|s| s.is_primary).count() == 1
+        && screens.first().map(|s| s.is_primary).unwrap_or(false),
+    );
+    let sane = screens.iter().all(|s| {
+      s.id != 0
+        && s.id < (1i64 << 53)
+        && s.bounds.width > 0
+        && s.bounds.height > 0
+        && s.work_area.width > 0
+        && s.work_area.height > 0
+        && rect_inside(&s.work_area, &s.bounds)
+        && s.scale_factor >= 0.5
+        && s.scale_factor <= 8.0
+    });
+    check(
+      "screens(): nonzero ids, positive bounds, work area inside bounds, sane scale",
+      sane,
+    );
+    let mut ids: Vec<i64> = screens.iter().map(|s| s.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    check("screens(): ids are distinct", ids.len() == screens.len());
+    match w.get_screen_id() {
+      Some(sid) => check(
+        "window screen id is one of screens()",
+        screens.iter().any(|s| s.id == sid),
+      ),
+      None => na("window screen (backend can't tell which display yet)"),
+    }
+    for s in &screens {
+      eprintln!("[e2e]   screen {s:?}");
+    }
+  } else {
+    check(
+      "screens() is empty without the capability",
+      laufey::screens().is_empty(),
+    );
+  }
+  if caps.display_events() {
+    // A display change can't be synthesized; registering must be harmless.
+    laufey::on_display_changed(|| eprintln!("[e2e] display changed"));
+    check("on_display_changed registers", true);
+  } else {
+    na("display-changed events (not reported by this backend)");
+  }
+
+  // -- size constraints -----------------------------------------------------
+  if caps.size_constraints() {
+    let range = laufey::SizeConstraints {
+      min_width: 400,
+      min_height: 300,
+      max_width: 900,
+      max_height: 700,
+    };
+    w.set_size_constraints(range);
+    check(
+      "size constraints round-trip",
+      w.get_size_constraints() == range,
+    );
+    check(
+      "get_min_size / get_max_size",
+      w.get_min_size() == (400, 300) && w.get_max_size() == (900, 700),
+    );
+    w.set_size(120, 90);
+    let clamped_up = wait_for(
+      || {
+        let (sw, sh) = w.get_size();
+        (sw - 400).abs() <= 4 && (sh - 300).abs() <= 4
+      },
+      60,
+      50,
+    )
+    .await;
+    let (sw, sh) = w.get_size();
+    check(
+      &format!("set_size below the minimum is clamped to it (got {sw}x{sh})"),
+      clamped_up,
+    );
+    w.set_size(3000, 3000);
+    let clamped_down = wait_for(
+      || {
+        let (sw, sh) = w.get_size();
+        (sw - 900).abs() <= 4 && (sh - 700).abs() <= 4
+      },
+      60,
+      50,
+    )
+    .await;
+    let (sw, sh) = w.get_size();
+    check(
+      &format!("set_size above the maximum is clamped to it (got {sw}x{sh})"),
+      clamped_down,
+    );
+    // A window outside a new range is resized into it.
+    w.set_size(800, 600);
+    let _ = wait_for(|| (w.get_size().0 - 800).abs() <= 4, 40, 50).await;
+    w.set_max_size(600, 500);
+    let pulled_in = wait_for(
+      || {
+        let (sw, sh) = w.get_size();
+        sw <= 604 && sh <= 504
+      },
+      60,
+      50,
+    )
+    .await;
+    let (sw, sh) = w.get_size();
+    check(
+      &format!("a tighter maximum resizes the window into it (got {sw}x{sh})"),
+      pulled_in,
+    );
+    // A maximum below the minimum is raised to it.
+    w.set_size_constraints(laufey::SizeConstraints {
+      min_width: 500,
+      min_height: 0,
+      max_width: 300,
+      max_height: 0,
+    });
+    check(
+      "a maximum below the minimum is raised to it",
+      w.get_size_constraints().max_width == 500,
+    );
+    w.set_size_constraints(laufey::SizeConstraints::default());
+    check(
+      "constraints clear to none",
+      w.get_size_constraints() == laufey::SizeConstraints::default(),
+    );
+    w.set_size(520, 420);
+    let _ = wait_for(|| (w.get_size().0 - 520).abs() <= 4, 40, 50).await;
+  } else {
+    na("size constraints (not supported by this backend)");
+  }
+
+  // -- state round trips ------------------------------------------------------
+  if caps.state() {
+    let events: Arc<Mutex<Vec<laufey::WindowStateEvent>>> = Arc::default();
+    {
+      let events = events.clone();
+      laufey::on_window_state_change(id, move |ev| {
+        events.lock().unwrap().push(ev);
+      });
+    }
+    let saw = |pred: &dyn Fn(&laufey::WindowStateEvent) -> bool| {
+      events.lock().unwrap().iter().any(pred)
+    };
+    check(
+      "a new window is in the normal state",
+      w.get_state().is_normal(),
+    );
+
+    w.set_position(80, 90);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let before_pos = w.get_position();
+    let before_size = w.get_size();
+
+    // maximize / unmaximize
+    w.maximize();
+    if wait_state(&w, |s| s.maximized, 6000).await {
+      check("maximize -> is_maximized", true);
+      let evented = wait_for(
+        || saw(&|e| e.state.maximized && !e.previous.maximized),
+        60,
+        50,
+      )
+      .await;
+      check(
+        "maximize fires a state event (previous not maximized)",
+        evented,
+      );
+      if caps.normal_bounds() {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        match w.get_normal_bounds() {
+          Some(r) => {
+            let size_ok = (r.width - before_size.0).abs() <= 4
+              && (r.height - before_size.1).abs() <= 4;
+            let pos_ok = !caps.set_position()
+              || ((r.x - before_pos.0).abs() <= 40
+                && (r.y - before_pos.1).abs() <= 40);
+            check(
+              &format!(
+                "normal bounds while maximized are the pre-maximize bounds (got {r:?}, before {before_pos:?} {before_size:?})"
+              ),
+              size_ok && pos_ok,
+            );
+          }
+          None => check("normal bounds available while maximized", false),
+        }
+      }
+      w.unmaximize();
+      check(
+        "unmaximize -> !is_maximized",
+        wait_state(&w, |s| !s.maximized, 6000).await,
+      );
+      check(
+        "unmaximize fires a state event",
+        wait_for(
+          || saw(&|e| !e.state.maximized && e.previous.maximized),
+          60,
+          50,
+        )
+        .await,
+      );
+    } else {
+      check(
+        "maximize did not report a wrong state",
+        w.get_state().is_normal(),
+      );
+      na("maximize (no window manager applied it)");
+    }
+
+    // minimize / restore
+    w.minimize();
+    if wait_state(&w, |s| s.minimized, 6000).await {
+      check("minimize -> is_minimized", true);
+      check(
+        "minimize fires a state event",
+        wait_for(
+          || saw(&|e| e.state.minimized && !e.previous.minimized),
+          60,
+          50,
+        )
+        .await,
+      );
+      w.restore();
+      check(
+        "restore -> !is_minimized",
+        wait_state(&w, |s| !s.minimized, 6000).await,
+      );
+      check(
+        "restore fires a state event",
+        wait_for(
+          || saw(&|e| !e.state.minimized && e.previous.minimized),
+          60,
+          50,
+        )
+        .await,
+      );
+    } else {
+      check(
+        "minimize did not report a wrong state",
+        !w.get_state().maximized && !w.get_state().fullscreen,
+      );
+      na("minimize (no window manager applied it)");
+      w.restore();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // fullscreen
+    w.set_fullscreen(true);
+    if wait_state(&w, |s| s.fullscreen, 10000).await {
+      check("set_fullscreen(true) -> is_fullscreen", true);
+      check(
+        "entering fullscreen fires a state event",
+        wait_for(
+          || saw(&|e| e.state.fullscreen && !e.previous.fullscreen),
+          60,
+          50,
+        )
+        .await,
+      );
+      w.set_fullscreen(false);
+      check(
+        "set_fullscreen(false) -> !is_fullscreen",
+        wait_state(&w, |s| !s.fullscreen, 10000).await,
+      );
+      check(
+        "leaving fullscreen fires a state event",
+        wait_for(
+          || saw(&|e| !e.state.fullscreen && e.previous.fullscreen),
+          60,
+          50,
+        )
+        .await,
+      );
+      // macOS animates the exit; let it settle before the next checks.
+      tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    } else {
+      check(
+        "fullscreen did not report a wrong state",
+        !w.get_state().maximized,
+      );
+      na("fullscreen (no window manager applied it)");
+    }
+    let events = events.lock().unwrap().clone();
+    check(
+      "state events carry this window's id",
+      events.iter().all(|e| e.window_id == id),
+    );
+    check(
+      "no state event repeats its previous state",
+      events.iter().all(|e| e.state != e.previous),
+    );
+  } else {
+    na("window state (not supported by this backend)");
+  }
+
+  // -- title bar / traffic lights ----------------------------------------------
+  let hidden = w.set_titlebar_style(laufey::TitlebarStyle::Hidden);
+  check(
+    "set_titlebar_style(Hidden) succeeds exactly when reported",
+    hidden == caps.titlebar_hidden(),
+  );
+  if hidden {
+    // The content now starts at the top of the frame.
+    let under = wait_for(
+      || {
+        let frame = w.get_position();
+        let inner = w.get_inner_position();
+        inner.1 == frame.1
+      },
+      40,
+      50,
+    )
+    .await;
+    check("hidden title bar: content extends under it", under);
+    let inset = w.set_titlebar_style(laufey::TitlebarStyle::HiddenInset);
+    check(
+      "set_titlebar_style(HiddenInset) succeeds exactly when reported",
+      inset == caps.titlebar_hidden_inset(),
+    );
+    let traffic = w.set_traffic_light_position(Some((20, 18)));
+    check(
+      "set_traffic_light_position succeeds exactly when reported",
+      traffic == caps.traffic_light_position(),
+    );
+    w.set_traffic_light_position(None);
+    check(
+      "set_titlebar_style(Default) restores the title bar",
+      w.set_titlebar_style(laufey::TitlebarStyle::Default),
+    );
+    let back = wait_for(
+      || {
+        let frame = w.get_position();
+        let inner = w.get_inner_position();
+        inner.1 > frame.1
+      },
+      40,
+      50,
+    )
+    .await;
+    check("default title bar: content below it again", back);
+  } else {
+    check(
+      "traffic lights refused without the capability",
+      !w.set_traffic_light_position(Some((20, 18)))
+        || caps.traffic_light_position(),
+    );
+    na("title bar styles (not supported by this backend)");
+  }
+
+  // -- backdrops ----------------------------------------------------------------
+  for (name, backdrop, cap) in [
+    ("mica", laufey::Backdrop::Mica, caps.mica()),
+    ("acrylic", laufey::Backdrop::Acrylic, caps.acrylic()),
+    ("mica-alt", laufey::Backdrop::MicaAlt, caps.mica_alt()),
+    (
+      "vibrancy",
+      laufey::Backdrop::Vibrancy(laufey::VibrancyMaterial::Sidebar),
+      caps.vibrancy(),
+    ),
+  ] {
+    let applied = w.set_backdrop(backdrop);
+    check(
+      &format!(
+        "set_backdrop({name}) succeeds exactly when reported (got {applied})"
+      ),
+      applied == cap,
+    );
+    if applied {
+      check(
+        &format!("set_backdrop(none) after {name}"),
+        w.set_backdrop(laufey::Backdrop::None),
+      );
+    }
+  }
+
+  w.close();
+}
+
+/// LAUFEY_E2E_ONLY=lifetime. Ends the process: keep-alive with no window,
+/// then quit(), which must end the event loop (the backend then calls the
+/// runtime's shutdown, observed here through `should_shutdown`).
+async fn lifetime_checks() -> ! {
+  let caps = laufey::window_capabilities();
+  if caps.keep_alive() {
+    laufey::set_quit_on_last_window_closed(false);
+    let w = Window::new(300, 200).title("native-e2e-lifetime");
+    let _ = wait_for(|| w.get_size().0 != 0, 100, 50).await;
+    w.close();
+    let closed = wait_for(|| w.get_size() == (0, 0), 100, 50).await;
+    check("the last window closed", closed);
+    // Still here, and the backend hasn't begun shutting down.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    check(
+      "keep-alive: the event loop survives its last window",
+      !laufey::should_shutdown(),
+    );
+    // A window can be opened again (a tray app reopening its UI).
+    let again = Window::new(300, 200).title("native-e2e-lifetime-2");
+    check(
+      "a window opens after the last one closed",
+      wait_for(|| again.get_size().0 != 0, 100, 50).await,
+    );
+  } else {
+    na("keep-alive (not supported by this backend)");
+  }
+  laufey::quit();
+  let ended = wait_for(laufey::should_shutdown, 300, 50).await;
+  check(
+    "quit() ends the event loop (runtime shutdown begins)",
+    ended,
+  );
+  // Report before the backend's teardown can race the exit code.
+  finish();
 }
 
 /// The `code` of an error envelope, or "ok" for a credential.

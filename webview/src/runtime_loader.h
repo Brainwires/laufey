@@ -565,6 +565,56 @@ class LaufeyBackend {
     }
   }
 
+  // --- Window state, constraints, screens and chrome (API >= 38) ---
+  // See laufey.h. The defaults are a backend that can do none of it (iOS):
+  // no capabilities, every setter a no-op or false, getters "unknown".
+  virtual uint32_t WindowCapabilities() {
+    return 0;
+  }
+  virtual void SetWindowState(uint32_t /*window_id*/, int /*action*/) {}
+  virtual uint32_t GetWindowState(uint32_t /*window_id*/) {
+    return 0;
+  }
+  virtual void SetWindowStateHandler(laufey_window_state_fn /*handler*/,
+                                     void* /*user_data*/) {}
+  virtual void SetWindowSizeConstraints(uint32_t /*window_id*/,
+                                        int /*min_width*/, int /*min_height*/,
+                                        int /*max_width*/, int /*max_height*/) {
+  }
+  virtual void GetWindowSizeConstraints(uint32_t /*window_id*/, int* min_width,
+                                        int* min_height, int* max_width,
+                                        int* max_height) {
+    for (int* p : {min_width, min_height, max_width, max_height}) {
+      if (p)
+        *p = 0;
+    }
+  }
+  virtual size_t GetScreens(laufey_screen_t* /*out*/, size_t /*capacity*/) {
+    return 0;
+  }
+  virtual int64_t GetWindowScreen(uint32_t /*window_id*/) {
+    return 0;
+  }
+  virtual void SetDisplayChangedHandler(laufey_display_changed_fn /*handler*/,
+                                        void* /*user_data*/) {}
+  virtual bool SetWindowTitlebarStyle(uint32_t /*window_id*/, int /*style*/) {
+    return false;
+  }
+  virtual bool SetWindowTrafficLightPosition(uint32_t /*window_id*/, int /*x*/,
+                                             int /*y*/) {
+    return false;
+  }
+  virtual bool SetWindowBackdrop(uint32_t /*window_id*/, int /*backdrop*/,
+                                 int /*material*/) {
+    return false;
+  }
+  virtual bool GetWindowNormalBounds(uint32_t /*window_id*/, int* /*x*/,
+                                     int* /*y*/, int* /*width*/,
+                                     int* /*height*/) {
+    return false;
+  }
+  virtual void SetQuitOnLastWindowClosed(bool /*quit*/) {}
+
   // --- Tray / status-bar icon ---
   virtual uint32_t CreateTrayIcon() {
     return 0;

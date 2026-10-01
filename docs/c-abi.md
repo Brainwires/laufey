@@ -75,6 +75,16 @@ The pointers group into:
   directory), buffered until a handler registers. CEF and WebView on every
   desktop OS; `NULL` on Winit (see
   [deep-links.md](deep-links.md#single-instance)).
+- **Window state, screens and chrome** (API ≥ 38) — `set_window_state` /
+  `get_window_state` / `set_window_state_handler` (maximize, minimize, restore,
+  fullscreen with change events), `set_window_size_constraints` /
+  `get_window_size_constraints`, `get_screens` / `get_window_screen` /
+  `set_display_changed_handler`, `window_capabilities` (what this backend / OS
+  can do), `set_window_titlebar_style` / `set_window_traffic_light_position`
+  (macOS), `set_window_backdrop` (Mica / Acrylic on Windows 11, vibrancy on
+  macOS), `get_window_normal_bounds`, `set_quit_on_last_window_closed`, and the
+  `quit` contract (ends the loop like the last window closing). See
+  [window-management.md](window-management.md).
 - **Passkeys** (API ≥ 37) — `passkey_capabilities`, `passkey_request`: WebAuthn
   ceremonies through the OS platform authenticator, one at a time, with the
   result (a JSON envelope) delivered exactly once on any thread. macOS and

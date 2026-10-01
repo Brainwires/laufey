@@ -299,6 +299,13 @@ jobs:
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --scheme-body
 
+      # App lifetime (API 38): keep-alive with no window, then quit() ending
+      # the event loop. Ends the process, so it runs on its own. Every leg,
+      # webview/linux included (no clipboard involved).
+      - name: App lifetime — keep-alive and quit
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --lifetime
+
       # Per-app web storage (LAUFEY_APP_ID / LAUFEY_DATA_DIR): persistence
       # across relaunches, isolation between apps, unchanged defaults. See
       # docs/app-data.md.

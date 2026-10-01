@@ -152,8 +152,7 @@ getter. No display-server introspection needed.
 - Window: `set_window_size`/`get_window_size`,
   `set_window_position`/`get_window_position`, `set_resizable`/`is_resizable`,
   `set_always_on_top`/`is_always_on_top`, `show`/`hide`/`is_visible`,
-  `set_window_opacity`/`get_window_opacity`,
-  `get_window_scale_factor`.
+  `set_window_opacity`/`get_window_opacity`, `get_window_scale_factor`.
 - Clipboard: `write_clipboard_text` → `read_clipboard_text` (round-trips through
   the real OS clipboard).
 - Handles: `get_window_handle` / `get_display_handle` / `get_window_handle_type`
@@ -645,3 +644,34 @@ The buffered `open_url` round trip (`test_trigger_open_url`) stays in Layer 0
 (`native-e2e-run.sh`). The lock's framing, limits and naming are unit-tested in
 `backend-common/tests/single_instance_test.cc` (ctest). The Winit backend has no
 single-instance lock, so the driver doesn't run there.
+
+## 16. Window state, constraints, screens and lifetime (API 38)
+
+`native_e2e`'s `window_api_checks` (part of the Layer-0 battery, or alone with
+`scripts/native-e2e-run.sh <backend> --window-api`) is capability-probed against
+`window_capabilities()`: a backend that reports a capability must honour it, and
+one that doesn't must refuse (setters return `false`).
+
+- **Screens**: non-empty, exactly one primary listed first, nonzero distinct
+  JS-safe ids, positive bounds, work area inside the bounds, sane scale, and the
+  window's screen is one of them.
+- **Size constraints**: round trip, `set_size` clamped up to the minimum and
+  down to the maximum, a tighter maximum resizes the window into it, a maximum
+  below the minimum is raised, constraints clear.
+- **State**: maximize → `is_maximized` → event (previous not maximized) → normal
+  bounds equal the pre-maximize bounds → unmaximize → event; minimize / restore;
+  fullscreen enter / leave; events carry the window id and never repeat their
+  previous state. Where nothing applied the change (Linux without a window
+  manager) the check is N/A, never a pass, and it still fails if a wrong state
+  is reported.
+- **Title bar / backdrops**: each setter succeeds exactly when the capability is
+  reported; a hidden title bar puts the content origin at the frame origin and
+  the default one moves it back.
+
+`--lifetime` (its own run, since it ends the process): with keep-alive on, the
+last window closes and the loop survives (no runtime shutdown), a new window
+opens, then `quit()` must end the loop, observed as the backend calling the
+runtime's shutdown.
+
+On Linux the CI legs run without a window manager; biscuits runs `--window-api`
+under xfwm4 for the state checks.

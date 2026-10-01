@@ -111,6 +111,15 @@ class LaufeyWindowDelegate : public CefWindowDelegate {
   void OnWindowDestroyed(CefRefPtr<CefWindow> window) override;
   bool CanClose(CefRefPtr<CefWindow> window) override;
   CefSize GetPreferredSize(CefRefPtr<CefView> view) override;
+  // Size constraints (API 38): what set_window_size_constraints stored.
+  CefSize GetMinimumSize(CefRefPtr<CefView> view) override;
+  CefSize GetMaximumSize(CefRefPtr<CefView> view) override;
+  // Window-state events (API 38): both can follow a maximize, minimize,
+  // restore or fullscreen change.
+  void OnWindowBoundsChanged(CefRefPtr<CefWindow> window,
+                             const CefRect& new_bounds) override;
+  void OnWindowFullscreenTransition(CefRefPtr<CefWindow> window,
+                                    bool is_completed) override;
 
   // Frameless windows (LAUFEY_WINDOW_FLAG_FRAMELESS) drop the title bar and
   // standard window buttons.
@@ -286,5 +295,16 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
 // Implemented in main_mac.mm.
 void LaufeyQuitMainLoopMac();
 #endif
+
+// Ends the CEF backend's main loop on every platform (LaufeyQuitMainLoopMac on
+// macOS, CefQuitMessageLoop elsewhere). UI thread.
+void LaufeyQuitMainLoop();
+
+// Window-state bookkeeping (API 38; runtime_loader.cc). Recheck reads the
+// window's state back from CefWindow on the UI thread and reports a change;
+// Schedule does that now and a few times over the next ~1.5 s, from any
+// thread.
+void CefRecheckWindowState(uint32_t window_id);
+void CefScheduleWindowStateRecheck(uint32_t window_id);
 
 #endif

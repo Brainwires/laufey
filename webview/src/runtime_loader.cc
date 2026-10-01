@@ -729,6 +729,123 @@ static void Backend_PasskeyRequest(void* data, uint32_t window_id,
   }
 }
 
+// --- Window state, constraints, screens and chrome (API >= 38) ---
+
+static uint32_t Backend_WindowCapabilities(void* data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->WindowCapabilities();
+  return 0;
+}
+
+static void Backend_SetWindowState(void* data, uint32_t window_id, int action) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    backend->SetWindowState(window_id, action);
+}
+
+static uint32_t Backend_GetWindowState(void* data, uint32_t window_id) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->GetWindowState(window_id);
+  return 0;
+}
+
+static void Backend_SetWindowStateHandler(void* data,
+                                          laufey_window_state_fn handler,
+                                          void* user_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    backend->SetWindowStateHandler(handler, user_data);
+}
+
+static void Backend_SetWindowSizeConstraints(void* data, uint32_t window_id,
+                                             int min_width, int min_height,
+                                             int max_width, int max_height) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    backend->SetWindowSizeConstraints(window_id, min_width, min_height,
+                                      max_width, max_height);
+}
+
+static void Backend_GetWindowSizeConstraints(void* data, uint32_t window_id,
+                                             int* min_width, int* min_height,
+                                             int* max_width, int* max_height) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend()) {
+    backend->GetWindowSizeConstraints(window_id, min_width, min_height,
+                                      max_width, max_height);
+    return;
+  }
+  for (int* p : {min_width, min_height, max_width, max_height}) {
+    if (p)
+      *p = 0;
+  }
+}
+
+static size_t Backend_GetScreens(void* data, laufey_screen_t* out,
+                                 size_t capacity) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->GetScreens(out, capacity);
+  return 0;
+}
+
+static int64_t Backend_GetWindowScreen(void* data, uint32_t window_id) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->GetWindowScreen(window_id);
+  return 0;
+}
+
+static void Backend_SetDisplayChangedHandler(void* data,
+                                             laufey_display_changed_fn handler,
+                                             void* user_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    backend->SetDisplayChangedHandler(handler, user_data);
+}
+
+static bool Backend_SetWindowTitlebarStyle(void* data, uint32_t window_id,
+                                           int style) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->SetWindowTitlebarStyle(window_id, style);
+  return false;
+}
+
+static bool Backend_SetWindowTrafficLightPosition(void* data,
+                                                  uint32_t window_id, int x,
+                                                  int y) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->SetWindowTrafficLightPosition(window_id, x, y);
+  return false;
+}
+
+static bool Backend_SetWindowBackdrop(void* data, uint32_t window_id,
+                                      int backdrop, int material) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->SetWindowBackdrop(window_id, backdrop, material);
+  return false;
+}
+
+static bool Backend_GetWindowNormalBounds(void* data, uint32_t window_id,
+                                          int* x, int* y, int* width,
+                                          int* height) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->GetWindowNormalBounds(window_id, x, y, width, height);
+  return false;
+}
+
+static void Backend_SetQuitOnLastWindowClosed(void* data, bool quit) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    backend->SetQuitOnLastWindowClosed(quit);
+}
+
 // --- Tray / status bar ---
 
 static uint32_t Backend_CreateTrayIcon(void* data) {
@@ -956,6 +1073,25 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_close_requested_handler = Backend_SetCloseRequestedHandler;
   backend_api_.test_trigger_close_requested = Backend_TestTriggerCloseRequested;
   backend_api_.test_inject_input = Backend_TestInjectInput;
+
+  // Window state, constraints, screens and chrome (API >= 38): see
+  // docs/window-management.md for what each OS / backend supports.
+  backend_api_.set_window_state = Backend_SetWindowState;
+  backend_api_.get_window_state = Backend_GetWindowState;
+  backend_api_.set_window_state_handler = Backend_SetWindowStateHandler;
+  backend_api_.set_window_size_constraints = Backend_SetWindowSizeConstraints;
+  backend_api_.get_window_size_constraints = Backend_GetWindowSizeConstraints;
+  backend_api_.get_screens = Backend_GetScreens;
+  backend_api_.get_window_screen = Backend_GetWindowScreen;
+  backend_api_.set_display_changed_handler = Backend_SetDisplayChangedHandler;
+  backend_api_.window_capabilities = Backend_WindowCapabilities;
+  backend_api_.set_window_titlebar_style = Backend_SetWindowTitlebarStyle;
+  backend_api_.set_window_traffic_light_position =
+      Backend_SetWindowTrafficLightPosition;
+  backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;
+  backend_api_.get_window_normal_bounds = Backend_GetWindowNormalBounds;
+  backend_api_.set_quit_on_last_window_closed =
+      Backend_SetQuitOnLastWindowClosed;
   backend_api_.set_page_load_handler = Backend_SetPageLoadHandler;
   backend_api_.show_dialog = Backend_ShowDialog;
   backend_api_.string_free = Backend_StringFree;

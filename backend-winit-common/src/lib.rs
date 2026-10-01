@@ -7,6 +7,7 @@ pub mod notification;
 pub mod open_url;
 pub mod permission;
 pub mod tray;
+pub mod window_api;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -637,6 +638,78 @@ pub struct LaufeyBackendApi {
   pub test_inject_input: Option<
     unsafe extern "C" fn(*mut c_void, u32, *const LaufeyTestInput) -> bool,
   >,
+
+  // --- Window state, constraints, screens and chrome (API >= 38) ---
+  // State, constraints, screens, normal bounds and keep-alive are filled by
+  // fill_common_api; display events, title bar styles and backdrops stay
+  // None (winit has no API for them; see docs/window-management.md).
+  pub set_window_state: Option<unsafe extern "C" fn(*mut c_void, u32, c_int)>,
+  pub get_window_state: Option<unsafe extern "C" fn(*mut c_void, u32) -> u32>,
+  pub set_window_state_handler: Option<
+    unsafe extern "C" fn(*mut c_void, Option<LaufeyWindowStateFn>, *mut c_void),
+  >,
+  pub set_window_size_constraints:
+    Option<unsafe extern "C" fn(*mut c_void, u32, c_int, c_int, c_int, c_int)>,
+  pub get_window_size_constraints: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *mut c_int,
+      *mut c_int,
+      *mut c_int,
+      *mut c_int,
+    ),
+  >,
+  pub get_screens: Option<
+    unsafe extern "C" fn(*mut c_void, *mut LaufeyScreen, usize) -> usize,
+  >,
+  pub get_window_screen: Option<unsafe extern "C" fn(*mut c_void, u32) -> i64>,
+  pub set_display_changed_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(*mut c_void)>,
+      *mut c_void,
+    ),
+  >,
+  pub window_capabilities: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub set_window_titlebar_style:
+    Option<unsafe extern "C" fn(*mut c_void, u32, c_int) -> bool>,
+  pub set_window_traffic_light_position:
+    Option<unsafe extern "C" fn(*mut c_void, u32, c_int, c_int) -> bool>,
+  pub set_window_backdrop:
+    Option<unsafe extern "C" fn(*mut c_void, u32, c_int, c_int) -> bool>,
+  pub get_window_normal_bounds: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *mut c_int,
+      *mut c_int,
+      *mut c_int,
+      *mut c_int,
+    ) -> bool,
+  >,
+  pub set_quit_on_last_window_closed:
+    Option<unsafe extern "C" fn(*mut c_void, bool)>,
+}
+
+/// `laufey_window_state_fn` (API 38).
+pub type LaufeyWindowStateFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32);
+
+/// Mirrors `laufey_screen_t` in laufey.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LaufeyScreen {
+  pub id: i64,
+  pub x: i32,
+  pub y: i32,
+  pub width: i32,
+  pub height: i32,
+  pub work_x: i32,
+  pub work_y: i32,
+  pub work_width: i32,
+  pub work_height: i32,
+  pub scale_factor: f64,
+  pub is_primary: bool,
 }
 
 /// Mirrors `laufey_test_input_t` in laufey.h.
@@ -1320,6 +1393,23 @@ pub fn create_api_base() -> LaufeyBackendApi {
     get_window_outer_size: None,
     // Test input injection (API >= 38): filled by fill_common_api.
     test_inject_input: None,
+    // Window state / constraints / screens / normal bounds / keep-alive
+    // (API >= 38): filled by fill_common_api. No display-changed event,
+    // title bar style or backdrop API in winit.
+    set_window_state: None,
+    get_window_state: None,
+    set_window_state_handler: None,
+    set_window_size_constraints: None,
+    get_window_size_constraints: None,
+    get_screens: None,
+    get_window_screen: None,
+    set_display_changed_handler: None,
+    window_capabilities: None,
+    set_window_titlebar_style: None,
+    set_window_traffic_light_position: None,
+    set_window_backdrop: None,
+    get_window_normal_bounds: None,
+    set_quit_on_last_window_closed: None,
   }
 }
 
@@ -2085,6 +2175,14 @@ pub enum CommonEvent {
   ShowContextMenu {
     window_id: u32,
   },
+  /// Apply the action queued by `window_api::queue_action` (API 38).
+  SetWindowState {
+    window_id: u32,
+  },
+  /// Apply the size constraints stored by `window_api::set_constraints`.
+  SetSizeConstraints {
+    window_id: u32,
+  },
   Quit,
   UiTask {
     task: unsafe extern "C" fn(*mut c_void),
@@ -2187,6 +2285,7 @@ macro_rules! define_common_backend_fns {
     }
 
     unsafe extern "C" fn backend_quit(_data: *mut ::std::ffi::c_void) {
+      $crate::window_api::mark_quitting();
       if let Some(state) = <$B as $crate::BackendAccess>::get() {
         let _ = state.proxy().send_event(
           <$B as $crate::BackendAccess>::common_event(
@@ -2202,6 +2301,12 @@ macro_rules! define_common_backend_fns {
       width: ::std::ffi::c_int,
       height: ::std::ffi::c_int,
     ) {
+      // Programmatic resizes are clamped to the size constraints (API 38).
+      let (width, height) = $crate::window_api::clamp(
+        $crate::window_api::get_constraints(window_id),
+        width,
+        height,
+      );
       if let Some(state) = <$B as $crate::BackendAccess>::get() {
         state.common().with_window(window_id, |ws| {
           *ws.pending_size.lock().unwrap() = Some((width, height));
@@ -2861,6 +2966,144 @@ macro_rules! define_common_backend_fns {
       }
     }
 
+    // --- Window state, constraints, screens (API >= 38) ---
+
+    unsafe extern "C" fn backend_set_window_state(
+      _data: *mut ::std::ffi::c_void,
+      window_id: u32,
+      action: ::std::ffi::c_int,
+    ) {
+      $crate::window_api::queue_action(window_id, action);
+      if let Some(state) = <$B as $crate::BackendAccess>::get() {
+        let _ = state.proxy().send_event(
+          <$B as $crate::BackendAccess>::common_event(
+            $crate::CommonEvent::SetWindowState { window_id },
+          ),
+        );
+      }
+    }
+
+    unsafe extern "C" fn backend_get_window_state(
+      _data: *mut ::std::ffi::c_void,
+      window_id: u32,
+    ) -> u32 {
+      $crate::window_api::get_state(window_id)
+    }
+
+    unsafe extern "C" fn backend_set_window_state_handler(
+      _data: *mut ::std::ffi::c_void,
+      handler: Option<$crate::LaufeyWindowStateFn>,
+      user_data: *mut ::std::ffi::c_void,
+    ) {
+      $crate::window_api::set_state_handler(
+        handler.map(|h| (h, user_data as usize)),
+      );
+    }
+
+    unsafe extern "C" fn backend_set_window_size_constraints(
+      _data: *mut ::std::ffi::c_void,
+      window_id: u32,
+      min_width: ::std::ffi::c_int,
+      min_height: ::std::ffi::c_int,
+      max_width: ::std::ffi::c_int,
+      max_height: ::std::ffi::c_int,
+    ) {
+      $crate::window_api::set_constraints(
+        window_id,
+        [min_width, min_height, max_width, max_height],
+      );
+      if let Some(state) = <$B as $crate::BackendAccess>::get() {
+        let _ = state.proxy().send_event(
+          <$B as $crate::BackendAccess>::common_event(
+            $crate::CommonEvent::SetSizeConstraints { window_id },
+          ),
+        );
+      }
+    }
+
+    unsafe extern "C" fn backend_get_window_size_constraints(
+      _data: *mut ::std::ffi::c_void,
+      window_id: u32,
+      min_width: *mut ::std::ffi::c_int,
+      min_height: *mut ::std::ffi::c_int,
+      max_width: *mut ::std::ffi::c_int,
+      max_height: *mut ::std::ffi::c_int,
+    ) {
+      let c = $crate::window_api::get_constraints(window_id);
+      for (ptr, value) in [
+        (min_width, c[0]),
+        (min_height, c[1]),
+        (max_width, c[2]),
+        (max_height, c[3]),
+      ] {
+        if !ptr.is_null() {
+          *ptr = value;
+        }
+      }
+    }
+
+    unsafe extern "C" fn backend_get_screens(
+      _data: *mut ::std::ffi::c_void,
+      out: *mut $crate::LaufeyScreen,
+      capacity: usize,
+    ) -> usize {
+      let screens = $crate::window_api::screens();
+      if !out.is_null() {
+        for (i, s) in screens.iter().take(capacity).enumerate() {
+          *out.add(i) = *s;
+        }
+      }
+      screens.len()
+    }
+
+    unsafe extern "C" fn backend_get_window_screen(
+      _data: *mut ::std::ffi::c_void,
+      window_id: u32,
+    ) -> i64 {
+      $crate::window_api::window_screen(window_id)
+    }
+
+    unsafe extern "C" fn backend_window_capabilities(
+      _data: *mut ::std::ffi::c_void,
+    ) -> u32 {
+      $crate::window_api::capabilities()
+    }
+
+    unsafe extern "C" fn backend_get_window_normal_bounds(
+      _data: *mut ::std::ffi::c_void,
+      window_id: u32,
+      x: *mut ::std::ffi::c_int,
+      y: *mut ::std::ffi::c_int,
+      width: *mut ::std::ffi::c_int,
+      height: *mut ::std::ffi::c_int,
+    ) -> bool {
+      let Some(state) = <$B as $crate::BackendAccess>::get() else {
+        return false;
+      };
+      let Some(current) = state.common().with_window(window_id, |ws| {
+        let (px, py) = (*ws.current_position.lock().unwrap()).unwrap_or((0, 0));
+        let (w, h) = (*ws.current_size.lock().unwrap()).unwrap_or((0, 0));
+        (px, py, w, h)
+      }) else {
+        return false;
+      };
+      let (bx, by, bw, bh) =
+        $crate::window_api::normal_bounds(window_id, current);
+      for (ptr, value) in [(x, bx), (y, by), (width, bw), (height, bh)] {
+        if !ptr.is_null() {
+          *ptr = value;
+        }
+      }
+      true
+    }
+
+    unsafe extern "C" fn backend_set_quit_on_last_window_closed(
+      _data: *mut ::std::ffi::c_void,
+      quit: bool,
+    ) {
+      $crate::window_api::set_quit_on_last_window_closed(quit);
+    }
+
     unsafe extern "C" fn backend_set_application_menu(
       _data: *mut ::std::ffi::c_void,
       window_id: u32,
@@ -3307,6 +3550,21 @@ macro_rules! fill_common_api {
       $api.test_trigger_open_url = Some(backend_test_trigger_open_url);
     }
     $api.test_inject_input = Some(backend_test_inject_input);
+    // Window state / constraints / screens / normal bounds / keep-alive
+    // (API >= 38). No display events, title bar styles or backdrops.
+    $api.set_window_state = Some(backend_set_window_state);
+    $api.get_window_state = Some(backend_get_window_state);
+    $api.set_window_state_handler = Some(backend_set_window_state_handler);
+    $api.set_window_size_constraints =
+      Some(backend_set_window_size_constraints);
+    $api.get_window_size_constraints =
+      Some(backend_get_window_size_constraints);
+    $api.get_screens = Some(backend_get_screens);
+    $api.get_window_screen = Some(backend_get_window_screen);
+    $api.window_capabilities = Some(backend_window_capabilities);
+    $api.get_window_normal_bounds = Some(backend_get_window_normal_bounds);
+    $api.set_quit_on_last_window_closed =
+      Some(backend_set_quit_on_last_window_closed);
   };
 }
 
@@ -3503,6 +3761,20 @@ pub fn handle_common_event<B: BackendAccess>(
           }
         });
       }
+      true
+    }
+    CommonEvent::SetWindowState { window_id: eid } if *eid == window_id => {
+      if let Some(action) = window_api::take_action(window_id) {
+        window_api::apply_action(window, action);
+      }
+      window_api::report(window_id, window);
+      true
+    }
+    CommonEvent::SetSizeConstraints { window_id: eid } if *eid == window_id => {
+      window_api::apply_constraints(
+        window,
+        window_api::get_constraints(window_id),
+      );
       true
     }
     CommonEvent::UiTask { task, data } => {
@@ -4389,6 +4661,7 @@ const DOUBLE_CLICK_INTERVAL: std::time::Duration =
   std::time::Duration::from_millis(500);
 const MULTI_CLICK_DISTANCE: f64 = 4.0;
 
+#[allow(clippy::too_many_arguments)]
 pub fn next_click_count(
   prev_button: Option<winit::event::MouseButton>,
   prev_pos: Option<(f64, f64)>,
@@ -4887,6 +5160,29 @@ pub fn find_runtime_library() -> Option<PathBuf> {
   None
 }
 
+static RUNTIME_SHUTDOWN: std::sync::OnceLock<RuntimeShutdownFn> =
+  std::sync::OnceLock::new();
+static RUNTIME_THREAD: Mutex<Option<thread::JoinHandle<()>>> = Mutex::new(None);
+
+/// Call the runtime's `laufey_runtime_shutdown` and wait (up to `timeout`)
+/// for its thread to finish, as the CEF and WebView backends do once their
+/// event loop has ended (`RuntimeLoader::Shutdown`). A runtime that ignores
+/// the signal is abandoned after the timeout rather than hanging the exit.
+pub fn shutdown_runtime(timeout: std::time::Duration) {
+  if let Some(f) = RUNTIME_SHUTDOWN.get() {
+    unsafe { f() };
+  }
+  let Some(handle) = RUNTIME_THREAD.lock().unwrap().take() else {
+    return;
+  };
+  let (tx, rx) = std::sync::mpsc::channel();
+  thread::spawn(move || {
+    let _ = handle.join();
+    let _ = tx.send(());
+  });
+  let _ = rx.recv_timeout(timeout);
+}
+
 pub fn load_and_start_runtime(api: LaufeyBackendApi) {
   // Install `application:openURLs:` before the runtime comes up: AppKit only
   // routes a launch URL to a delegate that already responds to the selector,
@@ -4898,7 +5194,7 @@ pub fn load_and_start_runtime(api: LaufeyBackendApi) {
   match runtime_path {
     Some(path) => {
       println!("Loading runtime from: {}", path.display());
-      thread::spawn(move || unsafe {
+      let handle = thread::spawn(move || unsafe {
         let lib = match Library::new(&path) {
           Ok(l) => l,
           Err(e) => {
@@ -4930,6 +5226,12 @@ pub fn load_and_start_runtime(api: LaufeyBackendApi) {
           eprintln!("Runtime init failed with code: {}", result);
           return;
         }
+        // Kept for shutdown_runtime() once the event loop has ended.
+        if let Ok(f) =
+          lib.get::<RuntimeShutdownFn>(b"laufey_runtime_shutdown\0")
+        {
+          let _ = RUNTIME_SHUTDOWN.set(*f);
+        }
 
         println!("Runtime initialized, starting...");
         let result = start();
@@ -4939,6 +5241,7 @@ pub fn load_and_start_runtime(api: LaufeyBackendApi) {
 
         std::mem::forget(lib);
       });
+      *RUNTIME_THREAD.lock().unwrap() = Some(handle);
     }
     None => {
       println!(

@@ -24,6 +24,9 @@ pub use keyboard::*;
 mod mouse;
 pub use mouse::*;
 
+mod window_state;
+pub use window_state::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
