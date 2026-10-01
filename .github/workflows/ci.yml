@@ -356,9 +356,10 @@ jobs:
             ls ~/Library/Logs/DiagnosticReports/*.ips >/dev/null 2>&1 && break
             sleep 2
           done
-          for f in $(ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -3); do
-            echo "== $f"; head -c 60000 "$f"; echo
-          done
+          # The exception and the crashed + main threads' backtraces; a
+          # whole report is too long for the log.
+          ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -3 |
+            while read -r f; do python3 scripts/print-crash-report.py "$f"; done
 
       # Layer 1 (Linux D-Bus StatusNotifier/dbusmenu observer) is built above
       # (compile-checked on real Linux) but not run here yet: the cef leg now
