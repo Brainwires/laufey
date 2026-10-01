@@ -579,6 +579,9 @@ bool IsLinuxWindowClickPassthrough(unsigned long xid);
 // skip taskbar/pager) so the WM treats it as an auxiliary panel that doesn't
 // take part in normal focus/taskbar handling. Implemented in main_linux.cc.
 void ConfigureLinuxWindowAsPanel(unsigned long xid);
+// gtk_init_check, once (runtime_loader_linux.cc). Call it on the GTK / CEF UI
+// thread before GTK is used.
+void CefEnsureGtkInit();
 #endif
 
 #endif

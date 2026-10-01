@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 38
+#define LAUFEY_API_VERSION 39
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -150,6 +150,134 @@ extern "C" {
 #define LAUFEY_WINDOW_CAP_SET_POSITION \
   (1u << 14)  // set_window_position works
               // (not on Wayland)
+// API >= 39: drag and drop and native file dialogs.
+#define LAUFEY_WINDOW_CAP_FILE_DROP (1u << 15)  // file-drop handler fires
+#define LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS \
+  (1u << 16)  // ENTER / OVER already carry the paths
+              // (otherwise only the count until DROP)
+#define LAUFEY_WINDOW_CAP_FILE_DRAG_OUT (1u << 17)  // start_file_drag
+#define LAUFEY_WINDOW_CAP_FILE_DIALOGS (1u << 18)   // show_file_dialog
+#define LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES \
+  (1u << 19)  // one open dialog may pick files and directories (macOS)
+#define LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL \
+  (1u << 20)  // a dialog with a window_id is modal to it (a sheet on macOS)
+
+// --- Drag and drop (API >= 39) ----------------------------------------------
+//
+// Phases of a file drag over a window, passed to laufey_file_drop_fn.
+#define LAUFEY_DRAG_ENTER 0
+#define LAUFEY_DRAG_OVER 1
+#define LAUFEY_DRAG_LEAVE 2
+#define LAUFEY_DRAG_DROP 3
+
+// Most paths one drop reports; a bigger drop is cut to this many.
+#define LAUFEY_MAX_DROP_PATHS 4096
+
+// Callback fired while files are dragged over a window and when they are
+// dropped on it (see set_file_drop_handler). `x`, `y` are the pointer in
+// window content coordinates, the space of the mouse handlers. `paths` holds
+// `count` absolute native paths (UTF-8), valid only for the duration of the
+// call:
+//   ENTER / OVER  `count` is the number of files dragged; `paths` is NULL
+//                 unless the backend reports LAUFEY_WINDOW_CAP_FILE_DROP_
+//                 ENTER_PATHS (some engines reveal the paths only on drop).
+//   LEAVE         the drag left the window or was cancelled: count 0, NULL.
+//   DROP          the files were dropped: `paths` is never NULL.
+// Only drags that carry files are reported; text, links and file promises
+// that are not files yet (e.g. a photo dragged out of Photos) are not.
+typedef void (*laufey_file_drop_fn)(void* user_data, uint32_t window_id,
+                                    int phase, double x, double y,
+                                    const char* const* paths, size_t count);
+
+// Outcome of start_file_drag, passed to laufey_drag_result_fn.
+#define LAUFEY_DRAG_RESULT_DROPPED 0    // a target accepted the files
+#define LAUFEY_DRAG_RESULT_CANCELLED 1  // the user cancelled, or no target
+#define LAUFEY_DRAG_RESULT_FAILED 2     // not started (see start_file_drag)
+
+typedef void (*laufey_drag_result_fn)(void* user_data, int result);
+
+// --- Native file dialogs (API >= 39) ----------------------------------------
+//
+// Kinds for laufey_file_dialog_options_t.kind.
+#define LAUFEY_FILE_DIALOG_OPEN 0
+#define LAUFEY_FILE_DIALOG_SAVE 1
+
+// Flags for laufey_file_dialog_options_t.flags. An OPEN dialog with neither
+// CHOOSE_FILES nor CHOOSE_DIRECTORIES picks files. Both together pick either
+// only where LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES is reported;
+// elsewhere the dialog picks directories.
+#define LAUFEY_FILE_DIALOG_CHOOSE_FILES (1u << 0)
+#define LAUFEY_FILE_DIALOG_CHOOSE_DIRECTORIES (1u << 1)
+#define LAUFEY_FILE_DIALOG_MULTIPLE (1u << 2)     // OPEN only
+#define LAUFEY_FILE_DIALOG_SHOW_HIDDEN (1u << 3)  // show dot / hidden files
+#define LAUFEY_FILE_DIALOG_NO_OVERWRITE_CONFIRM \
+  (1u << 4)  // SAVE: don't ask before replacing a file (where the OS lets us)
+
+// Result statuses passed to laufey_file_dialog_result_fn.
+#define LAUFEY_FILE_DIALOG_ACCEPTED 0  // `paths` holds the selection
+#define LAUFEY_FILE_DIALOG_CANCELLED \
+  1                                  // the user (or cancel_file_dialog)
+                                     // dismissed it
+#define LAUFEY_FILE_DIALOG_BUSY 2    // another file dialog is open
+#define LAUFEY_FILE_DIALOG_FAILED 3  // the OS could not show it
+
+// Most filters / extensions one dialog accepts; the rest are ignored.
+#define LAUFEY_FILE_DIALOG_MAX_FILTERS 64
+#define LAUFEY_FILE_DIALOG_MAX_EXTENSIONS 256
+
+// One file-type filter: a label ("Images") and extensions without the dot
+// ("png", "jpg"); the extension "*" means every file.
+typedef struct laufey_file_filter {
+  const char* name;
+  const char* const* extensions;
+  size_t extension_count;
+} laufey_file_filter_t;
+
+// Options for show_file_dialog. Every string is UTF-8 and may be NULL for the
+// platform default. `default_path` is a directory to start in, or a file path
+// (an OPEN dialog starts in its directory; a SAVE dialog also proposes its
+// name); a SAVE dialog given only a name proposes that name. The backend copies
+// everything it needs before show_file_dialog returns.
+typedef struct laufey_file_dialog_options {
+  int kind;        // LAUFEY_FILE_DIALOG_OPEN / _SAVE
+  uint32_t flags;  // LAUFEY_FILE_DIALOG_* flags
+  const char* title;
+  const char* default_path;
+  const char* button_label;  // the accept button ("Import")
+  const laufey_file_filter_t* filters;
+  size_t filter_count;
+} laufey_file_dialog_options_t;
+
+// Result of show_file_dialog: `status` is LAUFEY_FILE_DIALOG_*; for ACCEPTED
+// `paths` holds `count` (>= 1) absolute native paths, otherwise it is NULL and
+// `count` is 0. Valid only for the duration of the call.
+typedef void (*laufey_file_dialog_result_fn)(void* user_data,
+                                             uint32_t dialog_id, int status,
+                                             const char* const* paths,
+                                             size_t count);
+
+// Actions for test_file_dialog_respond.
+#define LAUFEY_TEST_DIALOG_CANCEL 0
+#define LAUFEY_TEST_DIALOG_ACCEPT 1
+
+// --- Clipboard: HTML, images, formats and change events (API >= 39) ---------
+//
+// Capability bits returned by clipboard_capabilities.
+#define LAUFEY_CLIPBOARD_CAP_TEXT (1u << 0)     // read/write_clipboard_text
+#define LAUFEY_CLIPBOARD_CAP_HTML (1u << 1)     // read/write_clipboard_html
+#define LAUFEY_CLIPBOARD_CAP_IMAGE (1u << 2)    // read/write_clipboard_image
+#define LAUFEY_CLIPBOARD_CAP_FORMATS (1u << 3)  // read_clipboard_formats
+#define LAUFEY_CLIPBOARD_CAP_CHANGE_EVENTS \
+  (1u << 4)  // set_clipboard_change_handler fires
+
+// Largest clipboard payload a read returns (text, HTML or PNG bytes). Bigger
+// content reads as absent, so a huge copy elsewhere can't exhaust memory here.
+#define LAUFEY_CLIPBOARD_MAX_READ_BYTES (64u * 1024u * 1024u)
+
+// Callback fired when the system clipboard's content changes (any app,
+// including this one). Fires on the backend UI thread; read the clipboard to
+// see the new content.
+typedef void (*laufey_clipboard_change_fn)(void* user_data);
 
 // One display, as reported by get_screens. Every rectangle is in the same
 // top-left-origin screen space and units as get_window_position /
@@ -896,11 +1024,12 @@ struct laufey_backend_api {
 
   // Read the clipboard's text content. Returns a heap-allocated UTF-8 string
   // the caller must free via `string_free`, or NULL if the clipboard is empty
-  // or holds no text representation. Must be called on the UI thread.
+  // or holds no text representation. Any thread from API 39 (see the
+  // clipboard section at the end of this table); before that, the UI thread.
   char* (*read_clipboard_text)(void* backend_data);
 
   // Replace the clipboard's content with `text` (UTF-8). Pass NULL or "" to
-  // clear the clipboard. Must be called on the UI thread.
+  // clear the clipboard. Any thread from API 39; before that, the UI thread.
   void (*write_clipboard_text)(void* backend_data, const char* text);
 
   // --- Custom URL scheme handler (API >= 26) ---------------------------------
@@ -1341,6 +1470,139 @@ struct laufey_backend_api {
   // policy is Accessory (set_dock_visible(false)) also stays alive when its
   // last window closes, whatever this is set to. quit() always ends the loop.
   void (*set_quit_on_last_window_closed)(void* backend_data, bool quit);
+
+  // --- Drag and drop (API >= 39) ---------------------------------------------
+  //
+  // Register the (process-wide) file-drop handler; NULL clears it. See
+  // laufey_file_drop_fn and docs/drag-and-drop.md. The page keeps receiving
+  // its own DOM drag events (with File objects, never paths); this handler is
+  // where the native paths are. LAUFEY_WINDOW_CAP_FILE_DROP says whether it
+  // fires. Fires on the backend UI thread.
+  void (*set_file_drop_handler)(void* backend_data, laufey_file_drop_fn handler,
+                                void* user_data);
+
+  // Start dragging `count` files (absolute paths, UTF-8) out of the window to
+  // another app or the desktop, as a copy, with `icon_png` (PNG bytes; NULL /
+  // 0 for the platform's file icon) under the pointer. The OS drives the drag
+  // modally from the pointer's current position, so call it while the left
+  // mouse button is held: from the page's `dragstart` (cancel the page's own
+  // drag with preventDefault()) or a `mousedown` + move. Any thread; the
+  // backend hops to its UI thread.
+  //
+  // `callback` is invoked EXACTLY ONCE with a LAUFEY_DRAG_RESULT_*: on the
+  // backend UI thread (Windows: its I/O thread) when the drag ends, or
+  // synchronously on the calling thread with FAILED, before start_file_drag
+  // returns, when the request is refused (no paths, more than
+  // LAUFEY_MAX_DROP_PATHS, a path that is not an existing absolute path, or a
+  // backend without drag-out). FAILED also comes from the UI thread when the
+  // drag can't start there (no left button held, another drag in progress, an
+  // unknown window). NULL callback: fire and forget.
+  // LAUFEY_WINDOW_CAP_FILE_DRAG_OUT says whether the backend can do it at all.
+  void (*start_file_drag)(void* backend_data, uint32_t window_id,
+                          const char* const* paths, size_t count,
+                          const uint8_t* icon_png, size_t icon_len,
+                          laufey_drag_result_fn callback, void* user_data);
+
+  // Test-only. Delivers a file-drag phase to the registered file-drop handler
+  // through the same dispatch the OS path uses (paths are copied and capped
+  // the same way). Returns true if a handler received it. NULL on backends
+  // that do not implement it.
+  bool (*test_trigger_file_drop)(void* backend_data, uint32_t window_id,
+                                 int phase, double x, double y,
+                                 const char* const* paths, size_t count);
+
+  // --- Native file dialogs (API >= 39) ---------------------------------------
+  //
+  // Show an open / save / folder dialog: the OS's own (NSOpenPanel /
+  // NSSavePanel, IFileOpenDialog / IFileSaveDialog, GtkFileChooserNative, the
+  // last one portal-aware). Any thread: the backend shows it on its UI thread
+  // and returns at once, so the runtime thread never blocks. `window_id` != 0
+  // makes the dialog modal to that window (a sheet on macOS) where
+  // LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL is reported; 0 shows an app-level
+  // dialog. One file dialog is open at a time per app.
+  //
+  // Returns the dialog id (> 0) that cancel_file_dialog takes and the callback
+  // carries, or 0 when the request was answered at once. `callback` fires
+  // EXACTLY ONCE: on the backend UI thread (Windows: the backend's own I/O
+  // thread, so the dialog's modal loop never stalls the engine's UI thread)
+  // when the dialog closes, or
+  // synchronously on the calling thread before this returns 0 (BUSY while
+  // another dialog is open; FAILED for bad options, a NULL `options`, or a
+  // backend without dialogs). A NULL `callback` returns 0 and shows nothing.
+  // `options` is copied before this returns.
+  uint32_t (*show_file_dialog)(void* backend_data, uint32_t window_id,
+                               const laufey_file_dialog_options_t* options,
+                               laufey_file_dialog_result_fn callback,
+                               void* user_data);
+
+  // Close an open file dialog as if the user cancelled it (its callback gets
+  // LAUFEY_FILE_DIALOG_CANCELLED). Returns false when no dialog with that id
+  // is open. Any thread.
+  bool (*cancel_file_dialog)(void* backend_data, uint32_t dialog_id);
+
+  // Test-only. Acts on the open file dialog as a user would: CANCEL closes
+  // it; ACCEPT first puts `path` (absolute, UTF-8; NULL keeps the dialog's
+  // own selection) into it where the platform lets a program do that, then
+  // accepts, so the result comes back through the dialog's own completion
+  // path. Returns false when no dialog is open or the platform can't accept
+  // programmatically (e.g. a portal dialog). Any thread. NULL on backends
+  // that do not implement it.
+  bool (*test_file_dialog_respond)(void* backend_data, int action,
+                                   const char* path);
+
+  // --- Clipboard: HTML, images, formats, changes (API >= 39) -----------------
+  //
+  // From API 39 every clipboard call, read_clipboard_text and
+  // write_clipboard_text included, may be made from any thread: the backend
+  // runs it where the platform requires (the main / GTK thread on macOS and
+  // Linux). Reads larger than LAUFEY_CLIPBOARD_MAX_READ_BYTES answer NULL.
+
+  // LAUFEY_CLIPBOARD_CAP_* bits for this backend on this OS. Any thread.
+  uint32_t (*clipboard_capabilities)(void* backend_data);
+
+  // The clipboard's HTML (UTF-8, a fragment or a document as the source app
+  // wrote it), freed with string_free, or NULL when it holds none. On Windows
+  // the CF_HTML header is stripped and the fragment returned.
+  char* (*read_clipboard_html)(void* backend_data);
+
+  // Replace the clipboard with `html`, plus `text_or_null` as the plain-text
+  // alternative for apps that don't take HTML (NULL: none). Returns false when
+  // the write failed.
+  bool (*write_clipboard_html)(void* backend_data, const char* html,
+                               const char* text_or_null);
+
+  // The clipboard's image as PNG bytes (`*len_out` set), freed with
+  // buffer_free, or NULL when it holds none. Other image formats on the
+  // clipboard (TIFF on macOS, a DIB on Windows, any pixbuf format on Linux)
+  // are converted to PNG.
+  uint8_t* (*read_clipboard_image)(void* backend_data, size_t* len_out);
+
+  // Replace the clipboard with the PNG image `png` (also offered in the
+  // platform's native image format so every app can paste it). Returns false
+  // when `png` is not a decodable PNG or the write failed.
+  bool (*write_clipboard_image)(void* backend_data, const uint8_t* png,
+                                size_t len);
+
+  // The kinds of content on the clipboard, as MIME types separated by '\n'
+  // (NUL-terminated, freed with string_free): "text/plain", "text/html",
+  // "image/png" (any image), "text/uri-list" (files), "text/rtf". An empty
+  // string for an empty clipboard; NULL on failure.
+  char* (*read_clipboard_formats)(void* backend_data);
+
+  // Register the (process-wide) clipboard-change handler; NULL clears it.
+  // macOS has no change notification, so the backend polls the pasteboard's
+  // change count (twice a second) only while a handler is set; Windows uses
+  // AddClipboardFormatListener; Linux the GTK clipboard's owner-change (X11
+  // needs XFixes; on Wayland GTK only hears of changes while one of the app's
+  // windows has focus). LAUFEY_CLIPBOARD_CAP_CHANGE_EVENTS says whether it
+  // fires. Any thread; the handler fires on the backend UI thread (Windows:
+  // the backend's I/O thread).
+  void (*set_clipboard_change_handler)(void* backend_data,
+                                       laufey_clipboard_change_fn handler,
+                                       void* user_data);
+
+  // Free a buffer returned by read_clipboard_image. Safe with NULL.
+  void (*buffer_free)(void* backend_data, void* buffer);
 };
 
 #ifdef __cplusplus

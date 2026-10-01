@@ -28,6 +28,7 @@
 //! it unchanged.
 
 mod body_echo;
+mod io_checks;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -574,6 +575,12 @@ fn e2e_main() {
     // (both end the process, so they can't share the main battery's run).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("lifetime") {
       lifetime_checks().await;
+    }
+    // LAUFEY_E2E_ONLY=io: drag and drop, file dialogs and the rich clipboard
+    // (API 39); runs on every backend, webview/linux included.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("io") {
+      io_checks::run().await;
+      finish();
     }
     // LAUFEY_E2E_ONLY=window-api: only the API 38 window checks (e.g. under a
     // real window manager, where the rest of the battery assumes none).

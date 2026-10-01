@@ -7,6 +7,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_io.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
@@ -181,6 +182,50 @@ class WKWebViewBackend : public LaufeyBackend {
   void RequestPermission(int kind, laufey_permission_callback_fn cb,
                          void* user_data) override;
 
+  // Drag and drop, file dialogs, rich clipboard (API >= 39).
+  void SetFileDropHandler(laufey_file_drop_fn handler,
+                          void* user_data) override {
+    laufey_common::SetFileDropHandler(handler, user_data);
+  }
+  bool TestTriggerFileDrop(uint32_t window_id, int phase, double x, double y,
+                           const char* const* paths, size_t count) override;
+  void StartFileDrag(uint32_t window_id, const char* const* paths, size_t count,
+                     const uint8_t* icon_png, size_t icon_len,
+                     laufey_drag_result_fn callback, void* user_data) override;
+  uint32_t ShowFileDialog(uint32_t window_id,
+                          const laufey_file_dialog_options_t* options,
+                          laufey_file_dialog_result_fn callback,
+                          void* user_data) override;
+  bool CancelFileDialog(uint32_t dialog_id) override {
+    return laufey_common::CancelFileDialogMac(dialog_id);
+  }
+  bool TestFileDialogRespond(int action, const char* path) override {
+    return laufey_common::TestFileDialogRespondMac(action, path);
+  }
+  uint32_t ClipboardCapabilities() override {
+    return laufey_common::ClipboardCapabilitiesMac();
+  }
+  char* ReadClipboardHtml() override {
+    return laufey_common::ClipboardReadHtmlMac();
+  }
+  bool WriteClipboardHtml(const std::string& html,
+                          const char* text_or_null) override {
+    return laufey_common::ClipboardWriteHtmlMac(html, text_or_null);
+  }
+  uint8_t* ReadClipboardImage(size_t* len_out) override {
+    return laufey_common::ClipboardReadImageMac(len_out);
+  }
+  bool WriteClipboardImage(const uint8_t* png, size_t len) override {
+    return laufey_common::ClipboardWriteImageMac(png, len);
+  }
+  char* ReadClipboardFormats() override {
+    return laufey_common::ClipboardReadFormatsMac();
+  }
+  void SetClipboardChangeHandler(laufey_clipboard_change_fn handler,
+                                 void* user_data) override {
+    laufey_common::SetClipboardChangeHandler(handler, user_data);
+  }
+
   // Window state, constraints, screens and chrome (API >= 38).
   uint32_t WindowCapabilities() override;
   void SetWindowState(uint32_t window_id, int action) override;
@@ -287,6 +332,102 @@ static void UnregisterNSWindow(NSWindow* win) {
 }
 - (BOOL)canBecomeMainWindow {
   return YES;
+}
+@end
+
+// The WKWebView every window uses. It is the window's drag destination, so it
+// is where file drags are seen: each phase goes to the file-drop handler with
+// the native paths (from the dragging pasteboard's file URLs) before WebKit
+// handles it, so the page keeps getting its own DOM drag events. A file drag
+// is always accepted (copy), even where the page doesn't handle it, so the
+// drop reaches the runtime; WebKit's answer still decides what the page does.
+@interface LaufeyWebView : WKWebView
+@property(nonatomic, assign) uint32_t laufeyWindowId;
+@end
+
+static std::vector<std::string> DraggedFilePaths(id<NSDraggingInfo> info) {
+  std::vector<std::string> paths;
+  NSArray<NSURL*>* urls = [[info draggingPasteboard]
+      readObjectsForClasses:@[ [NSURL class] ]
+                    options:@{
+                      NSPasteboardURLReadingFileURLsOnlyKey : @YES
+                    }];
+  for (NSURL* url in urls) {
+    if (url.isFileURL && url.path.length > 0)
+      paths.emplace_back(url.path.UTF8String);
+  }
+  return paths;
+}
+
+@implementation LaufeyWebView {
+  std::vector<std::string> _dragPaths;  // the current file drag's paths
+  bool _fileDrag;
+  NSDragOperation _webkitOp;  // WebKit's answer to the last enter / update
+  NSPoint _lastPoint;
+}
+
+- (NSPoint)laufeyDragPoint:(id<NSDraggingInfo>)info {
+  NSPoint p = [self convertPoint:[info draggingLocation] fromView:nil];
+  if (!self.isFlipped)
+    p.y = NSHeight(self.bounds) - p.y;
+  return p;
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)info {
+  NSDragOperation op = [super draggingEntered:info];
+  _webkitOp = op;
+  _dragPaths = DraggedFilePaths(info);
+  _fileDrag = !_dragPaths.empty();
+  if (!_fileDrag)
+    return op;
+  _lastPoint = [self laufeyDragPoint:info];
+  laufey_common::DispatchFileDrop(self.laufeyWindowId, LAUFEY_DRAG_ENTER,
+                                  _lastPoint.x, _lastPoint.y, _dragPaths,
+                                  _dragPaths.size());
+  return op == NSDragOperationNone ? NSDragOperationCopy : op;
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)info {
+  NSDragOperation op = [super draggingUpdated:info];
+  _webkitOp = op;
+  if (!_fileDrag)
+    return op;
+  NSPoint p = [self laufeyDragPoint:info];
+  if (!NSEqualPoints(p, _lastPoint)) {
+    _lastPoint = p;
+    laufey_common::DispatchFileDrop(self.laufeyWindowId, LAUFEY_DRAG_OVER, p.x,
+                                    p.y, _dragPaths, _dragPaths.size());
+  }
+  return op == NSDragOperationNone ? NSDragOperationCopy : op;
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)info {
+  [super draggingExited:info];
+  if (!_fileDrag)
+    return;
+  _fileDrag = false;
+  _dragPaths.clear();
+  NSPoint p = [self laufeyDragPoint:info];
+  laufey_common::DispatchFileDrop(self.laufeyWindowId, LAUFEY_DRAG_LEAVE, p.x,
+                                  p.y, {}, 0);
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)info {
+  if (!_fileDrag)
+    return [super performDragOperation:info];
+  std::vector<std::string> paths = std::move(_dragPaths);
+  _dragPaths.clear();
+  _fileDrag = false;
+  NSPoint p = [self laufeyDragPoint:info];
+  laufey_common::DispatchFileDrop(self.laufeyWindowId, LAUFEY_DRAG_DROP, p.x,
+                                  p.y, paths, paths.size());
+  if (_webkitOp == NSDragOperationNone) {
+    // WebKit refused this drop; we only accepted it for the runtime. End
+    // WebKit's drag session the way a cancelled drag would.
+    [super draggingExited:info];
+    return YES;
+  }
+  return [super performDragOperation:info];
 }
 @end
 
@@ -1238,8 +1379,9 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
           forMainFrameOnly:YES];
       [config.userContentController addUserScript:script];
 
-      WKWebView* webview = [[WKWebView alloc] initWithFrame:frame
-                                              configuration:config];
+      LaufeyWebView* webview = [[LaufeyWebView alloc] initWithFrame:frame
+                                                      configuration:config];
+      webview.laufeyWindowId = window_id;
       if ([webview respondsToSelector:@selector(setInspectable:)]) {
         [webview setInspectable:YES];
       }
@@ -2444,6 +2586,68 @@ void RunOnMainSync(dispatch_block_t block) {
 }
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Drag and drop, file dialogs (API >= 39)
+// ---------------------------------------------------------------------------
+
+bool WKWebViewBackend::TestTriggerFileDrop(uint32_t window_id, int phase,
+                                           double x, double y,
+                                           const char* const* paths,
+                                           size_t count) {
+  // The OS path dispatches on the main thread; so does the hook.
+  __block bool delivered = false;
+  void (^body)(void) = ^{
+    delivered = laufey_common::TestTriggerFileDrop(window_id, phase, x, y,
+                                                   paths, count);
+  };
+  if ([NSThread isMainThread]) {
+    body();
+  } else {
+    dispatch_sync(dispatch_get_main_queue(), body);
+  }
+  return delivered;
+}
+
+void WKWebViewBackend::StartFileDrag(uint32_t window_id,
+                                     const char* const* paths, size_t count,
+                                     const uint8_t* icon_png, size_t icon_len,
+                                     laufey_drag_result_fn callback,
+                                     void* user_data) {
+  auto* req = new laufey_common::DragOutRequest();
+  req->callback = callback;
+  req->user_data = user_data;
+  WKWebView* webview = nil;
+  {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      webview = state->webview;
+  }
+  if (!webview ||
+      !laufey_common::ValidateDragPaths(paths, count, &req->paths)) {
+    req->Finish(LAUFEY_DRAG_RESULT_FAILED);
+    delete req;
+    return;
+  }
+  if (icon_png && icon_len > 0)
+    req->icon_png.assign(icon_png, icon_png + icon_len);
+  laufey_common::StartFileDragMac((__bridge void*)webview, req);
+}
+
+uint32_t WKWebViewBackend::ShowFileDialog(
+    uint32_t window_id, const laufey_file_dialog_options_t* options,
+    laufey_file_dialog_result_fn callback, void* user_data) {
+  laufey_common::ParentResolver parent;
+  if (window_id != 0) {
+    parent = [this, window_id]() -> void* {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      return state ? (__bridge void*)state->window : nullptr;
+    };
+  }
+  return laufey_common::ShowFileDialogMac(std::move(parent), options, callback,
+                                          user_data);
+}
+
 uint32_t WKWebViewBackend::WindowCapabilities() {
   return LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
          LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS | LAUFEY_WINDOW_CAP_SCREENS |
@@ -2451,7 +2655,11 @@ uint32_t WKWebViewBackend::WindowCapabilities() {
          LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN_INSET |
          LAUFEY_WINDOW_CAP_TRAFFIC_LIGHT_POSITION | LAUFEY_WINDOW_CAP_VIBRANCY |
          LAUFEY_WINDOW_CAP_NORMAL_BOUNDS | LAUFEY_WINDOW_CAP_KEEP_ALIVE |
-         LAUFEY_WINDOW_CAP_SET_POSITION;
+         LAUFEY_WINDOW_CAP_SET_POSITION | LAUFEY_WINDOW_CAP_FILE_DROP |
+         LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
+         LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOGS |
+         LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES |
+         LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
 }
 
 void WKWebViewBackend::SetWindowState(uint32_t window_id, int action) {

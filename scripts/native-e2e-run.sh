@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus.
@@ -14,9 +14,11 @@
 # share the main battery's run.
 # --window-api runs only the API 38 window checks (state, constraints,
 # screens, title bar, backdrops); handy under a real window manager.
+# --io runs only the API 39 checks: drag and drop (through the test hook),
+# real file dialogs driven by the test hook, the rich clipboard.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -47,6 +49,9 @@ if [ "$mode" = "--lifetime" ]; then
 fi
 if [ "$mode" = "--window-api" ]; then
   export LAUFEY_E2E_ONLY=window-api
+fi
+if [ "$mode" = "--io" ]; then
+  export LAUFEY_E2E_ONLY=io
 fi
 
 # Resolve the backend binary (handles macOS .app bundles).

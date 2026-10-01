@@ -43,6 +43,7 @@ set(LAUFEY_COMMON_SRCS
   src/single_instance.cc
   src/passkey.cc
   src/window_state.cc
+  src/io.cc
 )
 
 if(WIN32)
@@ -65,6 +66,7 @@ if(APPLE)
     src/single_instance_mac.mm
     src/passkey_mac.mm
     src/window_mac.mm
+    src/io_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -75,6 +77,7 @@ elseif(UNIX)
     src/keymap_gdk.cc
     src/menu_linux.cc
     src/tray_linux.cc
+    src/io_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -86,6 +89,7 @@ elseif(WIN32)
     src/tray_win.cc
     src/passkey_win.cc
     src/window_win.cc
+    src/io_win.cc
   )
 endif()
 
@@ -107,6 +111,7 @@ if(WIN32)
     advapi32
     dwmapi
     shcore
+    uuid
   )
 elseif(APPLE)
   find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
@@ -194,6 +199,12 @@ if(LAUFEY_BUILD_TESTS)
     laufey_backend_common
   )
   add_test(NAME laufey_window_state_test COMMAND laufey_window_state_test)
+
+  # Drag-and-drop dispatch, drag-out path checks, the file dialog slot and
+  # option copying, file URIs, CF_HTML and clipboard format lists (no OS API).
+  add_executable(laufey_io_test tests/io_test.cc)
+  target_link_libraries(laufey_io_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_io_test COMMAND laufey_io_test)
 
   if(APPLE)
     # ASAuthorization error mapping (synthetic NSErrors, no ceremony).

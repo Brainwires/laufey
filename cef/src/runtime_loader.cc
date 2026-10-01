@@ -4,6 +4,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_io.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_single_instance.h"
@@ -19,6 +20,10 @@
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
+
+#ifdef __linux__
+#include <gtk/gtk.h>
 #endif
 
 #include <algorithm>
@@ -1927,6 +1932,7 @@ static char* Backend_ReadClipboardText(void* /*data*/) {
 #ifdef __APPLE__
   return laufey_common::ClipboardReadTextMac();
 #elif defined(__linux__)
+  laufey_common::GtkRunSync([] { CefEnsureGtkInit(); });
   return laufey_common::ClipboardReadTextLinux();
 #elif defined(_WIN32)
   return laufey_common::ClipboardReadTextWin();
@@ -1940,12 +1946,251 @@ static void Backend_WriteClipboardText(void* /*data*/, const char* text) {
 #ifdef __APPLE__
   laufey_common::ClipboardWriteTextMac(text_str);
 #elif defined(__linux__)
+  laufey_common::GtkRunSync([] { CefEnsureGtkInit(); });
   laufey_common::ClipboardWriteTextLinux(text_str);
 #elif defined(_WIN32)
   laufey_common::ClipboardWriteTextWin(text_str);
 #else
   (void)text_str;
 #endif
+}
+
+// --- Drag and drop, file dialogs, rich clipboard (API >= 39) ----------------
+//
+// Drops: CefDragHandler::OnDragEnter hands the browser process the dragged
+// files' paths (LaufeyHandler keeps them per browser); a closure-private
+// observer injected into the main frame (render_process_handler.cc) reports
+// where the drag is and when it drops, and LaufeyHandler dispatches each
+// phase with those paths. Dialogs, drag-out and the clipboard are the OS's
+// own, shared with the WebView backends (backend-common): the same dialogs
+// on every backend, not CEF's RunFileDialog.
+
+static CefRefPtr<CefWindow> CefWindowForId(uint32_t window_id);
+
+#ifdef __linux__
+// GTK must be initialized before the Linux clipboard / dialogs / drag source
+// touch it (runtime_loader_linux.cc); do it on the GTK (CEF UI) thread.
+static void EnsureGtkReady() {
+  laufey_common::GtkRunSync([] { CefEnsureGtkInit(); });
+}
+#endif
+
+static void Backend_SetFileDropHandler(void* /*data*/,
+                                       laufey_file_drop_fn handler,
+                                       void* user_data) {
+  laufey_common::SetFileDropHandler(handler, user_data);
+}
+
+static bool Backend_TestTriggerFileDrop(void* /*data*/, uint32_t window_id,
+                                        int phase, double x, double y,
+                                        const char* const* paths,
+                                        size_t count) {
+  // Real drops are dispatched on the UI thread (LaufeyHandler); so is this.
+  bool delivered = false;
+  cef_invoke_sync([&] {
+    delivered = laufey_common::TestTriggerFileDrop(window_id, phase, x, y,
+                                                   paths, count);
+  });
+  return delivered;
+}
+
+static void Backend_StartFileDrag(void* /*data*/, uint32_t window_id,
+                                  const char* const* paths, size_t count,
+                                  const uint8_t* icon_png, size_t icon_len,
+                                  laufey_drag_result_fn callback,
+                                  void* user_data) {
+  auto* req = new laufey_common::DragOutRequest();
+  req->callback = callback;
+  req->user_data = user_data;
+  if (!RuntimeLoader::GetInstance()->GetBrowserForWindow(window_id) ||
+      !laufey_common::ValidateDragPaths(paths, count, &req->paths)) {
+    req->Finish(LAUFEY_DRAG_RESULT_FAILED);
+    delete req;
+    return;
+  }
+  if (icon_png && icon_len > 0)
+    req->icon_png.assign(icon_png, icon_png + icon_len);
+#if defined(__APPLE__)
+  // The window's content view is the drag source; resolved on the UI (main)
+  // thread, where StartFileDragMac runs anyway.
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](uint32_t wid, laufey_common::DragOutRequest* r) {
+                            CefRefPtr<CefWindow> window = CefWindowForId(wid);
+                            if (!window) {
+                              r->Finish(LAUFEY_DRAG_RESULT_FAILED);
+                              delete r;
+                              return;
+                            }
+                            laufey_common::StartFileDragMac(
+                                window->GetWindowHandle(), r);
+                          },
+                          window_id, req));
+#elif defined(_WIN32)
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](uint32_t wid, laufey_common::DragOutRequest* r) {
+                            CefRefPtr<CefWindow> window = CefWindowForId(wid);
+                            if (!window) {
+                              r->Finish(LAUFEY_DRAG_RESULT_FAILED);
+                              delete r;
+                              return;
+                            }
+                            laufey_common::StartFileDragWin(
+                                window->GetWindowHandle(), r);
+                          },
+                          window_id, req));
+#else
+  // Chromium's windows are not GTK's; GTK drags from its own invisible
+  // source widget, which needs an X11 display (see the capability).
+  EnsureGtkReady();
+  laufey_common::StartFileDragLinux(nullptr, req);
+#endif
+}
+
+#if defined(__APPLE__) || defined(_WIN32)
+// The dialog's owner: the CefWindow's NSWindow / HWND, looked up on the UI
+// thread right before the dialog shows.
+static laufey_common::ParentResolver CefParentResolver(uint32_t window_id) {
+  if (window_id == 0)
+    return nullptr;
+  return [window_id]() -> void* {
+    CefRefPtr<CefWindow> window = CefWindowForId(window_id);
+    if (!window)
+      return nullptr;
+#if defined(__APPLE__)
+    return NSWindowForCefHandle(window->GetWindowHandle());
+#else
+    return window->GetWindowHandle();
+#endif
+  };
+}
+#endif
+
+static uint32_t Backend_ShowFileDialog(
+    void* /*data*/, uint32_t window_id,
+    const laufey_file_dialog_options_t* options,
+    laufey_file_dialog_result_fn callback, void* user_data) {
+  if (!callback)
+    return 0;
+#if defined(__APPLE__)
+  return laufey_common::ShowFileDialogMac(CefParentResolver(window_id), options,
+                                          callback, user_data);
+#elif defined(_WIN32)
+  return laufey_common::ShowFileDialogWin(CefParentResolver(window_id), options,
+                                          callback, user_data);
+#else
+  // GtkFileChooserNative needs a GtkWindow to be modal to; Chromium's X11 /
+  // Wayland windows aren't GTK's, so the dialog is app-level here.
+  (void)window_id;
+  EnsureGtkReady();
+  return laufey_common::ShowFileDialogLinux(nullptr, options, callback,
+                                            user_data);
+#endif
+}
+
+static bool Backend_CancelFileDialog(void* /*data*/, uint32_t dialog_id) {
+#if defined(__APPLE__)
+  return laufey_common::CancelFileDialogMac(dialog_id);
+#elif defined(_WIN32)
+  return laufey_common::CancelFileDialogWin(dialog_id);
+#else
+  return laufey_common::CancelFileDialogLinux(dialog_id);
+#endif
+}
+
+static bool Backend_TestFileDialogRespond(void* /*data*/, int action,
+                                          const char* path) {
+#if defined(__APPLE__)
+  return laufey_common::TestFileDialogRespondMac(action, path);
+#elif defined(_WIN32)
+  return laufey_common::TestFileDialogRespondWin(action, path);
+#else
+  return laufey_common::TestFileDialogRespondLinux(action, path);
+#endif
+}
+
+static uint32_t Backend_ClipboardCapabilities(void* /*data*/) {
+#if defined(__APPLE__)
+  return laufey_common::ClipboardCapabilitiesMac();
+#elif defined(_WIN32)
+  return laufey_common::ClipboardCapabilitiesWin();
+#else
+  EnsureGtkReady();
+  return laufey_common::ClipboardCapabilitiesLinux();
+#endif
+}
+
+static char* Backend_ReadClipboardHtml(void* /*data*/) {
+#if defined(__APPLE__)
+  return laufey_common::ClipboardReadHtmlMac();
+#elif defined(_WIN32)
+  return laufey_common::ClipboardReadHtmlWin();
+#else
+  EnsureGtkReady();
+  return laufey_common::ClipboardReadHtmlLinux();
+#endif
+}
+
+static bool Backend_WriteClipboardHtml(void* /*data*/, const char* html,
+                                       const char* text_or_null) {
+  if (!html)
+    return false;
+#if defined(__APPLE__)
+  return laufey_common::ClipboardWriteHtmlMac(html, text_or_null);
+#elif defined(_WIN32)
+  return laufey_common::ClipboardWriteHtmlWin(html, text_or_null);
+#else
+  EnsureGtkReady();
+  return laufey_common::ClipboardWriteHtmlLinux(html, text_or_null);
+#endif
+}
+
+static uint8_t* Backend_ReadClipboardImage(void* /*data*/, size_t* len_out) {
+#if defined(__APPLE__)
+  return laufey_common::ClipboardReadImageMac(len_out);
+#elif defined(_WIN32)
+  return laufey_common::ClipboardReadImageWin(len_out);
+#else
+  EnsureGtkReady();
+  return laufey_common::ClipboardReadImageLinux(len_out);
+#endif
+}
+
+static bool Backend_WriteClipboardImage(void* /*data*/, const uint8_t* png,
+                                        size_t len) {
+  if (!png || len == 0)
+    return false;
+#if defined(__APPLE__)
+  return laufey_common::ClipboardWriteImageMac(png, len);
+#elif defined(_WIN32)
+  return laufey_common::ClipboardWriteImageWin(png, len);
+#else
+  EnsureGtkReady();
+  return laufey_common::ClipboardWriteImageLinux(png, len);
+#endif
+}
+
+static char* Backend_ReadClipboardFormats(void* /*data*/) {
+#if defined(__APPLE__)
+  return laufey_common::ClipboardReadFormatsMac();
+#elif defined(_WIN32)
+  return laufey_common::ClipboardReadFormatsWin();
+#else
+  EnsureGtkReady();
+  return laufey_common::ClipboardReadFormatsLinux();
+#endif
+}
+
+static void Backend_SetClipboardChangeHandler(void* /*data*/,
+                                              laufey_clipboard_change_fn fn,
+                                              void* user_data) {
+#ifdef __linux__
+  EnsureGtkReady();
+#endif
+  laufey_common::SetClipboardChangeHandler(fn, user_data);
+}
+
+static void Backend_BufferFree(void* /*data*/, void* buffer) {
+  free(buffer);
 }
 
 // Test hook (API >= 30): synthesize a click on a menu/tray item by id. Platform
@@ -2081,6 +2326,29 @@ static uint32_t Backend_WindowCapabilities(void* /*data*/) {
   const char* wayland = getenv("WAYLAND_DISPLAY");
   if (!(wayland && *wayland))
     caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
+#endif
+  // Drag and drop and file dialogs (API >= 39). OnDragEnter has the paths
+  // from the start. macOS sheets and Windows owner windows are modal; on
+  // Linux the GTK dialog can't be made modal to Chromium's (non-GTK) window,
+  // and the GTK drag source needs an X11 display.
+  caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
+          LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
+          LAUFEY_WINDOW_CAP_FILE_DIALOGS;
+#if defined(__APPLE__)
+  caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT |
+          LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES |
+          LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+#elif defined(_WIN32)
+  caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+#else
+  EnsureGtkReady();
+  bool x11 = false;
+  laufey_common::GtkRunSync([&] {
+    GdkDisplay* display = gdk_display_get_default();
+    x11 = display && strstr(G_OBJECT_TYPE_NAME(display), "X11") != nullptr;
+  });
+  if (x11)
+    caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT;
 #endif
   return caps;
 }
@@ -2367,6 +2635,16 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.version = LAUFEY_API_VERSION;
   backend_api_.backend_data = this;
   backend_api_.test_click_menu_item = Backend_TestClickMenuItem;
+#ifdef __linux__
+  // backend-common's GTK work (clipboard, file dialogs, drag source) runs on
+  // the CEF UI thread, through CEF's own task queue.
+  laufey_common::SetGtkThread(
+      [](std::function<void()> fn) {
+        CefPostTask(TID_UI, base::BindOnce([](std::function<void()> f) { f(); },
+                                           std::move(fn)));
+      },
+      [] { return CefCurrentlyOn(TID_UI); });
+#endif
 
   backend_api_.create_window = Backend_CreateWindow;
   backend_api_.create_window_ex = Backend_CreateWindowEx;
@@ -2533,6 +2811,22 @@ void RuntimeLoader::InitializeBackendApi() {
   // Passkeys (API >= 37): see docs/passkeys.md.
   backend_api_.passkey_capabilities = Backend_PasskeyCapabilities;
   backend_api_.passkey_request = Backend_PasskeyRequest;
+
+  // Drag and drop, file dialogs and the rich clipboard (API >= 39).
+  backend_api_.set_file_drop_handler = Backend_SetFileDropHandler;
+  backend_api_.start_file_drag = Backend_StartFileDrag;
+  backend_api_.test_trigger_file_drop = Backend_TestTriggerFileDrop;
+  backend_api_.show_file_dialog = Backend_ShowFileDialog;
+  backend_api_.cancel_file_dialog = Backend_CancelFileDialog;
+  backend_api_.test_file_dialog_respond = Backend_TestFileDialogRespond;
+  backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
+  backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
+  backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;
+  backend_api_.read_clipboard_image = Backend_ReadClipboardImage;
+  backend_api_.write_clipboard_image = Backend_WriteClipboardImage;
+  backend_api_.read_clipboard_formats = Backend_ReadClipboardFormats;
+  backend_api_.set_clipboard_change_handler = Backend_SetClipboardChangeHandler;
+  backend_api_.buffer_free = Backend_BufferFree;
 
   // --- Tray / status bar ---
 #if defined(__APPLE__)

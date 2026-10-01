@@ -4,6 +4,7 @@
 #include "custom_schemes.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_io.h"
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
 #include "laufey_single_instance.h"
@@ -285,6 +286,7 @@ bool LaufeyHandler::DoClose(CefRefPtr<CefBrowser> browser) {
 
 void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
+  file_drag_paths_.erase(browser->GetIdentifier());
 
   for (auto it = browser_list_.begin(); it != browser_list_.end(); ++it) {
     if ((*it)->IsSame(browser)) {
@@ -331,6 +333,54 @@ void LaufeyHandler::OnTitleChange(CefRefPtr<CefBrowser> browser,
       window->SetTitle(title);
     }
   }
+}
+
+bool LaufeyHandler::OnDragEnter(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefDragData> dragData,
+                                DragOperationsMask /*mask*/) {
+  CEF_REQUIRE_UI_THREAD();
+  std::vector<std::string> paths;
+  if (dragData && dragData->IsFile()) {
+    std::vector<CefString> names;
+    // GetFilePaths: the full paths (GetFileNames is display names).
+    if (dragData->GetFilePaths(names)) {
+      for (const CefString& name : names) {
+        std::string path = name.ToString();
+        if (!path.empty() && paths.size() < LAUFEY_MAX_DROP_PATHS)
+          paths.push_back(std::move(path));
+      }
+    }
+  }
+  if (paths.empty())
+    file_drag_paths_.erase(browser->GetIdentifier());
+  else
+    file_drag_paths_[browser->GetIdentifier()] = std::move(paths);
+  return false;
+}
+
+void LaufeyHandler::OnFileDropMessage(CefRefPtr<CefBrowser> browser,
+                                      CefRefPtr<CefListValue> args) {
+  if (!args || args->GetSize() < 4)
+    return;
+  int phase = args->GetInt(0);
+  double x = args->GetDouble(1);
+  double y = args->GetDouble(2);
+  int count = args->GetInt(3);
+  if (phase < LAUFEY_DRAG_ENTER || phase > LAUFEY_DRAG_DROP || count < 0)
+    return;
+  int id = browser->GetIdentifier();
+  auto it = file_drag_paths_.find(id);
+  // Only a drag OnDragEnter saw carry files counts: the browser process is
+  // where the paths come from, the page only says where the drag is.
+  if (it == file_drag_paths_.end())
+    return;
+  uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
+  if (wid == 0)
+    return;
+  std::vector<std::string> paths = it->second;
+  if (phase == LAUFEY_DRAG_LEAVE || phase == LAUFEY_DRAG_DROP)
+    file_drag_paths_.erase(it);
+  laufey_common::DispatchFileDrop(wid, phase, x, y, paths, paths.size());
 }
 
 void LaufeyHandler::OnDraggableRegionsChanged(
@@ -564,6 +614,14 @@ bool LaufeyHandler::OnProcessMessageReceived(
 
     uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
     RuntimeLoader::GetInstance()->OnJsCall(wid, call_id, method_path, callArgs);
+    return true;
+  }
+
+  if (name == "laufey_file_drop") {
+    // From the observer the renderer injects into the main frame only; drop
+    // anything else, as for laufey_call.
+    if (frame && frame->IsMain())
+      OnFileDropMessage(browser, message->GetArgumentList());
     return true;
   }
 

@@ -6,6 +6,7 @@
 #include "runtime_loader.h"
 #include "laufey_window.h"
 #include "laufey_backend_common.h"
+#include "laufey_io.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_scheme_registry.h"
@@ -276,6 +277,139 @@ static gboolean on_focus_out_event(GtkWidget* widget, GdkEventFocus* event,
   return FALSE;
 }
 
+// --- File drags over a web view (API >= 39) --------------------------------
+//
+// The handlers are connected to the WebKitWebView with g_signal_connect, so
+// they run before WebKitWebViewBase's own (RUN_LAST class handlers) and only
+// observe: each returns FALSE / doesn't stop the emission, and WebKit handles
+// the drag for the page exactly as before. The paths come from the
+// text/uri-list data WebKit itself requests when a drag enters (requesting it
+// again here would hand WebKit a reply it didn't ask for), so ENTER waits for
+// that data and carries the paths. GTK emits drag-leave right before
+// drag-drop, so LEAVE is deferred to an idle callback that the drop cancels.
+// WebKit's answer decides whether the drop happens at all: a page that
+// refuses file drops (dropEffect "none") hides them from the runtime too.
+
+namespace {
+
+struct GtkFileDrag {
+  bool active = false;   // a uri-list drag is over the view
+  bool entered = false;  // ENTER was dispatched (the data had arrived)
+  std::vector<std::string> paths;
+  double x = 0, y = 0;
+  guint leave_idle = 0;
+};
+
+// Keyed by window id; UI thread only.
+std::map<uint32_t, GtkFileDrag> g_file_drags;
+
+bool DragHasUris(GdkDragContext* ctx) {
+  GdkAtom uri_list = gdk_atom_intern_static_string("text/uri-list");
+  for (GList* l = gdk_drag_context_list_targets(ctx); l; l = l->next) {
+    if (GDK_POINTER_TO_ATOM(l->data) == uri_list)
+      return true;
+  }
+  return false;
+}
+
+void EndFileDrag(uint32_t wid, bool send_leave) {
+  auto it = g_file_drags.find(wid);
+  if (it == g_file_drags.end())
+    return;
+  GtkFileDrag d = std::move(it->second);
+  g_file_drags.erase(it);
+  if (d.leave_idle)
+    g_source_remove(d.leave_idle);
+  if (send_leave && d.entered)
+    laufey_common::DispatchFileDrop(wid, LAUFEY_DRAG_LEAVE, d.x, d.y, {}, 0);
+}
+
+gboolean on_file_drag_motion(GtkWidget*, GdkDragContext* ctx, gint x, gint y,
+                             guint, gpointer user_data) {
+  if (!DragHasUris(ctx))
+    return FALSE;
+  uint32_t wid = GPOINTER_TO_UINT(user_data);
+  GtkFileDrag& d = g_file_drags[wid];
+  if (d.leave_idle) {
+    g_source_remove(d.leave_idle);
+    d.leave_idle = 0;
+  }
+  bool moved = !d.active || d.x != x || d.y != y;
+  d.active = true;
+  d.x = x;
+  d.y = y;
+  if (d.entered && moved)
+    laufey_common::DispatchFileDrop(wid, LAUFEY_DRAG_OVER, x, y, d.paths,
+                                    d.paths.size());
+  return FALSE;
+}
+
+void on_file_drag_data_received(GtkWidget*, GdkDragContext* ctx, gint, gint,
+                                GtkSelectionData* data, guint, guint,
+                                gpointer user_data) {
+  uint32_t wid = GPOINTER_TO_UINT(user_data);
+  auto it = g_file_drags.find(wid);
+  if (it == g_file_drags.end() || !it->second.active || !data)
+    return;
+  if (gtk_selection_data_get_target(data) !=
+      gdk_atom_intern_static_string("text/uri-list"))
+    return;
+  GtkFileDrag& d = it->second;
+  d.paths.clear();
+  if (gchar** uris = gtk_selection_data_get_uris(data)) {
+    for (gchar** u = uris; *u; u++) {
+      if (gchar* path = g_filename_from_uri(*u, nullptr, nullptr)) {
+        if (d.paths.size() < LAUFEY_MAX_DROP_PATHS &&
+            g_utf8_validate(path, -1, nullptr))
+          d.paths.emplace_back(path);
+        g_free(path);
+      }
+    }
+    g_strfreev(uris);
+  }
+  if (!d.entered && !d.paths.empty()) {
+    d.entered = true;
+    laufey_common::DispatchFileDrop(wid, LAUFEY_DRAG_ENTER, d.x, d.y, d.paths,
+                                    d.paths.size());
+  }
+  (void)ctx;
+}
+
+void on_file_drag_leave(GtkWidget*, GdkDragContext*, guint,
+                        gpointer user_data) {
+  uint32_t wid = GPOINTER_TO_UINT(user_data);
+  auto it = g_file_drags.find(wid);
+  if (it == g_file_drags.end() || it->second.leave_idle)
+    return;
+  it->second.leave_idle = g_idle_add(
+      [](gpointer data) -> gboolean {
+        uint32_t id = GPOINTER_TO_UINT(data);
+        auto found = g_file_drags.find(id);
+        if (found != g_file_drags.end())
+          found->second.leave_idle = 0;
+        EndFileDrag(id, true);
+        return G_SOURCE_REMOVE;
+      },
+      GUINT_TO_POINTER(wid));
+}
+
+gboolean on_file_drag_drop(GtkWidget*, GdkDragContext* ctx, gint x, gint y,
+                           guint, gpointer user_data) {
+  if (!DragHasUris(ctx))
+    return FALSE;
+  uint32_t wid = GPOINTER_TO_UINT(user_data);
+  std::vector<std::string> paths;
+  auto it = g_file_drags.find(wid);
+  if (it != g_file_drags.end())
+    paths = it->second.paths;
+  EndFileDrag(wid, false);
+  laufey_common::DispatchFileDrop(wid, LAUFEY_DRAG_DROP, x, y, paths,
+                                  paths.size());
+  return FALSE;
+}
+
+}  // namespace
+
 static gboolean on_configure_event(GtkWidget* widget, GdkEventConfigure* event,
                                    gpointer user_data) {
   uint32_t wid = LaufeyIdForWidget(widget);
@@ -480,6 +614,58 @@ class WebKitGTKBackend : public LaufeyBackend {
   void GetWindowOuterSize(uint32_t window_id, int* width, int* height) override;
   double GetWindowScaleFactor(uint32_t window_id) override;
   void SetWindowPosition(uint32_t window_id, int x, int y) override;
+  // Drag and drop, file dialogs, rich clipboard (API >= 39).
+  void SetFileDropHandler(laufey_file_drop_fn handler,
+                          void* user_data) override {
+    laufey_common::SetFileDropHandler(handler, user_data);
+  }
+  bool TestTriggerFileDrop(uint32_t window_id, int phase, double x, double y,
+                           const char* const* paths, size_t count) override {
+    // The OS path dispatches on the GTK thread; so does the hook.
+    bool delivered = false;
+    gtk_invoke_sync([&] {
+      delivered = laufey_common::TestTriggerFileDrop(window_id, phase, x, y,
+                                                     paths, count);
+    });
+    return delivered;
+  }
+  void StartFileDrag(uint32_t window_id, const char* const* paths, size_t count,
+                     const uint8_t* icon_png, size_t icon_len,
+                     laufey_drag_result_fn callback, void* user_data) override;
+  uint32_t ShowFileDialog(uint32_t window_id,
+                          const laufey_file_dialog_options_t* options,
+                          laufey_file_dialog_result_fn callback,
+                          void* user_data) override;
+  bool CancelFileDialog(uint32_t dialog_id) override {
+    return laufey_common::CancelFileDialogLinux(dialog_id);
+  }
+  bool TestFileDialogRespond(int action, const char* path) override {
+    return laufey_common::TestFileDialogRespondLinux(action, path);
+  }
+  uint32_t ClipboardCapabilities() override {
+    return laufey_common::ClipboardCapabilitiesLinux();
+  }
+  char* ReadClipboardHtml() override {
+    return laufey_common::ClipboardReadHtmlLinux();
+  }
+  bool WriteClipboardHtml(const std::string& html,
+                          const char* text_or_null) override {
+    return laufey_common::ClipboardWriteHtmlLinux(html, text_or_null);
+  }
+  uint8_t* ReadClipboardImage(size_t* len_out) override {
+    return laufey_common::ClipboardReadImageLinux(len_out);
+  }
+  bool WriteClipboardImage(const uint8_t* png, size_t len) override {
+    return laufey_common::ClipboardWriteImageLinux(png, len);
+  }
+  char* ReadClipboardFormats() override {
+    return laufey_common::ClipboardReadFormatsLinux();
+  }
+  void SetClipboardChangeHandler(laufey_clipboard_change_fn handler,
+                                 void* user_data) override {
+    laufey_common::SetClipboardChangeHandler(handler, user_data);
+  }
+
   // Window state, constraints and screens (API >= 38). No title bar styles
   // or backdrops: GTK has no API for either (see
   // docs/window-management.md), so those keep the base class's "false".
@@ -910,6 +1096,15 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     g_signal_connect(webview, "load-changed", G_CALLBACK(on_load_changed),
                      GUINT_TO_POINTER(window_id));
     g_signal_connect(webview, "create", G_CALLBACK(on_create), nullptr);
+    g_signal_connect(webview, "drag-motion", G_CALLBACK(on_file_drag_motion),
+                     GUINT_TO_POINTER(window_id));
+    g_signal_connect(webview, "drag-data-received",
+                     G_CALLBACK(on_file_drag_data_received),
+                     GUINT_TO_POINTER(window_id));
+    g_signal_connect(webview, "drag-leave", G_CALLBACK(on_file_drag_leave),
+                     GUINT_TO_POINTER(window_id));
+    g_signal_connect(webview, "drag-drop", G_CALLBACK(on_file_drag_drop),
+                     GUINT_TO_POINTER(window_id));
 
     WebKitSettings* wk_settings = webkit_web_view_get_settings(webview);
     webkit_settings_set_enable_developer_extras(wk_settings, TRUE);
@@ -1224,7 +1419,59 @@ uint32_t WebKitGTKBackend::WindowCapabilities() {
   // Wayland clients can't place their windows.
   if (!wayland)
     caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
+  // Drag and drop and file dialogs (API >= 39). Drag-out uses the window as
+  // the drag source, so it works on X11 and Wayland alike.
+  caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
+          LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
+          LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOGS |
+          LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
   return caps;
+}
+
+void WebKitGTKBackend::StartFileDrag(uint32_t window_id,
+                                     const char* const* paths, size_t count,
+                                     const uint8_t* icon_png, size_t icon_len,
+                                     laufey_drag_result_fn callback,
+                                     void* user_data) {
+  auto* req = new laufey_common::DragOutRequest();
+  req->callback = callback;
+  req->user_data = user_data;
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    known = GetWindow(window_id) != nullptr;
+  }
+  if (!known || !laufey_common::ValidateDragPaths(paths, count, &req->paths)) {
+    req->Finish(LAUFEY_DRAG_RESULT_FAILED);
+    delete req;
+    return;
+  }
+  if (icon_png && icon_len > 0)
+    req->icon_png.assign(icon_png, icon_png + icon_len);
+  // The window is looked up again on the GTK thread; if it closed in between
+  // there is no source and the drag fails there.
+  laufey_common::StartFileDragLinux(
+      [this, window_id]() -> void* {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        auto* state = GetWindow(window_id);
+        return state ? state->window : nullptr;
+      },
+      req);
+}
+
+uint32_t WebKitGTKBackend::ShowFileDialog(
+    uint32_t window_id, const laufey_file_dialog_options_t* options,
+    laufey_file_dialog_result_fn callback, void* user_data) {
+  laufey_common::ParentResolver parent;
+  if (window_id != 0) {
+    parent = [this, window_id]() -> void* {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      return state ? state->window : nullptr;
+    };
+  }
+  return laufey_common::ShowFileDialogLinux(std::move(parent), options,
+                                            callback, user_data);
 }
 
 void WebKitGTKBackend::SetWindowState(uint32_t window_id, int action) {

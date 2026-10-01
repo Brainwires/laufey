@@ -9,6 +9,7 @@
 #include <map>
 #include <queue>
 #include <string>
+#include <vector>
 
 #include "include/cef_app.h"
 #include "include/cef_client.h"
@@ -178,6 +179,14 @@ class LaufeyHandler : public CefClient,
     return this;
   }
 
+  // A drag entering a browser (API 39 file drops): remembers the dragged
+  // files' native paths for that browser; the page's observer then reports
+  // where the drag goes and the drop (see OnProcessMessageReceived). Never
+  // cancels the drag.
+  bool OnDragEnter(CefRefPtr<CefBrowser> browser,
+                   CefRefPtr<CefDragData> dragData,
+                   DragOperationsMask mask) override;
+
   // Forward the page's `-webkit-app-region: drag` rectangles to the window so
   // those areas drag the OS window (used by the transparent-titlebar layout).
   void OnDraggableRegionsChanged(
@@ -229,6 +238,12 @@ class LaufeyHandler : public CefClient,
  private:
   std::list<CefRefPtr<CefBrowser>> browser_list_;
   bool is_closing_ = false;
+  // The file paths of the drag currently over each browser (by browser id),
+  // from OnDragEnter. UI thread only.
+  std::map<int, std::vector<std::string>> file_drag_paths_;
+  // Handles a "laufey_file_drop" message from the page observer.
+  void OnFileDropMessage(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefListValue> args);
 
   IMPLEMENT_REFCOUNTING(LaufeyHandler);
 };

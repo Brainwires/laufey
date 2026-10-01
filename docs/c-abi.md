@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `38`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `39`) versions the contract. The `version` field
 on the API table lets a runtime detect the backend's vintage and avoid calling
 function pointers a backend predates (older backends leave new pointers `NULL`).
 
@@ -84,7 +84,21 @@ The pointers group into:
   (macOS), `set_window_backdrop` (Mica / Acrylic on Windows 11, vibrancy on
   macOS), `get_window_normal_bounds`, `set_quit_on_last_window_closed`, and the
   `quit` contract (ends the loop like the last window closing). See
-  [window-management.md](window-management.md).
+  [window-management.md](window-management.md). API 39 adds the
+  `LAUFEY_WINDOW_CAP_FILE_*` bits for drag and drop and file dialogs.
+- **Drag and drop** (API ≥ 39) — `set_file_drop_handler` (files dragged over and
+  dropped on a window, with native paths; the page keeps its DOM drag events),
+  `start_file_drag` (drag files out to other apps), and the
+  `test_trigger_file_drop` hook. See [drag-and-drop.md](drag-and-drop.md).
+- **File dialogs** (API ≥ 39) — `show_file_dialog` (the OS's open / save /
+  folder dialog, from any thread, resolved through a callback; never blocks the
+  caller), `cancel_file_dialog`, and the `test_file_dialog_respond` hook. See
+  [file-dialogs.md](file-dialogs.md).
+- **Clipboard** — `read_clipboard_text` / `write_clipboard_text` (API ≥ 27) and,
+  from API 39, `clipboard_capabilities`, HTML and PNG reads and writes,
+  `read_clipboard_formats`, `set_clipboard_change_handler` and `buffer_free`;
+  every clipboard call may then be made from any thread. See
+  [clipboard.md](clipboard.md).
 - **Passkeys** (API ≥ 37) — `passkey_capabilities`, `passkey_request`: WebAuthn
   ceremonies through the OS platform authenticator, one at a time, with the
   result (a JSON envelope) delivered exactly once on any thread. macOS and
@@ -296,6 +310,10 @@ ambient runtime context this thread doesn't have.
 
 ## Threading
 
-All API calls must happen on the UI thread the backend's event loop runs on.
-`post_ui_task` hops onto it from another thread. `show_dialog` blocks on the UI
-thread but pumps OS events so other windows stay responsive.
+All API calls must happen on the UI thread the backend's event loop runs on,
+unless their documentation says otherwise. `post_ui_task` hops onto it from
+another thread. `show_dialog` blocks on the UI thread but pumps OS events so
+other windows stay responsive. The API 38 window calls, the API 39 file dialogs,
+drag-out and every clipboard call may be made from any thread; the backend hops
+itself, and a file dialog resolves through its callback instead of blocking the
+caller.

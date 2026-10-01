@@ -42,6 +42,10 @@ static void EnsureGtkInit() {
   });
 }
 
+void CefEnsureGtkInit() {
+  EnsureGtkInit();
+}
+
 // Menu-template → GtkMenu conversion lives in backend-common
 // (laufey_common::BuildGtkMenuFromValue).
 
