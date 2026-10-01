@@ -43,9 +43,11 @@ bool IsFullscreen(NSWindow* w) {
   return (w.styleMask & NSWindowStyleMaskFullScreen) != 0;
 }
 
+bool LogicalFullscreen(NSWindow* w);
+
 uint32_t StateOf(NSWindow* w) {
   uint32_t state = 0;
-  if (IsFullscreen(w)) {
+  if (LogicalFullscreen(w)) {
     state |= LAUFEY_WINDOW_STATE_FULLSCREEN;
   } else if ((w.styleMask & NSWindowStyleMaskTitled) &&
              (w.styleMask & NSWindowStyleMaskResizable)) {
@@ -74,6 +76,13 @@ struct Watch {
   // it), so unmaximize can put it back.
   bool has_borderless_restore = false;
   NSRect borderless_restore;
+  // A fullscreen Space transition in progress: AppKit sets the fullscreen
+  // style bit when it starts, refuses a toggle until it ends ("not in
+  // fullscreen state"), and only then is the change done. +1 entering, -1
+  // leaving, 0 none.
+  int fs_transition = 0;
+  // An enter / leave requested during a transition, applied when it ends.
+  int pending_fs_action = 0;
 };
 
 std::mutex g_watch_mutex;
@@ -82,6 +91,56 @@ std::map<void*, Watch> g_watches;
 Watch* FindWatch(NSWindow* w) {
   auto it = g_watches.find((__bridge void*)w);
   return it == g_watches.end() ? nullptr : &it->second;
+}
+
+// Fullscreen as the state API reports it: the style bit, except that a
+// transition counts as done only when AppKit says it ended.
+bool LogicalFullscreen(NSWindow* w) {
+  int transition = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_watch_mutex);
+    if (Watch* watch = FindWatch(w))
+      transition = watch->fs_transition;
+  }
+  if (transition > 0)
+    return false;
+  if (transition < 0)
+    return true;
+  return IsFullscreen(w);
+}
+
+// Records a transition starting (+1 / -1) or ending (0). Returns the action
+// queued during it when it ends (0 if none).
+int SetFullscreenTransition(NSWindow* w, int transition) {
+  {
+    std::lock_guard<std::mutex> lock(g_watch_mutex);
+    Watch* watch = FindWatch(w);
+    if (!watch)
+      return 0;
+    watch->fs_transition = transition;
+    if (transition == 0) {
+      int pending = watch->pending_fs_action;
+      watch->pending_fs_action = 0;
+      return pending;
+    }
+  }
+  // A transition that never ends (AppKit only tells the window's delegate
+  // about a failed one) must not freeze the state: give up after 5 s.
+  __weak NSWindow* weak = w;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                 dispatch_get_main_queue(), ^{
+                   NSWindow* strong = weak;
+                   if (!strong)
+                     return;
+                   std::lock_guard<std::mutex> lock(g_watch_mutex);
+                   if (Watch* watch = FindWatch(strong)) {
+                     if (watch->fs_transition == transition) {
+                       watch->fs_transition = 0;
+                       watch->pending_fs_action = 0;
+                     }
+                   }
+                 });
+  return 0;
 }
 
 void ReportAndTrack(NSWindow* w, uint32_t window_id) {
@@ -215,15 +274,24 @@ void MacSetWindowState(void* nswindow, int action) {
         [w deminiaturize:nil];
       break;
     case LAUFEY_WINDOW_ACTION_ENTER_FULLSCREEN:
-      if (!IsFullscreen(w)) {
-        w.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
-        [w toggleFullScreen:nil];
+    case LAUFEY_WINDOW_ACTION_LEAVE_FULLSCREEN: {
+      bool enter = action == LAUFEY_WINDOW_ACTION_ENTER_FULLSCREEN;
+      {
+        std::lock_guard<std::mutex> lock(g_watch_mutex);
+        Watch* watch = FindWatch(w);
+        if (watch && watch->fs_transition != 0) {
+          // AppKit ignores a toggle mid-transition; do it when it ends.
+          watch->pending_fs_action = action;
+          break;
+        }
       }
+      if (enter == IsFullscreen(w))
+        break;
+      if (enter)
+        w.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+      [w toggleFullScreen:nil];
       break;
-    case LAUFEY_WINDOW_ACTION_LEAVE_FULLSCREEN:
-      if (IsFullscreen(w))
-        [w toggleFullScreen:nil];
-      break;
+    }
     default:
       break;
   }
@@ -301,8 +369,7 @@ void MacWatchWindowState(void* nswindow, uint32_t window_id) {
   }
   for (NSNotificationName name in @[
          NSWindowDidResizeNotification, NSWindowDidEndLiveResizeNotification,
-         NSWindowDidEnterFullScreenNotification,
-         NSWindowDidExitFullScreenNotification, NSWindowDidBecomeKeyNotification
+         NSWindowDidBecomeKeyNotification
        ]) {
     [observers addObject:[nc addObserverForName:name
                                          object:w
@@ -317,12 +384,50 @@ void MacWatchWindowState(void* nswindow, uint32_t window_id) {
                                  queue:nil
                             usingBlock:^(NSNotification*) {
                               NSWindow* strong = weak;
-                              if (!strong || [strong isZoomed])
+                              if (!strong)
+                                return;
+                              SetFullscreenTransition(strong, 1);
+                              if ([strong isZoomed])
                                 return;
                               CommitNormalBounds(
                                   window_id,
                                   MacWindowBounds((__bridge void*)strong));
                             }]];
+  [observers
+      addObject:[nc addObserverForName:NSWindowWillExitFullScreenNotification
+                                object:w
+                                 queue:nil
+                            usingBlock:^(NSNotification*) {
+                              NSWindow* strong = weak;
+                              if (strong)
+                                SetFullscreenTransition(strong, -1);
+                            }]];
+  // A transition ends (or fails): report the state it reached and apply an
+  // enter / leave requested meanwhile.
+  void (^transition_ended)(NSNotification*) = ^(NSNotification*) {
+    NSWindow* strong = weak;
+    if (!strong)
+      return;
+    int pending = SetFullscreenTransition(strong, 0);
+    ReportAndTrack(strong, window_id);
+    MacReapplyTrafficLightPosition((__bridge void*)strong);
+    if (pending != 0) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        NSWindow* again = weak;
+        if (again)
+          MacSetWindowState((__bridge void*)again, pending);
+      });
+    }
+  };
+  for (NSNotificationName name in @[
+         NSWindowDidEnterFullScreenNotification,
+         NSWindowDidExitFullScreenNotification
+       ]) {
+    [observers addObject:[nc addObserverForName:name
+                                         object:w
+                                          queue:nil
+                                     usingBlock:transition_ended]];
+  }
   {
     std::lock_guard<std::mutex> lock(g_watch_mutex);
     Watch& watch = g_watches[nswindow];

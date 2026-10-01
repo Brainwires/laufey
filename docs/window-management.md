@@ -331,7 +331,10 @@ build), so an app can surface "unsupported" instead of pretending:
 per backend: DIP (points) everywhere except the WebView2 backend, whose
 `get_size` / `set_size` / `get_position` have always been the outer window
 rectangle in physical pixels (a per-monitor-DPI-aware process); its constraints
-and screens use the same physical pixels so they compare directly.
+and screens use the same physical pixels so they compare directly. On CEF
+(Windows and macOS) `get_size` is `CefWindow::GetSize`, the whole window
+including its frame, so the constraints are whole-window sizes there too (the
+backend converts them to the client area Chromium enforces).
 
 ## Keeping a tray app alive; quitting (API ≥ 38)
 

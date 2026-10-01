@@ -101,15 +101,14 @@ fn check_inner_vs_frame(
   }
 }
 
-/// The WebView2 and CEF backends on Windows report `get_size` as the outer
-/// window rectangle (see "Units" in docs/window-management.md), so a content
+/// Backends whose `get_size` is the whole window, chrome included (see
+/// "Units" in docs/window-management.md): WebView2 (the outer rect) and CEF
+/// on Windows and macOS (CefWindow::GetSize, the widget bounds). A content
 /// vs outer comparison can't tell chrome apart there.
 fn size_is_outer_rect() -> bool {
-  cfg!(target_os = "windows")
-    && matches!(
-      std::env::var("LAUFEY_E2E_BACKEND").as_deref(),
-      Ok("webview") | Ok("cef")
-    )
+  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  (cfg!(target_os = "windows") && (backend == "webview" || backend == "cef"))
+    || (cfg!(target_os = "macos") && backend == "cef")
 }
 
 fn check_outer_vs_inner(
@@ -2000,6 +1999,72 @@ async fn window_api_checks() {
   w.close();
 }
 
+/// A tray-only app: with no window at all, a click on the tray icon still
+/// reaches the app (denoland/deno#36778 reported dead tray clicks once the
+/// host window was hidden on WebView2). The click is posted to the tray's
+/// message-only window exactly as Shell_NotifyIcon delivers it, so the
+/// message path under test is the shipping one; only the OS-side click is
+/// synthesized. Windows WebView2 / CEF only (their shared tray_win.cc).
+#[cfg(target_os = "windows")]
+async fn tray_click_with_no_window() {
+  #[link(name = "user32")]
+  extern "system" {
+    fn FindWindowExW(
+      parent: isize,
+      child_after: isize,
+      class: *const u16,
+      window: *const u16,
+    ) -> isize;
+    fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize)
+      -> i32;
+  }
+  const HWND_MESSAGE: isize = -3;
+  const WM_APP: u32 = 0x8000;
+  const WM_LBUTTONUP: isize = 0x0202;
+  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  if backend != "webview" && backend != "cef" {
+    na("tray click with no window (Windows WebView2 / CEF tray only)");
+    return;
+  }
+  let clicked = Arc::new(AtomicBool::new(false));
+  let tray = {
+    let clicked = clicked.clone();
+    TrayIcon::new().icon(TINY_PNG).on_click(move || {
+      clicked.store(true, Ordering::SeqCst);
+    })
+  };
+  if tray.id() == 0 {
+    check("tray created with no window open", false);
+    return;
+  }
+  let class: Vec<u16> = "LaufeyCommonTrayWindow\0".encode_utf16().collect();
+  let find = || unsafe {
+    FindWindowExW(HWND_MESSAGE, 0, class.as_ptr(), std::ptr::null())
+  };
+  // CEF creates it on its UI thread after create_tray_icon returns.
+  let _ = wait_for(|| find() != 0, 100, 50).await;
+  let hwnd = find();
+  check("tray message window exists with no window open", hwnd != 0);
+  if hwnd == 0 {
+    return;
+  }
+  // WM_LAUFEY_COMMON_TRAYICON (tray_win.cc): wParam = tray id, LOWORD(lParam)
+  // = the mouse message.
+  let posted = unsafe {
+    PostMessageW(hwnd, WM_APP + 65, tray.id() as usize, WM_LBUTTONUP)
+  };
+  check("tray click posted", posted != 0);
+  check(
+    "a tray click reaches the app with no window open",
+    wait_for(|| clicked.load(Ordering::SeqCst), 100, 50).await,
+  );
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn tray_click_with_no_window() {
+  na("tray click with no window (posted-message check is Windows-only)");
+}
+
 /// LAUFEY_E2E_ONLY=lifetime. Ends the process: keep-alive with no window,
 /// then quit(), which must end the event loop (the backend then calls the
 /// runtime's shutdown, observed here through `should_shutdown`).
@@ -2024,6 +2089,9 @@ async fn lifetime_checks() -> ! {
       "a window opens after the last one closed",
       wait_for(|| again.get_size().0 != 0, 100, 50).await,
     );
+    again.close();
+    let _ = wait_for(|| again.get_size() == (0, 0), 100, 50).await;
+    tray_click_with_no_window().await;
   } else {
     na("keep-alive (not supported by this backend)");
   }

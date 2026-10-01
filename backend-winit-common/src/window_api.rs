@@ -115,7 +115,15 @@ pub fn state_of(window: &Window) -> u32 {
   let mut state = 0;
   if window.fullscreen().is_some() {
     state |= STATE_FULLSCREEN;
-  } else if window.is_maximized() {
+  } else if window.is_decorated()
+    && window.is_resizable()
+    && window.is_maximized()
+  {
+    // Only asked of a titled, resizable window: on macOS winit answers
+    // `is_maximized` for any other window by switching its style mask to
+    // titled + resizable and back, which resizes it -- and this runs on
+    // every resize, so a frameless window would resize forever and starve
+    // the event loop. Such a window has no maximize control anyway.
     state |= STATE_MAXIMIZED;
   }
   if window.is_minimized() == Some(true) {
