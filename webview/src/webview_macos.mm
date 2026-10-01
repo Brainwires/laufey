@@ -6,6 +6,8 @@
 #import <WebKit/WebKit.h>
 
 #include "runtime_loader.h"
+
+#import <objc/message.h>
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_single_instance.h"
@@ -13,6 +15,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_system.h"
 #include "laufey_window.h"
 #include "init_script.h"
 
@@ -225,6 +228,58 @@ class WKWebViewBackend : public LaufeyBackend {
                                  void* user_data) override {
     laufey_common::SetClipboardChangeHandler(handler, user_data);
   }
+
+  // Global shortcuts, launch at login, DevTools (API >= 40).
+  // The Carbon hot-key platform is installed on first use.
+  static void EnsureShortcuts() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+      laufey_common::InstallShortcutPlatform(
+          laufey_common::CreateShortcutPlatformMac());
+    });
+  }
+  uint32_t SystemCapabilities() override {
+    EnsureShortcuts();
+    uint32_t caps =
+        laufey_common::ShortcutCapabilities() | LAUFEY_SYSTEM_CAP_DEVTOOLS;
+    if (laufey_common::GetLaunchAtLogin() != LAUFEY_LOGIN_ITEM_NOT_SUPPORTED)
+      caps |= LAUFEY_SYSTEM_CAP_LAUNCH_AT_LOGIN;
+    return caps;
+  }
+  void SetShortcutHandler(laufey_shortcut_fn handler,
+                          void* user_data) override {
+    laufey_common::SetShortcutHandler(handler, user_data);
+  }
+  void RegisterShortcut(const char* accelerator,
+                        laufey_shortcut_result_fn callback,
+                        void* user_data) override {
+    EnsureShortcuts();
+    laufey_common::RegisterShortcut(accelerator, callback, user_data);
+  }
+  bool UnregisterShortcut(const char* accelerator) override {
+    return laufey_common::UnregisterShortcut(accelerator);
+  }
+  void UnregisterAllShortcuts() override {
+    laufey_common::UnregisterAllShortcuts();
+  }
+  char* ListShortcuts() override {
+    return laufey_common::ListShortcuts();
+  }
+  char* CanonicalizeAccelerator(const char* accelerator) override {
+    return laufey_common::CanonicalizeAccelerator(accelerator);
+  }
+  bool TestTriggerShortcut(const char* accelerator) override {
+    return laufey_common::TestTriggerShortcut(accelerator);
+  }
+  int GetLaunchAtLogin() override {
+    return laufey_common::GetLaunchAtLogin();
+  }
+  int SetLaunchAtLogin(bool enabled, std::string* error) override {
+    return laufey_common::SetLaunchAtLogin(enabled, error);
+  }
+  void CloseDevTools(uint32_t window_id) override;
+  bool IsDevToolsOpen(uint32_t window_id) override;
+  bool IsDevToolsEnabled(uint32_t window_id) override;
 
   // Window state, constraints, screens and chrome (API >= 38).
   uint32_t WindowCapabilities() override;
@@ -1379,11 +1434,22 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
           forMainFrameOnly:YES];
       [config.userContentController addUserScript:script];
 
+      // DevTools (API 40): on unless the app launched with
+      // LAUFEY_INSPECTABLE=0 / "inspectable": false. `inspectable` (macOS
+      // 13.3+, set below) governs Safari's Web Inspector and the context
+      // menu's Inspect Element; developerExtrasEnabled (read when the web
+      // view is created) is the switch before 13.3.
+      const bool inspectable = laufey_common::LaunchInspectable();
+      @try {
+        [config.preferences setValue:@(inspectable)
+                              forKey:@"developerExtrasEnabled"];
+      } @catch (NSException*) {
+      }
       LaufeyWebView* webview = [[LaufeyWebView alloc] initWithFrame:frame
                                                       configuration:config];
       webview.laufeyWindowId = window_id;
       if ([webview respondsToSelector:@selector(setInspectable:)]) {
-        [webview setInspectable:YES];
+        [webview setInspectable:inspectable];
       }
       LaufeyUIDelegate* uiDelegate = [[LaufeyUIDelegate alloc] init];
       webview.UIDelegate = uiDelegate;
@@ -2486,7 +2552,27 @@ void WKWebViewBackend::ShowContextMenu(uint32_t window_id, int x, int y,
   });
 }
 
+// Runs `block` on the main thread and waits (inline when already there).
+static void RunOnMainSync(void (^block)(void)) {
+  if ([NSThread isMainThread])
+    block();
+  else
+    dispatch_sync(dispatch_get_main_queue(), block);
+}
+
+// The web view's _WKInspector (private; what Safari's Develop menu drives),
+// or nil.
+static id InspectorOf(WKWebView* webview) {
+  @try {
+    return [webview valueForKey:@"_inspector"];
+  } @catch (NSException*) {
+    return nil;
+  }
+}
+
 void WKWebViewBackend::OpenDevTools(uint32_t window_id) {
+  if (!laufey_common::LaunchInspectable())
+    return;
   dispatch_async(dispatch_get_main_queue(), ^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
@@ -2502,6 +2588,59 @@ void WKWebViewBackend::OpenDevTools(uint32_t window_id) {
       }
     }
   });
+}
+
+void WKWebViewBackend::CloseDevTools(uint32_t window_id) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || !state->webview)
+      return;
+    id inspector = InspectorOf(state->webview);
+    if (inspector && [inspector respondsToSelector:@selector(close)])
+      [inspector performSelector:@selector(close)];
+  });
+}
+
+bool WKWebViewBackend::IsDevToolsOpen(uint32_t window_id) {
+  __block bool open = false;
+  RunOnMainSync(^{
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || !state->webview)
+      return;
+    id inspector = InspectorOf(state->webview);
+    SEL visible = NSSelectorFromString(@"isVisible");
+    if (inspector && [inspector respondsToSelector:visible]) {
+      open =
+          reinterpret_cast<BOOL (*)(id, SEL)>(objc_msgSend)(inspector, visible);
+    }
+  });
+  return open;
+}
+
+bool WKWebViewBackend::IsDevToolsEnabled(uint32_t window_id) {
+  if (window_id == 0)
+    return laufey_common::LaunchInspectable();
+  __block bool enabled = false;
+  RunOnMainSync(^{
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || !state->webview)
+      return;
+    // Read back what the engine was given.
+    if ([state->webview respondsToSelector:@selector(isInspectable)]) {
+      enabled = reinterpret_cast<BOOL (*)(id, SEL)>(objc_msgSend)(
+          state->webview, @selector(isInspectable));
+      return;
+    }
+    @try {
+      enabled = [[state->webview.configuration.preferences
+          valueForKey:@"developerExtrasEnabled"] boolValue];
+    } @catch (NSException*) {
+    }
+  });
+  return enabled;
 }
 
 int WKWebViewBackend::ShowDialog(uint32_t /*window_id*/, int dialog_type,
@@ -2576,15 +2715,8 @@ bool WKWebViewBackend::TestTriggerOpenUrl(const char* url) {
 // The NSWindow work is laufey_common's (window_mac.mm, shared with CEF);
 // these resolve the window on the main thread and hand it over.
 
-namespace {
-void RunOnMainSync(dispatch_block_t block) {
-  if ([NSThread isMainThread]) {
-    block();
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), block);
-  }
-}
-}  // namespace
+// RunOnMainSync (above, with the DevTools code) runs the block on the main
+// thread and waits.
 
 // ---------------------------------------------------------------------------
 // Drag and drop, file dialogs (API >= 39)

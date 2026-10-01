@@ -18,6 +18,7 @@
 #include "include/wrapper/cef_helpers.h"
 
 #include "app.h"
+#include "laufey_launch_config.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
@@ -218,6 +219,7 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     // propagates it to subprocesses.
     if (process_type.empty()) {
       command_line->AppendSwitch("disable-background-networking");
+      LaufeyApplyInspectableToCommandLine(command_line);
     }
   }
 
@@ -368,7 +370,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
       GetEnvironmentVariableW(L"LAUFEY_REMOTE_DEBUGGING_PORT", port_buf, 16);
   // On a value of 16+ chars the API returns the required size and leaves the
   // buffer untouched, so the upper bound is load-bearing.
-  if (port_len > 0 && port_len < 16) {
+  // No remote debugging while DevTools are off (API 40, inspectable).
+  if (port_len > 0 && port_len < 16 && laufey_common::LaunchInspectable()) {
     int port = _wtoi(port_buf);
     if (port > 0 && port < 65536) {
       settings.remote_debugging_port = port;

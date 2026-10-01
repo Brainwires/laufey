@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 39
+#define LAUFEY_API_VERSION 40
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -278,6 +278,59 @@ typedef void (*laufey_file_dialog_result_fn)(void* user_data,
 // including this one). Fires on the backend UI thread; read the clipboard to
 // see the new content.
 typedef void (*laufey_clipboard_change_fn)(void* user_data);
+
+// --- Global shortcuts, launch at login, DevTools (API >= 40) ----------------
+//
+// Capability bits returned by system_capabilities.
+#define LAUFEY_SYSTEM_CAP_GLOBAL_SHORTCUTS \
+  (1u << 0)  // register_shortcut can bind system-wide shortcuts here
+#define LAUFEY_SYSTEM_CAP_SHORTCUTS_USER_BINDS \
+  (1u << 1)  // the user approves each shortcut and may pick another trigger
+             // (the XDG GlobalShortcuts portal on Wayland)
+#define LAUFEY_SYSTEM_CAP_LAUNCH_AT_LOGIN (1u << 2)  // get/set_launch_at_login
+#define LAUFEY_SYSTEM_CAP_DEVTOOLS \
+  (1u << 3)  // open / close / is_devtools_open work per window
+
+// Statuses passed to laufey_shortcut_result_fn.
+#define LAUFEY_SHORTCUT_OK 0
+#define LAUFEY_SHORTCUT_INVALID \
+  1  // the accelerator does not parse, or names a key that can't be global
+     // (a printable key with no modifier other than Shift)
+#define LAUFEY_SHORTCUT_CONFLICT \
+  2  // the OS refused it: another app (or another part of this process,
+     // outside this API) holds that combination
+#define LAUFEY_SHORTCUT_ALREADY_REGISTERED \
+  3  // this app already registered it through register_shortcut
+#define LAUFEY_SHORTCUT_NOT_SUPPORTED \
+  4  // no global shortcuts here (Wayland without the GlobalShortcuts
+     // portal, a backend without them)
+#define LAUFEY_SHORTCUT_DENIED 5  // the user declined it (portal dialog)
+#define LAUFEY_SHORTCUT_FAILED 6  // any other OS failure
+
+// Most shortcuts one app holds at a time; more answer FAILED.
+#define LAUFEY_MAX_SHORTCUTS 256
+
+// Fired when a registered global shortcut is pressed, whichever app has the
+// focus. `accelerator` is the canonical form register_shortcut reported
+// (UTF-8, valid for the duration of the call). Fires on the backend UI
+// thread.
+typedef void (*laufey_shortcut_fn)(void* user_data, const char* accelerator);
+
+// Result of register_shortcut: a LAUFEY_SHORTCUT_* status and, for OK and
+// ALREADY_REGISTERED, the canonical accelerator (else NULL). Valid only for
+// the duration of the call.
+typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
+                                          const char* accelerator);
+
+// Launch-at-login states returned by get_launch_at_login and
+// set_launch_at_login.
+#define LAUFEY_LOGIN_ITEM_DISABLED 0  // the app does not start at login
+#define LAUFEY_LOGIN_ITEM_ENABLED 1   // it does
+#define LAUFEY_LOGIN_ITEM_REQUIRES_APPROVAL \
+  2  // registered, but the user must allow it in the system settings first
+     // (macOS Login Items; a Windows startup entry the user turned off)
+#define LAUFEY_LOGIN_ITEM_NOT_SUPPORTED 3  // not on this backend / OS version
+#define LAUFEY_LOGIN_ITEM_FAILED 4         // set_launch_at_login failed
 
 // One display, as reported by get_screens. Every rectangle is in the same
 // top-left-origin screen space and units as get_window_position /
@@ -833,7 +886,8 @@ struct laufey_backend_api {
                             int y, laufey_value_t* menu_template,
                             laufey_menu_click_fn on_click, void* on_click_data);
 
-  // Open the DevTools inspector for the given window.
+  // Open the DevTools inspector for the given window. A no-op when DevTools
+  // are disabled (is_devtools_enabled, API >= 40).
   void (*open_devtools)(void* backend_data, uint32_t window_id);
 
   // Set the global JS namespace name for bindings (default: "Laufey").
@@ -1603,6 +1657,85 @@ struct laufey_backend_api {
 
   // Free a buffer returned by read_clipboard_image. Safe with NULL.
   void (*buffer_free)(void* backend_data, void* buffer);
+
+  // --- Global shortcuts, launch at login, DevTools (API >= 40) ---------------
+  //
+  // LAUFEY_SYSTEM_CAP_* bits for this backend on this OS and session. Any
+  // thread.
+  uint32_t (*system_capabilities)(void* backend_data);
+
+  // Register the (process-wide) global-shortcut handler; NULL clears it. See
+  // laufey_shortcut_fn and docs/global-shortcuts.md. Any thread.
+  void (*set_shortcut_handler)(void* backend_data, laufey_shortcut_fn handler,
+                               void* user_data);
+
+  // Bind `accelerator` ("CommandOrControl+Shift+K", the menu accelerator
+  // syntax; see docs/global-shortcuts.md) system-wide: macOS Carbon
+  // RegisterEventHotKey, Windows RegisterHotKey, X11 XGrabKey on the root
+  // window, the XDG GlobalShortcuts portal on Wayland. Any thread; never
+  // blocks. `callback` fires EXACTLY ONCE with a LAUFEY_SHORTCUT_* status:
+  // synchronously on the calling thread for INVALID, ALREADY_REGISTERED,
+  // NOT_SUPPORTED and a NULL accelerator, else from the backend once the OS
+  // answered (on Wayland, after the user answered the portal's dialog). A
+  // NULL callback: fire and forget.
+  void (*register_shortcut)(void* backend_data, const char* accelerator,
+                            laufey_shortcut_result_fn callback,
+                            void* user_data);
+
+  // Release a shortcut this app registered (any spelling of it). Returns
+  // false if it wasn't registered. Its handler stops firing before this
+  // returns; the OS binding is released right after. Any thread.
+  bool (*unregister_shortcut)(void* backend_data, const char* accelerator);
+
+  // Release every shortcut this app registered. Any thread.
+  void (*unregister_all_shortcuts)(void* backend_data);
+
+  // The canonical accelerators currently registered, separated by '\n'
+  // (freed with string_free; "" when there are none). Any thread.
+  char* (*list_shortcuts)(void* backend_data);
+
+  // The canonical form of `accelerator` (what register_shortcut reports and
+  // the handler receives; "Ctrl+Shift+K"), freed with string_free, or NULL
+  // when it doesn't parse. Any thread.
+  char* (*canonicalize_accelerator)(void* backend_data,
+                                    const char* accelerator);
+
+  // Test-only. Fires the shortcut handler for a REGISTERED `accelerator`
+  // (any spelling) through the dispatch the OS press uses. Returns false
+  // when it isn't registered or no handler is set. NULL on backends that do
+  // not implement it.
+  bool (*test_trigger_shortcut)(void* backend_data, const char* accelerator);
+
+  // Whether the app starts when the user logs in: a LAUFEY_LOGIN_ITEM_*
+  // state. macOS 13+: SMAppService.mainAppService; Windows: the
+  // HKCU\Software\Microsoft\Windows\CurrentVersion\Run value; Linux: the
+  // XDG autostart entry ~/.config/autostart/<app id>.desktop. The entry is
+  // named after LAUFEY_APP_ID (or the launch file's "appId"), else the
+  // executable's name. Any thread.
+  int (*get_launch_at_login)(void* backend_data);
+
+  // Turn launch at login on or off. Returns the state afterwards (ENABLED,
+  // REQUIRES_APPROVAL, DISABLED), NOT_SUPPORTED, or FAILED with a message in
+  // `*error_out` (if non-NULL; freed with string_free). Any thread.
+  int (*set_launch_at_login)(void* backend_data, bool enabled,
+                             char** error_out);
+
+  // Close the window's DevTools (opened with open_devtools, or by the user).
+  // Any thread.
+  void (*close_devtools)(void* backend_data, uint32_t window_id);
+
+  // Whether the window's DevTools are open. Any thread.
+  bool (*is_devtools_open)(void* backend_data, uint32_t window_id);
+
+  // Whether DevTools can be opened at all: false when the app launched with
+  // LAUFEY_INSPECTABLE=0 (or "inspectable": false in laufey-launch.json),
+  // which turns off the engine's inspector (WKWebView `inspectable`,
+  // WebView2 AreDevToolsEnabled, WebKitGTK enable-developer-extras, CEF's
+  // DevTools and remote debugging) so neither open_devtools nor the user
+  // (a shortcut, the context menu) can open them. With a `window_id`, the
+  // window's engine setting as read back from the engine; with 0, the
+  // launch setting. Any thread.
+  bool (*is_devtools_enabled)(void* backend_data, uint32_t window_id);
 };
 
 #ifdef __cplusplus

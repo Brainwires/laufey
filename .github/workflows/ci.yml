@@ -324,6 +324,22 @@ jobs:
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --io
 
+      # Global shortcuts, launch at login and DevTools (API 40): register /
+      # list / unregister, a conflict with a second process holding the same
+      # shortcut, a real key press on Windows, the login entry turned on and
+      # off (and the OS artefact checked), DevTools open / close / toggle; then
+      # the DevTools checks again with LAUFEY_INSPECTABLE=0 (nothing opens).
+      # Every leg; Winit reports N/A. See docs/e2e-testing.md.
+      - name: System — global shortcuts, launch at login, DevTools
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --system
+
+      - name: System — DevTools disabled (LAUFEY_INSPECTABLE=0)
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --devtools-off
+
       # Per-app web storage (LAUFEY_APP_ID / LAUFEY_DATA_DIR): persistence
       # across relaunches, isolation between apps, unchanged defaults. See
       # docs/app-data.md.

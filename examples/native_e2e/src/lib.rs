@@ -29,6 +29,7 @@
 
 mod body_echo;
 mod io_checks;
+mod system_checks;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -581,6 +582,29 @@ fn e2e_main() {
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("io") {
       io_checks::run().await;
       finish();
+    }
+    // LAUFEY_E2E_ONLY=system: global shortcuts, launch at login and DevTools
+    // (API 40); devtools-off: the same DevTools checks under
+    // LAUFEY_INSPECTABLE=0; shortcut-holder: the second process the
+    // shortcut conflict check starts.
+    match std::env::var("LAUFEY_E2E_ONLY").as_deref() {
+      Ok("system") => {
+        system_checks::run().await;
+        finish();
+      }
+      Ok("devtools-off") => {
+        system_checks::devtools_off().await;
+        finish();
+      }
+      Ok("shortcut-holder") => {
+        // Not a battery: no OVERALL line, so its output can't be mistaken
+        // for the main run's result.
+        system_checks::hold_shortcut().await;
+        eprintln!("[e2e-holder] done");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        unsafe { libc_exit(0) };
+      }
+      _ => {}
     }
     // LAUFEY_E2E_ONLY=window-api: only the API 38 window checks (e.g. under a
     // real window manager, where the rest of the battery assumes none).

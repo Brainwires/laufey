@@ -38,7 +38,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 39;
+pub const LAUFEY_API_VERSION: u32 = 40;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -762,7 +762,41 @@ pub struct LaufeyBackendApi {
     ),
   >,
   pub buffer_free: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+
+  // --- Global shortcuts, launch at login, DevTools (API >= 40) ---
+  pub system_capabilities: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub set_shortcut_handler:
+    Option<unsafe extern "C" fn(*mut c_void, Option<ShortcutFn>, *mut c_void)>,
+  pub register_shortcut: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      *const c_char,
+      Option<ShortcutResultFn>,
+      *mut c_void,
+    ),
+  >,
+  pub unregister_shortcut:
+    Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> bool>,
+  pub unregister_all_shortcuts: Option<unsafe extern "C" fn(*mut c_void)>,
+  pub list_shortcuts: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+  pub canonicalize_accelerator:
+    Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char>,
+  pub test_trigger_shortcut:
+    Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> bool>,
+  pub get_launch_at_login: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+  pub set_launch_at_login:
+    Option<unsafe extern "C" fn(*mut c_void, bool, *mut *mut c_char) -> c_int>,
+  pub close_devtools: Option<unsafe extern "C" fn(*mut c_void, u32)>,
+  pub is_devtools_open: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub is_devtools_enabled:
+    Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
 }
+
+/// `laufey_shortcut_fn` (API 40).
+pub type ShortcutFn = unsafe extern "C" fn(*mut c_void, *const c_char);
+/// `laufey_shortcut_result_fn` (API 40).
+pub type ShortcutResultFn =
+  unsafe extern "C" fn(*mut c_void, c_int, *const c_char);
 
 /// `laufey_file_dialog_result_fn` (API 39).
 pub type LaufeyFileDialogResultFn =
@@ -1503,6 +1537,22 @@ pub fn create_api_base() -> LaufeyBackendApi {
     read_clipboard_formats: None,
     set_clipboard_change_handler: None,
     buffer_free: None,
+    // API 40: Winit has no global shortcuts, launch-at-login or DevTools
+    // (no web engine); every entry stays NULL, which the laufey crate
+    // reports as unsupported.
+    system_capabilities: None,
+    set_shortcut_handler: None,
+    register_shortcut: None,
+    unregister_shortcut: None,
+    unregister_all_shortcuts: None,
+    list_shortcuts: None,
+    canonicalize_accelerator: None,
+    test_trigger_shortcut: None,
+    get_launch_at_login: None,
+    set_launch_at_login: None,
+    close_devtools: None,
+    is_devtools_open: None,
+    is_devtools_enabled: None,
   }
 }
 

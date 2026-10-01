@@ -5,6 +5,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_launch_config.h"
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
 #include "laufey_single_instance.h"
@@ -30,6 +31,7 @@ NativeDialogResult ShowNativeJSDialog_Mac(int type, const std::string& message,
 
 #include "include/base/cef_callback.h"
 #include "include/cef_browser.h"
+#include "include/cef_command_ids.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_panel.h"
 #include "include/views/cef_window.h"
@@ -701,6 +703,88 @@ void LaufeyApp::OnRegisterCustomSchemes(
 void LaufeyApp::OnBeforeChildProcessLaunch(
     CefRefPtr<CefCommandLine> command_line) {
   laufey_schemes::ForwardToChild(command_line);
+}
+
+// --- DevTools gating (API 40) ---------------------------------------------
+
+namespace {
+// The switches that expose a DevTools endpoint on the browser process.
+const char* const kRemoteDebuggingSwitches[] = {
+    "remote-debugging-port", "remote-debugging-pipe",
+    "remote-debugging-address", "remote-debugging-io-pipes",
+    "auto-open-devtools-for-tabs"};
+}  // namespace
+
+bool LaufeyIsDevToolsCommand(int command_id) {
+  switch (command_id) {
+    case IDC_DEV_TOOLS:
+    case IDC_DEV_TOOLS_CONSOLE:
+    case IDC_DEV_TOOLS_DEVICES:
+    case IDC_DEV_TOOLS_INSPECT:
+    case IDC_DEV_TOOLS_TOGGLE:
+    case IDC_CONTENT_CONTEXT_INSPECTELEMENT:
+    case IDC_CONTENT_CONTEXT_INSPECTBACKGROUNDPAGE:
+    case IDC_CONTENT_CONTEXT_INSPECTELEMENT_WITH_DEVTOOLS:
+    case IDC_CONTENT_CONTEXT_INSPECTELEMENT_WITH_GEMINI:
+      return true;
+  }
+  return false;
+}
+
+void LaufeyApplyInspectableToCommandLine(
+    CefRefPtr<CefCommandLine> command_line) {
+  if (laufey_common::LaunchInspectable())
+    return;
+  for (const char* sw : kRemoteDebuggingSwitches) {
+    if (command_line->HasSwitch(sw))
+      command_line->RemoveSwitch(sw);
+  }
+}
+
+bool LaufeyDevToolsReachable() {
+  if (laufey_common::LaunchInspectable())
+    return true;
+  // Off: reachable only if a remote-debugging switch got through anyway.
+  CefRefPtr<CefCommandLine> cl = CefCommandLine::GetGlobalCommandLine();
+  if (!cl)
+    return false;
+  for (const char* sw : kRemoteDebuggingSwitches) {
+    if (cl->HasSwitch(sw))
+      return true;
+  }
+  return false;
+}
+
+bool LaufeyHandler::OnChromeCommand(
+    CefRefPtr<CefBrowser> /*browser*/, int command_id,
+    cef_window_open_disposition_t /*disposition*/) {
+  // Handled (= dropped) only while DevTools are off.
+  return !laufey_common::LaunchInspectable() &&
+         LaufeyIsDevToolsCommand(command_id);
+}
+
+void LaufeyHandler::OnBeforeContextMenu(
+    CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> /*frame*/,
+    CefRefPtr<CefContextMenuParams> /*params*/, CefRefPtr<CefMenuModel> model) {
+  if (laufey_common::LaunchInspectable() || !model)
+    return;
+  for (size_t i = model->GetCount(); i > 0; i--) {
+    int id = model->GetCommandIdAt(i - 1);
+    if (LaufeyIsDevToolsCommand(id))
+      model->RemoveAt(i - 1);
+  }
+  // Drop a separator left dangling at the end.
+  size_t count = model->GetCount();
+  if (count > 0 && model->GetTypeAt(count - 1) == MENUITEMTYPE_SEPARATOR)
+    model->RemoveAt(count - 1);
+}
+
+bool LaufeyHandler::OnContextMenuCommand(
+    CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> /*frame*/,
+    CefRefPtr<CefContextMenuParams> /*params*/, int command_id,
+    EventFlags /*event_flags*/) {
+  return !laufey_common::LaunchInspectable() &&
+         LaufeyIsDevToolsCommand(command_id);
 }
 
 void LaufeyApp::OnContextInitialized() {

@@ -19,7 +19,8 @@
 //   { "appId": "com.example.app",
 //     "customSchemes": ["myapp"],
 //     "dataDir": "/absolute/path",
-//     "singleInstance": true }
+//     "singleInstance": true,
+//     "inspectable": false }
 //
 // Every key is optional. Each key stands in for its environment variable: an
 // environment variable that is set (non-empty) wins over the file, key by
@@ -52,6 +53,8 @@ struct LaunchConfig {
   std::vector<std::string> custom_schemes;
   bool has_single_instance = false;
   bool single_instance = false;
+  bool has_inspectable = false;
+  bool inspectable = true;
 };
 
 // Parses and validates the text of a launch file. Reads nothing from the
@@ -110,6 +113,12 @@ bool LaunchBoolSettingFrom(const std::string& env_name,
 // also "true"/"false") if set, else the launch file's "singleInstance", else
 // false. An invalid environment value is reported on stderr and ignored.
 bool LaunchSingleInstance();
+
+// Whether the web engine's DevTools may open (API 40): LAUFEY_INSPECTABLE
+// ("1"/"0", also "true"/"false") if set, else the launch file's
+// "inspectable", else true. An invalid environment value is reported on
+// stderr and ignored. Read once per process (the engines take it at startup).
+bool LaunchInspectable();
 
 }  // namespace laufey_common
 

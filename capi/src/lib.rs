@@ -30,12 +30,15 @@ pub use window_state::*;
 mod io;
 pub use io::*;
 
+mod system;
+pub use system::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 39;
+pub const LAUFEY_API_VERSION: u32 = 40;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -1569,7 +1572,9 @@ impl Window {
     }
   }
 
-  /// Open the DevTools inspector for this window.
+  /// Open the DevTools inspector for this window. A no-op when DevTools are
+  /// disabled ([`devtools_enabled`]). See also [`Window::close_devtools`],
+  /// [`Window::toggle_devtools`] and [`Window::is_devtools_open`].
   pub fn open_devtools(&self) {
     let api = api();
     if let Some(f) = api.open_devtools {

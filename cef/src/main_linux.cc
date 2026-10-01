@@ -744,6 +744,7 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     // propagates it to subprocesses.
     if (process_type.empty()) {
       command_line->AppendSwitch("disable-background-networking");
+      LaufeyApplyInspectableToCommandLine(command_line);
     }
   }
 
@@ -871,7 +872,11 @@ int main(int argc, char* argv[]) {
     CefString(&settings.root_cache_path) = cache_path;
   }
 
-  if (const char* port_env = getenv("LAUFEY_REMOTE_DEBUGGING_PORT")) {
+  // No remote debugging while DevTools are off (API 40, inspectable).
+  const char* port_env = laufey_common::LaunchInspectable()
+                             ? getenv("LAUFEY_REMOTE_DEBUGGING_PORT")
+                             : nullptr;
+  if (port_env) {
     int port = atoi(port_env);
     if (port > 0 && port < 65536) {
       settings.remote_debugging_port = port;

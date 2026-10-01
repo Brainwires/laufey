@@ -609,7 +609,7 @@ fn clipboard_capabilities_with(
 }
 
 /// Take a backend string (freed with `string_free`).
-unsafe fn take_backend_string(
+pub(crate) unsafe fn take_backend_string(
   api: &LaufeyBackendApi,
   ptr: *mut c_char,
 ) -> Option<String> {

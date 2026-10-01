@@ -623,6 +623,52 @@ class LaufeyBackend {
   virtual void SetClipboardChangeHandler(laufey_clipboard_change_fn /*fn*/,
                                          void* /*user_data*/) {}
 
+  // --- Global shortcuts, launch at login, DevTools (API >= 40) ---
+  // See laufey.h. The desktop backends override these with laufey_system.h
+  // (backend-common, which iOS doesn't link). The defaults are a backend that
+  // has none of it: registrations answer NOT_SUPPORTED (exactly once, on the
+  // calling thread), launch at login is NOT_SUPPORTED, DevTools stay closed.
+  virtual uint32_t SystemCapabilities() {
+    return 0;
+  }
+  virtual void SetShortcutHandler(laufey_shortcut_fn /*handler*/,
+                                  void* /*user_data*/) {}
+  virtual void RegisterShortcut(const char* /*accelerator*/,
+                                laufey_shortcut_result_fn callback,
+                                void* user_data) {
+    if (callback)
+      callback(user_data, LAUFEY_SHORTCUT_NOT_SUPPORTED, nullptr);
+  }
+  virtual bool UnregisterShortcut(const char* /*accelerator*/) {
+    return false;
+  }
+  virtual void UnregisterAllShortcuts() {}
+  virtual char* ListShortcuts() {
+    char* s = static_cast<char*>(malloc(1));
+    if (s)
+      s[0] = 0;
+    return s;
+  }
+  virtual char* CanonicalizeAccelerator(const char* /*accelerator*/) {
+    return nullptr;
+  }
+  virtual bool TestTriggerShortcut(const char* /*accelerator*/) {
+    return false;
+  }
+  virtual int GetLaunchAtLogin() {
+    return LAUFEY_LOGIN_ITEM_NOT_SUPPORTED;
+  }
+  virtual int SetLaunchAtLogin(bool /*enabled*/, std::string* /*error*/) {
+    return LAUFEY_LOGIN_ITEM_NOT_SUPPORTED;
+  }
+  virtual void CloseDevTools(uint32_t /*window_id*/) {}
+  virtual bool IsDevToolsOpen(uint32_t /*window_id*/) {
+    return false;
+  }
+  virtual bool IsDevToolsEnabled(uint32_t /*window_id*/) {
+    return false;
+  }
+
   // --- Window state, constraints, screens and chrome (API >= 38) ---
   // See laufey.h. The defaults are a backend that can do none of it (iOS):
   // no capabilities, every setter a no-op or false, getters "unknown".
