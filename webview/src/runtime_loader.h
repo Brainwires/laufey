@@ -565,6 +565,64 @@ class LaufeyBackend {
     }
   }
 
+  // --- Drag and drop, file dialogs, rich clipboard (API >= 39) ---
+  // See laufey.h. The desktop backends override these with laufey_io.h
+  // (backend-common, which iOS doesn't link). The defaults are a backend that
+  // has none of it: no drop events, drag-out and dialogs answering FAILED
+  // (exactly once, on the calling thread), plain-text clipboard only.
+  virtual void SetFileDropHandler(laufey_file_drop_fn /*handler*/,
+                                  void* /*user_data*/) {}
+  virtual bool TestTriggerFileDrop(uint32_t /*window_id*/, int /*phase*/,
+                                   double /*x*/, double /*y*/,
+                                   const char* const* /*paths*/,
+                                   size_t /*count*/) {
+    return false;
+  }
+  virtual void StartFileDrag(uint32_t /*window_id*/,
+                             const char* const* /*paths*/, size_t /*count*/,
+                             const uint8_t* /*icon_png*/, size_t /*icon_len*/,
+                             laufey_drag_result_fn callback, void* user_data) {
+    if (callback)
+      callback(user_data, LAUFEY_DRAG_RESULT_FAILED);
+  }
+  virtual uint32_t ShowFileDialog(uint32_t /*window_id*/,
+                                  const laufey_file_dialog_options_t* /*opts*/,
+                                  laufey_file_dialog_result_fn callback,
+                                  void* user_data) {
+    if (callback)
+      callback(user_data, 0, LAUFEY_FILE_DIALOG_FAILED, nullptr, 0);
+    return 0;
+  }
+  virtual bool CancelFileDialog(uint32_t /*dialog_id*/) {
+    return false;
+  }
+  virtual bool TestFileDialogRespond(int /*action*/, const char* /*path*/) {
+    return false;
+  }
+  virtual uint32_t ClipboardCapabilities() {
+    return LAUFEY_CLIPBOARD_CAP_TEXT;
+  }
+  virtual char* ReadClipboardHtml() {
+    return nullptr;
+  }
+  virtual bool WriteClipboardHtml(const std::string& /*html*/,
+                                  const char* /*text_or_null*/) {
+    return false;
+  }
+  virtual uint8_t* ReadClipboardImage(size_t* len_out) {
+    if (len_out)
+      *len_out = 0;
+    return nullptr;
+  }
+  virtual bool WriteClipboardImage(const uint8_t* /*png*/, size_t /*len*/) {
+    return false;
+  }
+  virtual char* ReadClipboardFormats() {
+    return nullptr;
+  }
+  virtual void SetClipboardChangeHandler(laufey_clipboard_change_fn /*fn*/,
+                                         void* /*user_data*/) {}
+
   // --- Window state, constraints, screens and chrome (API >= 38) ---
   // See laufey.h. The defaults are a backend that can do none of it (iOS):
   // no capabilities, every setter a no-op or false, getters "unknown".

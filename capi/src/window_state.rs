@@ -47,6 +47,13 @@ pub const LAUFEY_WINDOW_CAP_VIBRANCY: u32 = 1 << 11;
 pub const LAUFEY_WINDOW_CAP_NORMAL_BOUNDS: u32 = 1 << 12;
 pub const LAUFEY_WINDOW_CAP_KEEP_ALIVE: u32 = 1 << 13;
 pub const LAUFEY_WINDOW_CAP_SET_POSITION: u32 = 1 << 14;
+// API 39: drag and drop and native file dialogs.
+pub const LAUFEY_WINDOW_CAP_FILE_DROP: u32 = 1 << 15;
+pub const LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS: u32 = 1 << 16;
+pub const LAUFEY_WINDOW_CAP_FILE_DRAG_OUT: u32 = 1 << 17;
+pub const LAUFEY_WINDOW_CAP_FILE_DIALOGS: u32 = 1 << 18;
+pub const LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES: u32 = 1 << 19;
+pub const LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL: u32 = 1 << 20;
 
 // --- Types ---
 
@@ -271,6 +278,30 @@ impl WindowCapabilities {
   }
   pub fn set_position(&self) -> bool {
     self.has(LAUFEY_WINDOW_CAP_SET_POSITION)
+  }
+  /// The file-drop handler fires (API 39).
+  pub fn file_drop(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_FILE_DROP)
+  }
+  /// ENTER / OVER already carry the paths (not only the count).
+  pub fn file_drop_enter_paths(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS)
+  }
+  /// `start_file_drag` works.
+  pub fn file_drag_out(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_FILE_DRAG_OUT)
+  }
+  /// `show_file_dialog` works.
+  pub fn file_dialogs(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_FILE_DIALOGS)
+  }
+  /// One open dialog can pick files and directories (macOS).
+  pub fn file_dialog_files_and_directories(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES)
+  }
+  /// A dialog given a window is modal to it.
+  pub fn file_dialog_modal(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL)
   }
 }
 

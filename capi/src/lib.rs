@@ -27,12 +27,15 @@ pub use mouse::*;
 mod window_state;
 pub use window_state::*;
 
+mod io;
+pub use io::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 38;
+pub const LAUFEY_API_VERSION: u32 = 39;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -1669,7 +1672,9 @@ fn show_dialog_blocking(
 ///
 /// Returns `None` if the clipboard is empty, holds no text representation, or
 /// the backend does not support clipboard access. Mirrors the web
-/// `navigator.clipboard.readText()` API. Must be called on the UI thread.
+/// `navigator.clipboard.readText()` API. Any thread on API 39 backends (they
+/// hop to their UI thread where the platform needs it); older backends
+/// expected the UI thread.
 pub fn read_clipboard_text() -> Option<String> {
   let api = api();
   let f = api.read_clipboard_text?;
@@ -1693,7 +1698,7 @@ pub fn read_clipboard_text() -> Option<String> {
 ///
 /// Passing an empty string clears the clipboard. Mirrors the web
 /// `navigator.clipboard.writeText()` API. No-op if the backend does not
-/// support clipboard access. Must be called on the UI thread.
+/// support clipboard access. Any thread on API 39 backends.
 pub fn write_clipboard_text(text: &str) {
   let api = api();
   if let Some(f) = api.write_clipboard_text {

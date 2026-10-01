@@ -729,6 +729,119 @@ static void Backend_PasskeyRequest(void* data, uint32_t window_id,
   }
 }
 
+// --- Drag and drop, file dialogs, rich clipboard (API >= 39) ---
+
+static LaufeyBackend* BackendOf(void* data) {
+  return static_cast<RuntimeLoader*>(data)->GetBackend();
+}
+
+static void Backend_SetFileDropHandler(void* data, laufey_file_drop_fn handler,
+                                       void* user_data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    backend->SetFileDropHandler(handler, user_data);
+}
+
+static bool Backend_TestTriggerFileDrop(void* data, uint32_t window_id,
+                                        int phase, double x, double y,
+                                        const char* const* paths,
+                                        size_t count) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->TestTriggerFileDrop(window_id, phase, x, y, paths, count);
+  return false;
+}
+
+static void Backend_StartFileDrag(void* data, uint32_t window_id,
+                                  const char* const* paths, size_t count,
+                                  const uint8_t* icon_png, size_t icon_len,
+                                  laufey_drag_result_fn callback,
+                                  void* user_data) {
+  if (LaufeyBackend* backend = BackendOf(data)) {
+    backend->StartFileDrag(window_id, paths, count, icon_png, icon_len,
+                           callback, user_data);
+  } else if (callback) {
+    callback(user_data, LAUFEY_DRAG_RESULT_FAILED);
+  }
+}
+
+static uint32_t Backend_ShowFileDialog(
+    void* data, uint32_t window_id, const laufey_file_dialog_options_t* options,
+    laufey_file_dialog_result_fn callback, void* user_data) {
+  if (!callback)
+    return 0;
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->ShowFileDialog(window_id, options, callback, user_data);
+  callback(user_data, 0, LAUFEY_FILE_DIALOG_FAILED, nullptr, 0);
+  return 0;
+}
+
+static bool Backend_CancelFileDialog(void* data, uint32_t dialog_id) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->CancelFileDialog(dialog_id);
+  return false;
+}
+
+static bool Backend_TestFileDialogRespond(void* data, int action,
+                                          const char* path) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->TestFileDialogRespond(action, path);
+  return false;
+}
+
+static uint32_t Backend_ClipboardCapabilities(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->ClipboardCapabilities();
+  return 0;
+}
+
+static char* Backend_ReadClipboardHtml(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->ReadClipboardHtml();
+  return nullptr;
+}
+
+static bool Backend_WriteClipboardHtml(void* data, const char* html,
+                                       const char* text_or_null) {
+  if (!html)
+    return false;
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->WriteClipboardHtml(html, text_or_null);
+  return false;
+}
+
+static uint8_t* Backend_ReadClipboardImage(void* data, size_t* len_out) {
+  if (len_out)
+    *len_out = 0;
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->ReadClipboardImage(len_out);
+  return nullptr;
+}
+
+static bool Backend_WriteClipboardImage(void* data, const uint8_t* png,
+                                        size_t len) {
+  if (!png || len == 0)
+    return false;
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->WriteClipboardImage(png, len);
+  return false;
+}
+
+static char* Backend_ReadClipboardFormats(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->ReadClipboardFormats();
+  return nullptr;
+}
+
+static void Backend_SetClipboardChangeHandler(void* data,
+                                              laufey_clipboard_change_fn fn,
+                                              void* user_data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    backend->SetClipboardChangeHandler(fn, user_data);
+}
+
+static void Backend_BufferFree(void* /*data*/, void* buffer) {
+  free(buffer);
+}
+
 // --- Window state, constraints, screens and chrome (API >= 38) ---
 
 static uint32_t Backend_WindowCapabilities(void* data) {
@@ -1120,6 +1233,25 @@ void RuntimeLoader::InitializeBackendApi() {
   // ceremonies; Linux and iOS answer not_supported.
   backend_api_.passkey_capabilities = Backend_PasskeyCapabilities;
   backend_api_.passkey_request = Backend_PasskeyRequest;
+
+  // Drag and drop, file dialogs and the rich clipboard (API >= 39): see
+  // docs/drag-and-drop.md, docs/file-dialogs.md, docs/clipboard.md. The
+  // desktop backends implement them over backend-common; iOS keeps the
+  // unsupported defaults.
+  backend_api_.set_file_drop_handler = Backend_SetFileDropHandler;
+  backend_api_.start_file_drag = Backend_StartFileDrag;
+  backend_api_.test_trigger_file_drop = Backend_TestTriggerFileDrop;
+  backend_api_.show_file_dialog = Backend_ShowFileDialog;
+  backend_api_.cancel_file_dialog = Backend_CancelFileDialog;
+  backend_api_.test_file_dialog_respond = Backend_TestFileDialogRespond;
+  backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
+  backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
+  backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;
+  backend_api_.read_clipboard_image = Backend_ReadClipboardImage;
+  backend_api_.write_clipboard_image = Backend_WriteClipboardImage;
+  backend_api_.read_clipboard_formats = Backend_ReadClipboardFormats;
+  backend_api_.set_clipboard_change_handler = Backend_SetClipboardChangeHandler;
+  backend_api_.buffer_free = Backend_BufferFree;
 
   backend_api_.create_tray_icon = Backend_CreateTrayIcon;
   backend_api_.destroy_tray_icon = Backend_DestroyTrayIcon;

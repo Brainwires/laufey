@@ -20,6 +20,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_io.h"
 #include "laufey_single_instance.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
@@ -222,6 +223,10 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
 
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
+
+    // backend-common's I/O thread (file dialogs, drag-out, clipboard change
+    // events; its own STA thread, see laufey_io.h).
+    laufey_common::WinIoInit();
 
     // Keep the handler alive for the lifetime of the app.
     // Backend_CreateWindow uses LaufeyHandler::GetInstance() from the runtime

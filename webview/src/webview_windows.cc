@@ -2,6 +2,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_io.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_passkey.h"
@@ -422,6 +423,58 @@ class WebView2Backend : public LaufeyBackend {
     laufey_common::ClipboardWriteTextWin(text);
   }
 
+  // Drag and drop, file dialogs, rich clipboard (API >= 39).
+  void SetFileDropHandler(laufey_file_drop_fn handler,
+                          void* user_data) override {
+    laufey_common::SetFileDropHandler(handler, user_data);
+  }
+  bool TestTriggerFileDrop(uint32_t window_id, int phase, double x, double y,
+                           const char* const* paths, size_t count) override {
+    // The page's drop messages are dispatched on the UI thread; so is this.
+    bool delivered = false;
+    RunOnUiThreadSync([&] {
+      delivered = laufey_common::TestTriggerFileDrop(window_id, phase, x, y,
+                                                     paths, count);
+    });
+    return delivered;
+  }
+  void StartFileDrag(uint32_t window_id, const char* const* paths, size_t count,
+                     const uint8_t* icon_png, size_t icon_len,
+                     laufey_drag_result_fn callback, void* user_data) override;
+  uint32_t ShowFileDialog(uint32_t window_id,
+                          const laufey_file_dialog_options_t* options,
+                          laufey_file_dialog_result_fn callback,
+                          void* user_data) override;
+  bool CancelFileDialog(uint32_t dialog_id) override {
+    return laufey_common::CancelFileDialogWin(dialog_id);
+  }
+  bool TestFileDialogRespond(int action, const char* path) override {
+    return laufey_common::TestFileDialogRespondWin(action, path);
+  }
+  uint32_t ClipboardCapabilities() override {
+    return laufey_common::ClipboardCapabilitiesWin();
+  }
+  char* ReadClipboardHtml() override {
+    return laufey_common::ClipboardReadHtmlWin();
+  }
+  bool WriteClipboardHtml(const std::string& html,
+                          const char* text_or_null) override {
+    return laufey_common::ClipboardWriteHtmlWin(html, text_or_null);
+  }
+  uint8_t* ReadClipboardImage(size_t* len_out) override {
+    return laufey_common::ClipboardReadImageWin(len_out);
+  }
+  bool WriteClipboardImage(const uint8_t* png, size_t len) override {
+    return laufey_common::ClipboardWriteImageWin(png, len);
+  }
+  char* ReadClipboardFormats() override {
+    return laufey_common::ClipboardReadFormatsWin();
+  }
+  void SetClipboardChangeHandler(laufey_clipboard_change_fn handler,
+                                 void* user_data) override {
+    laufey_common::SetClipboardChangeHandler(handler, user_data);
+  }
+
   void BounceDock(int type) override;
   void SetDockBadge(const char* badge_or_null) override;
 
@@ -459,6 +512,11 @@ class WebView2Backend : public LaufeyBackend {
   }
 
   void HandleJsMessage(uint32_t window_id, const std::wstring& json);
+  // A message from the injected file-drop observer (see
+  // BuildFileDropScript): true if `message` was one (handled or refused),
+  // false if it is for the JS bridge.
+  bool HandleFileDropMessage(uint32_t window_id, const wchar_t* message,
+                             ICoreWebView2WebMessageReceivedEventArgs* args);
 
  private:
   WinWindowState* GetWindow(uint32_t window_id);
@@ -515,6 +573,9 @@ class WebView2Backend : public LaufeyBackend {
   // Message-only window owned by the UI thread used to receive marshaled
   // tasks even before the first real window exists.
   HWND dispatcher_hwnd_ = nullptr;
+  // Random per process; the file-drop observer script carries it in its
+  // closure and the host drops observer-shaped messages without it.
+  std::string file_drop_token_;
 };
 
 LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
@@ -728,6 +789,23 @@ WebView2Backend::WebView2Backend() {
   dispatcher_hwnd_ =
       CreateWindowExW(0, L"LaufeyWebView2", L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
                       nullptr, GetModuleHandle(nullptr), nullptr);
+
+  // backend-common's I/O thread (file dialogs, drag-out, clipboard change
+  // events; its own STA thread, see laufey_io.h).
+  laufey_common::WinIoInit();
+
+  // 256 random bits from two v4 GUIDs (CoCreateGuid draws them from the
+  // system RNG).
+  for (int i = 0; i < 2; i++) {
+    GUID g = {};
+    CoCreateGuid(&g);
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(&g);
+    static const char kHex[] = "0123456789abcdef";
+    for (size_t k = 0; k < sizeof(g); k++) {
+      file_drop_token_ += kHex[b[k] >> 4];
+      file_drop_token_ += kHex[b[k] & 15];
+    }
+  }
 }
 
 void WebView2Backend::RunOnUiThread(std::function<void()> task) {
@@ -1001,6 +1079,34 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             state->webview->AddScriptToExecuteOnDocumentCreated(
                 wInitScript.c_str(), nullptr);
 
+            // The file-drop observer (API 39): reports file drags over the
+            // page to the host, the drop with its File objects, whose native
+            // paths WebView2 reveals to the host only (ICoreWebView2File).
+            // Its `send` posts with a per-process token kept in the closure.
+            std::string dropScript =
+                "(function () {\n"
+                "  var wv = window.chrome && window.chrome.webview;\n"
+                "  if (!wv || window.top !== window) return;\n"
+                "  var post = wv.postMessage;\n"
+                "  var postX = wv.postMessageWithAdditionalObjects;\n"
+                "  var call = Function.prototype.call;\n"
+                "  var token = '" +
+                file_drop_token_ +
+                "';\n"
+                "  (" +
+                laufey_common::BuildDomFileDropObserverScript() +
+                ")(function (p, x, y, n, files) {\n"
+                "    var m = '{\"__laufeyFileDrop\":\"' + token + "
+                "'\",\"p\":' + (p | 0) + ',\"x\":' + (+x || 0) + "
+                "',\"y\":' + (+y || 0) + ',\"n\":' + (n | 0) + '}';\n"
+                "    if (files && postX) call.call(postX, wv, m, files);\n"
+                "    else call.call(post, wv, m);\n"
+                "  });\n"
+                "})();\n";
+            std::wstring wDropScript(dropScript.begin(), dropScript.end());
+            state->webview->AddScriptToExecuteOnDocumentCreated(
+                wDropScript.c_str(), nullptr);
+
             uint32_t wid = window_id;
             state->webview->add_WebMessageReceived(
                 Callback<ICoreWebView2WebMessageReceivedEventHandler>(
@@ -1030,10 +1136,11 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                         return S_OK;
                       }
 
-                      LPWSTR messageRaw;
+                      LPWSTR messageRaw = nullptr;
                       args->TryGetWebMessageAsString(&messageRaw);
                       if (messageRaw) {
-                        HandleJsMessage(wid, messageRaw);
+                        if (!HandleFileDropMessage(wid, messageRaw, args))
+                          HandleJsMessage(wid, messageRaw);
                         CoTaskMemFree(messageRaw);
                       }
                       return S_OK;
@@ -1601,7 +1708,127 @@ uint32_t WebView2Backend::WindowCapabilities() {
          LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS | LAUFEY_WINDOW_CAP_SCREENS |
          LAUFEY_WINDOW_CAP_DISPLAY_EVENTS | LAUFEY_WINDOW_CAP_NORMAL_BOUNDS |
          LAUFEY_WINDOW_CAP_KEEP_ALIVE | LAUFEY_WINDOW_CAP_SET_POSITION |
-         laufey_common::WinBackdropCapabilities();
+         laufey_common::WinBackdropCapabilities() |
+         // API 39. WebView2 shows the host the dropped files' paths only on
+         // the drop (ICoreWebView2File), so ENTER / OVER carry the count.
+         LAUFEY_WINDOW_CAP_FILE_DROP | LAUFEY_WINDOW_CAP_FILE_DRAG_OUT |
+         LAUFEY_WINDOW_CAP_FILE_DIALOGS | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+}
+
+// ---------------------------------------------------------------------------
+// Drag and drop, file dialogs (API >= 39)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Reads `"key":<number>` from the observer's message (which the script
+// builds itself, so the shape is fixed).
+bool ReadNumberField(const wchar_t* msg, const wchar_t* key, double* out) {
+  const wchar_t* at = wcsstr(msg, key);
+  if (!at)
+    return false;
+  at += wcslen(key);
+  wchar_t* end = nullptr;
+  double v = wcstod(at, &end);
+  if (end == at)
+    return false;
+  *out = v;
+  return true;
+}
+
+}  // namespace
+
+bool WebView2Backend::HandleFileDropMessage(
+    uint32_t window_id, const wchar_t* message,
+    ICoreWebView2WebMessageReceivedEventArgs* args) {
+  static const wchar_t kPrefix[] = L"{\"__laufeyFileDrop\":\"";
+  size_t prefix_len = wcslen(kPrefix);
+  if (wcsncmp(message, kPrefix, prefix_len) != 0)
+    return false;
+  // Refuse (but swallow) anything without this process's token: page script
+  // can post observer-shaped messages, but can't read the token.
+  std::wstring token(file_drop_token_.begin(), file_drop_token_.end());
+  const wchar_t* t = message + prefix_len;
+  if (wcsncmp(t, token.c_str(), token.size()) != 0 || t[token.size()] != L'"')
+    return true;
+  double phase = -1, x = 0, y = 0, n = 0;
+  if (!ReadNumberField(message, L"\"p\":", &phase) ||
+      !ReadNumberField(message, L"\"x\":", &x) ||
+      !ReadNumberField(message, L"\"y\":", &y) ||
+      !ReadNumberField(message, L"\"n\":", &n))
+    return true;
+  int p = static_cast<int>(phase);
+  if (p < LAUFEY_DRAG_ENTER || p > LAUFEY_DRAG_DROP || n < 0)
+    return true;
+  std::vector<std::string> paths;
+  if (p == LAUFEY_DRAG_DROP) {
+    // The dropped File objects, as WebView2 hands them to the host with their
+    // native paths.
+    ComPtr<ICoreWebView2WebMessageReceivedEventArgs2> args2;
+    ComPtr<ICoreWebView2ObjectCollectionView> objects;
+    if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args2))) &&
+        SUCCEEDED(args2->get_AdditionalObjects(&objects)) && objects) {
+      UINT32 count = 0;
+      objects->get_Count(&count);
+      for (UINT32 i = 0; i < count && paths.size() < LAUFEY_MAX_DROP_PATHS;
+           i++) {
+        ComPtr<IUnknown> item;
+        ComPtr<ICoreWebView2File> file;
+        if (FAILED(objects->GetValueAtIndex(i, &item)) || !item ||
+            FAILED(item.As(&file)))
+          continue;
+        LPWSTR path = nullptr;
+        if (SUCCEEDED(file->get_Path(&path)) && path) {
+          if (path[0])
+            paths.push_back(laufey_common::WideToUtf8(path));
+          CoTaskMemFree(path);
+        }
+      }
+    }
+  }
+  laufey_common::DispatchFileDrop(window_id, p, x, y, paths,
+                                  static_cast<size_t>(n));
+  return true;
+}
+
+void WebView2Backend::StartFileDrag(uint32_t window_id,
+                                    const char* const* paths, size_t count,
+                                    const uint8_t* icon_png, size_t icon_len,
+                                    laufey_drag_result_fn callback,
+                                    void* user_data) {
+  auto* req = new laufey_common::DragOutRequest();
+  req->callback = callback;
+  req->user_data = user_data;
+  HWND hwnd = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      hwnd = state->hwnd;
+  }
+  if (!hwnd || !laufey_common::ValidateDragPaths(paths, count, &req->paths)) {
+    req->Finish(LAUFEY_DRAG_RESULT_FAILED);
+    delete req;
+    return;
+  }
+  if (icon_png && icon_len > 0)
+    req->icon_png.assign(icon_png, icon_png + icon_len);
+  // RunDrag re-checks the HWND (IsWindow) on the UI thread.
+  laufey_common::StartFileDragWin(hwnd, req);
+}
+
+uint32_t WebView2Backend::ShowFileDialog(
+    uint32_t window_id, const laufey_file_dialog_options_t* options,
+    laufey_file_dialog_result_fn callback, void* user_data) {
+  laufey_common::ParentResolver parent;
+  if (window_id != 0) {
+    parent = [this, window_id]() -> void* {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      return state ? state->hwnd : nullptr;
+    };
+  }
+  return laufey_common::ShowFileDialogWin(std::move(parent), options, callback,
+                                          user_data);
 }
 
 void WebView2Backend::SetWindowState(uint32_t window_id, int action) {

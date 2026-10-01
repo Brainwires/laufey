@@ -164,6 +164,7 @@ impl App {
 
   fn close_window(&mut self, window_id: u32) {
     laufey_backend_winit_common::window_api::forget(window_id);
+    laufey_backend_winit_common::file_drop::forget(window_id);
     if let Some(info) = self.windows.remove(&window_id) {
       self.winit_to_laufey.remove(&info.window.id());
       laufey_backend_winit_common::remove_window_handles(window_id);
@@ -266,6 +267,7 @@ impl ApplicationHandler<UserEvent> for App {
       }
     }
     laufey_backend_winit_common::poll_menu_events();
+    laufey_backend_winit_common::file_drop::flush();
     // The tray lives on the primary monitor (menu bar / taskbar); its scale
     // factor converts tray-icon's physical rect into the logical window space.
     let scale_factor = event_loop
@@ -354,6 +356,25 @@ impl App {
     event: WindowEvent,
   ) {
     match event {
+      // File drops (API 39): gathered per window and reported once the queue
+      // is drained (about_to_wait -> file_drop::flush).
+      WindowEvent::HoveredFile(path) => {
+        let (x, y) = state
+          .common
+          .with_window(laufey_id, |ws| *ws.cursor_position.lock().unwrap())
+          .unwrap_or((0.0, 0.0));
+        laufey_backend_winit_common::file_drop::hovered(laufey_id, &path, x, y);
+      }
+      WindowEvent::DroppedFile(path) => {
+        let (x, y) = state
+          .common
+          .with_window(laufey_id, |ws| *ws.cursor_position.lock().unwrap())
+          .unwrap_or((0.0, 0.0));
+        laufey_backend_winit_common::file_drop::dropped(laufey_id, &path, x, y);
+      }
+      WindowEvent::HoveredFileCancelled => {
+        laufey_backend_winit_common::file_drop::cancelled(laufey_id);
+      }
       WindowEvent::CloseRequested => {
         let proceed =
           laufey_backend_winit_common::dispatch_close_requested_event(
@@ -639,9 +660,6 @@ impl App {
 
       WindowEvent::ThemeChanged(_) => {}
       WindowEvent::Destroyed => {}
-      WindowEvent::DroppedFile(_) => {}
-      WindowEvent::HoveredFile(_) => {}
-      WindowEvent::HoveredFileCancelled => {}
       WindowEvent::Ime(_) => {}
 
       WindowEvent::Touch(_)

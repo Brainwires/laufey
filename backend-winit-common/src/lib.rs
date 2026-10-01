@@ -3,6 +3,7 @@
 pub use winit;
 
 pub mod dock;
+pub mod file_drop;
 pub mod notification;
 pub mod open_url;
 pub mod permission;
@@ -37,7 +38,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 38;
+pub const LAUFEY_API_VERSION: u32 = 39;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -690,7 +691,82 @@ pub struct LaufeyBackendApi {
   >,
   pub set_quit_on_last_window_closed:
     Option<unsafe extern "C" fn(*mut c_void, bool)>,
+
+  // --- Drag and drop, file dialogs, rich clipboard (API >= 39) ---
+  // File drops (set_file_drop_handler, test_trigger_file_drop) and
+  // clipboard_capabilities are filled by fill_common_api (see file_drop.rs);
+  // drag-out, file dialogs and the rich clipboard stay None: winit has no API
+  // for them (docs/drag-and-drop.md, docs/file-dialogs.md,
+  // docs/clipboard.md). Every field is declared to keep the layout in sync
+  // with `laufey_backend_api`.
+  pub set_file_drop_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<file_drop::LaufeyFileDropFn>,
+      *mut c_void,
+    ),
+  >,
+  pub start_file_drag: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *const *const c_char,
+      usize,
+      *const u8,
+      usize,
+      Option<unsafe extern "C" fn(*mut c_void, c_int)>,
+      *mut c_void,
+    ),
+  >,
+  pub test_trigger_file_drop: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      c_int,
+      f64,
+      f64,
+      *const *const c_char,
+      usize,
+    ) -> bool,
+  >,
+  pub show_file_dialog: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *const c_void,
+      Option<LaufeyFileDialogResultFn>,
+      *mut c_void,
+    ) -> u32,
+  >,
+  pub cancel_file_dialog:
+    Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub test_file_dialog_respond:
+    Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char) -> bool>,
+  pub clipboard_capabilities: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub read_clipboard_html:
+    Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+  pub write_clipboard_html: Option<
+    unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> bool,
+  >,
+  pub read_clipboard_image:
+    Option<unsafe extern "C" fn(*mut c_void, *mut usize) -> *mut u8>,
+  pub write_clipboard_image:
+    Option<unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool>,
+  pub read_clipboard_formats:
+    Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+  pub set_clipboard_change_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(*mut c_void)>,
+      *mut c_void,
+    ),
+  >,
+  pub buffer_free: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
 }
+
+/// `laufey_file_dialog_result_fn` (API 39).
+pub type LaufeyFileDialogResultFn =
+  unsafe extern "C" fn(*mut c_void, u32, c_int, *const *const c_char, usize);
 
 /// `laufey_window_state_fn` (API 38).
 pub type LaufeyWindowStateFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32);
@@ -1410,6 +1486,23 @@ pub fn create_api_base() -> LaufeyBackendApi {
     set_window_backdrop: None,
     get_window_normal_bounds: None,
     set_quit_on_last_window_closed: None,
+    // Drag and drop, file dialogs, rich clipboard (API >= 39): file drops and
+    // the clipboard capability bits are filled by fill_common_api; winit has
+    // no drag-out, dialog or rich-clipboard API.
+    set_file_drop_handler: None,
+    start_file_drag: None,
+    test_trigger_file_drop: None,
+    show_file_dialog: None,
+    cancel_file_dialog: None,
+    test_file_dialog_respond: None,
+    clipboard_capabilities: None,
+    read_clipboard_html: None,
+    write_clipboard_html: None,
+    read_clipboard_image: None,
+    write_clipboard_image: None,
+    read_clipboard_formats: None,
+    set_clipboard_change_handler: None,
+    buffer_free: None,
   }
 }
 
@@ -3066,7 +3159,7 @@ macro_rules! define_common_backend_fns {
     unsafe extern "C" fn backend_window_capabilities(
       _data: *mut ::std::ffi::c_void,
     ) -> u32 {
-      $crate::window_api::capabilities()
+      $crate::window_api::capabilities() | $crate::file_drop::CAPABILITIES
     }
 
     unsafe extern "C" fn backend_get_window_normal_bounds(
@@ -3565,6 +3658,12 @@ macro_rules! fill_common_api {
     $api.get_window_normal_bounds = Some(backend_get_window_normal_bounds);
     $api.set_quit_on_last_window_closed =
       Some(backend_set_quit_on_last_window_closed);
+    // File drops and the clipboard capability bits (API >= 39).
+    $api.set_file_drop_handler = Some($crate::file_drop::set_file_drop_handler);
+    $api.test_trigger_file_drop =
+      Some($crate::file_drop::test_trigger_file_drop);
+    $api.clipboard_capabilities =
+      Some($crate::file_drop::clipboard_capabilities);
   };
 }
 

@@ -675,3 +675,35 @@ runtime's shutdown.
 
 On Linux the CI legs run without a window manager; biscuits runs `--window-api`
 under xfwm4 for the state checks.
+
+## 17. Drag and drop, file dialogs and the clipboard (API 39)
+
+`scripts/native-e2e-run.sh <backend> --io` runs `native_e2e`'s `io_checks`
+alone, on every backend (webview/linux included: every call it makes hops to the
+GTK thread). Capability-probed like the rest:
+
+- **Clipboard**: text from a worker thread, HTML with its plain-text
+  alternative, a PNG byte-for-byte, a non-PNG write refused, the formats list
+  after each write, and a change event after a write (the macOS change-count
+  poll, Windows' clipboard listener, GTK's owner-change), none once the handler
+  is cleared.
+- **File drops**: ENTER, OVER, LEAVE, DROP and an empty DROP through
+  `test_trigger_file_drop`, the dispatch the OS path uses, checked for window
+  id, position and paths; no delivery after the handler is cleared.
+- **File dialogs**: real OS dialogs. One closed by `test_file_dialog_respond`
+  (cancel), one by `cancel_file_dialog`, a second refused as busy while one is
+  open, and three accepted with a path the hook types in (a save target, an
+  existing file, a directory), each result coming back through the dialog's own
+  completion path. A dialog that won't take a typed path is N/A, not a pass: on
+  the macOS CI runners the panels run out of process (`ok:` is not implemented
+  and a posted Return doesn't reach them), so there the accepts are N/A and only
+  opening, cancelling and busy are checked.
+- **Drag out**: a relative path and a drag with no mouse button held both fail.
+  A real drag out (and a real OS drop) needs a person or OS-level input
+  injection and is not part of the battery.
+
+The portable pieces (the drop dispatch, the dialog slot's exactly-once
+completion, option copying, `file://` parsing, CF_HTML) are unit-tested in
+`backend-common/tests/io_test.cc` (ctest), the capi wrappers in
+`capi/src/io.rs`, and the Winit drop batching in
+`backend-winit-common/src/file_drop.rs`.
