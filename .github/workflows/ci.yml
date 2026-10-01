@@ -144,8 +144,6 @@ jobs:
   #                     building a muda menu with no GTK init.
   #   - webview / linux: WebKitGTK/Xlib isn't thread-safe under the worker-thread
   #                      runtime (xcb_xlib_threads_sequence_lost).
-  #   - cef|webview / windows: CEF's Windows dist extraction and the WebView2
-  #                            run are flaky in this job; need hands-on debugging.
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -158,6 +156,7 @@ jobs:
           - { os: macos-14, backend: cef }
           - { os: windows-latest, backend: winit }
           - { os: windows-latest, backend: webview }
+          - { os: windows-latest, backend: cef }
           - { os: ubuntu-22.04, backend: cef }
           # Storage e2e only: the Layer-0 battery is excluded on webview/linux
           # (see above).
@@ -241,6 +240,7 @@ jobs:
         if: runner.os == 'Windows' && matrix.backend != 'winit'
 
       - name: Build backend
+        if: ${{ !(runner.os == 'Windows' && matrix.backend == 'cef') }}
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ] && [ "${{ matrix.backend }}" = "webview" ]; then
@@ -248,6 +248,13 @@ jobs:
           else
             make ${{ matrix.backend }}
           fi
+
+      # As in build-cef: run make from the default shell (pwsh), where the
+      # Windows tar extracts the CEF dist. Under Git bash, GNU tar reads the
+      # "D:/..." archive path as a remote host and the extraction fails.
+      - name: Build backend (Windows, cef)
+        if: runner.os == 'Windows' && matrix.backend == 'cef'
+        run: make cef
 
       - name: Layer 0 — readback / events / clipboard / menu+tray clicks
         if: ${{ !matrix.storage_only }}
