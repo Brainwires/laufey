@@ -42,6 +42,7 @@ set(LAUFEY_COMMON_SRCS
   src/launch_config.cc
   src/single_instance.cc
   src/passkey.cc
+  src/window_state.cc
 )
 
 if(WIN32)
@@ -63,6 +64,7 @@ if(APPLE)
     src/tray_mac.mm
     src/single_instance_mac.mm
     src/passkey_mac.mm
+    src/window_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -83,6 +85,7 @@ elseif(WIN32)
     src/permissions_stub.cc
     src/tray_win.cc
     src/passkey_win.cc
+    src/window_win.cc
   )
 endif()
 
@@ -102,6 +105,8 @@ if(WIN32)
     gdi32
     user32
     advapi32
+    dwmapi
+    shcore
   )
 elseif(APPLE)
   find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
@@ -181,6 +186,14 @@ if(LAUFEY_BUILD_TESTS)
     Threads::Threads
   )
   add_test(NAME laufey_passkey_test COMMAND laufey_passkey_test)
+
+  # Window-state bookkeeping: state diffing, size constraints, normal-bounds
+  # settling, screen matching and the app-lifetime flags (no OS API).
+  add_executable(laufey_window_state_test tests/window_state_test.cc)
+  target_link_libraries(laufey_window_state_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_window_state_test COMMAND laufey_window_state_test)
 
   if(APPLE)
     # ASAuthorization error mapping (synthetic NSErrors, no ceremony).

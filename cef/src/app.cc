@@ -7,8 +7,10 @@
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
 #include "laufey_single_instance.h"
+#include "laufey_window.h"
 #include "scheme_handler.h"
 
+#include <algorithm>
 #include <iostream>
 
 #ifdef __linux__
@@ -28,6 +30,7 @@ NativeDialogResult ShowNativeJSDialog_Mac(int type, const std::string& message,
 #include "include/base/cef_callback.h"
 #include "include/cef_browser.h"
 #include "include/views/cef_browser_view.h"
+#include "include/views/cef_panel.h"
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
@@ -59,12 +62,19 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
       ConfigureNSWindowTransparentTitlebarForCefHandle(handle);
     }
     RegisterNSWindowForCefHandle(handle, laufey_id_);
+    laufey_common::MacObserveWindowStateChanges(NSWindowForCefHandle(handle),
+                                                laufey_id_,
+                                                CefScheduleWindowStateRecheck);
 #elif defined(_WIN32)
     if (no_activate) {
       ConfigureWin32WindowAsPanel((void*)handle);
     }
     RuntimeLoader::GetInstance()->RegisterNativeHandle((void*)(uintptr_t)handle,
                                                        laufey_id_);
+    // WM_SIZE is the one signal for a minimize / restore on Windows.
+    laufey_common::WinSubclassForStateChanges(reinterpret_cast<void*>(handle),
+                                              laufey_id_,
+                                              CefScheduleWindowStateRecheck);
 #elif defined(__linux__)
     if (no_activate) {
       ConfigureLinuxWindowAsPanel(handle);
@@ -77,6 +87,58 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
 
   window->Show();
   InstallNativeMouseMonitor();
+  if (laufey_id_ > 0)
+    CefScheduleWindowStateRecheck(laufey_id_);
+}
+
+// The constraints are in set_window_size units (CefWindow::GetSize, the
+// whole window), while Chromium applies the delegate's minimum / maximum to
+// the client area. Subtract the frame the window has right now.
+static CefSize FrameDelta(CefRefPtr<CefView> view) {
+  CefRefPtr<CefPanel> panel = view ? view->AsPanel() : nullptr;
+  CefRefPtr<CefWindow> window = panel ? panel->AsWindow() : nullptr;
+  if (!window)
+    return CefSize();
+  CefSize size = window->GetSize();
+  CefRect client = window->GetClientAreaBoundsInScreen();
+  return CefSize((std::max)(0, size.width - client.width),
+                 (std::max)(0, size.height - client.height));
+}
+
+CefSize LaufeyWindowDelegate::GetMinimumSize(CefRefPtr<CefView> view) {
+  laufey_common::SizeConstraints c =
+      laufey_common::GetSizeConstraints(laufey_id_);
+  if (c.min_width == 0 && c.min_height == 0)
+    return CefSize();
+  CefSize frame = FrameDelta(view);
+  return CefSize(
+      c.min_width > 0 ? (std::max)(1, c.min_width - frame.width) : 0,
+      c.min_height > 0 ? (std::max)(1, c.min_height - frame.height) : 0);
+}
+
+CefSize LaufeyWindowDelegate::GetMaximumSize(CefRefPtr<CefView> view) {
+  laufey_common::SizeConstraints c =
+      laufey_common::GetSizeConstraints(laufey_id_);
+  // CefSize() (0x0) means "no maximum"; an unbounded axis next to a bounded
+  // one gets a size nothing reaches.
+  if (c.max_width == 0 && c.max_height == 0)
+    return CefSize();
+  CefSize frame = FrameDelta(view);
+  return CefSize(
+      c.max_width > 0 ? (std::max)(1, c.max_width - frame.width) : 1 << 24,
+      c.max_height > 0 ? (std::max)(1, c.max_height - frame.height) : 1 << 24);
+}
+
+void LaufeyWindowDelegate::OnWindowBoundsChanged(CefRefPtr<CefWindow> window,
+                                                 const CefRect& new_bounds) {
+  if (laufey_id_ > 0)
+    CefRecheckWindowState(laufey_id_);
+}
+
+void LaufeyWindowDelegate::OnWindowFullscreenTransition(
+    CefRefPtr<CefWindow> window, bool is_completed) {
+  if (laufey_id_ > 0 && is_completed)
+    CefScheduleWindowStateRecheck(laufey_id_);
 }
 
 bool LaufeyWindowDelegate::IsFrameless(CefRefPtr<CefWindow> window) {
@@ -94,6 +156,8 @@ void LaufeyWindowDelegate::OnWindowActivationChanged(
     CefRefPtr<CefWindow> window, bool active) {
   if (laufey_id_ > 0) {
     RuntimeLoader::GetInstance()->DispatchFocusedEvent(laufey_id_, active);
+    // A window manager iconifies / restores through activation changes too.
+    CefScheduleWindowStateRecheck(laufey_id_);
   }
 }
 
@@ -123,14 +187,20 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
     laufey_common::PasskeyWindowClosing(reinterpret_cast<void*>(handle));
 #endif
 #ifdef __APPLE__
+    laufey_common::MacUnwatchWindowState(NSWindowForCefHandle(handle));
     UnregisterNSWindowForCefHandle(handle);
 #else
+#if defined(_WIN32)
+    laufey_common::WinUnsubclassForStateChanges(
+        reinterpret_cast<void*>(handle));
+#endif
     RuntimeLoader::GetInstance()->UnregisterNativeHandle(
         (void*)(uintptr_t)handle);
 #endif
   }
   if (laufey_id_ > 0) {
     RuntimeLoader::GetInstance()->UnregisterBrowser(laufey_id_);
+    laufey_common::ForgetWindow(laufey_id_);
   }
   RemoveNativeMouseMonitor();
   browser_view_ = nullptr;
@@ -223,13 +293,26 @@ void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     }
   }
   if (browser_list_.empty()) {
+    // A tray / menu-bar app keeps running with no window when it asked to
+    // (set_quit_on_last_window_closed(false), or an Accessory-policy macOS
+    // app, as the WebView backend); quit() ends the loop either way.
 #if defined(__APPLE__)
-    // macOS runs [NSApp run] (external_message_pump); stop that instead.
-    LaufeyQuitMainLoopMac();
+    bool end = laufey_common::ShouldQuitAfterLastWindowMac();
 #else
-    CefQuitMessageLoop();
+    bool end = laufey_common::ShouldEndLoopAfterLastWindow();
 #endif
+    if (end)
+      LaufeyQuitMainLoop();
   }
+}
+
+void LaufeyQuitMainLoop() {
+#if defined(__APPLE__)
+  // macOS runs [NSApp run] (external_message_pump); stop that instead.
+  LaufeyQuitMainLoopMac();
+#else
+  CefQuitMessageLoop();
+#endif
 }
 
 void LaufeyHandler::OnTitleChange(CefRefPtr<CefBrowser> browser,

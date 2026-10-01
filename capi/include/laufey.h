@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 37
+#define LAUFEY_API_VERSION 38
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -62,6 +62,128 @@ extern "C" {
 #define LAUFEY_WINDOW_FLAG_TRANSPARENT_TITLEBAR (1u << 2)
 #define LAUFEY_WINDOW_FLAG_HIDDEN (1u << 3)
 #define LAUFEY_WINDOW_FLAG_TRANSPARENT (1u << 4)
+
+// --- Window state, screens and chrome (API >= 38) ---------------------------
+//
+// Window state bits returned by get_window_state and passed to the
+// window-state handler. A window can be in more than one state at once where
+// the OS allows it (e.g. MAXIMIZED and MINIMIZED for a minimized window that
+// will restore to maximized, on platforms that report both).
+#define LAUFEY_WINDOW_STATE_MAXIMIZED (1u << 0)
+#define LAUFEY_WINDOW_STATE_MINIMIZED (1u << 1)
+#define LAUFEY_WINDOW_STATE_FULLSCREEN (1u << 2)
+
+// Actions for set_window_state.
+#define LAUFEY_WINDOW_ACTION_MAXIMIZE 1
+#define LAUFEY_WINDOW_ACTION_UNMAXIMIZE 2
+#define LAUFEY_WINDOW_ACTION_MINIMIZE 3
+// Un-minimize: the window returns to the state it had before it was
+// minimized (maximized windows come back maximized).
+#define LAUFEY_WINDOW_ACTION_RESTORE 4
+#define LAUFEY_WINDOW_ACTION_ENTER_FULLSCREEN 5
+#define LAUFEY_WINDOW_ACTION_LEAVE_FULLSCREEN 6
+
+// Title bar styles for set_window_titlebar_style.
+//   DEFAULT       the platform's standard title bar.
+//   HIDDEN        a transparent title bar with the content extended under it
+//                 and the system buttons overlaid (the runtime form of
+//                 LAUFEY_WINDOW_FLAG_TRANSPARENT_TITLEBAR; Electron
+//                 `titleBarStyle: 'hidden'`).
+//   HIDDEN_INSET  HIDDEN with the macOS traffic lights inset from the window
+//                 edge (Electron `titleBarStyle: 'hiddenInset'`).
+#define LAUFEY_TITLEBAR_DEFAULT 0
+#define LAUFEY_TITLEBAR_HIDDEN 1
+#define LAUFEY_TITLEBAR_HIDDEN_INSET 2
+
+// Backdrops for set_window_backdrop.
+//   NONE       remove any backdrop (the window is opaque again).
+//   MICA       Windows 11 Mica (DWMSBT_MAINWINDOW).
+//   ACRYLIC    Windows 11 Acrylic (DWMSBT_TRANSIENTWINDOW).
+//   MICA_ALT   Windows 11 tabbed Mica (DWMSBT_TABBEDWINDOW).
+//   VIBRANCY   macOS NSVisualEffectView behind the web view, with the
+//              `material` argument (LAUFEY_VIBRANCY_*).
+// A backdrop only shows where the page leaves its background transparent:
+// the backend makes the web view's own background transparent while one is
+// set and restores it for NONE.
+#define LAUFEY_BACKDROP_NONE 0
+#define LAUFEY_BACKDROP_MICA 1
+#define LAUFEY_BACKDROP_ACRYLIC 2
+#define LAUFEY_BACKDROP_MICA_ALT 3
+#define LAUFEY_BACKDROP_VIBRANCY 4
+
+// macOS vibrancy materials (the NSVisualEffectMaterial values, so they pass
+// through unchanged).
+#define LAUFEY_VIBRANCY_TITLEBAR 3
+#define LAUFEY_VIBRANCY_SELECTION 4
+#define LAUFEY_VIBRANCY_MENU 5
+#define LAUFEY_VIBRANCY_POPOVER 6
+#define LAUFEY_VIBRANCY_SIDEBAR 7
+#define LAUFEY_VIBRANCY_HEADER_VIEW 10
+#define LAUFEY_VIBRANCY_SHEET 11
+#define LAUFEY_VIBRANCY_WINDOW_BACKGROUND 12
+#define LAUFEY_VIBRANCY_HUD 13
+#define LAUFEY_VIBRANCY_FULLSCREEN_UI 15
+#define LAUFEY_VIBRANCY_TOOLTIP 17
+#define LAUFEY_VIBRANCY_CONTENT_BACKGROUND 18
+#define LAUFEY_VIBRANCY_UNDER_WINDOW_BACKGROUND 21
+#define LAUFEY_VIBRANCY_UNDER_PAGE_BACKGROUND 22
+
+// Capability bits returned by window_capabilities: what this backend can do
+// on this OS (and OS build) right now. A setter for a capability that is not
+// reported is a no-op (or returns false); a getter returns its "unknown"
+// value. Embedders surface this instead of pretending.
+#define LAUFEY_WINDOW_CAP_STATE (1u << 0)             // set/get_window_state
+#define LAUFEY_WINDOW_CAP_STATE_EVENTS (1u << 1)      // window-state handler
+#define LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS (1u << 2)  // min / max size
+#define LAUFEY_WINDOW_CAP_SCREENS (1u << 3)           // get_screens
+#define LAUFEY_WINDOW_CAP_DISPLAY_EVENTS (1u << 4)    // display-changed handler
+#define LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN (1u << 5)
+#define LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN_INSET (1u << 6)
+#define LAUFEY_WINDOW_CAP_TRAFFIC_LIGHT_POSITION (1u << 7)
+#define LAUFEY_WINDOW_CAP_BACKDROP_MICA (1u << 8)
+#define LAUFEY_WINDOW_CAP_BACKDROP_ACRYLIC (1u << 9)
+#define LAUFEY_WINDOW_CAP_BACKDROP_MICA_ALT (1u << 10)
+#define LAUFEY_WINDOW_CAP_VIBRANCY (1u << 11)
+#define LAUFEY_WINDOW_CAP_NORMAL_BOUNDS (1u << 12)  // get_window_normal_bounds
+#define LAUFEY_WINDOW_CAP_KEEP_ALIVE \
+  (1u << 13)  // set_quit_on_last_window_closed
+#define LAUFEY_WINDOW_CAP_SET_POSITION \
+  (1u << 14)  // set_window_position works
+              // (not on Wayland)
+
+// One display, as reported by get_screens. Every rectangle is in the same
+// top-left-origin screen space and units as get_window_position /
+// set_window_position on this backend, so a window position can be compared
+// with (and clamped to) a screen directly. `id` identifies the display while
+// it stays connected (CGDirectDisplayID on macOS; a hash of the device name on
+// Windows; CEF's display id); it is not guaranteed to survive a reconnect or
+// a restart. `scale_factor` is physical pixels per DIP for that display.
+typedef struct laufey_screen {
+  int64_t id;
+  int32_t x;
+  int32_t y;
+  int32_t width;
+  int32_t height;
+  int32_t work_x;  // the work area: the bounds minus the menu bar, dock,
+  int32_t work_y;  // taskbar and panels
+  int32_t work_width;
+  int32_t work_height;
+  double scale_factor;
+  bool is_primary;
+} laufey_screen_t;
+
+// Callback fired when a window's state changes (maximized, minimized,
+// fullscreen; LAUFEY_WINDOW_STATE_* bits), with the state before the change.
+// Fires once per observed change, on the backend UI thread, after the OS has
+// applied it (on macOS a fullscreen transition reports when its animation
+// completes). Resize / move / focus keep their own handlers.
+typedef void (*laufey_window_state_fn)(void* user_data, uint32_t window_id,
+                                       uint32_t state, uint32_t previous);
+
+// Callback fired when the set of displays, their arrangement, work areas or
+// scale factors change. Fires on the backend UI thread; call get_screens to
+// read the new layout.
+typedef void (*laufey_display_changed_fn)(void* user_data);
 
 typedef struct laufey_backend_api laufey_backend_api_t;
 
@@ -115,6 +237,33 @@ typedef void (*laufey_menu_click_fn)(void* user_data, uint32_t window_id,
 // Mouse event state
 #define LAUFEY_MOUSE_PRESSED 0
 #define LAUFEY_MOUSE_RELEASED 1
+
+// Synthetic input kinds for test_inject_input (API >= 38).
+#define LAUFEY_TEST_INPUT_KEY 0
+#define LAUFEY_TEST_INPUT_MOUSE_MOVE 1
+#define LAUFEY_TEST_INPUT_MOUSE_BUTTON 2
+#define LAUFEY_TEST_INPUT_WHEEL 3
+#define LAUFEY_TEST_INPUT_CURSOR_ENTER 4
+#define LAUFEY_TEST_INPUT_CURSOR_LEAVE 5
+#define LAUFEY_TEST_INPUT_MODIFIERS 6
+
+// Test-only input record. Unused fields are ignored per `kind`. Wheel
+// deltas are DOM-signed (positive Y is scroll down); the winit backend
+// converts them through the same mapping a real OS event uses.
+typedef struct laufey_test_input {
+  int kind;            // LAUFEY_TEST_INPUT_*
+  uint32_t modifiers;  // bitmask of LAUFEY_MOD_*
+  const char* key;     // KEY
+  const char* code;    // KEY
+  bool pressed;        // KEY / MOUSE_BUTTON
+  bool repeat;         // KEY
+  int button;          // MOUSE_BUTTON: LAUFEY_MOUSE_BUTTON_*
+  double x;            // MOVE / BUTTON / WHEEL / ENTER / LEAVE
+  double y;
+  double delta_x;  // WHEEL
+  double delta_y;
+  int delta_mode;  // WHEEL: LAUFEY_WHEEL_DELTA_*
+} laufey_test_input_t;
 
 // Dialog types
 #define LAUFEY_DIALOG_ALERT 0
@@ -252,8 +401,8 @@ typedef void (*laufey_mouse_move_fn)(
 // Callback for wheel (scroll) events.
 typedef void (*laufey_wheel_fn)(
     void* user_data, uint32_t window_id,
-    double delta_x,      // horizontal scroll amount
-    double delta_y,      // vertical scroll amount
+    double delta_x,      // horizontal scroll; positive = right (DOM WheelEvent)
+    double delta_y,      // vertical scroll; positive = down (DOM WheelEvent)
     double x,            // cursor x position in window coordinates
     double y,            // cursor y position in window coordinates
     uint32_t modifiers,  // bitmask of LAUFEY_MOD_* flags
@@ -387,6 +536,11 @@ struct laufey_backend_api {
   void (*set_title)(void* backend_data, uint32_t window_id, const char* title);
   void (*execute_js)(void* backend_data, uint32_t window_id, const char* script,
                      laufey_js_result_fn callback, void* callback_data);
+  // End the event loop: the backend's run loop returns and the process shuts
+  // down the way it does when the last window closes. Windows that are still
+  // open close without a close-requested event (quit is app-level; see
+  // laufey_close_requested_fn). Any thread. Ends the loop even when
+  // set_quit_on_last_window_closed(false) keeps it alive with no window.
   void (*quit)(void* backend_data);
   void (*set_window_size)(void* backend_data, uint32_t window_id, int width,
                           int height);
@@ -1046,6 +1200,147 @@ struct laufey_backend_api {
   void (*passkey_request)(void* backend_data, uint32_t window_id, uint32_t kind,
                           const char* options_json,
                           laufey_passkey_result_fn callback, void* user_data);
+
+  // --- Device pixel ratio (API >= 38) ----------------------------------------
+  //
+  // Physical pixels per density-independent pixel for this window, the same
+  // ratio as the Web `window.devicePixelRatio`. Live: a window that moves to
+  // another monitor reports the new scale on the next call. Returns 1.0 if
+  // the id is unknown. NULL on backends older than API version 38; callers
+  // must null-check and treat NULL as 1.0.
+  double (*get_window_scale_factor)(void* backend_data, uint32_t window_id);
+
+  // --- Content-view origin (API >= 38) ---------------------------------------
+  //
+  // Top-left of the content view in the same DIP, top-left-origin screen
+  // space as get_window_position. Differs from get_window_position by the
+  // title-bar / frame chrome, so `inner + clientX/Y` is MouseEvent.screenX/Y.
+  // Writes 0,0 if the id is unknown. NULL on backends older than API 38;
+  // callers must null-check and fall back to get_window_position.
+  void (*get_window_inner_position)(void* backend_data, uint32_t window_id,
+                                    int* x, int* y);
+
+  // --- Outer window size (API >= 38) -----------------------------------------
+  //
+  // Chrome-inclusive size in the same DIP space as get_window_size
+  // (`window.outerWidth` / `outerHeight`). A frameless window matches
+  // get_window_size. Writes 0,0 if the id is unknown. NULL on backends
+  // older than this field; callers must null-check and fall back to
+  // get_window_size.
+  void (*get_window_outer_size)(void* backend_data, uint32_t window_id,
+                                int* width, int* height);
+
+  // --- Test input injection (API >= 38) --------------------------------------
+  //
+  // Test-only. Posts a synthetic input event through the same dispatch a
+  // real OS event uses for this backend (winit: WindowEvent handlers;
+  // CEF / WebView: Dispatch* after native translation). Returns true if
+  // the event was accepted (known kind; winit also requires a live
+  // window). NULL on backends that do not implement it; callers should
+  // treat NULL like the other test hooks.
+  bool (*test_inject_input)(void* backend_data, uint32_t window_id,
+                            const laufey_test_input_t* event);
+
+  // --- Window state (API >= 38) ----------------------------------------------
+  //
+  // Apply a LAUFEY_WINDOW_ACTION_* to the window. Any thread; the backend
+  // hops to its UI thread. Asynchronous on platforms that animate the change
+  // (macOS fullscreen, minimize): the getter and the state handler report it
+  // once it took effect. An action the window is already in is a no-op.
+  // UNMAXIMIZE on a window that is not maximized, RESTORE on one that is not
+  // minimized and LEAVE_FULLSCREEN outside fullscreen do nothing.
+  void (*set_window_state)(void* backend_data, uint32_t window_id, int action);
+
+  // LAUFEY_WINDOW_STATE_* bits for the window as the OS reports it now; 0 for
+  // an unknown id or a normal window.
+  uint32_t (*get_window_state)(void* backend_data, uint32_t window_id);
+
+  // Register the (process-wide) window-state handler; NULL clears it.
+  void (*set_window_state_handler)(void* backend_data,
+                                   laufey_window_state_fn handler,
+                                   void* user_data);
+
+  // --- Size constraints (API >= 38) ------------------------------------------
+  //
+  // Minimum and maximum size of the window, in the same units as
+  // set_window_size (content size in DIP on most backends; see
+  // docs/window-management.md). 0 on an axis means "no constraint" for that
+  // axis. The OS enforces them while the user resizes, and set_window_size
+  // clamps to them; if the current size is outside the new range the window
+  // is resized into it. A maximum smaller than the minimum on an axis is
+  // raised to the minimum.
+  void (*set_window_size_constraints)(void* backend_data, uint32_t window_id,
+                                      int min_width, int min_height,
+                                      int max_width, int max_height);
+  // Writes the constraints last set (0 = none). Any pointer may be NULL.
+  void (*get_window_size_constraints)(void* backend_data, uint32_t window_id,
+                                      int* min_width, int* min_height,
+                                      int* max_width, int* max_height);
+
+  // --- Screens (API >= 38) ---------------------------------------------------
+  //
+  // Fill up to `capacity` entries of `out` with the connected displays, the
+  // primary one first, and return how many displays there are (which may be
+  // more than `capacity`: call again with a bigger buffer). `out` may be NULL
+  // when `capacity` is 0. Any thread.
+  size_t (*get_screens)(void* backend_data, laufey_screen_t* out,
+                        size_t capacity);
+
+  // The id of the display the window is on (the one it overlaps most), or 0
+  // when unknown.
+  int64_t (*get_window_screen)(void* backend_data, uint32_t window_id);
+
+  // Register the display-changed handler; NULL clears it.
+  void (*set_display_changed_handler)(void* backend_data,
+                                      laufey_display_changed_fn handler,
+                                      void* user_data);
+
+  // --- Capabilities (API >= 38) ----------------------------------------------
+  //
+  // LAUFEY_WINDOW_CAP_* bits for this backend on this OS. Any thread.
+  uint32_t (*window_capabilities)(void* backend_data);
+
+  // --- Title bar and backdrop (API >= 38) ------------------------------------
+  //
+  // Set the title bar style (LAUFEY_TITLEBAR_*) at runtime. Returns false
+  // (and changes nothing) when the backend can't do that style, which is
+  // everything but macOS today. Frameless windows have no title bar to style.
+  bool (*set_window_titlebar_style)(void* backend_data, uint32_t window_id,
+                                    int style);
+
+  // Move the macOS traffic lights so the close button's top-left sits at
+  // (x, y) from the window's top-left corner, in points. Negative values put
+  // them back where the system draws them. Kept across resizes, fullscreen
+  // and title changes. Returns false when unsupported.
+  bool (*set_window_traffic_light_position)(void* backend_data,
+                                            uint32_t window_id, int x, int y);
+
+  // Put a LAUFEY_BACKDROP_* behind the web content (`material` is a
+  // LAUFEY_VIBRANCY_* for LAUFEY_BACKDROP_VIBRANCY and ignored otherwise).
+  // Returns false (and changes nothing) when this backend / OS can't show
+  // that backdrop; see window_capabilities.
+  bool (*set_window_backdrop)(void* backend_data, uint32_t window_id,
+                              int backdrop, int material);
+
+  // --- Normal bounds (API >= 38) ---------------------------------------------
+  //
+  // The bounds the window returns to when it leaves the maximized, minimized
+  // or fullscreen state (the current bounds for a normal window): the
+  // position as get_window_position and the size as get_window_size, so
+  // set_window_position + set_window_size restore it. This is what an app
+  // persists to reopen its window where the user left it. Returns false for
+  // an unknown id. Any pointer may be NULL.
+  bool (*get_window_normal_bounds)(void* backend_data, uint32_t window_id,
+                                   int* x, int* y, int* width, int* height);
+
+  // --- App lifetime (API >= 38) ----------------------------------------------
+  //
+  // Whether the event loop ends when the last window closes (true, the
+  // default). A tray / menu-bar app passes false so it keeps running with no
+  // window; it then ends through quit(). On macOS an app whose activation
+  // policy is Accessory (set_dock_visible(false)) also stays alive when its
+  // last window closes, whatever this is set to. quit() always ends the loop.
+  void (*set_quit_on_last_window_closed)(void* backend_data, bool quit);
 };
 
 #ifdef __cplusplus

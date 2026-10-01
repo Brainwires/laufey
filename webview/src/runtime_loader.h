@@ -389,8 +389,22 @@ class LaufeyBackend {
                          laufey_js_result_fn callback, void* callback_data) = 0;
   virtual void SetWindowSize(uint32_t window_id, int width, int height) = 0;
   virtual void GetWindowSize(uint32_t window_id, int* width, int* height) = 0;
+  // Chrome-inclusive size in the same space as GetWindowSize. Default is
+  // the content size (no client chrome).
+  virtual void GetWindowOuterSize(uint32_t window_id, int* width, int* height) {
+    GetWindowSize(window_id, width, height);
+  }
+  // Physical pixels per DIP (`window.devicePixelRatio`). Default 1.0.
+  virtual double GetWindowScaleFactor(uint32_t /*window_id*/) {
+    return 1.0;
+  }
   virtual void SetWindowPosition(uint32_t window_id, int x, int y) = 0;
   virtual void GetWindowPosition(uint32_t window_id, int* x, int* y) = 0;
+  // Content-view origin in the same space as GetWindowPosition. Default is
+  // the frame origin (no chrome offset).
+  virtual void GetWindowInnerPosition(uint32_t window_id, int* x, int* y) {
+    GetWindowPosition(window_id, x, y);
+  }
   virtual void SetResizable(uint32_t window_id, bool resizable) = 0;
   virtual bool IsResizable(uint32_t window_id) = 0;
   virtual void SetAlwaysOnTop(uint32_t window_id, bool always_on_top) = 0;
@@ -550,6 +564,56 @@ class LaufeyBackend {
                "platform.\"}}");
     }
   }
+
+  // --- Window state, constraints, screens and chrome (API >= 38) ---
+  // See laufey.h. The defaults are a backend that can do none of it (iOS):
+  // no capabilities, every setter a no-op or false, getters "unknown".
+  virtual uint32_t WindowCapabilities() {
+    return 0;
+  }
+  virtual void SetWindowState(uint32_t /*window_id*/, int /*action*/) {}
+  virtual uint32_t GetWindowState(uint32_t /*window_id*/) {
+    return 0;
+  }
+  virtual void SetWindowStateHandler(laufey_window_state_fn /*handler*/,
+                                     void* /*user_data*/) {}
+  virtual void SetWindowSizeConstraints(uint32_t /*window_id*/,
+                                        int /*min_width*/, int /*min_height*/,
+                                        int /*max_width*/, int /*max_height*/) {
+  }
+  virtual void GetWindowSizeConstraints(uint32_t /*window_id*/, int* min_width,
+                                        int* min_height, int* max_width,
+                                        int* max_height) {
+    for (int* p : {min_width, min_height, max_width, max_height}) {
+      if (p)
+        *p = 0;
+    }
+  }
+  virtual size_t GetScreens(laufey_screen_t* /*out*/, size_t /*capacity*/) {
+    return 0;
+  }
+  virtual int64_t GetWindowScreen(uint32_t /*window_id*/) {
+    return 0;
+  }
+  virtual void SetDisplayChangedHandler(laufey_display_changed_fn /*handler*/,
+                                        void* /*user_data*/) {}
+  virtual bool SetWindowTitlebarStyle(uint32_t /*window_id*/, int /*style*/) {
+    return false;
+  }
+  virtual bool SetWindowTrafficLightPosition(uint32_t /*window_id*/, int /*x*/,
+                                             int /*y*/) {
+    return false;
+  }
+  virtual bool SetWindowBackdrop(uint32_t /*window_id*/, int /*backdrop*/,
+                                 int /*material*/) {
+    return false;
+  }
+  virtual bool GetWindowNormalBounds(uint32_t /*window_id*/, int* /*x*/,
+                                     int* /*y*/, int* /*width*/,
+                                     int* /*height*/) {
+    return false;
+  }
+  virtual void SetQuitOnLastWindowClosed(bool /*quit*/) {}
 
   // --- Tray / status-bar icon ---
   virtual uint32_t CreateTrayIcon() {

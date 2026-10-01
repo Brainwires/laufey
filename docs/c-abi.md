@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `37`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `38`) versions the contract. The `version` field
 on the API table lets a runtime detect the backend's vintage and avoid calling
 function pointers a backend predates (older backends leave new pointers `NULL`).
 
@@ -48,6 +48,10 @@ The pointers group into:
   size/position get+set, `set_resizable`/`is_resizable`,
   `set_always_on_top`/`is_always_on_top`,
   `set_window_opacity`/`get_window_opacity` (whole-window alpha, API ≥ 28),
+  `get_window_scale_factor` (`window.devicePixelRatio`, API ≥ 38),
+  `get_window_inner_position` (content-view origin, API ≥ 38),
+  `get_window_outer_size` (`window.outerWidth` / `outerHeight`, API ≥ 38),
+  `test_inject_input` (synthetic pointer / key / wheel, API ≥ 38),
   `show`/`hide`/`is_visible`, `focus`, `quit`, `post_ui_task`.
 - **Value marshalling** — the `value_*` family (below).
 - **JavaScript interop** — `set_js_call_handler`, `js_call_respond`,
@@ -71,6 +75,16 @@ The pointers group into:
   directory), buffered until a handler registers. CEF and WebView on every
   desktop OS; `NULL` on Winit (see
   [deep-links.md](deep-links.md#single-instance)).
+- **Window state, screens and chrome** (API ≥ 38) — `set_window_state` /
+  `get_window_state` / `set_window_state_handler` (maximize, minimize, restore,
+  fullscreen with change events), `set_window_size_constraints` /
+  `get_window_size_constraints`, `get_screens` / `get_window_screen` /
+  `set_display_changed_handler`, `window_capabilities` (what this backend / OS
+  can do), `set_window_titlebar_style` / `set_window_traffic_light_position`
+  (macOS), `set_window_backdrop` (Mica / Acrylic on Windows 11, vibrancy on
+  macOS), `get_window_normal_bounds`, `set_quit_on_last_window_closed`, and the
+  `quit` contract (ends the loop like the last window closing). See
+  [window-management.md](window-management.md).
 - **Passkeys** (API ≥ 37) — `passkey_capabilities`, `passkey_request`: WebAuthn
   ceremonies through the OS platform authenticator, one at a time, with the
   result (a JSON envelope) delivered exactly once on any thread. macOS and

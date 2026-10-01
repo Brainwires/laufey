@@ -3,15 +3,20 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus.
 # --scheme-body runs only the custom-scheme request-body round trip (for
 # backends where the full battery can't run in CI).
+# --lifetime runs only the app-lifetime checks (keep-alive with no window,
+# then quit() ending the event loop); they end the process, so they can't
+# share the main battery's run.
+# --window-api runs only the API 38 window checks (state, constraints,
+# screens, title bar, backdrops); handy under a real window manager.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -36,6 +41,12 @@ export LAUFEY_CUSTOM_SCHEMES=laufey-e2e
 export LAUFEY_E2E_BACKEND="$backend"
 if [ "$mode" = "--scheme-body" ]; then
   export LAUFEY_E2E_ONLY=scheme-body
+fi
+if [ "$mode" = "--lifetime" ]; then
+  export LAUFEY_E2E_ONLY=lifetime
+fi
+if [ "$mode" = "--window-api" ]; then
+  export LAUFEY_E2E_ONLY=window-api
 fi
 
 # Resolve the backend binary (handles macOS .app bundles).
@@ -77,9 +88,23 @@ if [ "$mode" = "--layer1" ]; then
   exec xvfb-run -a dbus-run-session -- "$driver" "$bin" ${args[@]+"${args[@]}"}
 fi
 
-# Layer 0: run the backend directly. On Linux, headless via Xvfb + a private
-# session bus (some tray impls need a session bus to even initialize).
+# Layer 0: capture output so an unexpected native termination cannot masquerade
+# as success merely because macOS reports an exit code of 0. On Linux, run
+# headless via Xvfb + a private session bus (some tray implementations need it).
 if is_linux; then
-  exec xvfb-run -a dbus-run-session -- "$bin" ${args[@]+"${args[@]}"}
+  set +e
+  output="$(xvfb-run -a dbus-run-session -- "$bin" ${args[@]+"${args[@]}"} 2>&1)"
+  status=$?
+  set -e
+else
+  set +e
+  output="$("$bin" ${args[@]+"${args[@]}"} 2>&1)"
+  status=$?
+  set -e
 fi
-exec "$bin" ${args[@]+"${args[@]}"}
+printf '%s\n' "$output"
+if ! grep -q '^\[e2e\] OVERALL ' <<<"$output"; then
+  echo "native e2e exited before reporting an overall result" >&2
+  exit 1
+fi
+exit "$status"
