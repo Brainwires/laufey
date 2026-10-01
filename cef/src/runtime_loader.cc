@@ -2231,10 +2231,13 @@ static int64_t Backend_GetWindowScreen(void* /*data*/, uint32_t window_id) {
   int64_t id = 0;
   cef_invoke_sync([&] {
     CefRefPtr<CefWindow> window = CefWindowForId(window_id);
-    if (!window)
+    if (!window || window->IsClosed())
       return;
-    if (CefRefPtr<CefDisplay> display = window->GetDisplay())
-      id = CefSafeDisplayId(display->GetID());
+    // The screen the window overlaps most, from its bounds: CefWindow's
+    // GetDisplay() crashed on macOS for a window that had just been shown
+    // (seen in CI), and the overlap rule is what the ABI promises anyway.
+    id = laufey_common::ScreenForBounds(CefCollectScreens(),
+                                        CefBoundsOf(window));
   });
   return id;
 }
