@@ -741,8 +741,20 @@ fn e2e_main() {
       );
     }
 
-    // Give the backend a moment to realize the window on screen.
+    // Give the backend a moment to realize the windows on screen, then wait
+    // until the last one created has a size. Backends that create windows on
+    // their UI thread do it in order, and WebView2 blocks that thread while
+    // it creates its first environment: from under a second to over four on
+    // a cold CI runner (CreateCoreWebView2EnvironmentWithOptions completing
+    // inside the call). Every setter below queues behind that, so a round
+    // trip timed from here would measure the engine's start-up instead.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let realize_start = std::time::Instant::now();
+    let realized = wait_for(|| frameless.get_size() != (0, 0), 600, 50).await;
+    eprintln!(
+      "[e2e] INFO windows realized: {realized} ({} ms after the first 300 ms)",
+      realize_start.elapsed().as_millis()
+    );
 
     let settled_scale = win.get_scale_factor();
     check("scale factor is still positive after realize", settled_scale > 0.0);
