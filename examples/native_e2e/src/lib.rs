@@ -492,6 +492,9 @@ fn e2e_main() {
     // Used where the full battery can't run (webview/linux in CI).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("scheme-body") {
       let body_win = body_round_trip(&body_received).await;
+      // Passkeys answer without the engine (not_supported on Linux), so they
+      // ride along where the full battery can't run.
+      passkey_checks(body_win.as_ref().map(|w| w.id()).unwrap_or(0)).await;
       let _ = &body_win;
       finish();
     }
@@ -1154,6 +1157,9 @@ fn e2e_main() {
       );
     }
 
+    // ---- Passkeys (API >= 37) --------------------------------------------
+    passkey_checks(win.id()).await;
+
     // ---- Layer-1 hold ----------------------------------------------------
     // When driven by the D-Bus observer (native_e2e_driver), stay alive with
     // the tray + menu registered so it can read the StatusNotifierItem, walk
@@ -1173,6 +1179,192 @@ fn e2e_main() {
     let _ = (&win, &body_win);
     finish();
   });
+}
+
+/// The `code` of an error envelope, or "ok" for a credential.
+fn passkey_code(envelope: &str) -> String {
+  if envelope.starts_with(r#"{"ok":true,"#) {
+    return "ok".into();
+  }
+  let key = r#""code":""#;
+  match envelope.find(key) {
+    Some(i) => envelope[i + key.len()..]
+      .split('"')
+      .next()
+      .unwrap_or("")
+      .to_string(),
+    None => format!("malformed envelope: {envelope}"),
+  }
+}
+
+fn passkey_get_options(rp_id: &str, timeout_ms: u32) -> String {
+  format!(
+    r#"{{"challenge":"AAECAwQFBgcICQoLDA0ODw","rpId":"{rp_id}","timeout":{timeout_ms},"userVerification":"preferred","allowCredentials":[]}}"#
+  )
+}
+
+/// A request's envelope, or a FAIL when none arrives in time.
+async fn passkey_answer(
+  name: &str,
+  fut: impl std::future::Future<Output = String>,
+) -> String {
+  match tokio::time::timeout(std::time::Duration::from_secs(30), fut).await {
+    Ok(envelope) => envelope,
+    Err(_) => {
+      check(&format!("{name}: an answer within 30s"), false);
+      String::new()
+    }
+  }
+}
+
+/// Passkeys (API >= 37). A real ceremony needs a person at the machine (see
+/// docs/passkeys.md), so this covers what answers without one: the
+/// capabilities per OS, the parser's refusals, an unknown window, one ceremony
+/// at a time, and a real OS round trip — on macOS an unsigned host is refused
+/// by the OS at once (`invalid_rp`); on Windows the request shows the system
+/// dialog and laufey's own timeout ends it (`timeout`;
+/// LAUFEY_E2E_PASSKEY_EXPECT pins the code where the run is known to have an
+/// interactive desktop). Exactly-once delivery is covered by
+/// backend-common's passkey_test (the Rust future can't observe a second
+/// call).
+async fn passkey_checks(window_id: u32) {
+  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  let caps = laufey::passkey_capabilities();
+  eprintln!(
+    "[e2e] passkey capabilities: platform={} security_keys={}",
+    caps.platform_authenticator, caps.security_keys
+  );
+  let supported = caps.platform_authenticator || caps.security_keys;
+
+  if backend == "winit" || cfg!(target_os = "linux") {
+    check("passkey capabilities: none here", !supported);
+    let env = passkey_answer(
+      "passkey get",
+      laufey::passkey_get(window_id, &passkey_get_options("example.com", 2000)),
+    )
+    .await;
+    check(
+      &format!(
+        "passkey request -> not_supported (got {})",
+        passkey_code(&env)
+      ),
+      passkey_code(&env) == "not_supported",
+    );
+    return;
+  }
+  if cfg!(target_os = "macos") {
+    check(
+      "passkey capabilities: platform + security keys (macOS 12+)",
+      caps.platform_authenticator && caps.security_keys,
+    );
+  } else if !caps.security_keys {
+    // Windows without webauthn.dll (an old build / Server SKU).
+    check(
+      "passkey capabilities: none without webauthn.dll",
+      !caps.platform_authenticator,
+    );
+    let env = passkey_answer(
+      "passkey get",
+      laufey::passkey_get(window_id, &passkey_get_options("example.com", 2000)),
+    )
+    .await;
+    check(
+      "passkey request without webauthn.dll -> not_supported",
+      passkey_code(&env) == "not_supported",
+    );
+    return;
+  } else {
+    check("passkey capabilities: security keys (webauthn.dll)", true);
+  }
+
+  // The parser refuses before the OS sees anything.
+  let env = passkey_answer(
+    "passkey create, malformed challenge",
+    laufey::passkey_create(
+      window_id,
+      r#"{"rp":{"id":"example.com","name":"x"},"user":{"id":"dXNlcg","name":"u"},"challenge":"not base64!"}"#,
+    ),
+  )
+  .await;
+  check(
+    &format!(
+      "passkey create with a malformed challenge -> unknown (got {})",
+      passkey_code(&env)
+    ),
+    passkey_code(&env) == "unknown" && env.contains("challenge"),
+  );
+  for rp in ["", "https://example.com", "Example.com", "127.0.0.1"] {
+    let env = passkey_answer(
+      "passkey get, bad rpId",
+      laufey::passkey_get(window_id, &passkey_get_options(rp, 2000)),
+    )
+    .await;
+    check(
+      &format!(
+        "passkey get with rpId {rp:?} -> invalid_rp (got {})",
+        passkey_code(&env)
+      ),
+      passkey_code(&env) == "invalid_rp",
+    );
+  }
+  let env = passkey_answer(
+    "passkey get, unknown window",
+    laufey::passkey_get(999_999, &passkey_get_options("example.com", 2000)),
+  )
+  .await;
+  check(
+    &format!(
+      "passkey get on an unknown window -> unknown (got {})",
+      passkey_code(&env)
+    ),
+    passkey_code(&env) == "unknown" && env.contains("not found"),
+  );
+
+  // A real OS request, and a second one while it is in progress.
+  let options = passkey_get_options("example.com", 2000);
+  let first = laufey::passkey_get(window_id, &options);
+  let second = laufey::passkey_get(window_id, &options);
+  let second = passkey_answer("second passkey get", second).await;
+  check(
+    &format!(
+      "a second passkey request while one runs -> already in progress (got {})",
+      passkey_code(&second)
+    ),
+    passkey_code(&second) == "unknown"
+      && second.contains("already in progress"),
+  );
+  let first = passkey_answer("passkey get", first).await;
+  let code = passkey_code(&first);
+  let expected: Vec<String> = match std::env::var("LAUFEY_E2E_PASSKEY_EXPECT") {
+    Ok(v) if !v.is_empty() => vec![v],
+    _ if cfg!(target_os = "macos") => vec!["invalid_rp".into()],
+    // Windows: the dialog's fate depends on the session (none without an
+    // interactive desktop).
+    _ => ["timeout", "cancelled", "not_supported", "unknown"]
+      .iter()
+      .map(|s| s.to_string())
+      .collect(),
+  };
+  check(
+    &format!("passkey get from the OS -> one of {expected:?} (got {code})"),
+    expected.contains(&code),
+  );
+
+  // The slot frees once the OS has ended the operation.
+  let mut freed = false;
+  for _ in 0..10 {
+    let env = passkey_answer(
+      "passkey get after the first",
+      laufey::passkey_get(window_id, &passkey_get_options("example.com", 1000)),
+    )
+    .await;
+    if !env.contains("already in progress") {
+      freed = true;
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+  }
+  check("the passkey slot frees after a request ends", freed);
 }
 
 /// Report the overall result and exit immediately (see "shutdown" above).

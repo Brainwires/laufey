@@ -4,6 +4,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
+#include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
 #include "init_script.h"
 #include <win32_menu.h>
@@ -366,6 +367,14 @@ class WebView2Backend : public LaufeyBackend {
   void PrintToPdf(uint32_t window_id, laufey_pdf_result_fn callback,
                   void* callback_data) override;
 
+  uint32_t PasskeyCapabilities() override {
+    return laufey_common::PasskeyCapabilitiesWin();
+  }
+  void PasskeyRequest(uint32_t window_id, uint32_t kind,
+                      const char* options_json,
+                      laufey_passkey_result_fn callback,
+                      void* user_data) override;
+
   int ShowDialog(uint32_t window_id, int dialog_type, const std::string& title,
                  const std::string& message, const std::string& default_value,
                  char** out_input_value) override;
@@ -598,6 +607,9 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         return 0;
       break;
     case WM_DESTROY: {
+      // A passkey dialog owned by this window ends with it (`cancelled`).
+      // Before the lock below: the result callback may re-enter the backend.
+      laufey_common::PasskeyWindowClosing(hwnd);
       // Single exit point for window teardown: fires for WM_CLOSE-initiated
       // closes and for CloseWindow()'s direct DestroyWindow alike, so a
       // deferred close resolved via close_window still quits the message
@@ -1469,6 +1481,43 @@ void WebView2Backend::Focus(uint32_t window_id) {
     SetForegroundWindow(state->hwnd);
     SetFocus(state->hwnd);
   }
+}
+
+void WebView2Backend::PasskeyRequest(uint32_t window_id, uint32_t kind,
+                                     const char* options_json,
+                                     laufey_passkey_result_fn callback,
+                                     void* user_data) {
+  // Any thread. Refusals (no webauthn.dll, invalid options, busy) answer
+  // here, synchronously; a started ceremony resolves its window on the UI
+  // thread and then runs on its own worker thread (PasskeyStartWin).
+  if (laufey_common::PasskeyCapabilitiesWin() == 0) {
+    laufey_common::PasskeyReportNotSupported(callback, user_data);
+    return;
+  }
+  std::shared_ptr<laufey_common::PasskeyCeremony> ceremony =
+      laufey_common::PasskeyBegin(kind, options_json, callback, user_data);
+  if (!ceremony)
+    return;
+  RunOnUiThread([this, window_id, ceremony] {
+    HWND hwnd = nullptr;
+    bool found = window_id == 0;
+    if (window_id != 0) {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id)) {
+        hwnd = state->hwnd;
+        found = hwnd != nullptr;
+      }
+    }
+    if (!found) {
+      ceremony->Finish(laufey_common::PasskeyErrorEnvelope(
+          laufey_common::kPasskeyUnknown,
+          "window " + std::to_string(window_id) + " not found"));
+      return;
+    }
+    // nullptr: the foreground window when it is ours, else our first visible
+    // window (see PasskeyStartWin).
+    laufey_common::PasskeyStartWin(ceremony, hwnd);
+  });
 }
 
 void WebView2Backend::PostUiTask(void (*task)(void*), void* data) {

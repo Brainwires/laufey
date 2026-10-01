@@ -41,6 +41,7 @@ set(LAUFEY_COMMON_SRCS
   src/data_dir.cc
   src/launch_config.cc
   src/single_instance.cc
+  src/passkey.cc
 )
 
 if(WIN32)
@@ -61,6 +62,7 @@ if(APPLE)
     src/menu_mac.mm
     src/tray_mac.mm
     src/single_instance_mac.mm
+    src/passkey_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -80,6 +82,7 @@ elseif(WIN32)
     src/clipboard_win.cc
     src/permissions_stub.cc
     src/tray_win.cc
+    src/passkey_win.cc
   )
 endif()
 
@@ -104,10 +107,14 @@ elseif(APPLE)
   find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
   find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
   find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+  # Passkeys (ASAuthorizationController); present since macOS 10.15, the
+  # passkey providers are checked for 12+ at runtime.
+  find_library(AUTHENTICATIONSERVICES_FRAMEWORK AuthenticationServices REQUIRED)
   target_link_libraries(laufey_backend_common PUBLIC
     ${USERNOTIFICATIONS_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
     ${COCOA_FRAMEWORK}
+    ${AUTHENTICATIONSERVICES_FRAMEWORK}
   )
   target_compile_options(laufey_backend_common PRIVATE
     $<$<COMPILE_LANGUAGE:OBJC,OBJCXX>:-fobjc-arc>
@@ -166,4 +173,22 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_single_instance_test
            COMMAND laufey_single_instance_test)
+
+  # Passkey options parser, envelopes and ceremony lifecycle (no OS API).
+  add_executable(laufey_passkey_test tests/passkey_test.cc)
+  target_link_libraries(laufey_passkey_test PRIVATE
+    laufey_backend_common
+    Threads::Threads
+  )
+  add_test(NAME laufey_passkey_test COMMAND laufey_passkey_test)
+
+  if(APPLE)
+    # ASAuthorization error mapping (synthetic NSErrors, no ceremony).
+    add_executable(laufey_passkey_mac_test tests/passkey_mac_test.mm)
+    target_link_libraries(laufey_passkey_mac_test PRIVATE
+      laufey_backend_common
+    )
+    target_compile_options(laufey_passkey_mac_test PRIVATE -fobjc-arc)
+    add_test(NAME laufey_passkey_mac_test COMMAND laufey_passkey_mac_test)
+  endif()
 endif()

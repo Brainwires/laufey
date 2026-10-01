@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 36
+#define LAUFEY_API_VERSION 37
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -158,6 +158,25 @@ typedef void (*laufey_open_url_fn)(void* user_data, const char* url);
 typedef void (*laufey_second_instance_fn)(void* user_data,
                                           const char* const* argv, size_t argc,
                                           const char* cwd);
+
+// --- Passkeys (API >= 37) ---------------------------------------------------
+//
+// Request kinds for passkey_request.
+#define LAUFEY_PASSKEY_CREATE 0  // registration (navigator.credentials.create)
+#define LAUFEY_PASSKEY_GET 1     // authentication (navigator.credentials.get)
+
+// Capability flags returned by passkey_capabilities.
+#define LAUFEY_PASSKEY_PLATFORM_AUTHENTICATOR (1u << 0)
+#define LAUFEY_PASSKEY_SECURITY_KEYS (1u << 1)
+
+// Largest options document passkey_request accepts, in bytes.
+#define LAUFEY_PASSKEY_MAX_OPTIONS_BYTES 65536
+
+// Result of passkey_request: `result_json` is a NUL-terminated UTF-8 JSON
+// envelope, valid only for the duration of the call (copy it). See
+// passkey_request for the format and the threading.
+typedef void (*laufey_passkey_result_fn)(void* user_data,
+                                         const char* result_json);
 
 // Callback fired when the user left-clicks a tray / status-bar icon.
 // (Right-click is reserved for the tray's menu.)
@@ -978,6 +997,55 @@ struct laufey_backend_api {
   void (*set_second_instance_handler)(void* backend_data,
                                       laufey_second_instance_fn fn,
                                       void* user_data);
+
+  // --- Passkeys (API >= 37) --------------------------------------------------
+  //
+  // WebAuthn ceremonies through the OS platform authenticator, for apps whose
+  // page origin can't satisfy the RP ID (a custom scheme or loopback origin).
+  // The wire format is the one of @clerk/electron-passkeys, so its JS bridge
+  // can sit on top unchanged. See docs/passkeys.md.
+  //
+  // Backends: macOS 12+ AuthenticationServices (ASAuthorizationController,
+  // platform + security-key providers), Windows 10 1903+ webauthn.dll. Linux
+  // (WebKitGTK, CEF) has no platform API: capabilities 0, requests answer
+  // not_supported. NULL on the Winit backend and on backends older than API
+  // version 37; callers must null-check.
+
+  // LAUFEY_PASSKEY_* flags: what a request can use right now. Any thread.
+  uint32_t (*passkey_capabilities)(void* backend_data);
+
+  // Start a ceremony. `kind` is LAUFEY_PASSKEY_CREATE or _GET; `options_json`
+  // is PublicKeyCredentialCreationOptions / RequestOptions as JSON with
+  // base64url (unpadded) binary fields: {rp:{id,name}, user:{id,name,
+  // displayName}, challenge, pubKeyCredParams, timeout,
+  // authenticatorSelection, attestation, excludeCredentials} for create,
+  // {challenge, rpId, timeout, userVerification, allowCredentials} for get.
+  // The options are untrusted input: the backend parses them strictly
+  // (<= LAUFEY_PASSKEY_MAX_OPTIONS_BYTES, UTF-8, required fields, base64url,
+  // RP ID syntax) and passes the RP ID to the OS, which enforces that the app
+  // may use it (macOS: the associated domain; Windows accepts any RP ID).
+  //
+  // `window_id` anchors the OS sheet / dialog; 0 means the focused window.
+  // One ceremony runs at a time per app: a request made while another is in
+  // progress is refused ("unknown", "a passkey request is already in
+  // progress").
+  //
+  // `callback` is invoked EXACTLY ONCE with the envelope
+  //   {"ok":true,"credential":{id, rawId, type, authenticatorAttachment,
+  //     response:{clientDataJSON, attestationObject, transports} (create) |
+  //     response:{clientDataJSON, authenticatorData, signature, userHandle}
+  //     (get)}}
+  //   {"ok":false,"error":{"code":"cancelled"|"invalid_rp"|"not_supported"|
+  //     "timeout"|"unknown","message":"..."}}
+  // and on ANY thread: synchronously on the calling thread, before
+  // passkey_request returns, when the request is refused up front (invalid
+  // options, busy, unsupported platform); on the main thread on macOS; on
+  // the ceremony's worker thread on Windows; on an internal timer thread for
+  // a timeout. Embedders must not assume a thread and must not block in it.
+  // Any thread may call passkey_request. A NULL callback makes it a no-op.
+  void (*passkey_request)(void* backend_data, uint32_t window_id, uint32_t kind,
+                          const char* options_json,
+                          laufey_passkey_result_fn callback, void* user_data);
 };
 
 #ifdef __cplusplus

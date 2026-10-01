@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `36`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `37`) versions the contract. The `version` field
 on the API table lets a runtime detect the backend's vintage and avoid calling
 function pointers a backend predates (older backends leave new pointers `NULL`).
 
@@ -71,6 +71,11 @@ The pointers group into:
   directory), buffered until a handler registers. CEF and WebView on every
   desktop OS; `NULL` on Winit (see
   [deep-links.md](deep-links.md#single-instance)).
+- **Passkeys** (API ≥ 37) — `passkey_capabilities`, `passkey_request`: WebAuthn
+  ceremonies through the OS platform authenticator, one at a time, with the
+  result (a JSON envelope) delivered exactly once on any thread. macOS and
+  Windows; not supported on Linux; `NULL` on Winit (see
+  [passkeys.md](passkeys.md)).
 - **Tray** — `create_tray_icon`, `destroy_tray_icon`, `set_tray_icon`(`_dark`),
   `set_tray_tooltip`, `set_tray_menu`, click handlers, `get_tray_icon_bounds`.
 - **Notifications** — `show_notification`, `close_notification`.

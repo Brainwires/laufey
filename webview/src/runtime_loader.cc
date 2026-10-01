@@ -677,6 +677,31 @@ static void Backend_SetSecondInstanceHandler(void* data,
   }
 }
 
+// --- Passkeys ---
+
+static uint32_t Backend_PasskeyCapabilities(void* data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->PasskeyCapabilities();
+  return 0;
+}
+
+static void Backend_PasskeyRequest(void* data, uint32_t window_id,
+                                   uint32_t kind, const char* options_json,
+                                   laufey_passkey_result_fn callback,
+                                   void* user_data) {
+  if (!callback)
+    return;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend()) {
+    backend->PasskeyRequest(window_id, kind, options_json, callback, user_data);
+  } else {
+    callback(user_data,
+             "{\"ok\":false,\"error\":{\"code\":\"unknown\","
+             "\"message\":\"backend not initialized\"}}");
+  }
+}
+
 // --- Tray / status bar ---
 
 static uint32_t Backend_CreateTrayIcon(void* data) {
@@ -887,6 +912,11 @@ void RuntimeLoader::InitializeBackendApi() {
   // Single instance (API >= 36): see docs/deep-links.md. The desktop
   // backends implement it on every OS; iOS keeps the no-op default.
   backend_api_.set_second_instance_handler = Backend_SetSecondInstanceHandler;
+
+  // Passkeys (API >= 37): see docs/passkeys.md. macOS and Windows run real
+  // ceremonies; Linux and iOS answer not_supported.
+  backend_api_.passkey_capabilities = Backend_PasskeyCapabilities;
+  backend_api_.passkey_request = Backend_PasskeyRequest;
 
   backend_api_.create_tray_icon = Backend_CreateTrayIcon;
   backend_api_.destroy_tray_icon = Backend_DestroyTrayIcon;

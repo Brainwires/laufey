@@ -546,6 +546,9 @@ void ConfigureNSWindowAsPanelForCefHandle(void* cef_handle);
 // (Electron `titleBarStyle: 'hidden'`). For
 // LAUFEY_WINDOW_FLAG_TRANSPARENT_TITLEBAR.
 void ConfigureNSWindowTransparentTitlebarForCefHandle(void* cef_handle);
+// The NSWindow* (bridged, unretained) behind a CEF window handle (an
+// NSView*), or nullptr. Main thread only; use it right away.
+void* NSWindowForCefHandle(void* cef_handle);
 #endif
 
 #ifdef _WIN32
