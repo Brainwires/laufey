@@ -543,10 +543,14 @@ class WinFileDialog : public FileDialogPlatform {
   bool TestAccept(const std::string& path) override {
     if (!dialog_ || shown_)
       return false;
-    if (DialogWindow() && !DoAccept(path))
-      return false;
-    // As for Cancel: until the window exists, and again while still open.
-    RetryLater([this, path] { TestAccept(path); });
+    if (DialogWindow())
+      return DoAccept(path);
+    // Applied once, when the window exists (a repeated accept would retype
+    // the name while the dialog is already closing).
+    RetryLater([this, path] {
+      if (!TestAccept(path))
+        Cancel();
+    });
     return true;
   }
 

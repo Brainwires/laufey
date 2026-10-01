@@ -162,6 +162,27 @@ void StartFileDragMac(void* nsview, DragOutRequest* req) {
 
 namespace {
 
+// Posts a Return key press to `panel`'s window through the event queue, the
+// way a real key press arrives.
+void PressReturn(NSSavePanel* panel) {
+  NSWindow* window = panel;
+  [window makeKeyAndOrderFront:nil];
+  for (NSEventType type : {NSEventTypeKeyDown, NSEventTypeKeyUp}) {
+    NSEvent* ev = [NSEvent
+                   keyEventWithType:type
+                           location:NSZeroPoint
+                      modifierFlags:0
+                          timestamp:[[NSProcessInfo processInfo] systemUptime]
+                       windowNumber:window.windowNumber
+                            context:nil
+                         characters:@"\r"
+        charactersIgnoringModifiers:@"\r"
+                          isARepeat:NO
+                            keyCode:36];
+    [NSApp postEvent:ev atStart:NO];
+  }
+}
+
 class MacFileDialog : public FileDialogPlatform {
  public:
   MacFileDialog(uint32_t id, NSWindow* parent, FileDialogRequest req)
@@ -270,8 +291,16 @@ class MacFileDialog : public FileDialogPlatform {
     NSSavePanel* panel = panel_;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
-                     if (laufey_common::FileDialogIsOpen(id))
+                     if (!laufey_common::FileDialogIsOpen(id))
+                       return;
+                     // An in-process panel implements ok:. An out-of-process
+                     // one (the panel service) throws "not implemented":
+                     // press Return in it instead, as a user would.
+                     @try {
                        [panel ok:nil];
+                     } @catch (NSException* e) {
+                       PressReturn(panel);
+                     }
                    });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
