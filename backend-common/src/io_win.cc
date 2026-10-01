@@ -543,18 +543,28 @@ class WinFileDialog : public FileDialogPlatform {
   bool TestAccept(const std::string& path) override {
     if (!dialog_ || shown_)
       return false;
-    if (DialogWindow())
-      return DoAccept(path);
-    // Applied once, when the window exists (a repeated accept would retype
-    // the name while the dialog is already closing).
-    RetryLater([this, path] {
-      if (!TestAccept(path))
-        Cancel();
-    });
+    ScheduleAccept(path, 0);
     return true;
   }
 
  private:
+  // The accept the test hook asked for: once the dialog window exists, give
+  // the dialog a moment to finish setting up, type the path and press OK;
+  // if the same dialog is still open a while later (the press came too
+  // early and was dropped), try again, a few times at most.
+  void ScheduleAccept(const std::string& path, int attempt) {
+    if (attempt >= 5)
+      return;
+    uint32_t id = id_;
+    WinRunOnIoThreadAfter(attempt == 0 ? 400 : 1200, [this, id, path, attempt] {
+      if (!FileDialogIsOpen(id) || shown_)
+        return;
+      if (DialogWindow())
+        DoAccept(path);
+      ScheduleAccept(path, attempt + 1);
+    });
+  }
+
   // The dialog's window, or null while Show() hasn't created it.
   HWND DialogWindow() {
     ComPtr<IOleWindow> ole;
