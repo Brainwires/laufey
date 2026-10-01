@@ -20,6 +20,7 @@
 - [Notifications](notifications.md)
 - [Clipboard](clipboard.md)
 - [Permissions](permissions.md)
+- [Passkeys](passkeys.md)
 - [App data & web storage](app-data.md)
 - [Packaging & distribution](distribution.md)
 - [Launch configuration](launch-config.md)

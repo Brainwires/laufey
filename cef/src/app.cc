@@ -5,6 +5,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
+#include "laufey_passkey.h"
 #include "laufey_single_instance.h"
 #include "scheme_handler.h"
 
@@ -114,6 +115,13 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
   // Unregister native window
   CefWindowHandle handle = window->GetWindowHandle();
   if (handle) {
+    // A passkey sheet / dialog anchored to this window ends with it
+    // (`cancelled`).
+#if defined(__APPLE__)
+    laufey_common::PasskeyWindowClosing(NSWindowForCefHandle(handle));
+#elif defined(_WIN32)
+    laufey_common::PasskeyWindowClosing(reinterpret_cast<void*>(handle));
+#endif
 #ifdef __APPLE__
     UnregisterNSWindowForCefHandle(handle);
 #else

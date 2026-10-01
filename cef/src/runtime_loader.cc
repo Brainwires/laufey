@@ -4,6 +4,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_single_instance.h"
 #include "scheme_handler.h"
@@ -722,6 +723,86 @@ static void Backend_SetSecondInstanceHandler(void* /*data*/,
                                              laufey_second_instance_fn handler,
                                              void* user_data) {
   laufey_common::SetSecondInstanceHandler(handler, user_data);
+}
+
+// --- Passkeys (API >= 37) ---
+//
+// macOS and Windows run real ceremonies (backend-common passkey_mac.mm /
+// passkey_win.cc); Linux has no platform API and answers not_supported.
+
+static uint32_t Backend_PasskeyCapabilities(void* /*data*/) {
+#if defined(__APPLE__)
+  return laufey_common::PasskeyCapabilitiesMac();
+#elif defined(_WIN32)
+  return laufey_common::PasskeyCapabilitiesWin();
+#else
+  return 0;
+#endif
+}
+
+static void Backend_PasskeyRequest(void* data, uint32_t window_id,
+                                   uint32_t kind, const char* options_json,
+                                   laufey_passkey_result_fn callback,
+                                   void* user_data) {
+  // Any thread. Refusals (no API, invalid options, busy) answer here,
+  // synchronously; a started ceremony resolves its window on TID_UI (the
+  // main thread on macOS).
+  if (!callback)
+    return;
+  if (Backend_PasskeyCapabilities(data) == 0) {
+    laufey_common::PasskeyReportNotSupported(callback, user_data);
+    return;
+  }
+#if defined(__APPLE__) || defined(_WIN32)
+  std::shared_ptr<laufey_common::PasskeyCeremony> ceremony =
+      laufey_common::PasskeyBegin(kind, options_json, callback, user_data);
+  if (!ceremony)
+    return;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  CefRefPtr<CefBrowser> browser =
+      window_id != 0 ? loader->GetBrowserForWindow(window_id) : nullptr;
+  if (window_id != 0 && !browser) {
+    ceremony->Finish(laufey_common::PasskeyErrorEnvelope(
+        laufey_common::kPasskeyUnknown,
+        "window " + std::to_string(window_id) + " not found"));
+    return;
+  }
+  CefPostTask(TID_UI,
+              base::BindOnce(
+                  [](CefRefPtr<CefBrowser> b,
+                     std::shared_ptr<laufey_common::PasskeyCeremony> c) {
+                    void* native = nullptr;
+                    if (b) {
+                      auto browser_view = CefBrowserView::GetForBrowser(b);
+                      auto window =
+                          browser_view ? browser_view->GetWindow() : nullptr;
+                      if (!window) {
+                        c->Finish(laufey_common::PasskeyErrorEnvelope(
+                            laufey_common::kPasskeyUnknown,
+                            "the window has no native handle"));
+                        return;
+                      }
+#if defined(__APPLE__)
+                      native = NSWindowForCefHandle(window->GetWindowHandle());
+#else
+                      native =
+                          reinterpret_cast<void*>(window->GetWindowHandle());
+#endif
+                    }
+    // nullptr: the key / foreground window of the app.
+#if defined(__APPLE__)
+                    laufey_common::PasskeyStartMac(c, native);
+#else
+                    laufey_common::PasskeyStartWin(c, native);
+#endif
+                  },
+                  browser, ceremony));
+#else
+  (void)data;
+  (void)window_id;
+  (void)kind;
+  (void)options_json;
+#endif
 }
 
 // --- CefValue <-> laufey::Value conversion (IPC boundary only) ---
@@ -1916,6 +1997,9 @@ void RuntimeLoader::InitializeBackendApi() {
   // Single instance (API >= 36), every OS: forwarded launches from
   // laufey_single_instance (see docs/deep-links.md).
   backend_api_.set_second_instance_handler = Backend_SetSecondInstanceHandler;
+  // Passkeys (API >= 37): see docs/passkeys.md.
+  backend_api_.passkey_capabilities = Backend_PasskeyCapabilities;
+  backend_api_.passkey_request = Backend_PasskeyRequest;
 
   // --- Tray / status bar ---
 #if defined(__APPLE__)

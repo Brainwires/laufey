@@ -10,6 +10,7 @@
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
+#include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
 #include "init_script.h"
 
@@ -139,6 +140,14 @@ class WKWebViewBackend : public LaufeyBackend {
 
   void SetOpenUrlHandler(laufey_open_url_fn handler, void* user_data) override;
   bool TestTriggerOpenUrl(const char* url) override;
+
+  uint32_t PasskeyCapabilities() override {
+    return laufey_common::PasskeyCapabilitiesMac();
+  }
+  void PasskeyRequest(uint32_t window_id, uint32_t kind,
+                      const char* options_json,
+                      laufey_passkey_result_fn callback,
+                      void* user_data) override;
 
   uint32_t CreateTrayIcon() override;
   void DestroyTrayIcon(uint32_t tray_id) override;
@@ -782,8 +791,17 @@ void WKWebViewBackend::RemoveWindowState(uint32_t window_id) {
 void WKWebViewBackend::OnWindowClosedByUser(uint32_t window_id) {
   // Main thread (AppKit delivers windowWillClose: there); safe to take the
   // lock and tear down state while the window finishes closing.
-  std::lock_guard<std::mutex> lock(windows_mutex_);
-  RemoveWindowState(window_id);
+  NSWindow* win = nil;
+  {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      win = state->window;
+    RemoveWindowState(window_id);
+  }
+  // A passkey sheet anchored to the window ends with it (`cancelled`).
+  // Outside the lock: the result callback may re-enter the backend.
+  if (win)
+    laufey_common::PasskeyWindowClosing((__bridge const void*)win);
 }
 
 void WKWebViewBackend::InstallGlobalMonitors() {
@@ -1260,6 +1278,8 @@ void WKWebViewBackend::CloseWindow(uint32_t window_id) {
       }
       if (!win)
         return;
+      // See OnWindowClosedByUser.
+      laufey_common::PasskeyWindowClosing((__bridge const void*)win);
       [win close];
     }
   });
@@ -1476,6 +1496,43 @@ void WKWebViewBackend::PrintToPdf(uint32_t window_id,
         callback(nullptr, 0, "print_to_pdf requires macOS 11 or newer",
                  callback_data);
       }
+    }
+  });
+}
+
+void WKWebViewBackend::PasskeyRequest(uint32_t window_id, uint32_t kind,
+                                      const char* options_json,
+                                      laufey_passkey_result_fn callback,
+                                      void* user_data) {
+  // Any thread. Refusals (no API, invalid options, busy) answer here,
+  // synchronously; a started ceremony moves to the main thread.
+  if (laufey_common::PasskeyCapabilitiesMac() == 0) {
+    laufey_common::PasskeyReportNotSupported(callback, user_data);
+    return;
+  }
+  std::shared_ptr<laufey_common::PasskeyCeremony> ceremony =
+      laufey_common::PasskeyBegin(kind, options_json, callback, user_data);
+  if (!ceremony)
+    return;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* win = nil;
+      bool found = window_id == 0;
+      if (window_id != 0) {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id)) {
+          win = state->window;
+          found = win != nil;
+        }
+      }
+      if (!found) {
+        ceremony->Finish(laufey_common::PasskeyErrorEnvelope(
+            laufey_common::kPasskeyUnknown,
+            "window " + std::to_string(window_id) + " not found"));
+        return;
+      }
+      // nil: the key / main window (see PasskeyStartMac).
+      laufey_common::PasskeyStartMac(ceremony, (__bridge void*)win);
     }
   });
 }

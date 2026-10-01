@@ -29,7 +29,7 @@ pub use mouse::*;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 36;
+pub const LAUFEY_API_VERSION: u32 = 37;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -2160,6 +2160,152 @@ where
   }
 }
 
+// --- Passkeys ---
+
+/// `passkey_request` kind: a registration (`navigator.credentials.create`).
+/// Mirrors `LAUFEY_PASSKEY_CREATE` in `laufey.h`.
+pub const LAUFEY_PASSKEY_CREATE: u32 = 0;
+/// `passkey_request` kind: an authentication (`navigator.credentials.get`).
+/// Mirrors `LAUFEY_PASSKEY_GET` in `laufey.h`.
+pub const LAUFEY_PASSKEY_GET: u32 = 1;
+/// Capability flag: a platform authenticator (Touch ID / iCloud Keychain,
+/// Windows Hello) can serve requests.
+pub const LAUFEY_PASSKEY_PLATFORM_AUTHENTICATOR: u32 = 1 << 0;
+/// Capability flag: roaming security keys can serve requests.
+pub const LAUFEY_PASSKEY_SECURITY_KEYS: u32 = 1 << 1;
+
+/// What [`passkey_create`] / [`passkey_get`] can use right now — the shape of
+/// `@clerk/electron-passkeys`' `capabilities()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PasskeyCapabilities {
+  pub platform_authenticator: bool,
+  pub security_keys: bool,
+}
+
+/// The passkey capabilities of this backend: both on macOS 12+, security keys
+/// (and Windows Hello when set up) on Windows 10 1903+, none on Linux, on the
+/// Winit backend and on backends older than API 37. Any thread.
+pub fn passkey_capabilities() -> PasskeyCapabilities {
+  passkey_capabilities_with(api())
+}
+
+fn passkey_capabilities_with(api: &LaufeyBackendApi) -> PasskeyCapabilities {
+  let flags = match api.passkey_capabilities {
+    Some(f) => unsafe { f(api.backend_data) },
+    None => 0,
+  };
+  PasskeyCapabilities {
+    platform_authenticator: flags & LAUFEY_PASSKEY_PLATFORM_AUTHENTICATOR != 0,
+    security_keys: flags & LAUFEY_PASSKEY_SECURITY_KEYS != 0,
+  }
+}
+
+/// Run a WebAuthn registration ceremony through the OS platform
+/// authenticator.
+///
+/// `options_json` is `PublicKeyCredentialCreationOptions` as JSON with
+/// base64url binary fields — exactly what `@clerk/electron` sends to
+/// `@clerk/electron-passkeys` — and the future resolves with its JSON
+/// envelope, `{"ok":true,"credential":{...}}` or
+/// `{"ok":false,"error":{"code","message"}}` with `code` one of `cancelled`,
+/// `invalid_rp`, `not_supported`, `timeout`, `unknown`. It never fails
+/// otherwise. `window_id` anchors the OS sheet / dialog (0: the focused
+/// window).
+///
+/// The options are untrusted input as far as the backend is concerned: it
+/// parses them strictly and lets the OS decide whether the app may use the
+/// RP ID (macOS: the `webcredentials:` associated domain). Only call this from
+/// the app's own trusted code. One ceremony runs at a time per app; another
+/// request meanwhile resolves with `unknown` ("a passkey request is already in
+/// progress").
+///
+/// The request is made when this function is called, not when the future is
+/// first polled. See `docs/passkeys.md`.
+pub fn passkey_create(
+  window_id: u32,
+  options_json: &str,
+) -> impl Future<Output = String> + Send + 'static {
+  passkey_request_with(api(), window_id, LAUFEY_PASSKEY_CREATE, options_json)
+}
+
+/// Run a WebAuthn authentication ceremony through the OS platform
+/// authenticator. `options_json` is `PublicKeyCredentialRequestOptions` as
+/// JSON with base64url binary fields; otherwise as [`passkey_create`].
+pub fn passkey_get(
+  window_id: u32,
+  options_json: &str,
+) -> impl Future<Output = String> + Send + 'static {
+  passkey_request_with(api(), window_id, LAUFEY_PASSKEY_GET, options_json)
+}
+
+/// The error envelope the backends write, for the answers the capi gives
+/// itself. `message` must not need JSON escaping.
+fn passkey_error_envelope(code: &str, message: &str) -> String {
+  format!(r#"{{"ok":false,"error":{{"code":"{code}","message":"{message}"}}}}"#)
+}
+
+unsafe extern "C" fn passkey_result_trampoline(
+  user_data: *mut c_void,
+  result_json: *const c_char,
+) {
+  // The backend calls this exactly once per request (laufey.h), so the box
+  // is reclaimed exactly once.
+  let tx =
+    Box::from_raw(user_data as *mut tokio::sync::oneshot::Sender<String>);
+  let result = if result_json.is_null() {
+    passkey_error_envelope("unknown", "the backend returned no result")
+  } else {
+    CStr::from_ptr(result_json).to_string_lossy().into_owned()
+  };
+  // The receiver may be gone (the future was dropped); nothing to do then.
+  let _ = tx.send(result);
+}
+
+fn passkey_request_with(
+  api: &LaufeyBackendApi,
+  window_id: u32,
+  kind: u32,
+  options_json: &str,
+) -> impl Future<Output = String> + Send + 'static {
+  let pending: Result<tokio::sync::oneshot::Receiver<String>, String> =
+    match (api.passkey_request, CString::new(options_json)) {
+      (None, _) => Err(passkey_error_envelope(
+        "not_supported",
+        "Native passkeys are not supported by this backend.",
+      )),
+      (Some(_), Err(_)) => Err(passkey_error_envelope(
+        "unknown",
+        "invalid passkey options: contains a NUL byte",
+      )),
+      (Some(f), Ok(options)) => {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let user_data = Box::into_raw(Box::new(tx)) as *mut c_void;
+        unsafe {
+          f(
+            api.backend_data,
+            window_id,
+            kind,
+            options.as_ptr(),
+            Some(passkey_result_trampoline),
+            user_data,
+          );
+        }
+        Ok(rx)
+      }
+    };
+  async move {
+    match pending {
+      Err(envelope) => envelope,
+      Ok(rx) => rx.await.unwrap_or_else(|_| {
+        passkey_error_envelope(
+          "unknown",
+          "the passkey request ended without a result",
+        )
+      }),
+    }
+  }
+}
+
 // --- Tray / status-bar icon ---
 
 fn tray_menu_handlers(
@@ -3460,6 +3606,147 @@ mod tests {
     assert!(!supports_scheme_handlers(&fake));
     fake.register_scheme_handler = Some(fake_register_scheme_handler);
     assert!(supports_scheme_handlers(&fake));
+  }
+
+  // --- Passkeys ---
+  //
+  // Local fake vtables (BACKEND_API belongs to the pdf tests), driven through
+  // the `_with` bodies of passkey_capabilities / passkey_create / passkey_get.
+
+  fn block_on<F: Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+      .build()
+      .unwrap()
+      .block_on(fut)
+  }
+
+  static PASSKEY_CALLS: Mutex<Vec<(u32, u32, String)>> = Mutex::new(Vec::new());
+
+  unsafe extern "C" fn fake_passkey_capabilities(
+    _backend_data: *mut c_void,
+  ) -> u32 {
+    // Unknown bits are ignored.
+    LAUFEY_PASSKEY_PLATFORM_AUTHENTICATOR | 0x80
+  }
+
+  // window_id 1: answers synchronously; 2: from another thread, later; 3: a
+  // NULL result; 4: never (the backend broke its contract).
+  unsafe extern "C" fn fake_passkey_request(
+    _backend_data: *mut c_void,
+    window_id: u32,
+    kind: u32,
+    options_json: *const c_char,
+    callback: ffi::laufey_passkey_result_fn,
+    user_data: *mut c_void,
+  ) {
+    let options = CStr::from_ptr(options_json).to_string_lossy().into_owned();
+    PASSKEY_CALLS
+      .lock()
+      .unwrap()
+      .push((window_id, kind, options));
+    let cb = callback.expect("callback must be set");
+    match window_id {
+      1 => cb(
+        user_data,
+        c"{\"ok\":true,\"credential\":{\"id\":\"AQ\"}}".as_ptr(),
+      ),
+      2 => {
+        let ud = user_data as usize;
+        std::thread::spawn(move || {
+          std::thread::sleep(std::time::Duration::from_millis(50));
+          unsafe {
+            cb(
+              ud as *mut c_void,
+              c"{\"ok\":false,\"error\":{\"code\":\"cancelled\",\"message\":\"m\"}}"
+                .as_ptr(),
+            )
+          };
+        });
+      }
+      3 => cb(user_data, std::ptr::null()),
+      _ => {
+        // Never answers: drop the sender so the future still resolves.
+        drop(Box::from_raw(
+          user_data as *mut tokio::sync::oneshot::Sender<String>,
+        ));
+      }
+    }
+  }
+
+  fn assert_send_static<T: Send + 'static>(_: &T) {}
+
+  #[test]
+  fn passkeys_without_backend_support() {
+    let fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    assert_eq!(
+      passkey_capabilities_with(&fake),
+      PasskeyCapabilities::default()
+    );
+    let fut = passkey_request_with(&fake, 0, LAUFEY_PASSKEY_GET, "{}");
+    assert_send_static(&fut);
+    assert_eq!(
+      block_on(fut),
+      r#"{"ok":false,"error":{"code":"not_supported","message":"Native passkeys are not supported by this backend."}}"#
+    );
+  }
+
+  #[test]
+  fn passkey_capabilities_follow_the_flags() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    fake.passkey_capabilities = Some(fake_passkey_capabilities);
+    assert_eq!(
+      passkey_capabilities_with(&fake),
+      PasskeyCapabilities {
+        platform_authenticator: true,
+        security_keys: false,
+      }
+    );
+  }
+
+  #[test]
+  fn passkey_requests_pass_through_and_resolve() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    fake.passkey_request = Some(fake_passkey_request);
+    let opts = r#"{"challenge":"AAAA","rpId":"example.com","x":"\u00e9 é"}"#;
+
+    // Synchronous answer, create kind, options passed byte for byte.
+    let out =
+      block_on(passkey_request_with(&fake, 1, LAUFEY_PASSKEY_CREATE, opts));
+    assert_eq!(out, r#"{"ok":true,"credential":{"id":"AQ"}}"#);
+    // Later answer from another thread, get kind.
+    let out =
+      block_on(passkey_request_with(&fake, 2, LAUFEY_PASSKEY_GET, opts));
+    assert!(out.contains(r#""code":"cancelled""#));
+    // A NULL result is an error envelope, not a crash.
+    let out =
+      block_on(passkey_request_with(&fake, 3, LAUFEY_PASSKEY_GET, opts));
+    assert!(out.contains(r#""code":"unknown""#));
+    // A backend that never answers (and drops its sender) still resolves.
+    let out =
+      block_on(passkey_request_with(&fake, 4, LAUFEY_PASSKEY_GET, opts));
+    assert!(out.contains("ended without a result"));
+
+    let calls = PASSKEY_CALLS.lock().unwrap();
+    let mine: Vec<_> = calls.iter().filter(|c| c.2 == opts).collect();
+    assert_eq!(mine.len(), 4);
+    assert_eq!((mine[0].0, mine[0].1), (1, LAUFEY_PASSKEY_CREATE));
+    assert_eq!((mine[1].0, mine[1].1), (2, LAUFEY_PASSKEY_GET));
+  }
+
+  #[test]
+  fn passkey_options_with_nul_never_reach_the_backend() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    fake.passkey_request = Some(fake_passkey_request);
+    let opts = "{\"marker\":\"nul-test\0\"}";
+    let out =
+      block_on(passkey_request_with(&fake, 1, LAUFEY_PASSKEY_GET, opts));
+    assert!(out.contains(r#""code":"unknown""#));
+    assert!(out.contains("NUL"));
+    assert!(PASSKEY_CALLS
+      .lock()
+      .unwrap()
+      .iter()
+      .all(|c| !c.2.contains("nul-test")));
   }
 
   // Fake print_to_pdf backend shared by the pdf tests, dispatching on

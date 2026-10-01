@@ -131,6 +131,13 @@ void RegisterNSWindowForCefHandle(void* cef_handle, uint32_t window_id) {
   }
 }
 
+void* NSWindowForCefHandle(void* cef_handle) {
+  if (!cef_handle)
+    return nullptr;
+  NSView* view = (__bridge NSView*)cef_handle;
+  return (__bridge void*)[view window];
+}
+
 void UnregisterNSWindowForCefHandle(void* cef_handle) {
   NSView* view = (__bridge NSView*)cef_handle;
   NSWindow* nswindow = [view window];

@@ -530,6 +530,27 @@ class LaufeyBackend {
   virtual void SetSecondInstanceHandler(laufey_second_instance_fn /*handler*/,
                                         void* /*user_data*/) {}
 
+  // --- Passkeys (API >= 37) ---
+  // The macOS and Windows backends override both with laufey_passkey.h
+  // (backend-common, which iOS doesn't link). The defaults are the answer of
+  // a platform without a passkey API (Linux, iOS): no capabilities, and every
+  // request refused with not_supported before its options are read (the text
+  // of laufey_common::PasskeyReportNotSupported).
+  virtual uint32_t PasskeyCapabilities() {
+    return 0;
+  }
+  virtual void PasskeyRequest(uint32_t /*window_id*/, uint32_t /*kind*/,
+                              const char* /*options_json*/,
+                              laufey_passkey_result_fn callback,
+                              void* user_data) {
+    if (callback) {
+      callback(user_data,
+               "{\"ok\":false,\"error\":{\"code\":\"not_supported\","
+               "\"message\":\"Native passkeys are not supported on this "
+               "platform.\"}}");
+    }
+  }
+
   // --- Tray / status-bar icon ---
   virtual uint32_t CreateTrayIcon() {
     return 0;
