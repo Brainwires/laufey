@@ -2132,6 +2132,12 @@ async fn lifetime_checks() -> ! {
   } else {
     na("keep-alive (not supported by this backend)");
   }
+  // Quit with a window open, the usual case. The runtime must still be told
+  // before the process ends: macOS WKWebView used to return from main under
+  // it, unless AppKit's terminate-after-last-window check happened to run
+  // first (which a closed last window above can schedule).
+  let open_at_quit = Window::new(300, 200).title("native-e2e-lifetime-3");
+  let _ = wait_for(|| open_at_quit.get_size().0 != 0, 100, 50).await;
   laufey::quit();
   let ended = wait_for(laufey::should_shutdown, 300, 50).await;
   check(
