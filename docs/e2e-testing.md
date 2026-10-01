@@ -694,7 +694,10 @@ GTK thread). Capability-probed like the rest:
   (cancel), one by `cancel_file_dialog`, a second refused as busy while one is
   open, and three accepted with a path the hook types in (a save target, an
   existing file, a directory), each result coming back through the dialog's own
-  completion path. A dialog that won't take a typed path is N/A, not a pass.
+  completion path. A dialog that won't take a typed path is N/A, not a pass: on
+  the macOS CI runners the panels run out of process (`ok:` is not implemented
+  and a posted Return doesn't reach them), so there the accepts are N/A and only
+  opening, cancelling and busy are checked.
 - **Drag out**: a relative path and a drag with no mouse button held both fail.
   A real drag out (and a real OS drop) needs a person or OS-level input
   injection and is not part of the battery.
