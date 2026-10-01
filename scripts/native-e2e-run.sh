@@ -93,23 +93,66 @@ if [ "$mode" = "--layer1" ]; then
   exec xvfb-run -a dbus-run-session -- "$driver" "$bin" ${args[@]+"${args[@]}"}
 fi
 
-# Layer 0: capture output so an unexpected native termination cannot masquerade
-# as success merely because macOS reports an exit code of 0. On Linux, run
-# headless via Xvfb + a private session bus (some tray implementations need it).
-if is_linux; then
-  set +e
-  output="$(xvfb-run -a dbus-run-session -- "$bin" ${args[@]+"${args[@]}"} 2>&1)"
-  status=$?
-  set -e
-else
-  set +e
-  output="$("$bin" ${args[@]+"${args[@]}"} 2>&1)"
-  status=$?
-  set -e
-fi
-printf '%s\n' "$output"
-if ! grep -q '^\[e2e\] OVERALL ' <<<"$output"; then
+# Layer 0: stream the output (so a hang shows how far the battery got) and
+# keep a copy, so an unexpected native termination cannot masquerade as
+# success merely because macOS reports an exit code of 0. On Linux, run
+# headless via Xvfb + a private session bus (some tray implementations need
+# it).
+#
+# A watchdog bounds the run (LAUFEY_E2E_WATCHDOG_SECS, default 300; the whole
+# battery takes well under a minute). When it fires it prints every thread's
+# stack (macOS `sample`, Linux gdb when installed) before killing the
+# process, so a hang leaves evidence instead of only a step timeout.
+log="$(mktemp "${TMPDIR:-/tmp}/native-e2e.XXXXXX")"
+run_backend() {
+  if is_linux; then
+    exec xvfb-run -a dbus-run-session -- "$bin" ${args[@]+"${args[@]}"}
+  else
+    exec "$bin" ${args[@]+"${args[@]}"}
+  fi
+}
+run_backend > >(tee "$log") 2>&1 &
+pid=$!
+watchdog_secs="${LAUFEY_E2E_WATCHDOG_SECS:-300}"
+(
+  waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$watchdog_secs" ]; then
+      echo "native e2e: watchdog: no exit after ${watchdog_secs}s; stacks follow" >&2
+      case "$(uname -s)" in
+        Darwin)
+          # The backend and its helper processes (CEF renderer / GPU).
+          for p in "$pid" $(pgrep -P "$pid" 2>/dev/null || true); do
+            sample "$p" 3 -mayDie 2>&1 | head -c 200000 >&2 || true
+          done ;;
+        Linux)
+          if command -v gdb >/dev/null; then
+            for p in $(pgrep -f "$bin" 2>/dev/null || true); do
+              gdb -p "$p" -batch -ex "thread apply all bt" 2>&1 |
+                head -c 200000 >&2 || true
+            done
+          fi ;;
+      esac
+      kill -9 "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+) &
+watchdog=$!
+set +e
+wait "$pid"
+status=$?
+set -e
+wait "$watchdog" 2>/dev/null || true
+# Let tee drain what the process wrote last.
+sleep 1
+echo "== native-e2e: backend exited with status $status =="
+if ! grep -q '^\[e2e\] OVERALL ' "$log"; then
   echo "native e2e exited before reporting an overall result" >&2
+  rm -f "$log"
   exit 1
 fi
+rm -f "$log"
 exit "$status"

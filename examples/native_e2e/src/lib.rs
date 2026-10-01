@@ -993,6 +993,29 @@ fn e2e_main() {
       40,
     )
     .await;
+    if !sized {
+      // Say what was read and whether the size only arrived late, so a
+      // failure tells "slow" apart from "wrong".
+      let t0 = std::time::Instant::now();
+      let late = wait_for(
+        || {
+          let (w, h) = win.get_size();
+          (w - 640).abs() <= 2 && (h - 480).abs() <= 2
+        },
+        200,
+        50,
+      )
+      .await;
+      eprintln!(
+        "[e2e] INFO set_size(640, 480): get_size {:?}; {}",
+        win.get_size(),
+        if late {
+          format!("converged {} ms after the 2 s wait", t0.elapsed().as_millis())
+        } else {
+          "never converged within 10 s more".to_string()
+        }
+      );
+    }
     check("set_size -> get_size round-trips", sized);
 
     // Position is advisory: window managers may constrain it. Assert loosely.
