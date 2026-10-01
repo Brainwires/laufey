@@ -3,6 +3,8 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_launch_config.h"
+#include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_passkey.h"
@@ -38,6 +40,8 @@
 #include <condition_variable>
 #include <vector>
 #include <functional>
+#include <thread>
+#include <algorithm>
 
 using namespace Microsoft::WRL;
 
@@ -100,6 +104,11 @@ struct WinWindowState {
   // LAUFEY_BACKDROP_* behind the page (API 38); not NONE means the client
   // area is left unpainted and the web view background is transparent.
   int backdrop = LAUFEY_BACKDROP_NONE;
+  // DevTools (API 40). WebView2 opens them in a top-level window of its
+  // browser process and has no API to close them or ask whether they are
+  // open, so the window open_devtools brought up is tracked.
+  UINT32 browser_pid = 0;
+  HWND devtools_hwnd = nullptr;
 };
 
 // Custom window message for UI tasks
@@ -475,6 +484,61 @@ class WebView2Backend : public LaufeyBackend {
     laufey_common::SetClipboardChangeHandler(handler, user_data);
   }
 
+  // Global shortcuts, launch at login, DevTools (API >= 40). RegisterHotKey
+  // runs on the UI thread (its hidden window lives there); the platform is
+  // installed on first use.
+  void EnsureShortcuts() {
+    std::call_once(shortcuts_once_, [this] {
+      laufey_common::InstallShortcutPlatform(
+          laufey_common::CreateShortcutPlatformWin(
+              [this](std::function<void()> task) {
+                RunOnUiThread(std::move(task));
+              }));
+    });
+  }
+  uint32_t SystemCapabilities() override {
+    EnsureShortcuts();
+    uint32_t caps =
+        laufey_common::ShortcutCapabilities() | LAUFEY_SYSTEM_CAP_DEVTOOLS;
+    if (laufey_common::GetLaunchAtLogin() != LAUFEY_LOGIN_ITEM_NOT_SUPPORTED)
+      caps |= LAUFEY_SYSTEM_CAP_LAUNCH_AT_LOGIN;
+    return caps;
+  }
+  void SetShortcutHandler(laufey_shortcut_fn handler,
+                          void* user_data) override {
+    laufey_common::SetShortcutHandler(handler, user_data);
+  }
+  void RegisterShortcut(const char* accelerator,
+                        laufey_shortcut_result_fn callback,
+                        void* user_data) override {
+    EnsureShortcuts();
+    laufey_common::RegisterShortcut(accelerator, callback, user_data);
+  }
+  bool UnregisterShortcut(const char* accelerator) override {
+    return laufey_common::UnregisterShortcut(accelerator);
+  }
+  void UnregisterAllShortcuts() override {
+    laufey_common::UnregisterAllShortcuts();
+  }
+  char* ListShortcuts() override {
+    return laufey_common::ListShortcuts();
+  }
+  char* CanonicalizeAccelerator(const char* accelerator) override {
+    return laufey_common::CanonicalizeAccelerator(accelerator);
+  }
+  bool TestTriggerShortcut(const char* accelerator) override {
+    return laufey_common::TestTriggerShortcut(accelerator);
+  }
+  int GetLaunchAtLogin() override {
+    return laufey_common::GetLaunchAtLogin();
+  }
+  int SetLaunchAtLogin(bool enabled, std::string* error) override {
+    return laufey_common::SetLaunchAtLogin(enabled, error);
+  }
+  void CloseDevTools(uint32_t window_id) override;
+  bool IsDevToolsOpen(uint32_t window_id) override;
+  bool IsDevToolsEnabled(uint32_t window_id) override;
+
   void BounceDock(int type) override;
   void SetDockBadge(const char* badge_or_null) override;
 
@@ -562,6 +626,10 @@ class WebView2Backend : public LaufeyBackend {
   void RunOnUiThreadSync(std::function<void()> task);
 
   std::map<uint32_t, WinWindowState> windows_;
+  std::once_flag shortcuts_once_;
+  // The window's DevTools window (tracked or, with one window per browser
+  // process, found by title), or null. Any thread.
+  HWND FindDevToolsWindow(uint32_t window_id);
   std::recursive_mutex windows_mutex_;
   bool class_registered_ = false;
   // See SchemesForEnvironment.
@@ -1062,6 +1130,18 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
 
             state->controller = controller;
             controller->get_CoreWebView2(&state->webview);
+            if (state->webview) {
+              state->webview->get_BrowserProcessId(&state->browser_pid);
+              // DevTools (API 40): F12, the context menu's Inspect and
+              // OpenDevToolsWindow all follow AreDevToolsEnabled, which
+              // follows LAUFEY_INSPECTABLE / "inspectable" (default on).
+              ComPtr<ICoreWebView2Settings> settings;
+              if (SUCCEEDED(state->webview->get_Settings(&settings)) &&
+                  settings) {
+                settings->put_AreDevToolsEnabled(
+                    laufey_common::LaunchInspectable() ? TRUE : FALSE);
+              }
+            }
 
             RECT bounds;
             GetClientRect(hwnd, &bounds);
@@ -2142,16 +2222,139 @@ void WebView2Backend::ShowContextMenu(uint32_t window_id, int x, int y,
 // DevTools
 // ============================================================================
 
+namespace {
+
+// The visible top-level windows of process `pid` titled "DevTools..." (the
+// title Chromium gives a DevTools window: "DevTools - <page>").
+std::vector<HWND> DevToolsWindowsOf(DWORD pid) {
+  struct Scan {
+    DWORD pid;
+    std::vector<HWND> found;
+  } scan{pid, {}};
+  if (!pid)
+    return scan.found;
+  EnumWindows(
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* sc = reinterpret_cast<Scan*>(lp);
+        DWORD owner = 0;
+        GetWindowThreadProcessId(hwnd, &owner);
+        if (owner != sc->pid || !IsWindowVisible(hwnd))
+          return TRUE;
+        wchar_t title[16] = {};
+        int n = GetWindowTextW(hwnd, title, 16);
+        if (n >= 8 && wcsncmp(title, L"DevTools", 8) == 0)
+          sc->found.push_back(hwnd);
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&scan));
+  return scan.found;
+}
+
+bool IsDevToolsWindowOf(HWND hwnd, DWORD pid) {
+  if (!hwnd || !IsWindow(hwnd))
+    return false;
+  for (HWND h : DevToolsWindowsOf(pid)) {
+    if (h == hwnd)
+      return true;
+  }
+  return false;
+}
+
+}  // namespace
+
 void WebView2Backend::OpenDevTools(uint32_t window_id) {
+  if (!laufey_common::LaunchInspectable())
+    return;
   if (GetCurrentThreadId() != ui_thread_id_) {
     RunOnUiThread([this, window_id] { OpenDevTools(window_id); });
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
-  if (state && state->webview) {
-    state->webview->OpenDevToolsWindow();
+  if (!state || !state->webview)
+    return;
+  DWORD pid = static_cast<DWORD>(state->browser_pid);
+  std::vector<HWND> before = DevToolsWindowsOf(pid);
+  state->webview->OpenDevToolsWindow();
+  // The window appears asynchronously (or, when this view's DevTools are
+  // already open, the existing one comes to the front): find it and remember
+  // it, for close_devtools / is_devtools_open.
+  std::thread([this, window_id, pid, before] {
+    HWND found = nullptr;
+    for (int i = 0; i < 100 && !found; i++) {
+      Sleep(50);
+      for (HWND h : DevToolsWindowsOf(pid)) {
+        if (std::find(before.begin(), before.end(), h) == before.end()) {
+          found = h;
+          break;
+        }
+      }
+      if (!found && i >= 10) {
+        HWND fg = GetForegroundWindow();
+        if (IsDevToolsWindowOf(fg, pid))
+          found = fg;
+      }
+    }
+    if (!found)
+      return;
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    if (auto* st = GetWindow(window_id))
+      st->devtools_hwnd = found;
+  }).detach();
+}
+
+HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  if (!state || !state->browser_pid)
+    return nullptr;
+  DWORD pid = static_cast<DWORD>(state->browser_pid);
+  if (IsDevToolsWindowOf(state->devtools_hwnd, pid))
+    return state->devtools_hwnd;
+  state->devtools_hwnd = nullptr;
+  // Opened some other way (F12, the context menu): attributable to this
+  // view only when no other window shares its browser process.
+  int sharing = 0;
+  for (auto& [wid, other] : windows_) {
+    if (other.browser_pid == state->browser_pid)
+      sharing++;
   }
+  if (sharing != 1)
+    return nullptr;
+  std::vector<HWND> found = DevToolsWindowsOf(pid);
+  return found.empty() ? nullptr : found.front();
+}
+
+void WebView2Backend::CloseDevTools(uint32_t window_id) {
+  HWND hwnd = FindDevToolsWindow(window_id);
+  if (!hwnd)
+    return;
+  // The DevTools window belongs to the browser process; closing it is what
+  // its own close button does.
+  PostMessageW(hwnd, WM_CLOSE, 0, 0);
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  if (auto* state = GetWindow(window_id))
+    state->devtools_hwnd = nullptr;
+}
+
+bool WebView2Backend::IsDevToolsOpen(uint32_t window_id) {
+  return FindDevToolsWindow(window_id) != nullptr;
+}
+
+bool WebView2Backend::IsDevToolsEnabled(uint32_t window_id) {
+  if (window_id == 0)
+    return laufey_common::LaunchInspectable();
+  BOOL enabled = FALSE;
+  RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || !state->webview)
+      return;
+    ComPtr<ICoreWebView2Settings> settings;
+    if (SUCCEEDED(state->webview->get_Settings(&settings)) && settings)
+      settings->get_AreDevToolsEnabled(&enabled);
+  });
+  return enabled != FALSE;
 }
 
 void WebView2Backend::PrintToPdf(uint32_t window_id,

@@ -11,6 +11,7 @@
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
 #include "app.h"
+#include "laufey_launch_config.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_single_instance.h"
@@ -434,7 +435,11 @@ int main(int argc, char* argv[]) {
       CefString(&settings.root_cache_path) = cache_path;
     }
 
-    if (const char* port_env = getenv("LAUFEY_REMOTE_DEBUGGING_PORT")) {
+    // No remote debugging while DevTools are off (API 40, inspectable).
+    const char* port_env = laufey_common::LaunchInspectable()
+                               ? getenv("LAUFEY_REMOTE_DEBUGGING_PORT")
+                               : nullptr;
+    if (port_env) {
       int port = atoi(port_env);
       if (port > 0 && port < 65536) {
         settings.remote_debugging_port = port;

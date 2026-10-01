@@ -13,6 +13,9 @@
 
 #include "include/cef_app.h"
 #include "include/cef_client.h"
+#include "include/cef_command_handler.h"
+#include "include/cef_command_line.h"
+#include "include/cef_context_menu_handler.h"
 #include "include/cef_jsdialog_handler.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
@@ -151,12 +154,34 @@ class LaufeyWindowDelegate : public CefWindowDelegate {
   IMPLEMENT_REFCOUNTING(LaufeyWindowDelegate);
 };
 
+// DevTools gating (API 40; app.cc). With LAUFEY_INSPECTABLE=0 /
+// "inspectable": false, DevTools are off for the whole process:
+//   - the remote-debugging switches are stripped from the browser process's
+//     command line (and settings.remote_debugging_port is never set);
+//   - LaufeyHandler swallows Chrome's DevTools commands (F12,
+//     Ctrl/Cmd+Shift+I / J / C, Cmd+Option+I / J / C) and drops the context
+//     menu's Inspect items;
+//   - open_devtools is a no-op.
+// Chromium's "devtools.availability" preference is NOT used: it also refuses
+// the in-process DevTools protocol client that print_to_pdf drives
+// (ExecuteDevToolsMethod), so PDFs would break.
+void LaufeyApplyInspectableToCommandLine(
+    CefRefPtr<CefCommandLine> command_line);
+// Whether DevTools can be reached in this process: inspectable, or a
+// remote-debugging switch present on the browser process's command line
+// despite it (read back from CEF's global command line). UI thread.
+bool LaufeyDevToolsReachable();
+// Whether a command id is one of Chrome's DevTools / Inspect commands.
+bool LaufeyIsDevToolsCommand(int command_id);
+
 class LaufeyHandler : public CefClient,
                       public CefLifeSpanHandler,
                       public CefDisplayHandler,
                       public CefKeyboardHandler,
                       public CefDragHandler,
-                      public CefJSDialogHandler {
+                      public CefJSDialogHandler,
+                      public CefCommandHandler,
+                      public CefContextMenuHandler {
  public:
   LaufeyHandler();
   ~LaufeyHandler() override;
@@ -178,6 +203,26 @@ class LaufeyHandler : public CefClient,
   CefRefPtr<CefDragHandler> GetDragHandler() override {
     return this;
   }
+  CefRefPtr<CefCommandHandler> GetCommandHandler() override {
+    return this;
+  }
+  CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
+    return this;
+  }
+
+  // DevTools off (API 40, LAUFEY_INSPECTABLE=0): Chrome's DevTools commands
+  // (F12, Ctrl/Cmd+Shift+I / J / C, the app menu) are swallowed and the
+  // context menu loses its Inspect items. See LaufeyApplyInspectable* below.
+  bool OnChromeCommand(CefRefPtr<CefBrowser> browser, int command_id,
+                       cef_window_open_disposition_t disposition) override;
+  void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefFrame> frame,
+                           CefRefPtr<CefContextMenuParams> params,
+                           CefRefPtr<CefMenuModel> model) override;
+  bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
+                            CefRefPtr<CefFrame> frame,
+                            CefRefPtr<CefContextMenuParams> params,
+                            int command_id, EventFlags event_flags) override;
 
   // A drag entering a browser (API 39 file drops): remembers the dragged
   // files' native paths for that browser; the page's observer then reports
@@ -269,6 +314,7 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
     // propagates it to subprocesses.
     if (process_type.empty()) {
       command_line->AppendSwitch("disable-background-networking");
+      LaufeyApplyInspectableToCommandLine(command_line);
     }
   }
 

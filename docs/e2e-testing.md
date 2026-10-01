@@ -493,22 +493,24 @@ above only touches an in-process mutex and works from any thread.
 Rows are capability groups; each cell is per-backend. Every ✅ is additionally
 per-OS (`Linux/macOS/Windows`); WebView's web-layer cells differ by engine.
 
-| Capability                             | Technique | CEF                         | WebView                 | Winit            | Gate                   |
-| -------------------------------------- | --------- | --------------------------- | ----------------------- | ---------------- | ---------------------- |
-| Window geometry/state/opacity readback | A         | ✅                          | ✅                      | ✅ (Rust)        | ✅                     |
-| Window lifecycle events                | B         | ✅                          | ✅                      | ✅               | ✅                     |
-| Close handler (defer-until-close)      | B (`§8`)  | ✅ (Linux/Win nightly-only) | ✅ (Linux nightly-only) | ✅               | ✅ (macOS; see `§8`)   |
-| Clipboard round-trip                   | A         | ✅                          | ✅                      | ✅               | ✅                     |
-| Window handles / types                 | A         | ✅                          | ✅                      | ✅               | ✅                     |
-| Application / context menu             | D + B     | ✅                          | ✅                      | ✅ (`muda`)      | ✅                     |
-| Tray icon / menu / click               | D + B     | ✅                          | ✅                      | ✅ (`tray-icon`) | ✅ (win tray nightly)  |
-| Notifications payload                  | D         | ✅                          | ✅                      | probe            | Linux ✅, else nightly |
-| Dock / taskbar                         | A/D/F     | ✅                          | ✅                      | probe            | partial                |
-| Raw mouse/keyboard/wheel events        | E         | ✅                          | ✅                      | ✅               | ✅ (with hook)         |
-| Web: bindings/execute_js/navigate/load | B/C/E     | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)       |
-| Custom scheme handlers                 | C         | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)       |
-| DevTools                               | F         | ✅                          | partial                 | N/A              | nightly                |
-| Dialogs (alert/confirm/prompt/file)    | F         | ⚠️                          | ⚠️                      | ⚠️               | nightly                |
+| Capability                             | Technique   | CEF                         | WebView                 | Winit            | Gate                   |
+| -------------------------------------- | ----------- | --------------------------- | ----------------------- | ---------------- | ---------------------- |
+| Window geometry/state/opacity readback | A           | ✅                          | ✅                      | ✅ (Rust)        | ✅                     |
+| Window lifecycle events                | B           | ✅                          | ✅                      | ✅               | ✅                     |
+| Close handler (defer-until-close)      | B (`§8`)    | ✅ (Linux/Win nightly-only) | ✅ (Linux nightly-only) | ✅               | ✅ (macOS; see `§8`)   |
+| Clipboard round-trip                   | A           | ✅                          | ✅                      | ✅               | ✅                     |
+| Window handles / types                 | A           | ✅                          | ✅                      | ✅               | ✅                     |
+| Application / context menu             | D + B       | ✅                          | ✅                      | ✅ (`muda`)      | ✅                     |
+| Tray icon / menu / click               | D + B       | ✅                          | ✅                      | ✅ (`tray-icon`) | ✅ (win tray nightly)  |
+| Notifications payload                  | D           | ✅                          | ✅                      | probe            | Linux ✅, else nightly |
+| Dock / taskbar                         | A/D/F       | ✅                          | ✅                      | probe            | partial                |
+| Raw mouse/keyboard/wheel events        | E           | ✅                          | ✅                      | ✅               | ✅ (with hook)         |
+| Web: bindings/execute_js/navigate/load | B/C/E       | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)       |
+| Custom scheme handlers                 | C           | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)       |
+| DevTools open / close / toggle / off   | A (`§18`)   | ✅                          | ✅                      | N/A              | ✅ (`--system`)        |
+| Global shortcuts (incl. conflict)      | A/B (`§18`) | ✅                          | ✅                      | N/A              | ✅ (`--system`)        |
+| Launch at login                        | A (`§18`)   | ✅                          | ✅                      | N/A              | ✅ (`--system`, CI)    |
+| Dialogs (alert/confirm/prompt/file)    | F           | ⚠️                          | ⚠️                      | ⚠️               | nightly                |
 
 Net: ~90% of the C ABI is a hosted-CI PR gate across all backends; only modal /
 outward-facing surfaces are nightly.
@@ -716,3 +718,41 @@ completion, option copying, `file://` parsing, CF_HTML) are unit-tested in
 `backend-common/tests/io_test.cc` (ctest), the capi wrappers in
 `capi/src/io.rs`, and the Winit drop batching in
 `backend-winit-common/src/file_drop.rs`.
+
+## 18. Global shortcuts, launch at login and DevTools (API 40)
+
+`scripts/native-e2e-run.sh <backend> --system` runs `native_e2e`'s
+`system_checks` alone, on every backend (Winit reports each part N/A and checks
+that it says so). `--devtools-off` runs the DevTools part again under
+`LAUFEY_INSPECTABLE=0`.
+
+- **Global shortcuts** (see [global-shortcuts.md](global-shortcuts.md)): a real
+  OS registration answered with the canonical form, listed, another spelling
+  refused as `ALREADY_REGISTERED`, `INVALID` for a modifier-less key and an
+  unknown key, a press through `test_trigger_shortcut` reaching the handler with
+  the canonical form, and on Windows a real key press injected with `SendInput`
+  arriving as `WM_HOTKEY`. Then the **conflict**: the battery starts a second
+  copy of the backend (`LAUFEY_E2E_ONLY=shortcut-holder`, its own data
+  directory) that registers a shortcut and reports through a file; this process
+  must get `CONFLICT` for the same shortcut from the OS (Carbon's exclusive hot
+  keys, `RegisterHotKey`, an X11 grab), and `OK` once the holder has released it
+  and exited. Unregister, the list, the test hook after unregistering, and
+  re-registering finish it. A Wayland session with the portal is N/A (nothing
+  can answer the portal's dialog); the portal client is covered by
+  `shortcuts_portal_test` (ctest) against a mock portal.
+- **Launch at login** (see [launch-at-login.md](launch-at-login.md)): on, read
+  back, the OS artefact checked (the `Run` value naming this executable on
+  Windows, the autostart file with this executable's `Exec` on Linux; macOS
+  keeps `SMAppService` state in its own database), off, read back, artefact
+  gone, original state restored. Only with `CI` set or
+  `LAUFEY_E2E_LOGIN_ITEM=1`; the run script names the entry
+  `dev.laufey.e2e.system` (`LAUFEY_APP_ID`).
+- **DevTools** (see [devtools.md](devtools.md)): the launch setting and the
+  engine's own setting read back, then open, close and two toggles, each waited
+  for through `is_devtools_open`. Under `--devtools-off`: both settings off,
+  `open_devtools` and `toggle_devtools` open nothing, and on CEF `print_to_pdf`
+  (which drives the DevTools protocol) still returns a PDF.
+
+The portable pieces are unit-tested in `backend-common/tests/system_test.cc`
+(parsing, the registry over a fake OS side, the autostart format) and the capi
+wrappers in `capi/src/system.rs`.

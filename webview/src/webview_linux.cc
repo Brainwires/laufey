@@ -7,6 +7,8 @@
 #include "laufey_window.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_launch_config.h"
+#include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_scheme_registry.h"
@@ -666,6 +668,58 @@ class WebKitGTKBackend : public LaufeyBackend {
     laufey_common::SetClipboardChangeHandler(handler, user_data);
   }
 
+  // Global shortcuts, launch at login, DevTools (API >= 40). The X11 /
+  // portal shortcut platform is installed on first use.
+  static void EnsureShortcuts() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+      laufey_common::InstallShortcutPlatform(
+          laufey_common::CreateShortcutPlatformLinux());
+    });
+  }
+  uint32_t SystemCapabilities() override {
+    EnsureShortcuts();
+    uint32_t caps =
+        laufey_common::ShortcutCapabilities() | LAUFEY_SYSTEM_CAP_DEVTOOLS;
+    if (laufey_common::GetLaunchAtLogin() != LAUFEY_LOGIN_ITEM_NOT_SUPPORTED)
+      caps |= LAUFEY_SYSTEM_CAP_LAUNCH_AT_LOGIN;
+    return caps;
+  }
+  void SetShortcutHandler(laufey_shortcut_fn handler,
+                          void* user_data) override {
+    laufey_common::SetShortcutHandler(handler, user_data);
+  }
+  void RegisterShortcut(const char* accelerator,
+                        laufey_shortcut_result_fn callback,
+                        void* user_data) override {
+    EnsureShortcuts();
+    laufey_common::RegisterShortcut(accelerator, callback, user_data);
+  }
+  bool UnregisterShortcut(const char* accelerator) override {
+    return laufey_common::UnregisterShortcut(accelerator);
+  }
+  void UnregisterAllShortcuts() override {
+    laufey_common::UnregisterAllShortcuts();
+  }
+  char* ListShortcuts() override {
+    return laufey_common::ListShortcuts();
+  }
+  char* CanonicalizeAccelerator(const char* accelerator) override {
+    return laufey_common::CanonicalizeAccelerator(accelerator);
+  }
+  bool TestTriggerShortcut(const char* accelerator) override {
+    return laufey_common::TestTriggerShortcut(accelerator);
+  }
+  int GetLaunchAtLogin() override {
+    return laufey_common::GetLaunchAtLogin();
+  }
+  int SetLaunchAtLogin(bool enabled, std::string* error) override {
+    return laufey_common::SetLaunchAtLogin(enabled, error);
+  }
+  void CloseDevTools(uint32_t window_id) override;
+  bool IsDevToolsOpen(uint32_t window_id) override;
+  bool IsDevToolsEnabled(uint32_t window_id) override;
+
   // Window state, constraints and screens (API >= 38). No title bar styles
   // or backdrops: GTK has no API for either (see
   // docs/window-management.md), so those keep the base class's "false".
@@ -1107,7 +1161,11 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                      GUINT_TO_POINTER(window_id));
 
     WebKitSettings* wk_settings = webkit_web_view_get_settings(webview);
-    webkit_settings_set_enable_developer_extras(wk_settings, TRUE);
+    // DevTools (API 40): the inspector, its context-menu item and its
+    // shortcut exist only with developer extras on, which follows
+    // LAUFEY_INSPECTABLE / "inspectable" (default on).
+    webkit_settings_set_enable_developer_extras(
+        wk_settings, laufey_common::LaunchInspectable() ? TRUE : FALSE);
 
     if (transparent) {
       // Let the page's own alpha show through the webview (any region the
@@ -2013,6 +2071,8 @@ void WebKitGTKBackend::ShowContextMenu(uint32_t window_id, int /*x*/, int /*y*/,
 // ============================================================================
 
 void WebKitGTKBackend::OpenDevTools(uint32_t window_id) {
+  if (!laufey_common::LaunchInspectable())
+    return;
   gtk_invoke_sync([&] {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
@@ -2022,6 +2082,45 @@ void WebKitGTKBackend::OpenDevTools(uint32_t window_id) {
       webkit_web_inspector_show(inspector);
     }
   });
+}
+
+void WebKitGTKBackend::CloseDevTools(uint32_t window_id) {
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (state && state->webview)
+      webkit_web_inspector_close(webkit_web_view_get_inspector(state->webview));
+  });
+}
+
+bool WebKitGTKBackend::IsDevToolsOpen(uint32_t window_id) {
+  bool open = false;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || !state->webview)
+      return;
+    // The inspector's own web view exists while it is shown (attached or in
+    // its window) and is dropped when it closes.
+    open = webkit_web_inspector_get_web_view(
+               webkit_web_view_get_inspector(state->webview)) != nullptr;
+  });
+  return open;
+}
+
+bool WebKitGTKBackend::IsDevToolsEnabled(uint32_t window_id) {
+  if (window_id == 0)
+    return laufey_common::LaunchInspectable();
+  bool enabled = false;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (state && state->webview) {
+      enabled = webkit_settings_get_enable_developer_extras(
+                    webkit_web_view_get_settings(state->webview)) != FALSE;
+    }
+  });
+  return enabled;
 }
 
 // WebKitGTK has no in-memory PDF API; WebKitPrintOperation only writes to a

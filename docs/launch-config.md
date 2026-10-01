@@ -28,7 +28,8 @@ The directory comes from the running executable's real path
   "appId": "com.example.myapp",
   "customSchemes": ["myapp"],
   "dataDir": "/absolute/path",
-  "singleInstance": true
+  "singleInstance": true,
+  "inspectable": false
 }
 ```
 
@@ -40,6 +41,7 @@ Every key is optional, and each key stands in for one environment variable:
 | `customSchemes`  | `LAUFEY_CUSTOM_SCHEMES`  | array of URL scheme names (a letter, then letters, digits, `+-.`) |
 | `dataDir`        | `LAUFEY_DATA_DIR`        | absolute path                                                     |
 | `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
+| `inspectable`    | `LAUFEY_INSPECTABLE`     | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
@@ -59,6 +61,11 @@ what its variable does:
   It needs an app id (`appId` or `LAUFEY_APP_ID`); without one the backend warns
   and runs unlocked. The WebView and CEF backends read it; the Winit backend
   does not.
+- `inspectable` (default `true`) set to `false` turns the web engine's DevTools
+  off for the process: no inspector, no Inspect menu item, no DevTools shortcut,
+  no remote debugging, and `open_devtools` does nothing
+  ([DevTools](devtools.md)). Release builds of an app usually ship it `false`.
+  The WebView and CEF backends read it.
 
 ## Precedence
 

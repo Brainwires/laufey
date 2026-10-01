@@ -44,6 +44,8 @@ set(LAUFEY_COMMON_SRCS
   src/passkey.cc
   src/window_state.cc
   src/io.cc
+  src/shortcuts.cc
+  src/login_item.cc
 )
 
 if(WIN32)
@@ -67,6 +69,8 @@ if(APPLE)
     src/passkey_mac.mm
     src/window_mac.mm
     src/io_mac.mm
+    src/shortcuts_mac.mm
+    src/login_item_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -78,6 +82,8 @@ elseif(UNIX)
     src/menu_linux.cc
     src/tray_linux.cc
     src/io_linux.cc
+    src/shortcuts_linux.cc
+    src/login_item_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -90,6 +96,8 @@ elseif(WIN32)
     src/passkey_win.cc
     src/window_win.cc
     src/io_win.cc
+    src/shortcuts_win.cc
+    src/login_item_win.cc
   )
 endif()
 
@@ -120,11 +128,17 @@ elseif(APPLE)
   # Passkeys (ASAuthorizationController); present since macOS 10.15, the
   # passkey providers are checked for 12+ at runtime.
   find_library(AUTHENTICATIONSERVICES_FRAMEWORK AuthenticationServices REQUIRED)
+  # Global shortcuts (RegisterEventHotKey) and launch at login (SMAppService,
+  # macOS 13+, checked at runtime).
+  find_library(CARBON_FRAMEWORK Carbon REQUIRED)
+  find_library(SERVICEMANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
   target_link_libraries(laufey_backend_common PUBLIC
     ${USERNOTIFICATIONS_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
     ${COCOA_FRAMEWORK}
     ${AUTHENTICATIONSERVICES_FRAMEWORK}
+    ${CARBON_FRAMEWORK}
+    ${SERVICEMANAGEMENT_FRAMEWORK}
   )
   target_compile_options(laufey_backend_common PRIVATE
     $<$<COMPILE_LANGUAGE:OBJC,OBJCXX>:-fobjc-arc>
@@ -132,14 +146,19 @@ elseif(APPLE)
 elseif(UNIX)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LAUFEY_COMMON_GTK REQUIRED gtk+-3.0)
+  # Global shortcuts on X11: key grabs over a private XCB connection (libxcb
+  # is already a dependency of GTK's X11 backend).
+  pkg_check_modules(LAUFEY_COMMON_XCB REQUIRED xcb)
   target_include_directories(laufey_backend_common PUBLIC
     ${LAUFEY_COMMON_GTK_INCLUDE_DIRS}
+    ${LAUFEY_COMMON_XCB_INCLUDE_DIRS}
   )
   # No appindicator build dependency: tray_linux.cc dlopen()s the
   # Ayatana or legacy appindicator library at runtime. CMAKE_DL_LIBS
   # covers dlopen/dlsym on toolchains that still need -ldl.
   target_link_libraries(laufey_backend_common PUBLIC
     ${LAUFEY_COMMON_GTK_LIBRARIES}
+    ${LAUFEY_COMMON_XCB_LIBRARIES}
     ${CMAKE_DL_LIBS}
   )
   target_compile_options(laufey_backend_common PUBLIC
@@ -205,6 +224,26 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_io_test tests/io_test.cc)
   target_link_libraries(laufey_io_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_io_test COMMAND laufey_io_test)
+
+  # Accelerator parsing, the shortcut registry (with a fake OS side) and the
+  # autostart entry format (no OS API).
+  add_executable(laufey_system_test tests/system_test.cc)
+  target_link_libraries(laufey_system_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_system_test COMMAND laufey_system_test)
+
+  if(UNIX AND NOT APPLE)
+    # The GlobalShortcuts portal client against a mock portal on a private
+    # D-Bus session bus (GTestDBus; skipped when dbus-daemon is missing).
+    add_executable(laufey_shortcuts_portal_test
+                   tests/shortcuts_portal_test.cc)
+    target_link_libraries(laufey_shortcuts_portal_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_shortcuts_portal_test
+             COMMAND laufey_shortcuts_portal_test)
+    set_tests_properties(laufey_shortcuts_portal_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+  endif()
 
   if(APPLE)
     # ASAuthorization error mapping (synthetic NSErrors, no ceremony).

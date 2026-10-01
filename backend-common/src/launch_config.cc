@@ -223,6 +223,16 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
       }
       config.has_single_instance = true;
       config.single_instance = value.boolean;
+    } else if (key == "inspectable") {
+      config.has_inspectable = false;
+      config.inspectable = true;
+      if (value.type != JsonValue::Type::kBool) {
+        Warn(warnings, std::string("\"inspectable\" must be a boolean, not ") +
+                           TypeName(value.type) + "; ignoring it");
+        continue;
+      }
+      config.has_inspectable = true;
+      config.inspectable = value.boolean;
     } else {
       Warn(warnings, "unknown key \"" + key + "\"; ignoring it");
     }
@@ -346,6 +356,22 @@ bool LaunchBoolSettingFrom(const std::string& env_name,
                  "\" is not 1, 0, true or false; ignoring it";
   }
   return file_has && file_value;
+}
+
+bool LaunchInspectable() {
+  static const bool inspectable = [] {
+    const LaunchConfig& file = ProcessLaunchConfig();
+    std::string warning;
+    // Unlike singleInstance, the default is on: pass "the file says true"
+    // when the file is silent.
+    bool on = LaunchBoolSettingFrom(
+        "LAUFEY_INSPECTABLE", GetEnvUtf8("LAUFEY_INSPECTABLE"), true,
+        file.has_inspectable ? file.inspectable : true, &warning);
+    if (!warning.empty())
+      std::cerr << "laufey: " << warning << std::endl;
+    return on;
+  }();
+  return inspectable;
 }
 
 bool LaunchSingleInstance() {

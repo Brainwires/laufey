@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `39`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `40`) versions the contract. The `version` field
 on the API table lets a runtime detect the backend's vintage and avoid calling
 function pointers a backend predates (older backends leave new pointers `NULL`).
 
@@ -64,7 +64,11 @@ The pointers group into:
   contract as of API ≥ 31 — see below).
 - **Window handles** — `get_window_handle`, `get_display_handle`,
   `get_window_handle_type` (for GPU surface creation).
-- **Menus** — `set_application_menu`, `show_context_menu`, `open_devtools`.
+- **Menus** — `set_application_menu`, `show_context_menu`.
+- **DevTools** — `open_devtools` and, from API 40, `close_devtools`,
+  `is_devtools_open` and `is_devtools_enabled` (read back from the engine;
+  `LAUFEY_INSPECTABLE=0` / `"inspectable": false` turns DevTools off for the
+  process). See [devtools.md](devtools.md).
 - **Dialogs** — `show_dialog`, `string_free`.
 - **Dock / taskbar** — `set_dock_badge`, `bounce_dock`, `set_dock_menu`,
   `set_dock_visible`, `set_dock_reopen_handler`.
@@ -104,6 +108,17 @@ The pointers group into:
   result (a JSON envelope) delivered exactly once on any thread. macOS and
   Windows; not supported on Linux; `NULL` on Winit (see
   [passkeys.md](passkeys.md)).
+- **Global shortcuts** (API ≥ 40) — `system_capabilities`,
+  `set_shortcut_handler`, `register_shortcut` (any thread, never blocks, the
+  result delivered exactly once: OK with the canonical accelerator, or INVALID /
+  CONFLICT / ALREADY_REGISTERED / NOT_SUPPORTED / DENIED / FAILED),
+  `unregister_shortcut`, `unregister_all_shortcuts`, `list_shortcuts`,
+  `canonicalize_accelerator` and the `test_trigger_shortcut` hook. macOS,
+  Windows, X11 and the Wayland portal; `NULL` on Winit (see
+  [global-shortcuts.md](global-shortcuts.md)).
+- **Launch at login** (API ≥ 40) — `get_launch_at_login`, `set_launch_at_login`
+  (`SMAppService`, the HKCU `Run` key, XDG autostart; `NULL` on Winit; see
+  [launch-at-login.md](launch-at-login.md)).
 - **Tray** — `create_tray_icon`, `destroy_tray_icon`, `set_tray_icon`(`_dark`),
   `set_tray_tooltip`, `set_tray_menu`, click handlers, `get_tray_icon_bounds`.
 - **Notifications** — `show_notification`, `close_notification`.

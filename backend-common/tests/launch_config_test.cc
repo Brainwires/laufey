@@ -206,6 +206,33 @@ static void TestPrecedence() {
   EXPECT(LaunchSettingFrom("", false, "") == "");
 }
 
+static void TestInspectable() {
+  size_t w = 0;
+  LaunchConfig c = Parse("{}", &w);
+  EXPECT(w == 0 && !c.has_inspectable && c.inspectable);
+  c = Parse("{\"inspectable\": false}", &w);
+  EXPECT(w == 0 && c.has_inspectable && !c.inspectable);
+  c = Parse("{\"inspectable\": true}", &w);
+  EXPECT(w == 0 && c.has_inspectable && c.inspectable);
+  // Only a JSON boolean counts; a wrong value leaves the default (on).
+  const char* wrong[] = {"{\"inspectable\": 0}", "{\"inspectable\": \"no\"}",
+                         "{\"inspectable\": null}"};
+  for (const char* text : wrong) {
+    c = Parse(text, &w);
+    EXPECT(w == 1 && !c.has_inspectable && c.inspectable);
+  }
+  // The precedence LaunchInspectable uses: the environment wins, then the
+  // file, then on.
+  std::string warning;
+  EXPECT(!LaunchBoolSettingFrom("V", "0", true, true, &warning));
+  EXPECT(LaunchBoolSettingFrom("V", "1", true, false, &warning));
+  EXPECT(!LaunchBoolSettingFrom("V", "", true, false, &warning));
+  EXPECT(LaunchBoolSettingFrom("V", "", true, true, &warning));
+  EXPECT(warning.empty());
+  EXPECT(LaunchBoolSettingFrom("V", "maybe", true, true, &warning));
+  EXPECT(!warning.empty());
+}
+
 static void TestSingleInstance() {
   size_t w = 0;
   LaunchConfig c = Parse("{\"singleInstance\": true}", &w);
@@ -360,6 +387,7 @@ int main() {
   TestSchema();
   TestPrecedence();
   TestSingleInstance();
+  TestInspectable();
   TestPaths();
   TestProcessLaunchConfig();
   if (g_failures) {

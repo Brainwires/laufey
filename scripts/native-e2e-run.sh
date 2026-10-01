@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus.
@@ -16,9 +16,13 @@
 # screens, title bar, backdrops); handy under a real window manager.
 # --io runs only the API 39 checks: drag and drop (through the test hook),
 # real file dialogs driven by the test hook, the rich clipboard.
+# --system runs only the API 40 checks: global shortcuts (including a
+# conflict with a second process), launch at login (only in CI or with
+# LAUFEY_E2E_LOGIN_ITEM=1) and DevTools open / close / toggle.
+# --devtools-off runs the DevTools checks under LAUFEY_INSPECTABLE=0.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -52,6 +56,15 @@ if [ "$mode" = "--window-api" ]; then
 fi
 if [ "$mode" = "--io" ]; then
   export LAUFEY_E2E_ONLY=io
+fi
+if [ "$mode" = "--system" ]; then
+  export LAUFEY_E2E_ONLY=system
+  # Names the login entry (HKCU Run value, XDG autostart file).
+  export LAUFEY_APP_ID="${LAUFEY_APP_ID:-dev.laufey.e2e.system}"
+fi
+if [ "$mode" = "--devtools-off" ]; then
+  export LAUFEY_E2E_ONLY=devtools-off
+  export LAUFEY_INSPECTABLE=0
 fi
 
 # Resolve the backend binary (handles macOS .app bundles).

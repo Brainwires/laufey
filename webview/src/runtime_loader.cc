@@ -842,6 +842,102 @@ static void Backend_BufferFree(void* /*data*/, void* buffer) {
   free(buffer);
 }
 
+// --- Global shortcuts, launch at login, DevTools (API >= 40) ---
+
+static uint32_t Backend_SystemCapabilities(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->SystemCapabilities();
+  return 0;
+}
+
+static void Backend_SetShortcutHandler(void* data, laufey_shortcut_fn handler,
+                                       void* user_data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    backend->SetShortcutHandler(handler, user_data);
+}
+
+static void Backend_RegisterShortcut(void* data, const char* accelerator,
+                                     laufey_shortcut_result_fn callback,
+                                     void* user_data) {
+  if (LaufeyBackend* backend = BackendOf(data)) {
+    backend->RegisterShortcut(accelerator, callback, user_data);
+  } else if (callback) {
+    callback(user_data, LAUFEY_SHORTCUT_NOT_SUPPORTED, nullptr);
+  }
+}
+
+static bool Backend_UnregisterShortcut(void* data, const char* accelerator) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->UnregisterShortcut(accelerator);
+  return false;
+}
+
+static void Backend_UnregisterAllShortcuts(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    backend->UnregisterAllShortcuts();
+}
+
+static char* Backend_ListShortcuts(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->ListShortcuts();
+  return nullptr;
+}
+
+static char* Backend_CanonicalizeAccelerator(void* data,
+                                             const char* accelerator) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->CanonicalizeAccelerator(accelerator);
+  return nullptr;
+}
+
+static bool Backend_TestTriggerShortcut(void* data, const char* accelerator) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->TestTriggerShortcut(accelerator);
+  return false;
+}
+
+static int Backend_GetLaunchAtLogin(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->GetLaunchAtLogin();
+  return LAUFEY_LOGIN_ITEM_NOT_SUPPORTED;
+}
+
+static int Backend_SetLaunchAtLogin(void* data, bool enabled,
+                                    char** error_out) {
+  if (error_out)
+    *error_out = nullptr;
+  LaufeyBackend* backend = BackendOf(data);
+  if (!backend)
+    return LAUFEY_LOGIN_ITEM_NOT_SUPPORTED;
+  std::string error;
+  int state = backend->SetLaunchAtLogin(enabled, &error);
+  if (state == LAUFEY_LOGIN_ITEM_FAILED && error_out && !error.empty()) {
+    char* copy = static_cast<char*>(malloc(error.size() + 1));
+    if (copy) {
+      memcpy(copy, error.c_str(), error.size() + 1);
+      *error_out = copy;
+    }
+  }
+  return state;
+}
+
+static void Backend_CloseDevTools(void* data, uint32_t window_id) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    backend->CloseDevTools(window_id);
+}
+
+static bool Backend_IsDevToolsOpen(void* data, uint32_t window_id) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->IsDevToolsOpen(window_id);
+  return false;
+}
+
+static bool Backend_IsDevToolsEnabled(void* data, uint32_t window_id) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->IsDevToolsEnabled(window_id);
+  return false;
+}
+
 // --- Window state, constraints, screens and chrome (API >= 38) ---
 
 static uint32_t Backend_WindowCapabilities(void* data) {
@@ -1252,6 +1348,24 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.read_clipboard_formats = Backend_ReadClipboardFormats;
   backend_api_.set_clipboard_change_handler = Backend_SetClipboardChangeHandler;
   backend_api_.buffer_free = Backend_BufferFree;
+
+  // Global shortcuts, launch at login, DevTools (API >= 40): see
+  // docs/global-shortcuts.md, docs/launch-at-login.md, docs/devtools.md. The
+  // desktop backends implement them over backend-common; iOS keeps the
+  // unsupported defaults.
+  backend_api_.system_capabilities = Backend_SystemCapabilities;
+  backend_api_.set_shortcut_handler = Backend_SetShortcutHandler;
+  backend_api_.register_shortcut = Backend_RegisterShortcut;
+  backend_api_.unregister_shortcut = Backend_UnregisterShortcut;
+  backend_api_.unregister_all_shortcuts = Backend_UnregisterAllShortcuts;
+  backend_api_.list_shortcuts = Backend_ListShortcuts;
+  backend_api_.canonicalize_accelerator = Backend_CanonicalizeAccelerator;
+  backend_api_.test_trigger_shortcut = Backend_TestTriggerShortcut;
+  backend_api_.get_launch_at_login = Backend_GetLaunchAtLogin;
+  backend_api_.set_launch_at_login = Backend_SetLaunchAtLogin;
+  backend_api_.close_devtools = Backend_CloseDevTools;
+  backend_api_.is_devtools_open = Backend_IsDevToolsOpen;
+  backend_api_.is_devtools_enabled = Backend_IsDevToolsEnabled;
 
   backend_api_.create_tray_icon = Backend_CreateTrayIcon;
   backend_api_.destroy_tray_icon = Backend_DestroyTrayIcon;
