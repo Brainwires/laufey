@@ -64,12 +64,26 @@ void RegisterAll(CefRawPtr<CefSchemeRegistrar> registrar) {
 }
 
 void ForwardToChild(CefRefPtr<CefCommandLine> command_line) {
-  if (!command_line || command_line->HasSwitch(kSwitch)) {
+  if (!command_line) {
     return;
   }
-  std::string joined = laufey_common::JoinForwardedSchemes(Declared());
-  if (!joined.empty()) {
-    command_line->AppendSwitchWithValue(kSwitch, joined);
+  // The child's command line may already carry the switch (CEF copies the
+  // browser's own switches to it); merge rather than skip, so schemes this
+  // process declared from the environment reach it too.
+  std::string existing;
+  if (command_line->HasSwitch(kSwitch)) {
+    existing = command_line->GetSwitchValue(kSwitch).ToString();
+  }
+  std::string merged =
+      laufey_common::MergeForwardedSchemes(existing, Declared());
+  if (merged == existing) {
+    return;
+  }
+  if (command_line->HasSwitch(kSwitch)) {
+    command_line->RemoveSwitch(kSwitch);
+  }
+  if (!merged.empty()) {
+    command_line->AppendSwitchWithValue(kSwitch, merged);
   }
 }
 

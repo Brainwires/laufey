@@ -140,6 +140,17 @@ inline std::string JoinForwardedSchemes(
   return joined;
 }
 
+// The --laufey-custom-schemes value for a child process whose command line
+// already carries `child_value` ("" when it has none): the schemes already
+// there, then `declared`, as one list without duplicates (and without "app").
+// A child whose command line already names some schemes still gets the rest
+// of the browser process's declaration (e.g. from the environment).
+inline std::string MergeForwardedSchemes(
+    const std::string& child_value, const std::vector<std::string>& declared) {
+  return JoinForwardedSchemes(
+      MergeSchemeLists({child_value, JoinForwardedSchemes(declared)}));
+}
+
 // Thread-safe set of scheme names an embedder registered. "app" is always a
 // member so backends can iterate one list when they install their handlers.
 class SchemeRegistry {
