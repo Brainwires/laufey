@@ -2049,15 +2049,22 @@ async fn tray_click_with_no_window() {
     return;
   }
   // WM_LAUFEY_COMMON_TRAYICON (tray_win.cc): wParam = tray id, LOWORD(lParam)
-  // = the mouse message.
-  let posted = unsafe {
-    PostMessageW(hwnd, WM_APP + 65, tray.id() as usize, WM_LBUTTONUP)
-  };
-  check("tray click posted", posted != 0);
-  check(
-    "a tray click reaches the app with no window open",
-    wait_for(|| clicked.load(Ordering::SeqCst), 100, 50).await,
-  );
+  // = the mouse message. The click handler is installed on the UI thread
+  // asynchronously (CEF posts it as a task, which may run after a window
+  // message posted now), so re-post until it lands.
+  let mut posted = false;
+  let mut reached = false;
+  for _ in 0..20 {
+    posted |= unsafe {
+      PostMessageW(hwnd, WM_APP + 65, tray.id() as usize, WM_LBUTTONUP)
+    } != 0;
+    if wait_for(|| clicked.load(Ordering::SeqCst), 10, 50).await {
+      reached = true;
+      break;
+    }
+  }
+  check("tray click posted", posted);
+  check("a tray click reaches the app with no window open", reached);
 }
 
 #[cfg(not(target_os = "windows"))]
