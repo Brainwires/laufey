@@ -75,7 +75,25 @@ fn os_says_ui_thread(hwnd: usize) -> bool {
 async fn ui_thread_checks() -> Option<Window> {
   let win = Window::new(320, 240).title("native-e2e-ui-thread");
   let _ = wait_for(|| win.get_size().0 != 0, 100, 50).await;
-  let hwnd = win.get_window_handle() as usize;
+  let mut hwnd = win.get_window_handle() as usize;
+  // CEF exposes no native handle: find the top-level window by its title.
+  #[cfg(target_os = "windows")]
+  if hwnd == 0 {
+    extern "system" {
+      fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+    }
+    let title: Vec<u16> = "native-e2e-ui-thread"
+      .encode_utf16()
+      .chain(std::iter::once(0))
+      .collect();
+    for _ in 0..100 {
+      hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) } as usize;
+      if hwnd != 0 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  }
 
   check(
     "the runtime's own thread is not the UI thread",

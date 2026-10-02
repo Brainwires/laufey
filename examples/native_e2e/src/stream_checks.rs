@@ -417,9 +417,17 @@ pub fn serve(req: SchemeRequest, state: &State) -> Option<SchemeRequest> {
       on_event_loop(move || {
         begin(&req, 200, "application/octet-stream");
         // WebKitGTK reads eagerly whenever its thread is free: keep it busy
-        // so the queue fills (the other engines stop reading for a page
-        // that doesn't read).
-        block_ui_thread(UI_BUSY_MS);
+        // so the queue fills. The other engines stop reading for a page that
+        // doesn't read; WebView2 must not be held, since it starts streaming
+        // (and applies its cap) from a timer on the UI thread.
+        if cfg!(target_os = "linux")
+          && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
+        {
+          block_ui_thread(UI_BUSY_MS);
+        } else {
+          // Late enough that WebView2 streams it instead of buffering.
+          std::thread::sleep(Duration::from_millis(200));
+        }
         let chunk = vec![0x5au8; 1024 * 1024];
         let mut accepted = 0usize;
         let mut failed_at = None;
