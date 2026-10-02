@@ -173,6 +173,14 @@ class LaufeyWindowDelegate : public CefWindowDelegate {
 // (ExecuteDevToolsMethod), so PDFs would break.
 void LaufeyApplyInspectableToCommandLine(
     CefRefPtr<CefCommandLine> command_line);
+// A deep-link launch (a URL among the process's positional arguments, see
+// laufey_launch_args.h) drops every Chromium switch its own command line
+// carried before "--": an allow-list that is empty, since a link-started app
+// needs none. Registrations run `"<exe>" -- "%1"`, which Chromium's parser
+// already stops at; this covers an older registration without the "--".
+// Uses the arguments the host recorded with laufey_common::SetProcessArgs (a
+// no-op where it recorded none). Browser process only.
+void LaufeyStripDeepLinkSwitches(CefRefPtr<CefCommandLine> command_line);
 // Whether DevTools can be reached in this process: inspectable, or a
 // remote-debugging switch present on the browser process's command line
 // despite it (read back from CEF's global command line). UI thread.
@@ -350,6 +358,7 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
     // Electron/Puppeteer do). Only the browser process needs the switch; CEF
     // propagates it to subprocesses.
     if (process_type.empty()) {
+      LaufeyStripDeepLinkSwitches(command_line);
       command_line->AppendSwitch("disable-background-networking");
       LaufeyApplyInspectableToCommandLine(command_line);
     }

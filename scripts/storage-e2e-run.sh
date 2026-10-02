@@ -257,11 +257,11 @@ step file-read ${scheme_env[@]+"${scheme_env[@]}"} \
 if [ -n "$sub" ]; then
   if [ -d "$base/$id_f/$sub" ]; then pass "launch file appId: profile at <app data>/$id_f/$sub"; else fail "launch file appId: no profile at $base/$id_f/$sub"; fi
 fi
-# The environment wins over the file: LAUFEY_APP_ID selects app b's store,
-# which doesn't have the value (the file's schemes still apply).
+# The file pins the app id: a LAUFEY_APP_ID in the environment (one
+# inherited from another app) doesn't move the app into app b's store.
 step file-env-override ${scheme_env[@]+"${scheme_env[@]}"} \
   LAUFEY_APP_ID="$id_b" LAUFEY_E2E_STORAGE_MODE=read \
-  LAUFEY_E2E_STORAGE_EXPECT_NOT="${value}f"
+  LAUFEY_E2E_STORAGE_EXPECT="${value}f"
 # A malformed file is reported and ignored: the app starts with the
 # unconfigured default store.
 printf '{ "appId": ' >"$launch_file"

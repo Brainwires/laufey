@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 #include <cstdlib>
 #include <cstring>
 
@@ -18,6 +19,7 @@
 #include "include/wrapper/cef_helpers.h"
 
 #include "app.h"
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
@@ -223,6 +225,7 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     // Electron/Puppeteer do). Only the browser process needs the switch; CEF
     // propagates it to subprocesses.
     if (process_type.empty()) {
+      LaufeyStripDeepLinkSwitches(command_line);
       command_line->AppendSwitch("disable-background-networking");
       LaufeyApplyInspectableToCommandLine(command_line);
     }
@@ -289,17 +292,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     return exit_code;
   }
 
-  // Parse --runtime argument
+  // laufey's own options end at "--" (a registered URL scheme runs
+  // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
+  // packaged app (a launch file or a runtime next to the executable) never
+  // takes its runtime from the command line. The arguments are also kept for
+  // the browser process's command line hook, which drops a deep-link
+  // launch's Chromium switches (LaufeyStripDeepLinkSwitches). See
+  // laufey_launch_args.h.
   int argc;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  if (argv) {
-    for (int i = 1; i < argc; ++i) {
-      if (wcscmp(argv[i], L"--runtime") == 0 && i + 1 < argc) {
-        g_runtime_path = laufey_common::WideToUtf8(argv[++i]);
-      } else if (wcsncmp(argv[i], L"--runtime=", 10) == 0) {
-        g_runtime_path = laufey_common::WideToUtf8(argv[i] + 10);
-      }
-    }
+  {
+    std::vector<std::string> args;
+    for (int i = 1; argv && i < argc; ++i)
+      args.push_back(laufey_common::WideToUtf8(argv[i]));
+    laufey_common::SetProcessArgs(args);
+    const bool packaged =
+        laufey_common::IsPackagedLaunch(!LaufeyFindColocatedRuntime().empty());
+    g_runtime_path =
+        laufey_common::ParseHostOptions(args, packaged).runtime_path;
   }
 
   if (g_runtime_path.empty()) {

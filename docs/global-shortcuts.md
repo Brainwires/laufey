@@ -61,10 +61,11 @@ not `Plus`). Letters, digits and punctuation follow the current keyboard layout
 on macOS and Windows (`Ctrl+Z` is the key labelled Z on an AZERTY keyboard) and
 the keyboard map on X11.
 
-A printable key (a letter, digit, punctuation or Space) needs a modifier other
-than Shift, so a global shortcut can never swallow ordinary typing; `K` or
-`Shift+K` alone is `INVALID`. Function, navigation and media keys may stand
-alone (`F13`, `MediaPlayPause`).
+A key used while typing (a letter, digit, punctuation, Space, any numpad key,
+Enter, Tab, Backspace or Delete) needs a modifier other than Shift, so a global
+shortcut can never swallow or observe ordinary typing in other apps; `K`,
+`Shift+K`, `Num5` or `Enter` alone is `INVALID`. Function, navigation and media
+keys may stand alone (`F13`, `MediaPlayPause`).
 
 Every combination has one **canonical** spelling, `Ctrl+Alt+Shift+Super+<Key>`
 with only the modifiers present (`Ctrl+Shift+K`, `Super+Space`, `Alt+F4`,

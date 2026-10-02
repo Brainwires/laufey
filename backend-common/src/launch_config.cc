@@ -331,16 +331,24 @@ std::string LaunchSettingFrom(const std::string& env_value, bool file_has,
   return file_has ? file_value : std::string();
 }
 
+std::string LaunchPinnedSettingFrom(const std::string& env_value,
+                                    bool file_has,
+                                    const std::string& file_value) {
+  if (file_has)
+    return file_value;
+  return env_value;
+}
+
 std::string LaunchAppId() {
   const LaunchConfig& file = ProcessLaunchConfig();
-  return LaunchSettingFrom(GetEnvUtf8("LAUFEY_APP_ID"), file.has_app_id,
-                           file.app_id);
+  return LaunchPinnedSettingFrom(GetEnvUtf8("LAUFEY_APP_ID"), file.has_app_id,
+                                 file.app_id);
 }
 
 std::string LaunchDataDir() {
   const LaunchConfig& file = ProcessLaunchConfig();
-  return LaunchSettingFrom(GetEnvUtf8("LAUFEY_DATA_DIR"), file.has_data_dir,
-                           file.data_dir);
+  return LaunchPinnedSettingFrom(GetEnvUtf8("LAUFEY_DATA_DIR"),
+                                 file.has_data_dir, file.data_dir);
 }
 
 bool LaunchBoolSettingFrom(const std::string& env_name,
@@ -358,15 +366,28 @@ bool LaunchBoolSettingFrom(const std::string& env_name,
   return file_has && file_value;
 }
 
+bool LaunchInspectableFrom(const std::string& env_value, bool file_has,
+                           bool file_value, std::string* warning) {
+  if (file_has && !file_value) {
+    if (warning && (env_value == "1" || env_value == "true"))
+      *warning =
+          "LAUFEY_INSPECTABLE=" + env_value +
+          " is ignored: the app's launch file turns DevTools off";
+    return false;
+  }
+  // Unlike singleInstance, the default is on: pass "the file says true"
+  // when the file is silent.
+  return LaunchBoolSettingFrom("LAUFEY_INSPECTABLE", env_value, true, true,
+                               warning);
+}
+
 bool LaunchInspectable() {
   static const bool inspectable = [] {
     const LaunchConfig& file = ProcessLaunchConfig();
     std::string warning;
-    // Unlike singleInstance, the default is on: pass "the file says true"
-    // when the file is silent.
-    bool on = LaunchBoolSettingFrom(
-        "LAUFEY_INSPECTABLE", GetEnvUtf8("LAUFEY_INSPECTABLE"), true,
-        file.has_inspectable ? file.inspectable : true, &warning);
+    bool on = LaunchInspectableFrom(GetEnvUtf8("LAUFEY_INSPECTABLE"),
+                                    file.has_inspectable, file.inspectable,
+                                    &warning);
     if (!warning.empty())
       std::cerr << "laufey: " << warning << std::endl;
     return on;

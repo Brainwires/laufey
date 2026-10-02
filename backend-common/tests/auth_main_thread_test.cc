@@ -294,8 +294,13 @@ static void TestUiTasksConcurrentDispatchAndClose() {
     d.Close();
     for (auto& th : threads)
       th.join();
-    for (auto& p : probes)
+    for (auto& p : probes) {
+      // ProbeTask notifies under the probe's lock: once the lock is free it
+      // is done with the probe, which may then be destroyed (ThreadSanitizer
+      // otherwise sees the vector's teardown race a late notify_all).
+      std::lock_guard<std::mutex> lock(p.m);
       CHECK(p.calls == 1);
+    }
   }
 }
 

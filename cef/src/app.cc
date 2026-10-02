@@ -5,6 +5,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
 #include "laufey_external_links.h"
@@ -21,6 +22,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <string>
+#include <vector>
 
 #ifdef __linux__
 #include <gtk/gtk.h>
@@ -772,6 +775,18 @@ void LaufeyApplyInspectableToCommandLine(
   for (const char* sw : kRemoteDebuggingSwitches) {
     if (command_line->HasSwitch(sw))
       command_line->RemoveSwitch(sw);
+  }
+}
+
+void LaufeyStripDeepLinkSwitches(CefRefPtr<CefCommandLine> command_line) {
+  const std::vector<std::string> strip =
+      laufey_common::DeepLinkSwitchesToStrip(laufey_common::ProcessArgs(), {});
+  for (const std::string& name : strip) {
+    if (command_line->HasSwitch(name)) {
+      std::cerr << "laufey: ignoring --" << name
+                << " on the command line of a deep-link launch" << std::endl;
+      command_line->RemoveSwitch(name);
+    }
   }
 }
 

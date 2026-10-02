@@ -2,6 +2,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_auth_session.h"
+#include "laufey_launch_args.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "runtime_loader.h"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 // Brings the app to the front for a forwarded launch: restores and
 // foregrounds this thread's front-most visible top-level window. Hidden
@@ -57,18 +59,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-  std::string runtimePath;
-
-  int argc;
-  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  if (argv) {
-    for (int i = 1; i < argc; ++i) {
-      if (wcscmp(argv[i], L"--runtime") == 0 && i + 1 < argc) {
-        runtimePath = laufey_common::WideToUtf8(argv[++i]);
-      }
+  // laufey's own options end at "--" (a registered URL scheme runs
+  // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
+  // packaged app (a launch file or a runtime next to the executable) never
+  // takes its runtime from the command line. See laufey_launch_args.h.
+  std::vector<std::string> args;
+  {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv) {
+      for (int i = 1; i < argc; ++i)
+        args.push_back(laufey_common::WideToUtf8(argv[i]));
+      LocalFree(argv);
     }
-    LocalFree(argv);
   }
+  laufey_common::SetProcessArgs(args);
+  const bool packaged =
+      laufey_common::IsPackagedLaunch(!LaufeyFindColocatedRuntime().empty());
+  std::string runtimePath =
+      laufey_common::ParseHostOptions(args, packaged).runtime_path;
 
   if (runtimePath.empty()) {
     // Read as UTF-16 and convert to UTF-8; the ANSI variant would garble
@@ -92,7 +101,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     runtimePath = LaufeyFindColocatedRuntime();
   }
 
-  if (runtimePath.empty()) {
+  // Development fallbacks, relative to the working directory: never for a
+  // packaged app, whose working directory is wherever it was started from.
+  if (runtimePath.empty() && !packaged) {
     const wchar_t* searchPaths[] = {L".\\runtime.dll",
                                     L".\\target\\debug\\hello.dll",
                                     L".\\target\\release\\hello.dll"};

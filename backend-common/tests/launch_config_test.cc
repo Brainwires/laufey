@@ -204,6 +204,12 @@ static void TestPrecedence() {
   EXPECT(LaunchSettingFrom("", false, "file") == "");
   EXPECT(LaunchSettingFrom("env", false, "") == "env");
   EXPECT(LaunchSettingFrom("", false, "") == "");
+  // App id and data dir: the shipped file wins over an inherited environment
+  // (another app that launched this one must not move it into its profile).
+  EXPECT(LaunchPinnedSettingFrom("env", true, "file") == "file");
+  EXPECT(LaunchPinnedSettingFrom("", true, "file") == "file");
+  EXPECT(LaunchPinnedSettingFrom("env", false, "") == "env");
+  EXPECT(LaunchPinnedSettingFrom("", false, "") == "");
 }
 
 static void TestInspectable() {
@@ -231,6 +237,20 @@ static void TestInspectable() {
   EXPECT(warning.empty());
   EXPECT(LaunchBoolSettingFrom("V", "maybe", true, true, &warning));
   EXPECT(!warning.empty());
+
+  // What LaunchInspectable applies: a shipped "inspectable": false can't be
+  // turned back on from the environment (reported), only off.
+  warning.clear();
+  EXPECT(!LaunchInspectableFrom("1", true, false, &warning));
+  EXPECT(warning.find("ignored") != std::string::npos);
+  warning.clear();
+  EXPECT(!LaunchInspectableFrom("true", true, false, &warning));
+  EXPECT(!LaunchInspectableFrom("", true, false, &warning));
+  EXPECT(!LaunchInspectableFrom("0", true, true, &warning));
+  EXPECT(!LaunchInspectableFrom("0", false, true, &warning));
+  EXPECT(LaunchInspectableFrom("1", true, true, &warning));
+  EXPECT(LaunchInspectableFrom("", true, true, &warning));
+  EXPECT(LaunchInspectableFrom("", false, true, &warning));
 }
 
 static void TestSingleInstance() {
@@ -357,10 +377,12 @@ static void TestProcessLaunchConfig() {
   EXPECT(LaunchCustomSchemes() == "one,two");
   EXPECT(LaunchSingleInstance());
 
-  // The environment wins, key by key.
+  // The environment wins, key by key, except for the app id and data dir
+  // the file pins (an inherited environment can't move the app's profile).
   SetEnv("LAUFEY_APP_ID", "from.env");
+  SetEnv("LAUFEY_DATA_DIR", ABS "/from/env");
   SetEnv("LAUFEY_CUSTOM_SCHEMES", "envscheme");
-  EXPECT(LaunchAppId() == "from.env");
+  EXPECT(LaunchAppId() == "dev.laufey.test");
   EXPECT(LaunchDataDir() == ABS "/from/file");
   EXPECT(LaunchCustomSchemes() == "envscheme");
   SetEnv("LAUFEY_SINGLE_INSTANCE", "0");

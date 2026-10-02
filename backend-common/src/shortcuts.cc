@@ -241,10 +241,17 @@ std::string CanonicalAccelerator(const Accelerator& a) {
 }
 
 bool IsAllowedGlobalShortcut(const Accelerator& a) {
-  bool printable = a.kind == KeyKind::kLetter || a.kind == KeyKind::kDigit ||
-                   a.kind == KeyKind::kPunct ||
-                   (a.kind == KeyKind::kNamed && a.named == NamedKey::kSpace);
-  if (!printable)
+  // Keys used while typing: printable ones, the whole numpad, and the
+  // editing keys (Enter, Tab, Backspace, Delete). A global shortcut on one of
+  // them alone would see (and swallow) what the user types in other apps.
+  bool typing =
+      a.kind == KeyKind::kLetter || a.kind == KeyKind::kDigit ||
+      a.kind == KeyKind::kPunct || a.kind == KeyKind::kNumpad ||
+      (a.kind == KeyKind::kNamed &&
+       (a.named == NamedKey::kSpace || a.named == NamedKey::kEnter ||
+        a.named == NamedKey::kTab || a.named == NamedKey::kBackspace ||
+        a.named == NamedKey::kDelete));
+  if (!typing)
     return true;
   return (a.mods & ~kModShift) != 0;
 }

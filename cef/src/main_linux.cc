@@ -748,6 +748,7 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     // Electron/Puppeteer do). Only the browser process needs the switch; CEF
     // propagates it to subprocesses.
     if (process_type.empty()) {
+      LaufeyStripDeepLinkSwitches(command_line);
       command_line->AppendSwitch("disable-background-networking");
       LaufeyApplyInspectableToCommandLine(command_line);
     }
