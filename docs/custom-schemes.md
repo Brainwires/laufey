@@ -41,7 +41,9 @@ new scheme, so dispatch on `req.url` (and `req.window_id` if windows serve
 different content). The handler runs on a backend thread and must not block it;
 move slow work onto your own thread or async runtime. Both the request body
 (`req.exchange.read_body`) and the response are streamed, so the page's `fetch`
-sees each `write` as it happens. Scheme names follow RFC 3986 (a letter, then
+sees each `write` as it happens (see
+[Streaming responses](#streaming-responses), which WebView2 supports only for
+`fetch`, `EventSource` and XHR). Scheme names follow RFC 3986 (a letter, then
 letters, digits, `+`, `-`, or `.`), are case-insensitive, and are stored in
 lowercase; an invalid name is logged and ignored. Engine-less backends such as
 Winit have no scheme support; `laufey::scheme_handlers_supported()` returns
@@ -90,6 +92,54 @@ the backend logs a warning. Each backend installs the schemes in its own way:
 ```sh
 laufey --laufey-custom-schemes=myapp --runtime ./libmyapp.so
 ```
+
+## Streaming responses
+
+A response reaches the page as the handler writes it, and a response may never
+end: a page can read a Server-Sent Events stream with `EventSource`, or a
+`fetch` body with `response.body.getReader()`, while the handler keeps writing.
+When the page stops reading (the reader is cancelled, the request aborted, the
+`EventSource` closed, the document replaced or the window closed), the next
+`write` returns a negative value; stop writing then and call `finish`. A handler
+that has nothing to send for a long time learns of the cancellation only at its
+next write, so a heartbeat (an SSE comment line such as `:\n\n`) bounds how long
+a dead stream lingers.
+
+WKWebView, WebKitGTK and CEF hand each write to the page directly. WebView2
+cannot: it reads a `WebResourceRequested` response stream to its end before the
+page sees any of it
+([WebView2Feedback#3519](https://github.com/MicrosoftEdge/WebView2Feedback/issues/3519)),
+so a stream that never ends would never arrive. The WebView2 backend therefore
+streams through the page instead:
+
+- A script installed at document start wraps `fetch`, `EventSource` and
+  `XMLHttpRequest` (asynchronous requests). Requests they make to a URL on a
+  registered scheme **with the document's own origin** carry an
+  `x-laufey-stream` header with a random id (the backend strips it before the
+  handler sees the request).
+- A tagged response that is still open 50 ms after its head is answered with the
+  head alone, and its body is posted to the document as it is written
+  (`PostWebMessageAsJson`, base64). The wrapper builds the `Response` from those
+  chunks, so the page reads it incrementally; status, status text, headers,
+  binary bodies and `Content-Encoding` (decoded with `DecompressionStream`)
+  behave as before. A tagged response that finishes within 50 ms, and every
+  other request, is answered in one piece as before.
+- The page acknowledges what it reads: at most 4 MiB is in flight to a page that
+  is not reading. Beyond that the backend holds up to 64 MiB, and a response
+  that outgrows it fails (the page's read rejects and the handler's write
+  returns a negative value); the handler's `write` itself never blocks.
+- Only a same-origin document may receive a body: the backend checks the origin
+  of the document that asks for it against the request URL.
+
+The limits: navigations, subresources (`<img>`, `<script>`, `<video>`, ...),
+synchronous XHR, requests to another origin, and requests made from a document
+that is cross-origin with the top-level document (whose web messages WebView2
+does not deliver) are still answered in one piece, so on WebView2 they cannot
+stream; a response to them that never ends is cancelled when the document goes
+away. A streamed `Response`'s `clone()`, `url`, `redirected` and `type` behave
+as usual, but upload progress events are not fired for a wrapped
+`XMLHttpRequest`, and the page's own `chrome.webview` message listeners do not
+see the stream messages.
 
 Treat everything in a request as untrusted input, as you would for an HTTP
 server. A page on another origin, including a remote page the window navigated

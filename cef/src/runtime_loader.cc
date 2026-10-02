@@ -29,6 +29,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -276,6 +277,35 @@ static void Backend_Quit(void* data) {
               }));
 }
 
+// Window sizes are the page area, the browser view (as window.innerWidth /
+// innerHeight see it), in DIP; CefWindow's size is the whole window, so the
+// frame around the page is added when resizing. UI thread.
+static CefSize CefFrameAroundPage(CefRefPtr<CefBrowserView> browser_view) {
+  CefRefPtr<CefWindow> window = browser_view->GetWindow();
+  if (!window)
+    return CefSize();
+  CefSize outer = window->GetSize();
+  CefSize page = browser_view->GetSize();
+  if (page.width <= 0 || page.height <= 0) {
+    // Not laid out yet: the client area is what the page will fill.
+    CefRect client = window->GetClientAreaBoundsInScreen();
+    page = CefSize(client.width, client.height);
+  }
+  if (page.width <= 0 || page.height <= 0)
+    return CefSize();
+  return CefSize((std::max)(0, outer.width - page.width),
+                 (std::max)(0, outer.height - page.height));
+}
+
+static void CefSetPageSize(CefRefPtr<CefBrowserView> browser_view, int width,
+                           int height) {
+  CefRefPtr<CefWindow> window = browser_view->GetWindow();
+  if (!window)
+    return;
+  CefSize frame = CefFrameAroundPage(browser_view);
+  window->SetSize(CefSize(width + frame.width, height + frame.height));
+}
+
 static void Backend_SetWindowSize(void* data, uint32_t window_id, int width,
                                   int height) {
   // Programmatic resizes are clamped to the size constraints (API 38).
@@ -287,12 +317,8 @@ static void Backend_SetWindowSize(void* data, uint32_t window_id, int width,
                             [](CefRefPtr<CefBrowser> b, int w, int h) {
                               auto browser_view =
                                   CefBrowserView::GetForBrowser(b);
-                              if (browser_view) {
-                                auto window = browser_view->GetWindow();
-                                if (window) {
-                                  window->SetSize(CefSize(w, h));
-                                }
-                              }
+                              if (browser_view)
+                                CefSetPageSize(browser_view, w, h);
                             },
                             browser, width, height));
   }
@@ -306,13 +332,12 @@ static void Backend_GetWindowSize(void* data, uint32_t window_id, int* width,
   if (browser) {
     cef_invoke_sync([&] {
       auto browser_view = CefBrowserView::GetForBrowser(browser);
-      if (browser_view) {
-        auto window = browser_view->GetWindow();
-        if (window) {
-          CefSize size = window->GetSize();
-          w = size.width;
-          h = size.height;
-        }
+      auto window = browser_view ? browser_view->GetWindow() : nullptr;
+      if (window) {
+        CefSize outer = window->GetSize();
+        CefSize frame = CefFrameAroundPage(browser_view);
+        w = (std::max)(0, outer.width - frame.width);
+        h = (std::max)(0, outer.height - frame.height);
       }
     });
   }
@@ -336,11 +361,15 @@ static void Backend_GetWindowOuterSize(void* data, uint32_t window_id,
       if (!window)
         return;
 #ifdef _WIN32
+      // The window rectangle in DIP, like CefWindow::GetPosition.
       HWND hwnd = window->GetWindowHandle();
       RECT rect;
-      if (hwnd && GetWindowRect(hwnd, &rect)) {
-        w = rect.right - rect.left;
-        h = rect.bottom - rect.top;
+      UINT dpi = hwnd ? GetDpiForWindow(hwnd) : 0;
+      if (hwnd && dpi && GetWindowRect(hwnd, &rect)) {
+        w = static_cast<int>(
+            std::lround((rect.right - rect.left) * 96.0 / dpi));
+        h = static_cast<int>(
+            std::lround((rect.bottom - rect.top) * 96.0 / dpi));
         return;
       }
 #elif defined(__APPLE__)
@@ -2389,14 +2418,21 @@ static uint32_t CefStateOf(CefRefPtr<CefWindow> window) {
   return state;
 }
 
-static laufey_common::Bounds CefBoundsOf(CefRefPtr<CefWindow> window) {
+// Normal bounds: the frame's position and the page size (get_window_size).
+static laufey_common::Bounds CefBoundsOf(CefRefPtr<CefWindow> window,
+                                         uint32_t window_id) {
   laufey_common::Bounds b;
   CefPoint pos = window->GetPosition();
   CefSize size = window->GetSize();
+  CefRefPtr<CefBrowser> browser =
+      RuntimeLoader::GetInstance()->GetBrowserForWindow(window_id);
+  auto browser_view =
+      browser ? CefBrowserView::GetForBrowser(browser) : nullptr;
+  CefSize frame = browser_view ? CefFrameAroundPage(browser_view) : CefSize();
   b.x = pos.x;
   b.y = pos.y;
-  b.width = size.width;
-  b.height = size.height;
+  b.width = (std::max)(0, size.width - frame.width);
+  b.height = (std::max)(0, size.height - frame.height);
   return b;
 }
 
@@ -2409,8 +2445,8 @@ void CefRecheckWindowState(uint32_t window_id) {
   int64_t now = laufey_common::MonotonicMs();
   if (state != 0 && laufey_common::LastReportedWindowState(window_id) == 0)
     laufey_common::NoteWindowLeftNormal(window_id, now);
-  laufey_common::NoteWindowGeometry(window_id, CefBoundsOf(window), state == 0,
-                                    now);
+  laufey_common::NoteWindowGeometry(window_id, CefBoundsOf(window, window_id),
+                                    state == 0, now);
   laufey_common::ReportWindowState(window_id, state);
 }
 
@@ -2540,9 +2576,9 @@ static void Backend_SetWindowSizeConstraints(void* /*data*/, uint32_t window_id,
                       return;
 #if defined(__APPLE__)
                     // LaufeyWindowDelegate::GetMinimumSize / GetMaximumSize
-                    // answer Chromium when it asks; AppKit enforces the frame
-                    // limits during a live resize.
-                    laufey_common::MacApplyFrameSizeConstraints(
+                    // answer Chromium when it asks; AppKit enforces the
+                    // content limits during a live resize.
+                    laufey_common::MacApplyContentSizeConstraints(
                         NSWindowForCefHandle(window->GetWindowHandle()), c);
 #endif
                     // Have Chromium ask the delegate again.
@@ -2550,10 +2586,19 @@ static void Backend_SetWindowSizeConstraints(void* /*data*/, uint32_t window_id,
                     if ((window->IsMaximized)() || (window->IsMinimized)() ||
                         window->IsFullscreen())
                       return;
-                    CefSize size = window->GetSize();
-                    int w = size.width, h = size.height;
+                    CefRefPtr<CefBrowser> browser =
+                        RuntimeLoader::GetInstance()->GetBrowserForWindow(wid);
+                    auto browser_view =
+                        browser ? CefBrowserView::GetForBrowser(browser)
+                                : nullptr;
+                    if (!browser_view)
+                      return;
+                    CefSize outer = window->GetSize();
+                    CefSize frame = CefFrameAroundPage(browser_view);
+                    int w = outer.width - frame.width;
+                    int h = outer.height - frame.height;
                     if (laufey_common::ClampSize(c, &w, &h))
-                      window->SetSize(CefSize(w, h));
+                      CefSetPageSize(browser_view, w, h);
                   },
                   window_id, c));
 }
@@ -2626,8 +2671,14 @@ static int64_t Backend_GetWindowScreen(void* /*data*/, uint32_t window_id) {
     // The screen the window overlaps most, from its bounds: CefWindow's
     // GetDisplay() crashed on macOS for a window that had just been shown
     // (seen in CI), and the overlap rule is what the ABI promises anyway.
-    id = laufey_common::ScreenForBounds(CefCollectScreens(),
-                                        CefBoundsOf(window));
+    laufey_common::Bounds frame;
+    CefPoint pos = window->GetPosition();
+    CefSize size = window->GetSize();
+    frame.x = pos.x;
+    frame.y = pos.y;
+    frame.width = size.width;
+    frame.height = size.height;
+    id = laufey_common::ScreenForBounds(CefCollectScreens(), frame);
   });
   return id;
 }
@@ -2733,7 +2784,7 @@ static bool Backend_GetWindowNormalBounds(void* /*data*/, uint32_t window_id,
     if (CefStateOf(window) != 0 &&
         laufey_common::GetCommittedNormalBounds(window_id, &b))
       return;
-    b = CefBoundsOf(window);
+    b = CefBoundsOf(window, window_id);
   });
   if (!found)
     return false;

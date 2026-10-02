@@ -491,13 +491,13 @@ void MacObserveWindowStateChanges(void* nswindow, uint32_t window_id,
   watch.observers = observers;
 }
 
-void MacApplyFrameSizeConstraints(void* nswindow, const SizeConstraints& c) {
+void MacApplyContentSizeConstraints(void* nswindow, const SizeConstraints& c) {
   NSWindow* w = (__bridge NSWindow*)nswindow;
   if (!w)
     return;
-  w.minSize = NSMakeSize(c.min_width, c.min_height);
-  w.maxSize = NSMakeSize(c.max_width > 0 ? c.max_width : FLT_MAX,
-                         c.max_height > 0 ? c.max_height : FLT_MAX);
+  w.contentMinSize = NSMakeSize(c.min_width, c.min_height);
+  w.contentMaxSize = NSMakeSize(c.max_width > 0 ? c.max_width : FLT_MAX,
+                                c.max_height > 0 ? c.max_height : FLT_MAX);
 }
 
 std::vector<laufey_screen_t> MacGetScreens() {

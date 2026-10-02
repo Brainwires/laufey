@@ -11,12 +11,14 @@
 #include "laufey_scheme_registry.h"
 #include "laufey_window.h"
 #include "init_script.h"
+#include "wv2_scheme_stream.h"
 #include <win32_menu.h>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <shellscalingapi.h>
 #include <wincodec.h>
 #include <wrl.h>
 
@@ -42,6 +44,7 @@
 #include <functional>
 #include <thread>
 #include <algorithm>
+#include <cmath>
 
 using namespace Microsoft::WRL;
 
@@ -120,6 +123,107 @@ struct UiTaskData {
 };
 
 // ============================================================================
+// Window geometry units
+// ============================================================================
+//
+// Sizes, positions and size constraints cross the C ABI in DIP (CSS pixels at
+// the page's zoom 1), as on the other backends, and a window's size is its
+// client (page) area; get_outer_size is the whole frame. HWNDs work in
+// physical pixels (the process is per-monitor DPI aware), so a window's
+// geometry converts with its own DPI and a screen's with its monitor's.
+
+namespace {
+
+double WinWindowScale(HWND hwnd) {
+  UINT dpi = hwnd ? GetDpiForWindow(hwnd) : 0;
+  return dpi ? dpi / 96.0 : 1.0;
+}
+
+double WinMonitorScale(HMONITOR monitor) {
+  UINT dpi_x = 96, dpi_y = 96;
+  if (!monitor ||
+      FAILED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y)) ||
+      dpi_x == 0)
+    return 1.0;
+  return dpi_x / 96.0;
+}
+
+int WinToDip(LONG px, double scale) {
+  return static_cast<int>(std::lround(px / scale));
+}
+
+LONG WinToPx(int dip, double scale) {
+  return static_cast<LONG>(std::lround(dip * scale));
+}
+
+// The frame's physical size around a client area of `width` x `height`
+// physical pixels: the window's current frame (title bar, borders, a menu
+// bar however many rows it wraps to), or the style's frame while there is
+// no client area to measure (minimized).
+SIZE WinFrameForClient(HWND hwnd, LONG width, LONG height) {
+  RECT window_rect, client;
+  if (!IsIconic(hwnd) && GetWindowRect(hwnd, &window_rect) &&
+      GetClientRect(hwnd, &client) && client.right > 0 && client.bottom > 0) {
+    return {width + (window_rect.right - window_rect.left) - client.right,
+            height + (window_rect.bottom - window_rect.top) - client.bottom};
+  }
+  RECT r = {0, 0, width, height};
+  AdjustWindowRectExForDpi(
+      &r, static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
+      GetMenu(hwnd) != nullptr,
+      static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)),
+      GetDpiForWindow(hwnd));
+  return {r.right - r.left, r.bottom - r.top};
+}
+
+// Resizes `hwnd` so its client area is `width` x `height` DIP.
+void WinSetClientSize(HWND hwnd, int width, int height, UINT extra_flags) {
+  double scale = WinWindowScale(hwnd);
+  LONG cw = WinToPx(width, scale), ch = WinToPx(height, scale);
+  SIZE frame = WinFrameForClient(hwnd, cw, ch);
+  SetWindowPos(hwnd, nullptr, 0, 0, frame.cx, frame.cy,
+               SWP_NOMOVE | SWP_NOZORDER | extra_flags);
+  // A menu bar can wrap to another row at the new width; correct once.
+  RECT client;
+  if (!IsIconic(hwnd) && GetClientRect(hwnd, &client) &&
+      (client.right != cw || client.bottom != ch)) {
+    frame = WinFrameForClient(hwnd, cw, ch);
+    SetWindowPos(hwnd, nullptr, 0, 0, frame.cx, frame.cy,
+                 SWP_NOMOVE | SWP_NOZORDER | extra_flags);
+  }
+}
+
+// The frame (physical) around the client area while the window was last in
+// the normal state, for normal bounds of a maximized / fullscreen window.
+// UI thread only.
+std::map<HWND, SIZE>& WinNormalFrames() {
+  static std::map<HWND, SIZE> frames;
+  return frames;
+}
+
+void WinNoteNormalFrame(HWND hwnd) {
+  RECT window_rect, client;
+  if (GetWindowRect(hwnd, &window_rect) && GetClientRect(hwnd, &client) &&
+      client.right > 0 && client.bottom > 0) {
+    WinNormalFrames()[hwnd] = {
+        (window_rect.right - window_rect.left) - client.right,
+        (window_rect.bottom - window_rect.top) - client.bottom};
+  }
+}
+
+// A screen rectangle in its monitor's DIP.
+void WinScreenRectToDip(int* x, int* y, int* width, int* height) {
+  RECT r = {*x, *y, *x + *width, *y + *height};
+  double scale = WinMonitorScale(MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST));
+  *x = WinToDip(r.left, scale);
+  *y = WinToDip(r.top, scale);
+  *width = WinToDip(r.right - r.left, scale);
+  *height = WinToDip(r.bottom - r.top, scale);
+}
+
+}  // namespace
+
+// ============================================================================
 // Custom URL scheme handling (in-process transport)
 // ============================================================================
 //
@@ -143,167 +247,8 @@ std::wstring SchemeUtf8ToWide(const std::string& s) {
   return w;
 }
 
-std::string SchemeWideToUtf8(LPCWSTR s) {
-  if (!s)
-    return std::string();
-  int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
-  if (n <= 0)
-    return std::string();
-  std::string out(n - 1, '\0');
-  WideCharToMultiByte(CP_UTF8, 0, s, -1, &out[0], n, nullptr, nullptr);
-  return out;
-}
-
-// Buffered exchange: the response is collected, then a single
-// WebResourceResponse is created and the deferral completed on the UI thread.
-class WinSchemeExchange : public SchemeExchangeBase {
- public:
-  WinSchemeExchange(ComPtr<ICoreWebView2Environment> env,
-                    ComPtr<ICoreWebView2WebResourceRequestedEventArgs> args,
-                    ComPtr<ICoreWebView2Deferral> deferral,
-                    std::vector<uint8_t> request_body)
-      : env_(std::move(env)),
-        args_(std::move(args)),
-        deferral_(std::move(deferral)),
-        request_body_(std::move(request_body)) {}
-
-  intptr_t ReadRequestBody(uint8_t* buf, size_t cap) override {
-    if (cap == 0)
-      return 0;
-    size_t remaining = request_body_.size() - req_cursor_;
-    if (remaining == 0)
-      return 0;
-    size_t n = (std::min)(cap, remaining);
-    memcpy(buf, request_body_.data() + req_cursor_, n);
-    req_cursor_ += n;
-    return static_cast<intptr_t>(n);
-  }
-
-  void Begin(int status, const char* headers, size_t headers_len) override {
-    status_ = status;
-    headers_ = LaufeyParseFlatHeaders(headers, headers_len);
-  }
-
-  intptr_t WriteResponse(const uint8_t* buf, size_t len) override {
-    response_body_.insert(response_body_.end(), buf, buf + len);
-    return static_cast<intptr_t>(len);
-  }
-
-  void Finish() override {
-    // WebView2 objects are single-threaded; complete on the UI thread.
-    RuntimeLoader::GetInstance()->GetBackend()->PostUiTask(
-        &WinSchemeExchange::CompleteOnUi, this);
-  }
-
- private:
-  static void CompleteOnUi(void* data) {
-    auto* self = static_cast<WinSchemeExchange*>(data);
-    self->Complete();
-    delete self;
-  }
-
-  void Complete() {
-    ComPtr<IStream> stream;
-    stream.Attach(SHCreateMemStream(
-        response_body_.empty() ? nullptr : response_body_.data(),
-        static_cast<UINT>(response_body_.size())));
-    std::wstring headers_w;
-    for (const auto& [k, v] : headers_) {
-      headers_w += SchemeUtf8ToWide(k) + L": " + SchemeUtf8ToWide(v) + L"\r\n";
-    }
-    ComPtr<ICoreWebView2WebResourceResponse> response;
-    if (env_) {
-      env_->CreateWebResourceResponse(stream.Get(), status_, L"OK",
-                                      headers_w.c_str(), &response);
-      if (response)
-        args_->put_Response(response.Get());
-    }
-    deferral_->Complete();
-  }
-
-  ComPtr<ICoreWebView2Environment> env_;
-  ComPtr<ICoreWebView2WebResourceRequestedEventArgs> args_;
-  ComPtr<ICoreWebView2Deferral> deferral_;
-  std::vector<uint8_t> request_body_;
-  size_t req_cursor_ = 0;
-  int status_ = 200;
-  std::vector<std::pair<std::string, std::string>> headers_;
-  std::vector<uint8_t> response_body_;
-};
-
-HRESULT HandleAppResourceRequested(
-    ComPtr<ICoreWebView2Environment> env,
-    ICoreWebView2WebResourceRequestedEventArgs* args) {
-  // This runs inside a WebView2 COM event callback. A C++ exception unwinding
-  // back through WebView2's (non-EH) frames would reach std::terminate and
-  // crash the whole process — on Windows that surfaces as exit code
-  // 0xc0000409 (STATUS_STACK_BUFFER_OVERRUN). Contain everything here.
-  try {
-    ComPtr<ICoreWebView2WebResourceRequest> request;
-    if (FAILED(args->get_Request(&request)) || !request)
-      return S_OK;
-
-    LPWSTR uri_raw = nullptr;
-    request->get_Uri(&uri_raw);
-    LPWSTR method_raw = nullptr;
-    request->get_Method(&method_raw);
-    std::string url = SchemeWideToUtf8(uri_raw);
-    std::string method = method_raw ? SchemeWideToUtf8(method_raw) : "GET";
-    if (uri_raw)
-      CoTaskMemFree(uri_raw);
-    if (method_raw)
-      CoTaskMemFree(method_raw);
-
-    std::vector<std::pair<std::string, std::string>> headers;
-    ComPtr<ICoreWebView2HttpRequestHeaders> req_headers;
-    if (SUCCEEDED(request->get_Headers(&req_headers)) && req_headers) {
-      ComPtr<ICoreWebView2HttpHeadersCollectionIterator> it;
-      if (SUCCEEDED(req_headers->GetIterator(&it)) && it) {
-        BOOL has_current = FALSE;
-        while (SUCCEEDED(it->get_HasCurrentHeader(&has_current)) &&
-               has_current) {
-          LPWSTR name = nullptr;
-          LPWSTR value = nullptr;
-          if (SUCCEEDED(it->GetCurrentHeader(&name, &value))) {
-            headers.emplace_back(SchemeWideToUtf8(name),
-                                 SchemeWideToUtf8(value));
-            if (name)
-              CoTaskMemFree(name);
-            if (value)
-              CoTaskMemFree(value);
-          }
-          BOOL has_next = FALSE;
-          if (FAILED(it->MoveNext(&has_next)) || !has_next)
-            break;
-        }
-      }
-    }
-
-    std::vector<uint8_t> body;
-    ComPtr<IStream> content;
-    if (SUCCEEDED(request->get_Content(&content)) && content) {
-      uint8_t chunk[16 * 1024];
-      ULONG read = 0;
-      while (SUCCEEDED(content->Read(chunk, sizeof(chunk), &read)) &&
-             read > 0) {
-        body.insert(body.end(), chunk, chunk + read);
-      }
-    }
-
-    ComPtr<ICoreWebView2Deferral> deferral;
-    args->GetDeferral(&deferral);
-
-    std::string flat = LaufeyFlattenHeaders(headers);
-    // window_id is unused by the desktop bridge (single named channel).
-    auto* exchange =
-        new WinSchemeExchange(env, args, deferral, std::move(body));
-    RuntimeLoader::GetInstance()->DispatchSchemeRequest(0, exchange, method,
-                                                        url, flat);
-    return S_OK;
-  } catch (...) {
-    return S_OK;
-  }
-}
+// The exchange itself (buffered, or streamed through the page shim) lives in
+// wv2_scheme_stream.cc.
 
 }  // namespace
 
@@ -369,8 +314,20 @@ class WebView2Backend : public LaufeyBackend {
                                 int* min_height, int* max_width,
                                 int* max_height) override;
   size_t GetScreens(laufey_screen_t* out, size_t capacity) override {
-    return laufey_common::CopyScreens(laufey_common::WinGetScreens(), out,
-                                      capacity);
+    // In each monitor's DIP (see "Window geometry units").
+    std::vector<laufey_screen_t> screens = laufey_common::WinGetScreens();
+    for (auto& s : screens) {
+      double k = s.scale_factor > 0 ? s.scale_factor : 1.0;
+      s.x = WinToDip(s.x, k);
+      s.y = WinToDip(s.y, k);
+      s.width = WinToDip(s.width, k);
+      s.height = WinToDip(s.height, k);
+      s.work_x = WinToDip(s.work_x, k);
+      s.work_y = WinToDip(s.work_y, k);
+      s.work_width = WinToDip(s.work_width, k);
+      s.work_height = WinToDip(s.work_height, k);
+    }
+    return laufey_common::CopyScreens(screens, out, capacity);
   }
   int64_t GetWindowScreen(uint32_t window_id) override;
   void SetDisplayChangedHandler(laufey_display_changed_fn handler,
@@ -663,10 +620,14 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         }
       }
       if (wid > 0) {
+        if (wParam == SIZE_RESTORED && !laufey_common::WinIsFullscreen(wid))
+          WinNoteNormalFrame(hwnd);
         RECT rect;
         GetClientRect(hwnd, &rect);
+        double scale = WinWindowScale(hwnd);
         RuntimeLoader::GetInstance()->DispatchResizeEvent(
-            wid, rect.right - rect.left, rect.bottom - rect.top);
+            wid, WinToDip(rect.right - rect.left, scale),
+            WinToDip(rect.bottom - rect.top, scale));
         // SIZE_MAXIMIZED / SIZE_MINIMIZED / SIZE_RESTORED: one source of the
         // window-state events (API 38); duplicates are dropped there.
         laufey_common::ReportWindowState(
@@ -675,14 +636,30 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       return 0;
     }
     case WM_GETMINMAXINFO:
-      // Size constraints (API 38) are in this backend's set_window_size
-      // units: outer window pixels.
-      if (wid > 0 && laufey_common::WinApplyMinMaxInfo(
-                         reinterpret_cast<void*>(lParam),
-                         laufey_common::GetSizeConstraints(wid), 1.0, 0, 0)) {
-        return 0;
+      // Size constraints (API 38) are client sizes in DIP, like
+      // set_window_size; Windows tracks the frame in physical pixels.
+      if (wid > 0) {
+        SIZE frame = WinFrameForClient(hwnd, 0, 0);
+        if (laufey_common::WinApplyMinMaxInfo(
+                reinterpret_cast<void*>(lParam),
+                laufey_common::GetSizeConstraints(wid), WinWindowScale(hwnd),
+                frame.cx, frame.cy)) {
+          return 0;
+        }
       }
       break;
+    case WM_DPICHANGED: {
+      // Moved to a monitor with another scale: take the size Windows
+      // suggests, which keeps the window's DIP size.
+      const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+      if (suggested) {
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+      return 0;
+    }
     case WM_ERASEBKGND:
       // With a backdrop the client area must stay unpainted (black is
       // transparent over an extended DWM frame) for it to show through.
@@ -701,8 +678,10 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       break;
     case WM_MOVE:
       if (wid > 0) {
+        double scale = WinWindowScale(hwnd);
         RuntimeLoader::GetInstance()->DispatchMoveEvent(
-            wid, (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam));
+            wid, WinToDip((short)LOWORD(lParam), scale),
+            WinToDip((short)HIWORD(lParam), scale));
       }
       return 0;
     case WM_SETFOCUS:
@@ -747,8 +726,9 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
                        : LAUFEY_MOUSE_BUTTON_FORWARD;
           break;
       }
-      double x = static_cast<double>(GET_X_LPARAM(lParam));
-      double y = static_cast<double>(GET_Y_LPARAM(lParam));
+      double scale = WinWindowScale(hwnd);
+      double x = GET_X_LPARAM(lParam) / scale;
+      double y = GET_Y_LPARAM(lParam) / scale;
       uint32_t modifiers = keyboard::GetLaufeyModifiers();
       RuntimeLoader::GetInstance()->DispatchMouseClickEvent(wid, state, button,
                                                             x, y, modifiers, 1);
@@ -808,8 +788,11 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       // closes and for CloseWindow()'s direct DestroyWindow alike, so a
       // deferred close resolved via close_window still quits the message
       // loop when the last window goes away.
-      if (wid > 0)
+      if (wid > 0) {
         laufey_common::ForgetWindow(wid);
+        laufey_wv2::CancelStreamsForWindow(wid);
+      }
+      WinNormalFrames().erase(hwnd);
       std::lock_guard<std::recursive_mutex> lock(g_hwnd_mutex);
       // A tray app can keep running with no window
       // (set_quit_on_last_window_closed(false)); quit() ends it anyway.
@@ -857,6 +840,19 @@ WebView2Backend::WebView2Backend() {
   dispatcher_hwnd_ =
       CreateWindowExW(0, L"LaufeyWebView2", L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
                       nullptr, GetModuleHandle(nullptr), nullptr);
+
+  laufey_wv2::StreamHooks stream_hooks;
+  stream_hooks.run_on_ui = [this](std::function<void()> task) {
+    RunOnUiThread(std::move(task));
+  };
+  stream_hooks.post_json = [this](uint32_t window_id,
+                                  const std::wstring& json) {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    return state && state->webview &&
+           SUCCEEDED(state->webview->PostWebMessageAsJson(json.c_str()));
+  };
+  laufey_wv2::InitSchemeStreams(std::move(stream_hooks));
 
   // backend-common's I/O thread (file dialogs, drag-out, clipboard change
   // events; its own STA thread, see laufey_io.h).
@@ -1219,8 +1215,14 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                       LPWSTR messageRaw = nullptr;
                       args->TryGetWebMessageAsString(&messageRaw);
                       if (messageRaw) {
-                        if (!HandleFileDropMessage(wid, messageRaw, args))
+                        LPWSTR source = nullptr;
+                        args->get_Source(&source);
+                        if (!laufey_wv2::HandleStreamMessage(wid, messageRaw,
+                                                             source) &&
+                            !HandleFileDropMessage(wid, messageRaw, args))
                           HandleJsMessage(wid, messageRaw);
+                        if (source)
+                          CoTaskMemFree(source);
                         CoTaskMemFree(messageRaw);
                       }
                       return S_OK;
@@ -1260,6 +1262,12 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // environment — otherwise the filter would never fire and the
             // handler is dead weight.
             if (!schemes.empty()) {
+              // Streams fetch / EventSource / XHR responses on these schemes
+              // to the page; see wv2_scheme_stream.h.
+              std::wstring shim = SchemeUtf8ToWide(
+                  laufey_wv2::BuildSchemeStreamShimScript(schemes));
+              state->webview->AddScriptToExecuteOnDocumentCreated(shim.c_str(),
+                                                                  nullptr);
               ComPtr<ICoreWebView2Environment> envPtr = env;
               for (const std::string& scheme : schemes) {
                 std::wstring filter = SchemeUtf8ToWide(scheme) + L"://*";
@@ -1269,13 +1277,49 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
               EventRegistrationToken schemeToken;
               state->webview->add_WebResourceRequested(
                   Callback<ICoreWebView2WebResourceRequestedEventHandler>(
-                      [envPtr](ICoreWebView2* sender,
-                               ICoreWebView2WebResourceRequestedEventArgs* args)
-                          -> HRESULT {
-                        return HandleAppResourceRequested(envPtr, args);
+                      [envPtr, wid](ICoreWebView2* sender,
+                                    ICoreWebView2WebResourceRequestedEventArgs*
+                                        args) -> HRESULT {
+                        return laufey_wv2::HandleSchemeRequest(envPtr.Get(),
+                                                               args, wid);
                       })
                       .Get(),
                   &schemeToken);
+              // The streams of a document end with it: at the commit of the
+              // main-frame navigation that replaces it, or with its renderer.
+              state->webview->add_NavigationStarting(
+                  Callback<ICoreWebView2NavigationStartingEventHandler>(
+                      [wid](ICoreWebView2*,
+                            ICoreWebView2NavigationStartingEventArgs* args)
+                          -> HRESULT {
+                        UINT64 nav = 0;
+                        args->get_NavigationId(&nav);
+                        laufey_wv2::OnNavigationStarting(wid, nav);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+              state->webview->add_ContentLoading(
+                  Callback<ICoreWebView2ContentLoadingEventHandler>(
+                      [wid](ICoreWebView2*,
+                            ICoreWebView2ContentLoadingEventArgs* args)
+                          -> HRESULT {
+                        UINT64 nav = 0;
+                        args->get_NavigationId(&nav);
+                        laufey_wv2::OnNavigationCommitted(wid, nav);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+              state->webview->add_ProcessFailed(
+                  Callback<ICoreWebView2ProcessFailedEventHandler>(
+                      [wid](ICoreWebView2*,
+                            ICoreWebView2ProcessFailedEventArgs*) -> HRESULT {
+                        laufey_wv2::CancelStreamsForWindow(wid);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
             }
 
             state->webview->add_ScriptDialogOpening(
@@ -1502,8 +1546,7 @@ void WebView2Backend::SetWindowSize(uint32_t window_id, int width, int height) {
   if (state) {
     // SetWindowPos ignores WM_GETMINMAXINFO; clamp to the constraints here.
     laufey_common::ClampSizeForWindow(window_id, &width, &height);
-    SetWindowPos(state->hwnd, nullptr, 0, 0, width, height,
-                 SWP_NOMOVE | SWP_NOZORDER);
+    WinSetClientSize(state->hwnd, width, height, 0);
   }
 }
 
@@ -1522,18 +1565,30 @@ void WebView2Backend::GetWindowSize(uint32_t window_id, int* width,
   auto* state = GetWindow(window_id);
   if (state) {
     RECT rect;
-    if (GetWindowRect(state->hwnd, &rect)) {
+    if (GetClientRect(state->hwnd, &rect)) {
+      double scale = WinWindowScale(state->hwnd);
       if (width)
-        *width = rect.right - rect.left;
+        *width = WinToDip(rect.right, scale);
       if (height)
-        *height = rect.bottom - rect.top;
+        *height = WinToDip(rect.bottom, scale);
     }
   }
 }
 
 void WebView2Backend::GetWindowOuterSize(uint32_t window_id, int* width,
                                          int* height) {
-  GetWindowSize(window_id, width, height);
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  if (state) {
+    RECT rect;
+    if (GetWindowRect(state->hwnd, &rect)) {
+      double scale = WinWindowScale(state->hwnd);
+      if (width)
+        *width = WinToDip(rect.right - rect.left, scale);
+      if (height)
+        *height = WinToDip(rect.bottom - rect.top, scale);
+    }
+  }
 }
 
 void WebView2Backend::SetWindowPosition(uint32_t window_id, int x, int y) {
@@ -1545,7 +1600,9 @@ void WebView2Backend::SetWindowPosition(uint32_t window_id, int x, int y) {
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (state) {
-    SetWindowPos(state->hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    double scale = WinWindowScale(state->hwnd);
+    SetWindowPos(state->hwnd, nullptr, WinToPx(x, scale), WinToPx(y, scale), 0,
+                 0, SWP_NOSIZE | SWP_NOZORDER);
   }
 }
 
@@ -1557,10 +1614,11 @@ void WebView2Backend::GetWindowInnerPosition(uint32_t window_id, int* x,
     return;
   POINT pt = {0, 0};
   if (ClientToScreen(state->hwnd, &pt)) {
+    double scale = WinWindowScale(state->hwnd);
     if (x)
-      *x = pt.x;
+      *x = WinToDip(pt.x, scale);
     if (y)
-      *y = pt.y;
+      *y = WinToDip(pt.y, scale);
   }
 }
 
@@ -1570,10 +1628,11 @@ void WebView2Backend::GetWindowPosition(uint32_t window_id, int* x, int* y) {
   if (state) {
     RECT rect;
     if (GetWindowRect(state->hwnd, &rect)) {
+      double scale = WinWindowScale(state->hwnd);
       if (x)
-        *x = rect.left;
+        *x = WinToDip(rect.left, scale);
       if (y)
-        *y = rect.top;
+        *y = WinToDip(rect.top, scale);
     }
   }
 }
@@ -1941,15 +2000,14 @@ void WebView2Backend::SetWindowSizeConstraints(uint32_t window_id,
         laufey_common::WinIsFullscreen(window_id))
       return;
     RECT rect;
-    if (!GetWindowRect(state->hwnd, &rect))
+    if (!GetClientRect(state->hwnd, &rect))
       return;
-    int w = rect.right - rect.left;
-    int h = rect.bottom - rect.top;
+    double scale = WinWindowScale(state->hwnd);
+    int w = WinToDip(rect.right, scale);
+    int h = WinToDip(rect.bottom, scale);
     // A window outside its new range is brought into it.
-    if (laufey_common::ClampSizeForWindow(window_id, &w, &h)) {
-      SetWindowPos(state->hwnd, nullptr, 0, 0, w, h,
-                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
+    if (laufey_common::ClampSizeForWindow(window_id, &w, &h))
+      WinSetClientSize(state->hwnd, w, h, SWP_NOACTIVATE);
   });
 }
 
@@ -2010,8 +2068,35 @@ bool WebView2Backend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
                                             int* width, int* height) {
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
-  return state && laufey_common::WinGetNormalRect(state->hwnd, window_id, x, y,
-                                                  width, height);
+  int px = 0, py = 0, pw = 0, ph = 0;
+  if (!state || !laufey_common::WinGetNormalRect(state->hwnd, window_id, &px,
+                                                 &py, &pw, &ph))
+    return false;
+  // The frame's origin (get_position) and the client size inside it
+  // (get_size), the frame being the one the window had while normal.
+  SIZE frame;
+  auto it = WinNormalFrames().find(state->hwnd);
+  if (it != WinNormalFrames().end()) {
+    frame = it->second;
+  } else {
+    RECT r = {0, 0, 0, 0};
+    AdjustWindowRectExForDpi(
+        &r, static_cast<DWORD>(GetWindowLongPtrW(state->hwnd, GWL_STYLE)),
+        GetMenu(state->hwnd) != nullptr,
+        static_cast<DWORD>(GetWindowLongPtrW(state->hwnd, GWL_EXSTYLE)),
+        GetDpiForWindow(state->hwnd));
+    frame = {r.right - r.left, r.bottom - r.top};
+  }
+  double scale = WinWindowScale(state->hwnd);
+  if (x)
+    *x = WinToDip(px, scale);
+  if (y)
+    *y = WinToDip(py, scale);
+  if (width)
+    *width = WinToDip((std::max)(0L, pw - frame.cx), scale);
+  if (height)
+    *height = WinToDip((std::max)(0L, ph - frame.cy), scale);
+  return true;
 }
 
 void WebView2Backend::PasskeyRequest(uint32_t window_id, uint32_t kind,
@@ -2212,7 +2297,10 @@ void WebView2Backend::ShowContextMenu(uint32_t window_id, int x, int y,
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state && state->hwnd) {
-      win32_menu::ShowContextMenu(state->hwnd, x, y, menu_template, api,
+      // (x, y) is in window (client) DIP; the menu takes client pixels.
+      double scale = WinWindowScale(state->hwnd);
+      win32_menu::ShowContextMenu(state->hwnd, WinToPx(x, scale),
+                                  WinToPx(y, scale), menu_template, api,
                                   on_click, on_click_data, window_id);
     }
   });
@@ -2517,7 +2605,19 @@ void WebView2Backend::SetTrayIconDark(uint32_t tray_id, const void* png_bytes,
 
 bool WebView2Backend::GetTrayIconBounds(uint32_t tray_id, int* x, int* y,
                                         int* width, int* height) {
-  return laufey_common::GetTrayIconBoundsWin(tray_id, x, y, width, height);
+  int px = 0, py = 0, pw = 0, ph = 0;
+  if (!laufey_common::GetTrayIconBoundsWin(tray_id, &px, &py, &pw, &ph))
+    return false;
+  WinScreenRectToDip(&px, &py, &pw, &ph);
+  if (x)
+    *x = px;
+  if (y)
+    *y = py;
+  if (width)
+    *width = pw;
+  if (height)
+    *height = ph;
+  return true;
 }
 void WebView2Backend::SetTrayDoubleClickHandler(uint32_t tray_id,
                                                 laufey_tray_click_fn handler,

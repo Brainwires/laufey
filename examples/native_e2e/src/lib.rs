@@ -29,6 +29,7 @@
 
 mod body_echo;
 mod io_checks;
+mod stream_checks;
 mod system_checks;
 
 use std::collections::HashMap;
@@ -103,14 +104,52 @@ fn check_inner_vs_frame(
   }
 }
 
-/// Backends whose `get_size` is the whole window, chrome included (see
-/// "Units" in docs/window-management.md): WebView2 (the outer rect) and CEF
-/// on Windows and macOS (CefWindow::GetSize, the widget bounds). A content
-/// vs outer comparison can't tell chrome apart there.
-fn size_is_outer_rect() -> bool {
-  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
-  (cfg!(target_os = "windows") && (backend == "webview" || backend == "cef"))
-    || (cfg!(target_os = "macos") && backend == "cef")
+/// The page's `[innerWidth, innerHeight]` in `win`, or `None` where there is
+/// no page to ask (an engine-less backend) or it does not answer in time.
+async fn page_inner_size(win: &Window) -> Option<(i32, i32)> {
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  win.execute_js(
+    "[window.innerWidth, window.innerHeight]",
+    Some(move |r: Result<Value, Value>| {
+      let _ = tx.send(r);
+    }),
+  );
+  let num = |v: &Value| match v {
+    Value::Int(n) => Some(*n),
+    Value::Double(d) => Some(d.round() as i32),
+    _ => None,
+  };
+  match tokio::time::timeout(std::time::Duration::from_secs(1), rx).await {
+    Ok(Ok(Ok(Value::List(l)))) if l.len() == 2 => {
+      Some((num(&l[0])?, num(&l[1])?))
+    }
+    _ => None,
+  }
+}
+
+/// The page fills the size set_size asked for: `get_size` is the content
+/// (page) area on every backend, in CSS pixels.
+async fn check_page_size(name: &str, win: &Window, want: (i32, i32)) {
+  // A resize reaches the renderer a frame or two after the native window.
+  let mut got = None;
+  for _ in 0..30 {
+    got = page_inner_size(win).await;
+    match got {
+      // No answer yet (the page may still be loading): ask again.
+      None => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+      Some((w, h)) if (w - want.0).abs() <= 1 && (h - want.1).abs() <= 1 => {
+        break
+      }
+      _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+    }
+  }
+  match got {
+    None => na(&format!("{name} (no page to measure on this backend)")),
+    Some((w, h)) => check(
+      &format!("{name} (want {}x{}, page {w}x{h})", want.0, want.1),
+      (w - want.0).abs() <= 1 && (h - want.1).abs() <= 1,
+    ),
+  }
 }
 
 fn check_outer_vs_inner(
@@ -121,12 +160,6 @@ fn check_outer_vs_inner(
 ) {
   if inner == (0, 0) && outer == (0, 0) {
     na(&format!("{name} (size not available yet)"));
-    return;
-  }
-  if expect_chrome && size_is_outer_rect() {
-    na(&format!(
-      "{name} (get_size is the outer window rect on this backend)"
-    ));
     return;
   }
   if expect_chrome {
@@ -546,15 +579,21 @@ fn e2e_main() {
     // What the request-body round trip's echo routes received (body_echo.rs).
     let body_received: body_echo::Received =
       Arc::new(Mutex::new(HashMap::new()));
+    // What the incremental-response checks observed (stream_checks.rs).
+    let stream_state = stream_checks::State::default();
     let make_handler = {
       let echo = echo_url.clone().unwrap_or_default();
       let seen = seen_urls.clone();
       let received = body_received.clone();
+      let streams = stream_state.clone();
       move || {
-        let (echo, seen, received) =
-          (echo.clone(), seen.clone(), received.clone());
+        let (echo, seen, received, streams) =
+          (echo.clone(), seen.clone(), received.clone(), streams.clone());
         move |req: SchemeRequest| {
-          if let Some(req) = body_echo::serve(req, &received) {
+          let Some(req) = body_echo::serve(req, &received) else {
+            return;
+          };
+          if let Some(req) = stream_checks::serve(req, &streams) {
             serve_scheme_request(req, &echo, &seen)
           }
         }
@@ -566,6 +605,8 @@ fn e2e_main() {
     // Used where the full battery can't run (webview/linux in CI).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("scheme-body") {
       let body_win = body_round_trip(&body_received).await;
+      let stream_win = stream_checks::run(&stream_state).await;
+      let _ = &stream_win;
       // Passkeys answer without the engine (not_supported on Linux), so they
       // ride along where the full battery can't run.
       passkey_checks(body_win.as_ref().map(|w| w.id()).unwrap_or(0)).await;
@@ -1053,6 +1094,7 @@ fn e2e_main() {
       );
     }
     check("set_size -> get_size round-trips", sized);
+    check_page_size("set_size sizes the page area", &win, (640, 480)).await;
 
     // Position is advisory: window managers may constrain it. Assert loosely.
     win.set_position(150, 170);
@@ -1452,6 +1494,7 @@ fn e2e_main() {
 
     // ---- request body over the custom scheme -----------------------------
     let body_win = body_round_trip(&body_received).await;
+    let stream_win = stream_checks::run(&stream_state).await;
 
     // ---- close-requested handler round-trip --------------------------------
     // A second window (kept separate from `win`, which must survive to
@@ -1639,7 +1682,7 @@ fn e2e_main() {
     // down on the backend's main thread can crash or race and clobber the exit
     // code (e.g. SIGTRAP -> 133), which would corrupt the CI signal. The OS
     // reclaims everything on exit. `_ = &win;` keeps the window alive to here.
-    let _ = (&win, &body_win);
+    let _ = (&win, &body_win, &stream_win);
     finish();
   });
 }
@@ -1764,6 +1807,7 @@ async fn window_api_checks() {
       &format!("set_size below the minimum is clamped to it (got {sw}x{sh})"),
       clamped_up,
     );
+    check_page_size("the minimum size is the page area", &w, (400, 300)).await;
     w.set_size(3000, 3000);
     let clamped_down = wait_for(
       || {
@@ -1779,6 +1823,7 @@ async fn window_api_checks() {
       &format!("set_size above the maximum is clamped to it (got {sw}x{sh})"),
       clamped_down,
     );
+    check_page_size("the maximum size is the page area", &w, (900, 700)).await;
     // A window outside a new range is resized into it.
     w.set_size(800, 600);
     let _ = wait_for(|| (w.get_size().0 - 800).abs() <= 4, 40, 50).await;
