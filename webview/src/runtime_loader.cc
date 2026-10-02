@@ -4,6 +4,8 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
+#include "laufey_auth_session.h"
+#include "laufey_ui_tasks.h"
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -1055,6 +1057,47 @@ static void Backend_SetQuitOnLastWindowClosed(void* data, bool quit) {
     backend->SetQuitOnLastWindowClosed(quit);
 }
 
+// --- UI-thread tasks (API >= 42) ---
+
+static void Backend_DispatchUiTask(void* /*data*/, laufey_ui_task_fn task,
+                                   void* task_data) {
+  laufey_common::UiTaskDispatcher::Get().Dispatch(task, task_data);
+}
+
+static bool Backend_IsUiThread(void* /*data*/) {
+  return laufey_common::UiTaskDispatcher::Get().IsUiThread();
+}
+
+// --- Auth session (API >= 42) ---
+
+static uint32_t Backend_AuthSessionCapabilities(void* data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->AuthSessionCapabilities();
+  return 0;
+}
+
+static void Backend_AuthSessionStart(void* data, uint32_t window_id,
+                                     const char* url, const char* callback,
+                                     uint32_t flags,
+                                     laufey_auth_session_result_fn on_result,
+                                     void* user_data) {
+  if (!on_result)
+    return;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend()) {
+    backend->AuthSessionStart(window_id, url, callback, flags, on_result,
+                              user_data);
+  } else {
+    on_result(user_data, LAUFEY_AUTH_SESSION_FAILED, "backend not initialized");
+  }
+}
+
+static bool Backend_TestCancelAuthSession(void* /*data*/) {
+  return laufey_common::AuthSessionCancelCurrent(
+      "the user cancelled the sign-in");
+}
+
 // --- Tray / status bar ---
 
 static uint32_t Backend_CreateTrayIcon(void* data) {
@@ -1473,6 +1516,14 @@ void RuntimeLoader::InitializeBackendApi() {
       Backend_ListScheduledNotifications;
   backend_api_.cancel_notification = Backend_CancelNotification;
   backend_api_.test_notification_respond = Backend_TestNotificationRespond;
+
+  // UI-thread tasks and auth sessions (API >= 42): see docs/c-abi.md and
+  // docs/auth-session.md. The dispatcher is bound to the UI thread in Load.
+  backend_api_.dispatch_ui_task = Backend_DispatchUiTask;
+  backend_api_.is_ui_thread = Backend_IsUiThread;
+  backend_api_.auth_session_capabilities = Backend_AuthSessionCapabilities;
+  backend_api_.auth_session_start = Backend_AuthSessionStart;
+  backend_api_.test_cancel_auth_session = Backend_TestCancelAuthSession;
 }
 
 RuntimeLoader::RuntimeLoader() {
@@ -1500,6 +1551,17 @@ RuntimeLoader* RuntimeLoader::GetInstance() {
 }
 
 bool RuntimeLoader::Load(const std::string& path) {
+  // Load runs on the UI thread (each host's main thread, which runs the
+  // backend's loop): bind dispatch_ui_task's queue to it before the runtime
+  // can dispatch anything.
+  laufey_common::UiTaskDispatcher::Get().Bind(
+      [this](void (*task)(void*), void* task_data) {
+        LaufeyBackend* backend = GetBackend();
+        if (!backend)
+          return false;  // a headless worker has no UI thread
+        backend->PostUiTask(task, task_data);
+        return true;
+      });
 #ifndef _WIN32
   library_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!library_handle_) {

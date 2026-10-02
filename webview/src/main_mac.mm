@@ -4,6 +4,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
@@ -140,6 +141,10 @@ void EnsureEditMenu(NSMenu* menubar) {
 // applicationWillTerminate:) or through quit()'s -stop: (after [NSApp run]
 // returns in main), and which one wins is a race.
 - (void)shutDownRuntime {
+  // The loop is over: UI tasks still queued are answered "not run" and an
+  // auth session in progress ends cancelled, so a runtime thread waiting on
+  // either is released before Shutdown waits for it.
+  laufey_common::UiLoopEnded();
   RuntimeLoader::GetInstance()->Shutdown();
   delete self.backend;
   self.backend = nullptr;
@@ -218,6 +223,9 @@ static int run_headless(const char* runtimePath) {
     return 1;
   }
 
+  // No UI loop in a headless worker: UI tasks are answered "not run" at
+  // once instead of waiting for a loop that never runs.
+  laufey_common::UiLoopEnded();
   if (!loader->Start()) {
     std::cerr << "Failed to start headless worker runtime." << std::endl;
     return 1;

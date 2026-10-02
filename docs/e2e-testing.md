@@ -209,7 +209,15 @@ a 6 MiB binary body (over the WebView2 credit window) byte for byte. Each
 never-ending route keeps writing heartbeats until a write fails, so the battery
 also asserts that every cancellation reached the handler
 (`examples/native_e2e/src/stream_checks.rs`; see
-[Streaming responses](custom-schemes.md#streaming-responses)).
+[Streaming responses](custom-schemes.md#streaming-responses)). Two scenarios
+check that a write never blocks the writer (API 42): `slow` writes a 4 MiB body
+from a single "event loop" thread while the UI thread is held busy for 1.5 s
+(through `spawn_on_ui_thread`), and must finish writing in well under that, then
+serve a `ping` request in the middle of the page's slow read of the body; `cap`
+writes 80 MiB to a page that doesn't read and expects a write to fail once 64
+MiB are held, and the page's `fetch` or read to reject (N/A on WKWebView, which
+hands every write to WebKit). The old WebKitGTK pipe failed both: its writer
+blocked for the whole 1.5 s and the 80 MiB went through.
 `LAUFEY_E2E_ONLY=scheme-body` (`native-e2e-run.sh <backend> --scheme-body`) runs
 only these two checks.
 
@@ -826,3 +834,42 @@ Under `--window-api` (and the main battery), the fullscreen check also reads
 `get_window_normal_bounds` while fullscreen: it must be the pre-fullscreen
 bounds (macOS used to report the fullscreen frame once its transition had
 settled).
+
+## 20. UI-thread tasks and auth sessions (API 42)
+
+`scripts/native-e2e-run.sh <backend> --auth-thread` runs `native_e2e`'s
+`auth_thread_checks` alone, on every backend, and ends with `quit()`. See
+[c-abi.md](c-abi.md#ui-thread-tasks-api--42) and
+[auth-session.md](auth-session.md).
+
+- **UI-thread tasks**: the runtime's thread is not the UI thread;
+  `spawn_on_ui_thread`, `try_run_on_ui_thread` (from a plain thread) and
+  `run_on_ui_thread` (littledivy/laufey#79) run their task on the UI thread, by
+  laufey's account (`is_ui_thread`) **and the OS's**: `pthread_main_np()` on
+  macOS, `gettid() == getpid()` on Linux, and on Windows the thread that owns
+  the test window's HWND (`GetWindowThreadProcessId`). A call made on the UI
+  thread runs inline; 20 tasks run in dispatch order; 200 blocking tasks from 4
+  threads each run once. After `quit()` (the runtime sees `should_shutdown`), a
+  task that raced the quit has been answered, and a new one is refused at once
+  with `UiThreadError::Shutdown` instead of hanging.
+- **Auth sessions**: the capabilities match the OS (macOS: supported +
+  ephemeral; elsewhere and on Winit: none). Off macOS a session answers
+  `not_supported` with the RFC 8252 hint. On macOS: argument refusals; a real
+  `ASWebAuthenticationSession` round trip, ephemeral (no consent prompt),
+  through a loopback "identity provider" that redirects to
+  `laufey-e2e-auth://cb?code=…&state=s1`, resolving with exactly that URL; a
+  second session meanwhile is `busy`; `test_cancel_auth_session` ends a session
+  `cancelled` (as the user closing the sheet); closing the anchor window does
+  too; and, in CI only (it puts a prompt on the screen), a cancel while the
+  consent prompt of a non-ephemeral session is up, which the OS itself never
+  reports, still ends it `cancelled`.
+
+The portable cores are unit-tested in
+`backend-common/tests/auth_main_thread_test.cc` (the dispatcher over a fake
+loop, including tasks pending when the loop ends and a refused post; auth
+argument validation, the one-session slot, exactly-once results, races),
+`backend-winit-common/src/ui_tasks.rs`, and `capi/src/ui_thread.rs` /
+`capi/src/auth_session.rs` with fake vtables. The WebKitGTK response body has
+its own test, `backend-common/tests/scheme_body_stream_test.cc` (writes never
+block, an asynchronous pollable reader on a GMainContext, the cap, a reader that
+went away, a synchronous reader).

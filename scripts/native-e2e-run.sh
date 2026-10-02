@@ -24,9 +24,13 @@
 # context-menu close callback, notification responses, live callbacks and
 # scheduling. On Linux it starts a stand-in notification server
 # (laufey_mock_notification_server) on the run's private session bus.
+# --auth-thread runs only the API 42 checks: UI-thread tasks (proved with the
+# OS's own notion of the UI thread, refused after quit()) and auth sessions
+# (a real ASWebAuthenticationSession round trip on macOS, not_supported
+# elsewhere). Ends with quit().
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off|--menus-notifications]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off|--menus-notifications|--auth-thread]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -69,6 +73,9 @@ fi
 if [ "$mode" = "--devtools-off" ]; then
   export LAUFEY_E2E_ONLY=devtools-off
   export LAUFEY_INSPECTABLE=0
+fi
+if [ "$mode" = "--auth-thread" ]; then
+  export LAUFEY_E2E_ONLY=auth-thread
 fi
 mock=""
 if [ "$mode" = "--menus-notifications" ]; then

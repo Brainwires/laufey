@@ -719,6 +719,26 @@ class LaufeyBackend {
   }
   virtual void SetQuitOnLastWindowClosed(bool /*quit*/) {}
 
+  // --- Auth session (API >= 42) ---
+  // The macOS backend overrides both with laufey_auth_session.h
+  // (ASWebAuthenticationSession). The defaults are the answer of a platform
+  // without an OS auth session (Windows, Linux, iOS): no capabilities, every
+  // request NOT_SUPPORTED (RFC 8252: the embedder opens the system browser).
+  virtual uint32_t AuthSessionCapabilities() {
+    return 0;
+  }
+  virtual void AuthSessionStart(uint32_t /*window_id*/, const char* /*url*/,
+                                const char* /*callback*/, uint32_t /*flags*/,
+                                laufey_auth_session_result_fn on_result,
+                                void* user_data) {
+    if (on_result) {
+      on_result(user_data, LAUFEY_AUTH_SESSION_NOT_SUPPORTED,
+                "this platform has no OS auth session; open the system "
+                "browser and receive the redirect through a loopback or "
+                "custom-scheme listener (RFC 8252)");
+    }
+  }
+
   // --- Tray / status-bar icon ---
   virtual uint32_t CreateTrayIcon() {
     return 0;

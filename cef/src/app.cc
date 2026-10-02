@@ -8,6 +8,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
+#include "laufey_auth_session.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 #include "scheme_handler.h"
@@ -172,6 +173,8 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
     // (`cancelled`).
 #if defined(__APPLE__)
     laufey_common::PasskeyWindowClosing(NSWindowForCefHandle(handle));
+    // So does an auth session sheet.
+    laufey_common::AuthSessionWindowClosing(NSWindowForCefHandle(handle));
 #elif defined(_WIN32)
     laufey_common::PasskeyWindowClosing(reinterpret_cast<void*>(handle));
 #endif

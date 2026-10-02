@@ -131,10 +131,22 @@ void LaufeySchemeHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
   response_length = -1;
 }
 
+// Bytes held for a page that isn't reading before the response fails
+// (Chromium stops calling Read while the renderer doesn't consume). The cap
+// of the WebView2 and WebKitGTK backends; the runtime's write never blocks.
+constexpr size_t kMaxQueuedResponseBytes = 64 * 1024 * 1024;
+// net::ERR_FAILED: what a failed read reports to Chromium.
+constexpr int kNetErrFailed = -2;
+
 bool LaufeySchemeHandler::Read(void* data_out, int bytes_to_read,
                                int& bytes_read,
                                CefRefPtr<CefResourceReadCallback> callback) {
   std::lock_guard<std::mutex> lock(mutex_);
+
+  if (failed_) {
+    bytes_read = kNetErrFailed;
+    return false;
+  }
 
   if (!response_body_.empty()) {
     size_t n =
@@ -223,19 +235,32 @@ void LaufeySchemeHandler::Begin(int status, const char* headers,
 intptr_t LaufeySchemeHandler::WriteResponse(const uint8_t* buf, size_t len) {
   CefRefPtr<CefResourceReadCallback> to_continue;
   int to_report = 0;
+  bool overflow = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (cancelled_)
+    if (cancelled_ || failed_)
       return -1;
-    response_body_.insert(response_body_.end(), buf, buf + len);
-    // Satisfy a parked Read by copying into its output buffer.
-    if (read_callback_ && pending_data_ && !response_body_.empty()) {
-      size_t n =
-          std::min(static_cast<size_t>(pending_cap_), response_body_.size());
-      std::copy(response_body_.begin(), response_body_.begin() + n,
-                static_cast<uint8_t*>(pending_data_));
-      response_body_.erase(response_body_.begin(), response_body_.begin() + n);
-      to_report = static_cast<int>(n);
+    if (response_body_.size() + len > kMaxQueuedResponseBytes) {
+      // The page isn't reading: fail the response (its read rejects)
+      // instead of holding an unbounded body.
+      overflow = true;
+      failed_ = true;
+      response_body_.clear();
+      to_report = kNetErrFailed;
+    } else {
+      response_body_.insert(response_body_.end(), buf, buf + len);
+      // Satisfy a parked Read by copying into its output buffer.
+      if (read_callback_ && pending_data_ && !response_body_.empty()) {
+        size_t n =
+            std::min(static_cast<size_t>(pending_cap_), response_body_.size());
+        std::copy(response_body_.begin(), response_body_.begin() + n,
+                  static_cast<uint8_t*>(pending_data_));
+        response_body_.erase(response_body_.begin(),
+                             response_body_.begin() + n);
+        to_report = static_cast<int>(n);
+      }
+    }
+    if (read_callback_ && (overflow || to_report > 0)) {
       to_continue = read_callback_;
       read_callback_ = nullptr;
       pending_data_ = nullptr;
@@ -243,7 +268,7 @@ intptr_t LaufeySchemeHandler::WriteResponse(const uint8_t* buf, size_t len) {
   }
   if (to_continue)
     to_continue->Continue(to_report);
-  return static_cast<intptr_t>(len);
+  return overflow ? -1 : static_cast<intptr_t>(len);
 }
 
 void LaufeySchemeHandler::FinishResponse() {

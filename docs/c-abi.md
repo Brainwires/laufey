@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `41`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `42`) versions the contract. The `version` field
 on the API table lets a runtime detect the backend's vintage and avoid calling
 function pointers a backend predates (older backends leave new pointers `NULL`).
 
@@ -52,7 +52,9 @@ The pointers group into:
   `get_window_inner_position` (content-view origin, API ≥ 38),
   `get_window_outer_size` (`window.outerWidth` / `outerHeight`, API ≥ 38),
   `test_inject_input` (synthetic pointer / key / wheel, API ≥ 38),
-  `show`/`hide`/`is_visible`, `focus`, `quit`, `post_ui_task`.
+  `show`/`hide`/`is_visible`, `focus`, `quit`, `post_ui_task`, and from API 42
+  `dispatch_ui_task` / `is_ui_thread` (see
+  [UI-thread tasks](#ui-thread-tasks-api--42) below).
 - **Value marshalling** — the `value_*` family (below).
 - **JavaScript interop** — `set_js_call_handler`, `js_call_respond`,
   `invoke_js_callback`, `release_js_callback`, `execute_js`, `set_js_namespace`,
@@ -133,6 +135,12 @@ The pointers group into:
   `test_notification_respond` hook. See [notifications.md](notifications.md).
 - **Permissions** — `query_permission`, `request_permission`
   (`LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL` from API 41).
+- **Auth session** (API ≥ 42) — `auth_session_capabilities`,
+  `auth_session_start` (an OS-run browser sign-in that ends at a callback URL,
+  one at a time, the result delivered exactly once on any thread) and the
+  `test_cancel_auth_session` hook. macOS `ASWebAuthenticationSession` (WKWebView
+  and CEF); `NOT_SUPPORTED` on Windows and Linux, where RFC 8252 says to use the
+  system browser; `NULL` on Winit (see [auth-session.md](auth-session.md)).
 - **Custom URL scheme handler** (API ≥ 26) — `register_scheme_handler`,
   `scheme_request_read_body`, `scheme_response_begin`, `scheme_response_write`,
   `scheme_response_finish`.
@@ -333,12 +341,47 @@ into their async runtime from that thread; e.g. the Rust `laufey` crate's
 ahead of time rather than relying on a bare `tokio::spawn`, which requires an
 ambient runtime context this thread doesn't have.
 
+## UI-thread tasks (API ≥ 42)
+
+```c
+typedef void (*laufey_ui_task_fn)(void* data, bool ran);
+void (*dispatch_ui_task)(void* backend_data, laufey_ui_task_fn task, void* data);
+bool (*is_ui_thread)(void* backend_data);
+```
+
+`post_ui_task` hands a task to the platform's queue (a GCD block, a window
+message, a GLib idle source, a CEF task, a Winit user event) and forgets it.
+Once the event loop has ended nothing drains that queue, so a runtime thread
+waiting for such a task waits forever, and the backend's shutdown, which waits
+for the runtime thread, waits with it. `dispatch_ui_task` adds the guarantee:
+`task` is called **exactly once**, with `ran == true` on the UI thread (queued
+behind the work already posted there, never inline), or with `ran == false` when
+the loop has ended or ends before the task ran. The backend answers every
+pending task that way on the thread that ends the loop, **before** it calls
+`laufey_runtime_shutdown`, and answers later dispatches synchronously. A
+headless worker (no loop) answers every dispatch with `ran == false`.
+
+`is_ui_thread` is true on the thread that runs those tasks: the process main
+thread on macOS (every backend) and for the WebView backends, CEF's `TID_UI`
+(the main thread), the Winit event loop's thread. Both are callable from any
+thread; the shared implementation is `backend-common/include/laufey_ui_tasks.h`
+(`backend-winit-common/src/ui_tasks.rs` for Winit).
+
+In the `laufey` crate: `is_ui_thread()`, `try_run_on_ui_thread(f)` (blocks;
+inline on the UI thread; `Err(UiThreadError::Shutdown)` once the loop ended),
+`spawn_on_ui_thread(f)` (a future; never blocks), and `run_on_ui_thread(f)`
+(littledivy/laufey#79, which now hops through `dispatch_ui_task` on every
+platform and panics instead of hanging when the loop has ended). A panic in `f`
+is resumed on the caller. Blocking a thread the UI thread is itself waiting for
+deadlocks: prefer `spawn_on_ui_thread` from an async runtime.
+
 ## Threading
 
 All API calls must happen on the UI thread the backend's event loop runs on,
 unless their documentation says otherwise. `post_ui_task` hops onto it from
-another thread. `show_dialog` blocks on the UI thread but pumps OS events so
-other windows stay responsive. The API 38 window calls, the API 39 file dialogs,
-drag-out and every clipboard call may be made from any thread; the backend hops
-itself, and a file dialog resolves through its callback instead of blocking the
-caller.
+another thread, and `dispatch_ui_task` (API ≥ 42) does so with an answer
+guaranteed even when the app quits. `show_dialog` blocks on the UI thread but
+pumps OS events so other windows stay responsive. The API 38 window calls, the
+API 39 file dialogs, drag-out and every clipboard call may be made from any
+thread; the backend hops itself, and a file dialog resolves through its callback
+instead of blocking the caller.

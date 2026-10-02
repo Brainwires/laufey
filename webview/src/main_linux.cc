@@ -1,6 +1,7 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
 #include "laufey_launch_config.h"
+#include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "runtime_loader.h"
@@ -163,6 +164,10 @@ int main(int argc, char* argv[]) {
 
   backend->Run();
 
+  // The loop is over: UI tasks still queued are answered "not run" and an
+  // auth session in progress ends cancelled, so a runtime thread waiting on
+  // either is released before Shutdown waits for it.
+  laufey_common::UiLoopEnded();
   loader->Shutdown();
   delete backend;
 

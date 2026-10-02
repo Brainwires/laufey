@@ -14,6 +14,7 @@
 #include "laufey_launch_config.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 
@@ -299,6 +300,9 @@ static int run_headless(const char* runtimePath) {
     return 1;
   }
 
+  // No UI loop in a headless worker: UI tasks are answered "not run" at
+  // once instead of waiting for a loop that never runs.
+  laufey_common::UiLoopEnded();
   if (!loader->Start()) {
     std::cerr << "Failed to start headless worker runtime." << std::endl;
     return 1;
@@ -481,6 +485,10 @@ int main(int argc, char* argv[]) {
     [g_pump start];  // begin the steady pump so the runtime starts
     [NSApp run];
 
+    // The loop is over: UI tasks still queued are answered "not run" and an
+    // auth session in progress ends cancelled, so a runtime thread waiting on
+    // either is released before Shutdown waits for it.
+    laufey_common::UiLoopEnded();
     LaufeyClearSecondInstanceHooks();
     RuntimeLoader::GetInstance()->Shutdown();
 

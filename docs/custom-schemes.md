@@ -105,7 +105,28 @@ that has nothing to send for a long time learns of the cancellation only at its
 next write, so a heartbeat (an SSE comment line such as `:\n\n`) bounds how long
 a dead stream lingers.
 
-WKWebView, WebKitGTK and CEF hand each write to the page directly. WebView2
+A handler's `write` **never blocks**: the runtime writes from its event loop
+thread, so a write that waited for a slow page would stall the whole app. Each
+backend takes the bytes and hands them on as the engine reads:
+
+- **WKWebView** passes each write to WebKit (`didReceiveData:`) on the main
+  thread; WebKit takes all of it.
+- **WebKitGTK** queues each write in memory for the response's `GInputStream`,
+  which WebKit reads from the GTK main loop (a pollable stream: no thread waits
+  on it). Before API 42 the body went through a pipe whose `write` blocked once
+  64 KiB were unread, which stalled the runtime whenever the GTK thread was
+  busy.
+- **CEF** queues it for Chromium's next `Read` (Chromium stops reading while the
+  page doesn't consume).
+- **WebView2** streams through the page (below).
+
+The queue for a page that isn't reading is capped at **64 MiB** on WebKitGTK,
+CEF and WebView2: past that the response fails (the page's `fetch` or read
+rejects) and the handler's next `write` returns a negative value, instead of the
+body growing without bound. WKWebView hands everything to WebKit, so it has no
+cap of its own.
+
+WKWebView, WebKitGTK and CEF hand each write to the page as it arrives. WebView2
 cannot: it reads a `WebResourceRequested` response stream to its end before the
 page sees any of it
 ([WebView2Feedback#3519](https://github.com/MicrosoftEdge/WebView2Feedback/issues/3519)),

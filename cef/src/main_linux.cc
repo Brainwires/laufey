@@ -21,6 +21,7 @@
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_launch_config.h"
+#include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "renderer_app.h"
@@ -639,6 +640,9 @@ static int run_headless(const std::string& runtimePath) {
     return 1;
   }
 
+  // No UI loop in a headless worker: UI tasks are answered "not run" at
+  // once instead of waiting for a loop that never runs.
+  laufey_common::UiLoopEnded();
   if (!loader->Start()) {
     std::cerr << "Failed to start headless worker runtime." << std::endl;
     return 1;
@@ -896,6 +900,11 @@ int main(int argc, char* argv[]) {
   LaufeyInstallSecondInstanceHooks();
 
   CefRunMessageLoop();
+
+  // The loop is over: UI tasks still queued are answered "not run" and an
+  // auth session in progress ends cancelled, so a runtime thread waiting on
+  // either is released before Shutdown waits for it.
+  laufey_common::UiLoopEnded();
 
   LaufeyClearSecondInstanceHooks();
   RuntimeLoader::GetInstance()->Shutdown();
