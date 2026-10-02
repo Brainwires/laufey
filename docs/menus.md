@@ -106,6 +106,25 @@ white on selection; Windows and Linux render icons as-is (Linux uses a
 `GtkImageMenuItem`, which the AppIndicator tray also exports). A checked item
 shows its checkmark instead of an icon on Linux.
 
+On Windows (both backends) a context menu is a `TrackPopupMenu` modal loop on
+the UI thread:
+
+- Only one menu can be active on a thread. When another one is (the window's
+  menu bar or system menu in keyboard menu mode, which a lone press and release
+  of Alt starts, or a context menu that is still open), `TrackPopupMenu` would
+  fail at once and nothing would show; laufey ends that menu first and shows the
+  new one as soon as its loop has unwound (within about a second at most).
+- The owner window is made the foreground window before the menu opens, so the
+  menu gets keyboard input (arrows, Return, Escape) and closes on a click
+  elsewhere (KB135788).
+- The UI thread keeps doing its work while the menu is open. Chromium runs no
+  tasks inside a native modal loop unless told to, so on CEF everything the
+  runtime sends through CEF's task queue (a page's binding calls, synchronous
+  window calls, `dispatch_ui_task`) used to wait for the menu, and a runtime
+  blocked on one stopped altogether; the CEF backend allows nestable tasks for
+  the length of the loop (`CefSetNestableTasksAllowed`). WebView2 delivers its
+  work as window messages, which the loop dispatches anyway.
+
 ## Test hooks
 
 - `test_click_menu_item(id)` runs a menu or tray item's click handler (every

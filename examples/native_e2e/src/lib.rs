@@ -392,6 +392,17 @@ const APP_PAGE_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 })();
 </script></body></html>"#;
 
+/// The page served at `laufey-e2e://app/ticker`: a page timer that reports
+/// to the runtime through the `menuTick` binding every 100 ms.
+const TICKER_PAGE_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8"><title>ticker</title></head><body>
+<script>
+setInterval(() => {
+  if (typeof Laufey !== 'undefined' && typeof Laufey.menuTick === 'function') {
+    Laufey.menuTick().catch(() => {});
+  }
+}, 100);
+</script></body></html>"#;
+
 fn respond(req: SchemeRequest, status: i32, content_type: &str, body: &[u8]) {
   let headers = vec![
     ("content-type".to_string(), content_type.to_string()),
@@ -443,6 +454,15 @@ fn serve_scheme_request(
         req.exchange.finish();
       });
     }
+    // A page whose timer calls the runtime every 100 ms (see
+    // menu_notification_checks.rs: it must keep ticking while a context
+    // menu is open).
+    "laufey-e2e://app/ticker" => respond(
+      req,
+      200,
+      "text/html; charset=utf-8",
+      TICKER_PAGE_HTML.as_bytes(),
+    ),
     "app://e2e/" | "app://e2e" => respond(
       req,
       200,

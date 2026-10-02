@@ -3319,6 +3319,18 @@ bool RuntimeLoader::Load(const std::string& path) {
             TID_UI, base::BindOnce([](void (*t)(void*), void* d) { t(d); },
                                    task, task_data));
       });
+#if defined(_WIN32)
+  // A context menu's TrackPopupMenu runs a native modal loop on TID_UI, and
+  // Chromium runs no tasks inside one unless told to: every CefPostTask (the
+  // runtime's synchronous UI-thread calls, dispatch_ui_task, the page's
+  // binding calls) would wait for the menu to close, and the runtime with
+  // them. Allow nestable tasks for the length of the loop (laufey_menu.h).
+  // The menu code is reentrancy safe for this: a task that shows another
+  // menu ends the open one first (win32_menu.h), and one that closes the
+  // window ends it too.
+  laufey_common::SetNativeModalLoopHook(
+      [](bool entering) { CefSetNestableTasksAllowed(entering); });
+#endif
 #ifndef _WIN32
   library_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!library_handle_) {

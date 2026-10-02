@@ -15,6 +15,7 @@
 
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -478,9 +479,27 @@ inline bool TestTriggerAccelerator(HWND hwnd, const char* accelerator) {
 
 constexpr UINT kEndMenuMessage = WM_APP + 0x51;
 
+// A context menu that is waiting for the thread's active menu to go (see
+// ShowContextMenu). Owned by the deferral timer while it waits.
+struct PendingContextMenu {
+  HWND hwnd = nullptr;
+  int x = 0;
+  int y = 0;
+  std::vector<laufey_common::MenuEntry> entries;
+  laufey_menu_click_fn on_click = nullptr;
+  void* on_click_data = nullptr;
+  uint32_t window_id = 0;
+  laufey_menu_closed_fn on_closed = nullptr;
+  void* on_closed_data = nullptr;
+  int deferrals = 0;
+};
+
+inline void TrackContextMenu(PendingContextMenu* menu);
+
 // A message-only window on the UI thread that ends the active menu: the
 // context menu's modal loop dispatches the thread's messages, so a message
-// posted here from any thread reaches EndMenu on the menu's own thread.
+// posted here from any thread reaches EndMenu on the menu's own thread. Its
+// timers (id = a PendingContextMenu*) show a deferred context menu.
 // UI thread (it is created on the first call).
 inline HWND EndMenuWindow() {
   static HWND hwnd = nullptr;
@@ -493,6 +512,11 @@ inline HWND EndMenuWindow() {
       EndMenu();
       return 0;
     }
+    if (m == WM_TIMER) {
+      KillTimer(h, w);
+      TrackContextMenu(reinterpret_cast<PendingContextMenu*>(w));
+      return 0;
+    }
     return DefWindowProcW(h, m, w, l);
   };
   wc.hInstance = GetModuleHandleW(nullptr);
@@ -503,47 +527,84 @@ inline HWND EndMenuWindow() {
   return hwnd;
 }
 
-// Show a context menu at the given position (client coordinates) and block
-// until it closes (UI thread). `on_closed` fires once it closed, after the
-// chosen item's click.
-inline void ShowContextMenu(
-    HWND hwnd, int x, int y,
-    const std::vector<laufey_common::MenuEntry>& entries,
-    laufey_menu_click_fn on_click, void* on_click_data, uint32_t window_id,
-    laufey_menu_closed_fn on_closed, void* on_closed_data) {
-  if (!hwnd || entries.empty()) {
-    laufey_common::FireContextMenuClosedNow(window_id, on_closed,
-                                            on_closed_data);
+// Whether a menu is active on this thread: a popup menu, or a window's menu
+// bar / system menu in menu mode (which a lone Alt press and release
+// starts).
+inline bool ThreadInMenuMode() {
+  GUITHREADINFO info = {};
+  info.cbSize = sizeof(info);
+  return GetGUIThreadInfo(GetCurrentThreadId(), &info) &&
+         (info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE |
+                        GUI_SYSTEMMENUMODE)) != 0;
+}
+
+// Shows `menu` and blocks until it closes (UI thread); takes ownership.
+inline void TrackContextMenu(PendingContextMenu* raw) {
+  std::unique_ptr<PendingContextMenu> menu(raw);
+  HWND hwnd = menu->hwnd;
+  if (!hwnd || !IsWindow(hwnd) || menu->entries.empty()) {
+    laufey_common::FireContextMenuClosedNow(menu->window_id, menu->on_closed,
+                                            menu->on_closed_data);
     return;
+  }
+  // Only one menu can be active on a thread: while another one is (the
+  // window's menu bar or system menu in menu mode, another context menu),
+  // TrackPopupMenu fails at once and nothing shows. End that one and show
+  // this menu once its loop has unwound, which the timer's message
+  // (dispatched by the outer loop's caller, not inside it) waits for. A
+  // menu that still can't show after ~1 s is shown anyway, so it reports
+  // its close either way.
+  constexpr int kMaxDeferrals = 20;
+  if (menu->deferrals < kMaxDeferrals && ThreadInMenuMode()) {
+    EndMenu();
+    menu->deferrals++;
+    HWND timer_window = EndMenuWindow();
+    if (timer_window && SetTimer(timer_window,
+                                 reinterpret_cast<UINT_PTR>(menu.get()), 50,
+                                 nullptr)) {
+      menu.release();
+      return;
+    }
   }
 
   MenuState state;
-  state.on_click = on_click;
-  state.on_click_data = on_click_data;
-  state.window_id = window_id;
+  state.on_click = menu->on_click;
+  state.on_click_data = menu->on_click_data;
+  state.window_id = menu->window_id;
 
-  HMENU popup = BuildMenuFromEntries(entries, state, true, false);
+  HMENU popup = BuildMenuFromEntries(menu->entries, state, true, false);
   if (!popup) {
-    laufey_common::FireContextMenuClosedNow(window_id, on_closed,
-                                            on_closed_data);
+    laufey_common::FireContextMenuClosedNow(menu->window_id, menu->on_closed,
+                                            menu->on_closed_data);
     return;
   }
 
   // Convert client coordinates to screen coordinates
-  POINT pt = {x, y};
+  POINT pt = {menu->x, menu->y};
   ClientToScreen(hwnd, &pt);
 
   HWND end_window = EndMenuWindow();
   uint64_t session = laufey_common::BeginContextMenu(
-      window_id, on_closed, on_closed_data, [end_window] {
+      menu->window_id, menu->on_closed, menu->on_closed_data, [end_window] {
         if (end_window)
           PostMessageW(end_window, kEndMenuMessage, 0, 0);
       });
 
-  // TrackPopupMenu blocks until the user selects an item or dismisses.
-  // TPM_RETURNCMD makes it return the selected command ID directly.
-  UINT cmd = static_cast<UINT>(TrackPopupMenu(
-      popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr));
+  // The menu gets keyboard input, and closes on a click elsewhere, only
+  // while its owner is the foreground window (KB135788). A no-op when it
+  // already is; refused by the OS when this process may not take the
+  // foreground.
+  SetForegroundWindow(GetAncestor(hwnd, GA_ROOT));
+  UINT cmd;
+  {
+    // Lets a backend keep running its own tasks inside the modal loop (CEF,
+    // see laufey_menu.h).
+    laufey_common::ScopedNativeModalLoop modal_loop;
+    // TrackPopupMenu blocks until the user selects an item or dismisses.
+    // TPM_RETURNCMD makes it return the selected command ID directly.
+    cmd = static_cast<UINT>(TrackPopupMenu(
+        popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr));
+  }
   // The documented companion of a context menu (KB135788): lets the next
   // click outside close the next menu.
   PostMessageW(hwnd, WM_NULL, 0, 0);
@@ -558,6 +619,33 @@ inline void ShowContextMenu(
       DeleteObject(bmp);
   }
   laufey_common::EndContextMenu(session);
+}
+
+// Show a context menu at the given position (client coordinates) and block
+// until it closes (UI thread). `on_closed` fires once it closed, after the
+// chosen item's click. When another menu is active on the thread, it is
+// ended first and this one shows (from a timer) once it has gone.
+inline void ShowContextMenu(
+    HWND hwnd, int x, int y,
+    const std::vector<laufey_common::MenuEntry>& entries,
+    laufey_menu_click_fn on_click, void* on_click_data, uint32_t window_id,
+    laufey_menu_closed_fn on_closed, void* on_closed_data) {
+  if (!hwnd || entries.empty()) {
+    laufey_common::FireContextMenuClosedNow(window_id, on_closed,
+                                            on_closed_data);
+    return;
+  }
+  auto* menu = new PendingContextMenu();
+  menu->hwnd = hwnd;
+  menu->x = x;
+  menu->y = y;
+  menu->entries = entries;
+  menu->on_click = on_click;
+  menu->on_click_data = on_click_data;
+  menu->window_id = window_id;
+  menu->on_closed = on_closed;
+  menu->on_closed_data = on_closed_data;
+  TrackContextMenu(menu);
 }
 
 }  // namespace win32_menu
