@@ -90,6 +90,23 @@ void TestParse() {
   EXPECT(IsAllowedGlobalShortcut(a));
   EXPECT(ParseAccelerator("VolumeUp", false, &a, nullptr));
   EXPECT(IsAllowedGlobalShortcut(a));
+  // The numpad and the editing keys are typing too: refused alone or with
+  // Shift, allowed with a real modifier.
+  const char* typing[] = {"Num5",  "NumAdd",    "NumDecimal", "Enter",
+                          "Tab",   "Backspace", "Delete",     "Num0"};
+  for (const char* key : typing) {
+    EXPECT(ParseAccelerator(key, false, &a, nullptr));
+    EXPECT(!IsAllowedGlobalShortcut(a));
+    EXPECT(ParseAccelerator(std::string("Shift+") + key, false, &a, nullptr));
+    EXPECT(!IsAllowedGlobalShortcut(a));
+    EXPECT(ParseAccelerator(std::string("Ctrl+") + key, false, &a, nullptr));
+    EXPECT(IsAllowedGlobalShortcut(a));
+  }
+  // Keys nobody types with stay allowed alone.
+  EXPECT(ParseAccelerator("Escape", false, &a, nullptr));
+  EXPECT(IsAllowedGlobalShortcut(a));
+  EXPECT(ParseAccelerator("MediaPlayPause", false, &a, nullptr));
+  EXPECT(IsAllowedGlobalShortcut(a));
 }
 
 // --- The registry over a fake OS side ------------------------------------------
