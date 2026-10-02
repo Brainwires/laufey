@@ -49,6 +49,7 @@ void (*auth_session_start)(void* backend_data, uint32_t window_id,
                            laufey_auth_session_result_fn on_result,
                            void* user_data);
 bool (*test_cancel_auth_session)(void* backend_data);
+bool (*auth_session_cancel)(void* backend_data);  // API >= 43
 
 typedef void (*laufey_auth_session_result_fn)(void* user_data, int32_t status,
                                               const char* value);
@@ -76,7 +77,8 @@ typedef void (*laufey_auth_session_result_fn)(void* user_data, int32_t status,
     `state` and any error parameters are in it; validating `state` and redeeming
     the code with PKCE (RFC 7636) are the caller's job.
   - `CANCELLED`: the user closed the sheet or declined the prompt, the anchor
-    window closed, the app's event loop ended, or `test_cancel_auth_session`.
+    window closed, the app's event loop ended, the app called
+    `auth_session_cancel`, or `test_cancel_auth_session`.
   - `NOT_SUPPORTED`: Windows, Linux, an https callback before macOS 14.4.
   - `INVALID`: a bad url, callback, flags or window id.
   - `BUSY`: another session is in progress. One runs at a time per app.
@@ -84,6 +86,12 @@ typedef void (*laufey_auth_session_result_fn)(void* user_data, int32_t status,
 
   Refusals (`NOT_SUPPORTED`, `INVALID`, `BUSY`) are answered synchronously,
   before `auth_session_start` returns. Embedders must not block in the callback.
+- `auth_session_cancel` (API 43) is how the app gives up on the running session:
+  the page cancelled the sign-in, or the app's own timeout fired. The sheet
+  closes, the session's `on_result` gets `CANCELLED` (still exactly once), and
+  the next `auth_session_start` is not `BUSY`. It returns `false`, and does
+  nothing, when no session is running, which is always the case where sessions
+  are not supported (Windows, Linux, Winit). Any thread.
 - `test_cancel_auth_session` (test-only) ends the running session as the user
   closing its sheet would.
 
@@ -91,8 +99,9 @@ Rust (`laufey` crate): `auth_session_capabilities()`,
 `auth_session_start(window_id, url, callback, ephemeral) -> impl Future<Output = Result<String, AuthSessionError>>`
 (`AuthSessionError { kind: AuthSessionErrorKind, message }`, the kind's `code()`
 is `cancelled` / `not_supported` / `invalid` / `busy` / `failed`), and
-`test_cancel_auth_session()`. The session starts when the function is called;
-dropping the future does not end it.
+`auth_session_cancel() -> bool` (API 43) and `test_cancel_auth_session()`. The
+session starts when the function is called; dropping the future does not end it:
+call `auth_session_cancel()`.
 
 ## Behavior notes
 

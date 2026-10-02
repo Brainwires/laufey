@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `42`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `43`) versions the contract. The `version` field
 on the API table lets a runtime detect the backend's vintage and avoid calling
 function pointers a backend predates (older backends leave new pointers `NULL`).
 
@@ -137,10 +137,13 @@ The pointers group into:
   (`LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL` from API 41).
 - **Auth session** (API ≥ 42) — `auth_session_capabilities`,
   `auth_session_start` (an OS-run browser sign-in that ends at a callback URL,
-  one at a time, the result delivered exactly once on any thread) and the
-  `test_cancel_auth_session` hook. macOS `ASWebAuthenticationSession` (WKWebView
-  and CEF); `NOT_SUPPORTED` on Windows and Linux, where RFC 8252 says to use the
-  system browser; `NULL` on Winit (see [auth-session.md](auth-session.md)).
+  one at a time, the result delivered exactly once on any thread), from API 43
+  `auth_session_cancel` (the app ends the running session: `CANCELLED`, once),
+  and the `test_cancel_auth_session` hook. macOS `ASWebAuthenticationSession`
+  (WKWebView and CEF); `NOT_SUPPORTED` on Windows and Linux, where RFC 8252 says
+  to use the system browser, and `auth_session_cancel` answers `false` there;
+  `NULL` on Winit, except `auth_session_cancel`, which answers `false` (see
+  [auth-session.md](auth-session.md)).
 - **Custom URL scheme handler** (API ≥ 26) — `register_scheme_handler`,
   `scheme_request_read_body`, `scheme_response_begin`, `scheme_response_write`,
   `scheme_response_finish`.

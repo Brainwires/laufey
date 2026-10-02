@@ -39,7 +39,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 42;
+pub const LAUFEY_API_VERSION: u32 = 43;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -836,6 +836,14 @@ pub struct LaufeyBackendApi {
   >,
   pub test_cancel_auth_session:
     Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+  // --- Auth session cancel (API >= 43) ---
+  pub auth_session_cancel: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+}
+
+/// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
+/// there is never one to cancel.
+unsafe extern "C" fn auth_session_cancel_none(_backend_data: *mut c_void) -> bool {
+  false
 }
 
 /// `laufey_auth_session_result_fn` (API 42).
@@ -1643,6 +1651,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     auth_session_capabilities: None,
     auth_session_start: None,
     test_cancel_auth_session: None,
+    // API 43: no session can run, so cancelling one answers false.
+    auth_session_cancel: Some(auth_session_cancel_none),
   }
 }
 

@@ -13,9 +13,12 @@
 //! ASWebAuthenticationSession round trip through a loopback server to a
 //! custom-scheme callback (ephemeral: no consent prompt), one session at a
 //! time, cancellation through the test hook (the user closing the sheet),
-//! the anchor window closing, and, in CI, cancelling while the OS consent
+//! through auth_session_cancel (API 43: the app giving up, after which the
+//! next session runs), the anchor window closing, and, in CI, cancelling
+//! while the OS consent
 //! prompt of a non-ephemeral session is up (where the OS itself never
-//! reports). See docs/auth-session.md.
+//! reports). auth_session_cancel answers false with no session running,
+//! and off macOS (where none can run). See docs/auth-session.md.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -293,8 +296,17 @@ async fn auth_session_checks(anchor: Option<&Window>) {
       matches!(&r, Some(Err(e)) if e.kind == AuthSessionErrorKind::NotSupported)
         && rfc,
     );
+    // API 43: cancelling is safe where no session can run.
+    check(
+      "auth_session_cancel() with no session answers false",
+      !laufey::auth_session_cancel(),
+    );
     return;
   }
+  check(
+    "auth_session_cancel() with no session running answers false",
+    !laufey::auth_session_cancel(),
+  );
 
   // Refusals, synchronously and without touching the OS.
   for (name, url, cb, window, want) in [
@@ -412,6 +424,42 @@ async fn auth_session_checks(anchor: Option<&Window>) {
   check(
     "no session left to cancel afterwards",
     !laufey::test_cancel_auth_session(),
+  );
+
+  // The app cancels (API 43: the page gave up, a timeout): the sheet goes,
+  // the session ends cancelled once, and the next one isn't busy.
+  let pending = laufey::auth_session_start(
+    anchor_id,
+    &format!("{idp}/auth/wait"),
+    CALLBACK_SCHEME,
+    true,
+  );
+  tokio::time::sleep(Duration::from_millis(1500)).await;
+  let cancelled = laufey::auth_session_cancel();
+  let again = laufey::auth_session_cancel();
+  let r = answer("the auth session the app cancelled", pending, 10).await;
+  check(
+    &format!(
+      "auth_session_cancel() ends the running session cancelled ({cancelled}, then {again}, {})",
+      kind(&r)
+    ),
+    cancelled
+      && !again
+      && matches!(&r, Some(Err(e)) if e.kind == AuthSessionErrorKind::Cancelled),
+  );
+  let next = laufey::auth_session_start(
+    anchor_id,
+    &format!("{idp}/auth/redirect?state=s2"),
+    CALLBACK_SCHEME,
+    true,
+  );
+  let next = answer("the auth session after a cancel", next, 60).await;
+  check(
+    &format!(
+      "after auth_session_cancel() the next session runs ({})",
+      kind(&next)
+    ),
+    matches!(&next, Some(Ok(url)) if url.ends_with("state=s2")),
   );
 
   // The anchor window closing ends the session cancelled.

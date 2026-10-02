@@ -1028,6 +1028,13 @@ static bool Backend_TestCancelAuthSession(void* /*data*/) {
       "the user cancelled the sign-in");
 }
 
+// API >= 43: the app cancels the running session (no session runs off
+// macOS, so it answers false there).
+static bool Backend_AuthSessionCancel(void* /*data*/) {
+  return laufey_common::AuthSessionCancelCurrent(
+      "the app cancelled the sign-in");
+}
+
 // --- CefValue <-> laufey::Value conversion (IPC boundary only) ---
 //
 // Values cross the renderer<->browser process boundary as CefValue trees, but
@@ -3281,6 +3288,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.auth_session_capabilities = Backend_AuthSessionCapabilities;
   backend_api_.auth_session_start = Backend_AuthSessionStart;
   backend_api_.test_cancel_auth_session = Backend_TestCancelAuthSession;
+  backend_api_.auth_session_cancel = Backend_AuthSessionCancel;
 }
 
 // --- RuntimeLoader lifecycle ---

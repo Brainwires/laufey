@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 42
+#define LAUFEY_API_VERSION 43
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -591,7 +591,8 @@ typedef void (*laufey_ui_task_fn)(void* data, bool ran);
 #define LAUFEY_AUTH_SESSION_OK 0  // `value`: the callback URL
 #define LAUFEY_AUTH_SESSION_CANCELLED \
   1  // the user closed the sheet / declined, the
-     // anchor window closed, or test_cancel_auth_session
+     // anchor window closed, auth_session_cancel,
+     // or test_cancel_auth_session
 #define LAUFEY_AUTH_SESSION_NOT_SUPPORTED \
   2  // no OS auth session here (Windows, Linux,
      // Winit): use the system browser (RFC 8252)
@@ -2015,6 +2016,16 @@ struct laufey_backend_api {
   // would (its result is CANCELLED). Returns false when no session is
   // running. Any thread. NULL on backends that do not implement it.
   bool (*test_cancel_auth_session)(void* backend_data);
+
+  // --- Auth session cancel (API >= 43) -------------------------------------
+
+  // Cancel the running session: the app gave up on it (the page cancelled,
+  // a timeout). Its sheet closes, and its `on_result` is called with
+  // CANCELLED, still exactly once; the slot is then free for the next
+  // session. Returns false, and does nothing, when no session is running,
+  // which is always the case where sessions are not supported (Windows,
+  // Linux, Winit). Any thread. NULL on backends older than API version 43.
+  bool (*auth_session_cancel)(void* backend_data);
 };
 
 #ifdef __cplusplus
