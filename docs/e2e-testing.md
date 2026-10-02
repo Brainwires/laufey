@@ -732,6 +732,14 @@ one that doesn't must refuse (setters return `false`).
 - **Title bar / backdrops**: each setter succeeds exactly when the capability is
   reported; a hidden title bar puts the content origin at the frame origin and
   the default one moves it back.
+- **A window the user closes** (`close_checks.rs`): a second window is closed
+  through the window system, not `close_window` — Alt+F4 through the window
+  manager on X11 (N/A without one), `WM_CLOSE` posted to it on Windows,
+  `-[NSWindow performClose:]` on macOS — with a JS call from its page still
+  pending. It must then read as closed (size 0x0, position (0, 0)), and the
+  getters, setters, `execute_js`, `navigate` and the answer to the pending call
+  that name it must all be no-ops: the backend's own destroy path drops the
+  window's state, so none of them reaches the destroyed native window.
 
 `--lifetime` (its own run, since it ends the process): with keep-alive on, the
 last window closes and the loop survives (no runtime shutdown), a new window

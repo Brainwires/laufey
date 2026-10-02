@@ -29,6 +29,7 @@
 
 mod auth_thread_checks;
 mod body_echo;
+mod close_checks;
 mod io_checks;
 mod lna_checks;
 mod menu_notification_checks;
@@ -2332,6 +2333,10 @@ async fn window_api_checks() {
       );
     }
   }
+
+  // -- a window the user closes ------------------------------------------------
+  // While `w` is still open, so the app has a window left.
+  close_checks::run().await;
 
   w.close();
 }
