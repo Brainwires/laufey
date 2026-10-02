@@ -12,6 +12,9 @@ pub mod tray;
 pub mod ui_tasks;
 pub mod window_api;
 
+#[cfg(test)]
+mod abi_layout_tests;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -929,6 +932,9 @@ pub const LAUFEY_TEST_INPUT_CURSOR_LEAVE: c_int = 5;
 pub const LAUFEY_TEST_INPUT_MODIFIERS: c_int = 6;
 
 unsafe impl Send for LaufeyBackendApi {}
+// Read-only once handed to the runtime (function pointers plus the opaque
+// backend_data the runtime passes back); every thread calls through it.
+unsafe impl Sync for LaufeyBackendApi {}
 
 pub type RuntimeInitFn = unsafe extern "C" fn(*const LaufeyBackendApi) -> c_int;
 pub type RuntimeStartFn = unsafe extern "C" fn() -> c_int;
@@ -5382,7 +5388,16 @@ pub fn shutdown_runtime(timeout: std::time::Duration) {
   let _ = rx.recv_timeout(timeout);
 }
 
+/// The vtable handed to the runtime, moved to a static home: the runtime
+/// keeps the pointer `laufey_runtime_init` receives for the rest of the
+/// process (laufey.h), so it must outlive every frame — the runtime thread's
+/// included, which ends before other threads stop calling through it.
+fn into_static_api(api: LaufeyBackendApi) -> &'static LaufeyBackendApi {
+  Box::leak(Box::new(api))
+}
+
 pub fn load_and_start_runtime(api: LaufeyBackendApi) {
+  let api = into_static_api(api);
   // This thread runs the event loop: dispatch_ui_task's UI thread.
   ui_tasks::bind_current_thread();
   // Install `application:openURLs:` before the runtime comes up: AppKit only
@@ -5422,7 +5437,7 @@ pub fn load_and_start_runtime(api: LaufeyBackendApi) {
             }
           };
 
-        let result = init(&api);
+        let result = init(api);
         if result != 0 {
           eprintln!("Runtime init failed with code: {}", result);
           return;
