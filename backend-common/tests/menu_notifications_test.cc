@@ -7,16 +7,20 @@
 // validation, generated tags, live routing of shown / clicks / actions /
 // closes, responses for notifications no live callback owns, the response
 // buffer and its "launch" flag, cancel, list JSON, the Linux schedule file,
-// Windows toast arguments and base64. Plain asserts, no framework.
+// Windows toast arguments and base64; the native modal loop hook (one
+// enter / leave pair per outermost loop, never off the UI thread). Plain
+// asserts, no framework.
 
 #include "laufey_menu.h"
 #include "laufey_notifications.h"
+#include "laufey_ui_tasks.h"
 #include "laufey_value.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace laufey_common;
@@ -457,6 +461,48 @@ void TestFormats() {
                                &d, &has_data));
 }
 
+std::vector<bool> g_modal_hook_calls;
+
+// ScopedNativeModalLoop tells the hook about the outermost loop on the UI
+// thread only: nested loops are counted, and a modal run on another thread
+// (an app dialog shown from the runtime's thread) never calls the hook, which
+// is a UI-thread call (CefSetNestableTasksAllowed).
+void TestNativeModalLoop() {
+  SetNativeModalLoopHook(
+      [](bool entering) { g_modal_hook_calls.push_back(entering); });
+  // Before Bind there is no UI thread: nothing is reported.
+  {
+    ScopedNativeModalLoop loop;
+  }
+  EXPECT(g_modal_hook_calls.empty());
+
+  UiTaskDispatcher::Get().Bind([](void (*)(void*), void*) { return false; });
+  {
+    ScopedNativeModalLoop outer;
+    EXPECT(g_modal_hook_calls.size() == 1 && g_modal_hook_calls[0]);
+    {
+      ScopedNativeModalLoop inner;
+      EXPECT(g_modal_hook_calls.size() == 1);
+    }
+    EXPECT(g_modal_hook_calls.size() == 1);
+  }
+  EXPECT(g_modal_hook_calls.size() == 2 && !g_modal_hook_calls[1]);
+
+  std::thread other([] { ScopedNativeModalLoop loop; });
+  other.join();
+  EXPECT(g_modal_hook_calls.size() == 2);
+
+  // A loop off the UI thread inside one on it changes nothing either.
+  {
+    ScopedNativeModalLoop outer;
+    std::thread nested([] { ScopedNativeModalLoop loop; });
+    nested.join();
+    EXPECT(g_modal_hook_calls.size() == 3);
+  }
+  EXPECT(g_modal_hook_calls.size() == 4 && !g_modal_hook_calls[3]);
+  SetNativeModalLoopHook(nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -467,6 +513,7 @@ int main() {
   TestValidate();
   TestRouting();
   TestFormats();
+  TestNativeModalLoop();
   std::printf("menu_notifications_test: OK\n");
   return 0;
 }

@@ -484,6 +484,121 @@ async fn context_menu_live_checks(caps: &laufey::MenuCapabilities) {
   );
 
   keyboard_choice_check(&w, show_menu).await;
+  #[cfg(windows)]
+  tray_menu_live_checks(w.id(), &ticks, page_ticks).await;
+}
+
+/// Windows WebView2 / CEF: the app keeps running while the TRAY icon's menu
+/// is open too. tray_win.cc runs that menu's TrackPopupMenu modal loop on the
+/// UI thread like the context menu's. The right-click is posted to the
+/// tray's hidden window exactly as Shell_NotifyIcon delivers it (only the
+/// OS-side click is synthesized), and WM_CANCELMODE to that window, the
+/// menu's owner, closes the menu without a choice.
+#[cfg(windows)]
+async fn tray_menu_live_checks(
+  window_id: u32,
+  ticks: &Arc<AtomicUsize>,
+  page_ticks: bool,
+) {
+  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  if backend != "webview" && backend != "cef" {
+    na("the app runs while a tray menu is open (WebView2 / CEF tray only)");
+    return;
+  }
+  let clicked = Arc::new(Mutex::new(Vec::<String>::new()));
+  let tray = {
+    let k = clicked.clone();
+    laufey::TrayIcon::new()
+      .icon(super::TINY_PNG)
+      .menu(&live_menu_items(), move |id| {
+        k.lock().unwrap().push(id.to_string())
+      })
+  };
+  if tray.id() == 0 {
+    check("tray created for the tray-menu check", false);
+    return;
+  }
+  // CEF creates the window, and sets the menu, on its UI thread after the
+  // calls return.
+  let _ = wait_for(|| !win::tray_window().is_null(), 100, 50).await;
+  let hwnd = win::tray_window();
+  check("the tray window exists", !hwnd.is_null());
+  if hwnd.is_null() {
+    return;
+  }
+  // A right-click that lands before the menu is set opens nothing: re-post
+  // until the menu is up.
+  let mut up = false;
+  for _ in 0..10 {
+    win::post(
+      hwnd,
+      win::WM_TRAYICON,
+      tray.id() as usize,
+      win::WM_RBUTTONUP,
+    );
+    if wait_for(win::popup_menu_open, 20, 50).await {
+      up = true;
+      break;
+    }
+  }
+  check("the tray menu is up (its popup window is visible)", up);
+  if !up {
+    return;
+  }
+
+  if page_ticks {
+    let before = ticks.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let during = ticks.load(Ordering::SeqCst) - before;
+    check(
+      &format!(
+        "a page timer keeps reaching the runtime while a tray menu is open \
+         ({during} ticks in 1.5 s)"
+      ),
+      during >= 3,
+    );
+  }
+  let size =
+    returns_within(5, move || Window::from_id(window_id).get_size()).await;
+  check(
+    &format!(
+      "a synchronous window call returns while a tray menu is open ({size:?})"
+    ),
+    size.is_some(),
+  );
+  let task = returns_within(5, || laufey::try_run_on_ui_thread(|| 7)).await;
+  match task {
+    Some(Err(e)) => {
+      na(&format!("run_on_ui_thread while a tray menu is open ({e})"))
+    }
+    _ => check(
+      &format!("run_on_ui_thread returns while a tray menu is open ({task:?})"),
+      matches!(task, Some(Ok(7))),
+    ),
+  }
+  check(
+    "the tray menu stayed open during the checks",
+    win::popup_menu_open(),
+  );
+
+  // Close it. A right-click still queued from the loop above would open the
+  // menu again once this one closes, so cancel until none is up.
+  let mut closed = false;
+  for _ in 0..5 {
+    win::post(hwnd, win::WM_CANCELMODE, 0, 0);
+    if wait_for(|| !win::popup_menu_open(), 40, 50).await {
+      tokio::time::sleep(Duration::from_millis(300)).await;
+      if !win::popup_menu_open() {
+        closed = true;
+        break;
+      }
+    }
+  }
+  check("WM_CANCELMODE closes the tray menu", closed);
+  check(
+    "a cancelled tray menu reports no click",
+    clicked.lock().unwrap().is_empty(),
+  );
 }
 
 /// Windows: a context menu is driven from the keyboard, injected with
@@ -965,6 +1080,7 @@ pub(crate) mod win {
     fn GetClientRect(hwnd: *mut c_void, rect: *mut Rect) -> i32;
     fn ClientToScreen(hwnd: *mut c_void, point: *mut Point) -> i32;
     fn GetClassNameW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
+    fn PostMessageW(hwnd: *mut c_void, msg: u32, wp: usize, lp: isize) -> i32;
   }
 
   #[link(name = "ole32")]
@@ -1160,6 +1276,48 @@ pub(crate) mod win {
     };
     unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
     search.found
+  }
+
+  /// This process's tray window (tray_win.cc): a hidden top-level window of
+  /// class "LaufeyCommonTrayWindow", never shown; null if there is none.
+  pub fn tray_window() -> *mut c_void {
+    struct Search {
+      pid: u32,
+      found: *mut c_void,
+    }
+    unsafe extern "system" fn visit(hwnd: *mut c_void, lparam: isize) -> i32 {
+      let search = &mut *(lparam as *mut Search);
+      let mut pid = 0u32;
+      GetWindowThreadProcessId(hwnd, &mut pid);
+      if pid != search.pid {
+        return 1;
+      }
+      let mut buf = [0u16; 64];
+      let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+      let class: Vec<u16> = "LaufeyCommonTrayWindow".encode_utf16().collect();
+      if n > 0 && buf[..n as usize] == class[..] {
+        search.found = hwnd;
+        return 0;
+      }
+      1
+    }
+    let mut search = Search {
+      pid: std::process::id(),
+      found: std::ptr::null_mut(),
+    };
+    unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
+    search.found
+  }
+
+  /// WM_LAUFEY_COMMON_TRAYICON (tray_win.cc): Shell_NotifyIcon's callback
+  /// message, wParam = the tray id, LOWORD(lParam) = the mouse message.
+  pub const WM_TRAYICON: u32 = 0x8000 + 65; // WM_APP + 65
+  pub const WM_LBUTTONUP: isize = 0x0202;
+  pub const WM_RBUTTONUP: isize = 0x0205;
+  pub const WM_CANCELMODE: u32 = 0x001F;
+
+  pub fn post(hwnd: *mut c_void, msg: u32, wp: usize, lp: isize) -> bool {
+    unsafe { PostMessageW(hwnd, msg, wp, lp) != 0 }
   }
 
   pub const VK_ESCAPE: u16 = 0x1B;

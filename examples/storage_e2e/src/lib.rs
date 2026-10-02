@@ -32,7 +32,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use laufey::{SchemeRequest, Value, Window};
 use tokio::sync::oneshot;
@@ -117,8 +117,67 @@ fn serve_scheme(req: SchemeRequest) {
   req.exchange.finish();
 }
 
-/// Runs `script` in the page and returns its string result, if any.
-async fn eval_string(win: &Window, script: &str) -> Option<String> {
+/// How an `execute_js` call ended.
+enum Eval {
+  /// The script's string result.
+  String(String),
+  /// The script threw (or its promise rejected): the error the engine gave.
+  Exception(Value),
+  /// It ran, but its result isn't a string.
+  NotString(Value),
+  /// No answer within the wait.
+  Timeout(Duration),
+}
+
+impl std::fmt::Display for Eval {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Eval::String(s) => write!(f, "string {s:?}"),
+      Eval::Exception(e) => write!(f, "exception {}", describe(e)),
+      Eval::NotString(v) => write!(f, "non-string result {}", describe(v)),
+      Eval::Timeout(d) => write!(f, "no answer within {d:?}"),
+    }
+  }
+}
+
+/// A short description of a value for the log.
+fn describe(v: &Value) -> String {
+  match v {
+    Value::Null => "null".into(),
+    Value::Bool(b) => format!("bool {b}"),
+    Value::Int(i) => format!("int {i}"),
+    Value::Double(d) => format!("double {d}"),
+    Value::String(s) => format!("{s:?}"),
+    Value::List(l) => {
+      format!(
+        "[{}]",
+        l.iter().map(describe).collect::<Vec<_>>().join(", ")
+      )
+    }
+    Value::Dict(m) => {
+      let mut keys: Vec<_> = m.iter().collect();
+      keys.sort_by(|a, b| a.0.cmp(b.0));
+      let parts: Vec<String> = keys
+        .into_iter()
+        .map(|(k, v)| format!("{k}: {}", describe(v)))
+        .collect();
+      format!("{{{}}}", parts.join(", "))
+    }
+    Value::Binary(b) => format!("{} bytes", b.len()),
+  }
+}
+
+impl Eval {
+  fn ok(self) -> Option<String> {
+    match self {
+      Eval::String(s) => Some(s),
+      _ => None,
+    }
+  }
+}
+
+/// Runs `script` in the page and waits up to `wait` for its result.
+async fn eval(win: &Window, script: &str, wait: Duration) -> Eval {
   let (tx, rx) = oneshot::channel::<Result<Value, Value>>();
   win.execute_js(
     script,
@@ -126,11 +185,22 @@ async fn eval_string(win: &Window, script: &str) -> Option<String> {
       let _ = tx.send(r);
     }),
   );
-  match tokio::time::timeout(Duration::from_secs(5), rx).await {
-    Ok(Ok(Ok(Value::String(s)))) => Some(s),
-    _ => None,
+  match tokio::time::timeout(wait, rx).await {
+    Ok(Ok(Ok(Value::String(s)))) => Eval::String(s),
+    Ok(Ok(Ok(other))) => Eval::NotString(other),
+    Ok(Ok(Err(e))) => Eval::Exception(e),
+    // The callback was dropped without an answer: as good as no answer.
+    Ok(Err(_)) | Err(_) => Eval::Timeout(wait),
   }
 }
+
+/// How long a script the scenario depends on (the secure-context check, the
+/// storage write and read) may take to answer once the page is up. A launch
+/// is a cold start: the renderer answers its first scripts in milliseconds on
+/// an idle machine, but on a loaded Windows runner they took 5-11 s to come
+/// back (measured with CPU contention on a 2-core VM), and the old 5 s bound
+/// read that as "no value" and quit before the write had run.
+const SCRIPT_WAIT: Duration = Duration::from_secs(30);
 
 /// `"<localStorage value>|<cookie value>"`, each "" when absent.
 const READ_JS: &str = r#"(() => {
@@ -184,27 +254,43 @@ fn e2e_main() {
       .load(&format!("{origin}/"));
 
     // Wait until the page's own origin answers (not about:blank or an error
-    // page). Polled rather than via on_page_load, which CEF doesn't fire.
+    // page). Polled rather than via on_page_load, which CEF doesn't fire. A
+    // poll sent while the first navigation commits can go unanswered; the
+    // next one follows its 5 s wait.
+    let started = Instant::now();
     let mut ready = false;
+    let mut polls = 0;
+    let mut unanswered = 0;
     if served {
       for _ in 0..100 {
-        if eval_string(&win, "location.origin").await.as_deref()
-          == Some(origin.as_str())
-        {
-          ready = true;
-          break;
+        polls += 1;
+        match eval(&win, "location.origin", Duration::from_secs(5)).await {
+          Eval::String(o) if o == origin => {
+            ready = true;
+            break;
+          }
+          Eval::Timeout(_) => unanswered += 1,
+          _ => {}
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
       }
     }
+    eprintln!(
+      "[e2e] page check: {} ms, {polls} polls, {unanswered} unanswered",
+      started.elapsed().as_millis()
+    );
     check(&format!("page loaded at {origin}"), ready);
     if ready && scheme.is_some() {
+      let t = Instant::now();
+      let result =
+        eval(&win, "String(window.isSecureContext)", SCRIPT_WAIT).await;
+      eprintln!(
+        "[e2e] isSecureContext ({} ms): {result}",
+        t.elapsed().as_millis()
+      );
       check(
         "custom-scheme page is a secure context",
-        eval_string(&win, "String(window.isSecureContext)")
-          .await
-          .as_deref()
-          == Some("true"),
+        result.ok().as_deref() == Some("true"),
       );
     }
     // Cookies are only used over loopback HTTP (see the module docs).
@@ -230,7 +316,13 @@ fn e2e_main() {
   return {read_js};
 }})()"#
           );
-          let got = eval_string(&win, &script).await.unwrap_or_default();
+          let t = Instant::now();
+          let result = eval(&win, &script, SCRIPT_WAIT).await;
+          eprintln!(
+            "[e2e] write script ({} ms): {result}",
+            t.elapsed().as_millis()
+          );
+          let got = result.ok().unwrap_or_default();
           let (ls, cookie) = split(&got);
           eprintln!("[e2e] wrote localStorage={ls:?} cookie={cookie:?}");
           check("localStorage write reads back", !value.is_empty() && ls == value);
@@ -244,7 +336,13 @@ fn e2e_main() {
           tokio::time::sleep(Duration::from_millis(1500)).await;
         }
         "read" => {
-          let got = eval_string(&win, read_js).await;
+          let t = Instant::now();
+          let result = eval(&win, read_js, SCRIPT_WAIT).await;
+          eprintln!(
+            "[e2e] read script ({} ms): {result}",
+            t.elapsed().as_millis()
+          );
+          let got = result.ok();
           check("read storage", got.is_some());
           let (ls, cookie) = split(&got.unwrap_or_default());
           eprintln!("[e2e] read localStorage={ls:?} cookie={cookie:?}");

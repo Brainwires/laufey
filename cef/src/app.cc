@@ -6,6 +6,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_launch_config.h"
+#include "laufey_menu.h"
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
@@ -18,6 +19,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 
 #ifdef __linux__
@@ -472,36 +474,41 @@ bool LaufeyHandler::OnJSDialog(CefRefPtr<CefBrowser> browser,
   std::string msg = message_text.ToString();
 
 #ifdef _WIN32
-  // Get the native window handle from CEF Views
+  // The window the dialog is modal to.
   HWND hwnd = nullptr;
   if (auto bv = CefBrowserView::GetForBrowser(browser)) {
     if (auto win = bv->GetWindow()) {
       hwnd = win->GetWindowHandle();
     }
   }
-
+  // ShowDialogWin brackets the modal with a ScopedNativeModalLoop, so CEF's
+  // tasks keep running while the dialog is open (this is TID_UI).
   if (dialog_type == JSDialogType::JSDIALOGTYPE_ALERT) {
-    std::wstring wmsg(msg.begin(), msg.end());
-    MessageBoxW(hwnd, wmsg.c_str(), L"Alert", MB_OK | MB_ICONINFORMATION);
+    laufey_common::ShowDialogWin(LAUFEY_DIALOG_ALERT, "Alert", msg, "", nullptr,
+                                 hwnd);
     callback->Continue(true, "");
     return true;
   }
   if (dialog_type == JSDialogType::JSDIALOGTYPE_CONFIRM) {
-    std::wstring wmsg(msg.begin(), msg.end());
-    int result = MessageBoxW(hwnd, wmsg.c_str(), L"Confirm",
-                             MB_OKCANCEL | MB_ICONQUESTION);
-    callback->Continue(result == IDOK, "");
+    int confirmed = laufey_common::ShowDialogWin(
+        LAUFEY_DIALOG_CONFIRM, "Confirm", msg, "", nullptr, hwnd);
+    callback->Continue(confirmed != 0, "");
     return true;
   }
   if (dialog_type == JSDialogType::JSDIALOGTYPE_PROMPT) {
-    std::wstring wmsg(msg.begin(), msg.end());
-    int result = MessageBoxW(hwnd, wmsg.c_str(), L"Prompt",
-                             MB_OKCANCEL | MB_ICONQUESTION);
-    callback->Continue(result == IDOK, default_prompt_text);
+    char* input = nullptr;
+    int confirmed = laufey_common::ShowDialogWin(
+        LAUFEY_DIALOG_PROMPT, "Prompt", msg, default_prompt_text.ToString(),
+        &input, hwnd);
+    std::string text = input ? input : "";
+    free(input);
+    callback->Continue(confirmed != 0, text);
     return true;
   }
 #elif defined(__APPLE__)
-  // macOS: use native NSAlert via helper in runtime_loader_mac.mm
+  // macOS: use native NSAlert via helper in runtime_loader_mac.mm. runModal
+  // is a nested loop on TID_UI: let CEF's tasks run inside it.
+  laufey_common::ScopedNativeModalLoop modal_loop;
   if (dialog_type == JSDialogType::JSDIALOGTYPE_ALERT) {
     ShowNativeJSDialog_Mac(0, msg, "");
     callback->Continue(true, "");
@@ -519,7 +526,9 @@ bool LaufeyHandler::OnJSDialog(CefRefPtr<CefBrowser> browser,
     return true;
   }
 #elif defined(__linux__)
-  // Linux: use GTK dialogs
+  // Linux: use GTK dialogs. gtk_dialog_run is a nested loop on TID_UI: let
+  // CEF's tasks run inside it.
+  laufey_common::ScopedNativeModalLoop modal_loop;
   if (dialog_type == JSDialogType::JSDIALOGTYPE_ALERT) {
     GtkWidget* dlg =
         gtk_message_dialog_new(nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
@@ -625,7 +634,7 @@ bool LaufeyHandler::OnProcessMessageReceived(
       if (callArgs && callArgs->GetSize() > 0 &&
           callArgs->GetType(0) == VTYPE_STRING) {
         std::string url = callArgs->GetString(0).ToString();
-        if (!url.empty()) {
+        if (IsAllowedExternalLinkUrl(url)) {
           LaufeyOpenExternalURL(url);
         }
       }

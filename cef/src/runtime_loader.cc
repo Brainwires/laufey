@@ -1699,7 +1699,7 @@ static void Backend_BounceDock_Win(void* data, int type) {
 
 // --- Tray (Windows) ---
 //
-// Shell_NotifyIcon + a hidden message-only window that receives
+// Shell_NotifyIcon + a hidden top-level window that receives
 // WM_TRAYICON (one per process). PNG → HICON via WIC.
 
 // --- Tray (Windows) ---
@@ -1709,7 +1709,7 @@ static void Backend_BounceDock_Win(void* data, int type) {
 
 uint32_t Backend_CreateTrayIcon_Win(void* /*data*/) {
   // Allocate the id synchronously; do the Shell_NotifyIcon setup on the
-  // UI thread so the message-only window is owned by the thread that
+  // UI thread so the hidden tray window is owned by the thread that
   // pumps messages for it.
   uint32_t tray_id = laufey_common::CreateTrayIconWin();
   CefPostTask(TID_UI,
@@ -2253,8 +2253,14 @@ static int Backend_ShowDialog(void* /*data*/, uint32_t /*window_id*/,
   return laufey_common::ShowDialogMac(dialog_type, title_str, message_str,
                                       default_str, out_input_value);
 #elif defined(__linux__)
-  return laufey_common::ShowDialogLinux(dialog_type, title_str, message_str,
-                                        default_str, out_input_value);
+  // GTK belongs to TID_UI: run the modal there (its nested loop keeps CEF's
+  // tasks running, see ShowDialogLinux) and wait for it.
+  int result = 0;
+  cef_invoke_sync([&] {
+    result = laufey_common::ShowDialogLinux(dialog_type, title_str, message_str,
+                                            default_str, out_input_value);
+  });
+  return result;
 #elif defined(_WIN32)
   return laufey_common::ShowDialogWin(dialog_type, title_str, message_str,
                                       default_str, out_input_value);

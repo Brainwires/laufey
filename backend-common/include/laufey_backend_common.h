@@ -166,9 +166,11 @@ int ShowDialogMac(int dialog_type, const std::string& title,
 #endif
 
 #ifdef _WIN32
+// `owner` is the HWND the dialog is modal to, or null for an unowned dialog.
+// Every string is shown as text (never passed to a shell or a script).
 int ShowDialogWin(int dialog_type, const std::string& title,
                   const std::string& message, const std::string& default_value,
-                  char** out_input_value);
+                  char** out_input_value, void* owner = nullptr);
 #endif
 
 #ifdef __linux__

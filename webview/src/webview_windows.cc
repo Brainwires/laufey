@@ -36,6 +36,7 @@
 
 #include <shlwapi.h>
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <map>
@@ -1397,39 +1398,38 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                       if (messageRaw)
                         CoTaskMemFree(messageRaw);
 
+                      // The page's text is shown as text (ShowDialogWin
+                      // never hands it to a shell), modal to this window.
+                      std::string msg = laufey_common::WideToUtf8(message);
                       if (kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT) {
-                        MessageBoxW(hwnd, message.c_str(), L"Alert",
-                                    MB_OK | MB_ICONINFORMATION);
+                        laufey_common::ShowDialogWin(LAUFEY_DIALOG_ALERT,
+                                                     "Alert", msg, "", nullptr,
+                                                     hwnd);
                         args->Accept();
                       } else if (kind ==
                                  COREWEBVIEW2_SCRIPT_DIALOG_KIND_CONFIRM) {
-                        int result =
-                            MessageBoxW(hwnd, message.c_str(), L"Confirm",
-                                        MB_OKCANCEL | MB_ICONQUESTION);
-                        if (result == IDOK) {
+                        if (laufey_common::ShowDialogWin(LAUFEY_DIALOG_CONFIRM,
+                                                         "Confirm", msg, "",
+                                                         nullptr, hwnd)) {
                           args->Accept();
                         }
                       } else if (kind ==
                                  COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT) {
-                        // For prompt, we need a custom dialog. Use a
-                        // simple approach with TaskDialog-style
-                        // input. WebView2 doesn't have a built-in way
-                        // to show prompt with input, so we accept
-                        // with the default.
                         LPWSTR defaultTextRaw = nullptr;
                         args->get_DefaultText(&defaultTextRaw);
                         std::wstring defaultText =
                             defaultTextRaw ? defaultTextRaw : L"";
                         if (defaultTextRaw)
                           CoTaskMemFree(defaultTextRaw);
-
-                        // Use a simple MessageBox for now — accept
-                        // with default text
-                        int result =
-                            MessageBoxW(hwnd, message.c_str(), L"Prompt",
-                                        MB_OKCANCEL | MB_ICONQUESTION);
-                        if (result == IDOK) {
-                          args->put_ResultText(defaultText.c_str());
+                        char* input = nullptr;
+                        if (laufey_common::ShowDialogWin(
+                                LAUFEY_DIALOG_PROMPT, "Prompt", msg,
+                                laufey_common::WideToUtf8(defaultText), &input,
+                                hwnd)) {
+                          std::wstring result =
+                              laufey_common::Utf8ToWide(input ? input : "");
+                          free(input);
+                          args->put_ResultText(result.c_str());
                           args->Accept();
                         }
                       } else if (kind ==
@@ -2687,7 +2687,7 @@ void WebView2Backend::SetDockBadge(const char* badge_or_null) {
 
 uint32_t WebView2Backend::CreateTrayIcon() {
   uint32_t tray_id = laufey_common::CreateTrayIconWin();
-  // The tray's message-only window must belong to the thread that pumps
+  // The tray's hidden window must belong to the thread that pumps
   // messages (this backend's UI thread): created on the caller's thread --
   // the runtime's, which never pumps -- it received no clicks or menu
   // requests at all, which is what made a tray-only app (no visible window)

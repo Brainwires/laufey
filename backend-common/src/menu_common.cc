@@ -4,6 +4,7 @@
 // the context-menu session and accelerator lookup. See laufey_menu.h.
 
 #include "laufey_menu.h"
+#include "laufey_ui_tasks.h"
 
 #include <atomic>
 #include <cctype>
@@ -334,7 +335,10 @@ void SetNativeModalLoopHook(NativeModalLoopHook hook) {
   g_modal_loop_hook.store(hook);
 }
 
-ScopedNativeModalLoop::ScopedNativeModalLoop() {
+ScopedNativeModalLoop::ScopedNativeModalLoop()
+    : on_ui_thread_(UiTaskDispatcher::Get().IsUiThread()) {
+  if (!on_ui_thread_)
+    return;
   if (g_modal_loop_depth++ == 0) {
     g_modal_loop_entered = g_modal_loop_hook.load();
     if (g_modal_loop_entered)
@@ -343,6 +347,8 @@ ScopedNativeModalLoop::ScopedNativeModalLoop() {
 }
 
 ScopedNativeModalLoop::~ScopedNativeModalLoop() {
+  if (!on_ui_thread_)
+    return;
   if (--g_modal_loop_depth == 0 && g_modal_loop_entered) {
     NativeModalLoopHook hook = g_modal_loop_entered;
     g_modal_loop_entered = nullptr;

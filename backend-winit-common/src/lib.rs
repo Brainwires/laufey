@@ -7,6 +7,7 @@ pub mod file_drop;
 pub mod notification;
 pub mod open_url;
 pub mod permission;
+mod prompt;
 pub mod tray;
 pub mod ui_tasks;
 pub mod window_api;
@@ -4474,105 +4475,17 @@ pub fn show_native_dialog(
   }
 }
 
-#[cfg(target_os = "macos")]
-fn show_prompt_dialog(
-  title: &str,
-  message: &str,
-  default_value: &str,
-) -> (bool, Option<String>) {
-  let script = format!(
-    "set result to display dialog \"{}\" default answer \"{}\" with title \"{}\" buttons {{\"Cancel\", \"OK\"}} default button \"OK\"\nreturn text returned of result",
-    message.replace('\\', "\\\\").replace('"', "\\\""),
-    default_value.replace('\\', "\\\\").replace('"', "\\\""),
-    title.replace('\\', "\\\\").replace('"', "\\\""),
-  );
-  match std::process::Command::new("osascript")
-    .arg("-e")
-    .arg(&script)
-    .output()
-  {
-    Ok(output) if output.status.success() => {
-      let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-      (true, Some(text))
-    }
-    _ => (false, None),
-  }
-}
-
-#[cfg(target_os = "windows")]
-fn show_prompt_dialog(
-  title: &str,
-  message: &str,
-  default_value: &str,
-) -> (bool, Option<String>) {
-  let script = format!(
-    r#"Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::InputBox('{}', '{}', '{}')"#,
-    message.replace('\'', "''"),
-    title.replace('\'', "''"),
-    default_value.replace('\'', "''"),
-  );
-  match std::process::Command::new("powershell")
-    .args(["-Command", &script])
-    .output()
-  {
-    Ok(output) if output.status.success() => {
-      let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-      if text.is_empty() {
-        (false, None)
-      } else {
-        (true, Some(text))
-      }
-    }
-    _ => (false, None),
-  }
-}
-
-#[cfg(target_os = "linux")]
-fn show_prompt_dialog(
-  title: &str,
-  message: &str,
-  default_value: &str,
-) -> (bool, Option<String>) {
-  match std::process::Command::new("zenity")
-    .args([
-      "--entry",
-      "--title",
-      title,
-      "--text",
-      message,
-      "--entry-text",
-      default_value,
-    ])
-    .output()
-  {
-    Ok(output) if output.status.success() => {
-      let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-      (true, Some(text))
-    }
-    _ => (false, None),
-  }
-}
-
-#[cfg(not(any(
-  target_os = "macos",
-  target_os = "windows",
-  target_os = "linux"
-)))]
-fn show_prompt_dialog(
-  _title: &str,
-  _message: &str,
-  default_value: &str,
-) -> (bool, Option<String>) {
-  (true, Some(default_value.to_string()))
-}
+// show_prompt_dialog: src/prompt.rs (no page text ever reaches a shell or a
+// script's source).
+use prompt::show_prompt_dialog;
 
 // --- Native clipboard implementation ---
 //
 // The winit/servo backends have no web engine, so clipboard access goes
-// through each platform's standard command-line clipboard tools, mirroring the
-// subprocess approach used for native dialogs above. These tools
+// through each platform's standard command-line clipboard tools. These tools
 // (pbcopy/pbpaste, clip/PowerShell, wl-clipboard/xclip) ship with — or are
-// conventional on — a default desktop install of each platform.
+// conventional on — a default desktop install of each platform. Each is run
+// with fixed arguments; the clipboard text only ever travels on stdin/stdout.
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn pipe_to_command(

@@ -894,6 +894,12 @@ that it says so). See [menus.md](menus.md) and
   mode); then Escape dismisses one menu and Down + Return chooses the first item
   of the next, injected with `SendInput`. N/A where the window can't take the
   foreground.
+- **Windows: the app runs while a tray menu is open** (WebView2 / CEF, their
+  shared `tray_win.cc`): the tray menu is opened by posting the right-click to
+  the tray's hidden top-level window as `Shell_NotifyIcon` delivers it, and its
+  `#32768` popup must be visible; while it is open the same three checks as for
+  the context menu hold; `WM_CANCELMODE` to the tray window closes it with no
+  click.
 - **Responses**: a click before any response handler is buffered, then delivered
   with `launch: true` when the handler registers; later ones arrive directly
   with `launch: false`.

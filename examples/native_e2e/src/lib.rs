@@ -2471,25 +2471,12 @@ async fn hidpi_checks(w: &Window, title: &str, scale: f64) {
 /// A tray-only app: with no window at all, a click on the tray icon still
 /// reaches the app (denoland/deno#36778 reported dead tray clicks once the
 /// host window was hidden on WebView2). The click is posted to the tray's
-/// message-only window exactly as Shell_NotifyIcon delivers it, so the
+/// hidden top-level window exactly as Shell_NotifyIcon delivers it, so the
 /// message path under test is the shipping one; only the OS-side click is
 /// synthesized. Windows WebView2 / CEF only (their shared tray_win.cc).
 #[cfg(target_os = "windows")]
 async fn tray_click_with_no_window() {
-  #[link(name = "user32")]
-  extern "system" {
-    fn FindWindowExW(
-      parent: isize,
-      child_after: isize,
-      class: *const u16,
-      window: *const u16,
-    ) -> isize;
-    fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize)
-      -> i32;
-  }
-  const HWND_MESSAGE: isize = -3;
-  const WM_APP: u32 = 0x8000;
-  const WM_LBUTTONUP: isize = 0x0202;
+  use menu_notification_checks::win;
   let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
   if backend != "webview" && backend != "cef" {
     na("tray click with no window (Windows WebView2 / CEF tray only)");
@@ -2506,27 +2493,25 @@ async fn tray_click_with_no_window() {
     check("tray created with no window open", false);
     return;
   }
-  let class: Vec<u16> = "LaufeyCommonTrayWindow\0".encode_utf16().collect();
-  let find = || unsafe {
-    FindWindowExW(HWND_MESSAGE, 0, class.as_ptr(), std::ptr::null())
-  };
   // CEF creates it on its UI thread after create_tray_icon returns.
-  let _ = wait_for(|| find() != 0, 100, 50).await;
-  let hwnd = find();
-  check("tray message window exists with no window open", hwnd != 0);
-  if hwnd == 0 {
+  let _ = wait_for(|| !win::tray_window().is_null(), 100, 50).await;
+  let hwnd = win::tray_window();
+  check("tray window exists with no window open", !hwnd.is_null());
+  if hwnd.is_null() {
     return;
   }
-  // WM_LAUFEY_COMMON_TRAYICON (tray_win.cc): wParam = tray id, LOWORD(lParam)
-  // = the mouse message. The click handler is installed on the UI thread
-  // asynchronously (CEF posts it as a task, which may run after a window
-  // message posted now), so re-post until it lands.
+  // The click handler is installed on the UI thread asynchronously (CEF
+  // posts it as a task, which may run after a window message posted now),
+  // so re-post until it lands.
   let mut posted = false;
   let mut reached = false;
   for _ in 0..20 {
-    posted |= unsafe {
-      PostMessageW(hwnd, WM_APP + 65, tray.id() as usize, WM_LBUTTONUP)
-    } != 0;
+    posted |= win::post(
+      hwnd,
+      win::WM_TRAYICON,
+      tray.id() as usize,
+      win::WM_LBUTTONUP,
+    );
     if wait_for(|| clicked.load(Ordering::SeqCst), 10, 50).await {
       reached = true;
       break;

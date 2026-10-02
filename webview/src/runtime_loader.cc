@@ -1761,7 +1761,7 @@ void RuntimeLoader::PollPendingJsCalls() {
           url = list[0]->GetString();
         }
       }
-      if (!url.empty()) {
+      if (IsAllowedExternalLinkUrl(url)) {
         if (LaufeyBackend* backend = GetBackend()) {
           backend->OpenExternalURL(url);
         }
