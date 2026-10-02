@@ -91,11 +91,15 @@ fn e2e_main() {
       );
     }
 
+    let launched = Instant::now();
     let seen = Arc::new(Mutex::new(Seen::default()));
     {
       let seen = seen.clone();
       laufey::on_second_instance(move |args, cwd| {
-        eprintln!("[e2e] second_instance args={args:?} cwd={cwd:?}");
+        eprintln!(
+          "[e2e] second_instance after {} ms: args={args:?} cwd={cwd:?}",
+          launched.elapsed().as_millis()
+        );
         seen
           .lock()
           .unwrap()
@@ -114,7 +118,7 @@ fn e2e_main() {
     let win = Window::new(360, 240).title("single-instance-e2e");
     // A beat for the window to appear before announcing readiness.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    eprintln!("[e2e] ready");
+    eprintln!("[e2e] ready ({} ms)", launched.elapsed().as_millis());
     let _ = std::io::stderr().flush();
 
     let second_want = expected_args("LAUFEY_E2E_SI_SECOND");

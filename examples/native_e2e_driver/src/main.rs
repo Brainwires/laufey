@@ -171,6 +171,15 @@ mod linux {
     let mut props = HashMap::new();
     if let Value::Dict(d) = &fields[1] {
       for (k, val) in d.iter() {
+        // a{sv}: read through the variant to the value itself.
+        let val = match val {
+          Value::Value(inner) => inner.as_ref(),
+          other => other,
+        };
+        let k = match k {
+          Value::Value(inner) => inner.as_ref(),
+          other => other,
+        };
         if let Value::Str(k) = k {
           if let Ok(ov) = OwnedValue::try_from(val.clone()) {
             props.insert(k.to_string(), ov);
@@ -299,6 +308,11 @@ mod linux {
     let mut labels = Vec::new();
     collect_labels(&root_node, &mut labels);
     eprintln!("[e2e] dbusmenu labels: {labels:?}");
+    if labels.is_empty() {
+      for c in &root_node.children {
+        eprintln!("[e2e] dbusmenu item {}: {:?}", c.id, c.props);
+      }
+    }
     check("menu has children", !root_node.children.is_empty(), failed);
 
     if let Some(target) = find_by_label(&root_node, "Ping") {
