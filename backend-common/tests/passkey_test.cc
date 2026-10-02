@@ -739,6 +739,50 @@ static void TestTimeout() {
   EXPECT(CountOf(r2) == 1 && HasCode(LastOf(r2), "cancelled"));
 }
 
+// The timeout thread and the OS's answer race on every iteration: exactly
+// one answer is delivered, the slot frees, and nothing touches the ceremony
+// after its last reference is gone. Finish / Abort notify cv_ after
+// unlocking, unlike the stack-frame rendezvous of laufey_sync_call.h, and
+// that is safe here only because cv_ is a member of a heap object that every
+// notifier holds a reference to (the timeout thread its own `self`, a backend
+// its shared_ptr), so the waiter returning can't destroy it. The `tsan` CI
+// job runs this under ThreadSanitizer to keep it that way.
+static void TestTimeoutRacesFinish() {
+  constexpr int kRounds = 400;
+  // Kept alive to the end: a losing timeout thread may still be returning
+  // from its (dropped) Abort when the round ends.
+  static Recorder recorders[kRounds];
+  for (int i = 0; i < kRounds; ++i) {
+    Recorder& r = recorders[i];
+    auto c = PasskeyBegin(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r);
+    EXPECT(c);
+    c->SetCanceller([] {});
+    c->StartTimeout(static_cast<uint32_t>(i % 3));
+    // The OS answers from another thread, which then drops its reference;
+    // ours is dropped first on odd rounds, so either side can be the last.
+    std::thread os([c, i]() mutable {
+      if (i % 4 == 0)
+        std::this_thread::sleep_for(std::chrono::microseconds(i % 7 * 100));
+      c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+      c.reset();
+    });
+    if (i % 2)
+      c.reset();
+    os.join();
+    c.reset();
+    for (int k = 0; k < 500 && CountOf(r) == 0; ++k)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT(CountOf(r) == 1);
+    EXPECT(HasCode(LastOf(r), "cancelled") || HasCode(LastOf(r), "timeout"));
+    // Finish ran on every round, so the slot is free for the next one.
+    EXPECT(!PasskeyBusyForTesting());
+  }
+  // Let the last timeout threads exit before the recorders' lifetime ends.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  for (int i = 0; i < kRounds; ++i)
+    EXPECT(CountOf(recorders[i]) == 1);
+}
+
 static void TestWindowClosing() {
   Recorder r;
   int a = 0, b = 0;
@@ -816,6 +860,7 @@ int main() {
   TestAbortKeepsSlotUntilFinish();
   TestCancellerInstalledAfterAbort();
   TestTimeout();
+  TestTimeoutRacesFinish();
   TestWindowClosing();
   TestDroppedCeremonyStillAnswers();
   TestConcurrentBegin();

@@ -214,6 +214,16 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_passkey_test COMMAND laufey_passkey_test)
 
+  # The rendezvous behind the synchronous UI-thread calls (laufey_sync_call.h)
+  # under load; the `tsan` CI job also runs it under ThreadSanitizer.
+  add_executable(laufey_sync_call_test tests/sync_call_test.cc)
+  target_link_libraries(laufey_sync_call_test PRIVATE
+    laufey_backend_common
+    Threads::Threads
+  )
+  add_test(NAME laufey_sync_call_test COMMAND laufey_sync_call_test)
+  set_tests_properties(laufey_sync_call_test PROPERTIES TIMEOUT 300)
+
   # Window-state bookkeeping: state diffing, size constraints, normal-bounds
   # settling, screen matching and the app-lifetime flags (no OS API).
   add_executable(laufey_window_state_test tests/window_state_test.cc)

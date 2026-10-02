@@ -93,6 +93,50 @@ jobs:
             -o "$RUNNER_TEMP/single_instance_test"
           "$RUNNER_TEMP/single_instance_test"
 
+  # The cross-thread rendezvous behind the synchronous UI-thread calls
+  # (backend-common/include/laufey_sync_call.h: cef_invoke_sync,
+  # gtk_invoke_sync, GtkRunSync, WinIoInit) and the passkey ceremony's
+  # timeout thread, under ThreadSanitizer: a notify after the waiter may have
+  # destroyed its condition variable is reported as a data race on the first
+  # call it happens to, where a plain run only hangs now and then.
+  tsan:
+    name: ThreadSanitizer (backend-common)
+    runs-on: ubuntu-24.04
+    env:
+      TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v7
+      # The runner kernel randomizes mmap with 32 bits, which ThreadSanitizer's
+      # shadow memory layout doesn't support ("unexpected memory mapping").
+      - name: Allow ThreadSanitizer's memory layout
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: sync_call_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include \
+            backend-common/tests/sync_call_test.cc -o "$RUNNER_TEMP/sync_call_test"
+          "$RUNNER_TEMP/sync_call_test"
+      - name: passkey_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/passkey_test.cc backend-common/src/passkey.cc \
+            backend-common/src/single_instance.cc \
+            backend-common/src/single_instance_posix.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/passkey_test"
+          "$RUNNER_TEMP/passkey_test"
+      - name: single_instance_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/single_instance_test.cc \
+            backend-common/src/single_instance.cc \
+            backend-common/src/single_instance_posix.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/single_instance_test"
+          "$RUNNER_TEMP/single_instance_test"
+
   build-winit:
     name: winit / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
