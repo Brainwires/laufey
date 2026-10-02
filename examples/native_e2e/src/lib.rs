@@ -711,6 +711,7 @@ fn e2e_main() {
     // (both end the process, so they can't share the main battery's run).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("lifetime") {
       lifetime_checks().await;
+      return;
     }
     // LAUFEY_E2E_ONLY=io: drag and drop, file dialogs and the rich clipboard
     // (API 39); runs on every backend, webview/linux included.
@@ -1835,6 +1836,9 @@ fn e2e_main() {
     let _ = (&win, &body_win, &stream_win);
     finish();
   });
+  // Only the lifetime checks get here: the runtime ends like a real one,
+  // without waiting for tasks that never finish (the event pump).
+  rt.shutdown_timeout(std::time::Duration::from_secs(2));
 }
 
 // ---- Window state, constraints, screens, chrome (API >= 38) ---------------
@@ -2523,7 +2527,7 @@ async fn tray_click_with_no_window() {
 /// LAUFEY_E2E_ONLY=lifetime. Ends the process: keep-alive with no window,
 /// then quit(), which must end the event loop (the backend then calls the
 /// runtime's shutdown, observed here through `should_shutdown`).
-async fn lifetime_checks() -> ! {
+async fn lifetime_checks() {
   let caps = laufey::window_capabilities();
   if caps.keep_alive() {
     laufey::set_quit_on_last_window_closed(false);
@@ -2556,14 +2560,78 @@ async fn lifetime_checks() -> ! {
   // first (which a closed last window above can schedule).
   let open_at_quit = Window::new(300, 200).title("native-e2e-lifetime-3");
   let _ = wait_for(|| open_at_quit.get_size().0 != 0, 100, 50).await;
+  // quit() from any thread: from the UI thread and, at the same time, from
+  // this one (a tokio worker, like a runtime's own thread). The UI loop must
+  // end on the UI thread either way, and the runtime be shut down once.
+  let from_ui = laufey::spawn_on_ui_thread(laufey::quit);
   laufey::quit();
   let ended = wait_for(laufey::should_shutdown, 300, 50).await;
   check(
     "quit() ends the event loop (runtime shutdown begins)",
     ended,
   );
-  // Report before the backend's teardown can race the exit code.
-  finish();
+  let _ =
+    tokio::time::timeout(std::time::Duration::from_secs(2), from_ui).await;
+  tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+  let calls = SHUTDOWN_CALLS.load(Ordering::SeqCst);
+  check(
+    &format!("the runtime is shut down exactly once (got {calls})"),
+    calls == 1,
+  );
+  // Then return instead of exiting: the backend must join this thread and
+  // end the process itself. On Unix an atexit guard checks that the process
+  // only exits after laufey_runtime_start returned (see exit_guard).
+  let failed = FAILED.load(Ordering::SeqCst);
+  eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
+  let _ = std::io::Write::flush(&mut std::io::stderr());
+  if failed {
+    unsafe { libc_exit(1) };
+  }
+  exit_guard::arm();
+}
+
+/// The runtime's own end of the app lifetime (LAUFEY_E2E_ONLY=lifetime): the
+/// backend calls laufey_runtime_shutdown, joins the runtime thread (whose
+/// laufey_runtime_start then returns) and only then ends the process.
+static SHUTDOWN_CALLS: std::sync::atomic::AtomicU32 =
+  std::sync::atomic::AtomicU32::new(0);
+static RUNTIME_RETURNED: AtomicBool = AtomicBool::new(false);
+
+mod exit_guard {
+  use std::sync::atomic::Ordering;
+
+  /// Unix: at process exit, FAIL unless laufey_runtime_start has returned
+  /// (the backend waited for the runtime thread) and the runtime was shut
+  /// down exactly once. A backend that returns from main, or calls exit(),
+  /// under a running runtime fails here instead of exiting 0.
+  #[cfg(unix)]
+  pub fn arm() {
+    extern "C" fn guard() {
+      let returned = super::RUNTIME_RETURNED.load(Ordering::SeqCst);
+      let calls = super::SHUTDOWN_CALLS.load(Ordering::SeqCst);
+      if returned && calls == 1 {
+        eprintln!(
+          "[e2e] PASS the process exits after the runtime returned \
+           (shutdown called once)"
+        );
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        return;
+      }
+      eprintln!(
+        "[e2e] FAIL the process exited under the runtime \
+         (laufey_runtime_start returned: {returned}, shutdown calls: {calls})"
+      );
+      let _ = std::io::Write::flush(&mut std::io::stderr());
+      unsafe { super::libc_exit(1) };
+    }
+    extern "C" {
+      fn atexit(f: extern "C" fn()) -> i32;
+    }
+    unsafe { atexit(guard) };
+  }
+
+  #[cfg(not(unix))]
+  pub fn arm() {}
 }
 
 /// The `code` of an error envelope, or "ok" for a credential.
@@ -2770,4 +2838,28 @@ extern "C" {
   fn libc_exit(code: i32) -> !;
 }
 
-laufey::main!(e2e_main);
+// laufey::main!(e2e_main), with the lifetime checks' bookkeeping: how often
+// the backend shuts the runtime down, and whether laufey_runtime_start has
+// returned.
+#[no_mangle]
+/// # Safety
+/// `api` must be either null or a valid pointer to a `LaufeyBackendApi`
+/// with static lifetime supplied by the host runtime.
+pub unsafe extern "C" fn laufey_runtime_init(
+  api: *const laufey::LaufeyBackendApi,
+) -> std::ffi::c_int {
+  unsafe { laufey::init_api(api) }
+}
+
+#[no_mangle]
+pub extern "C" fn laufey_runtime_start() -> std::ffi::c_int {
+  e2e_main();
+  RUNTIME_RETURNED.store(true, Ordering::SeqCst);
+  0
+}
+
+#[no_mangle]
+pub extern "C" fn laufey_runtime_shutdown() {
+  SHUTDOWN_CALLS.fetch_add(1, Ordering::SeqCst);
+  laufey::shutdown();
+}
