@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "laufey_scheme_cancel.h"
 #include "runtime_loader.h"
 #include "scheme_exchange.h"
 
@@ -46,6 +47,10 @@ constexpr size_t kCreditWindow = 4 * 1024 * 1024;
 constexpr size_t kMaxQueued = 64 * 1024 * 1024;
 // Payload bytes per posted message (base64 makes it 4/3 larger).
 constexpr size_t kMessageBytes = 192 * 1024;
+// A response answered in one piece is held whole until it finishes (WebView2
+// reads it to its end before the page sees any of it). Past this it fails
+// instead of growing without bound (a response that never ends).
+constexpr size_t kMaxBuffered = 512 * 1024 * 1024;
 
 StreamHooks g_hooks;
 
@@ -228,6 +233,123 @@ void StartTimer(UINT ms, std::function<void()> fn) {
     Timers()[id] = std::move(fn);
 }
 
+// A read-only IStream over a body this stream owns: hands a buffered
+// response to WebView2 without copying it (SHCreateMemStream copies, which
+// held every buffered body twice).
+class BodyStream
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          Microsoft::WRL::ChainInterfaces<IStream, ISequentialStream>> {
+ public:
+  explicit BodyStream(std::vector<uint8_t> body) : body_(std::move(body)) {}
+
+  // ISequentialStream
+  STDMETHODIMP Read(void* pv, ULONG cb, ULONG* pcbRead) override {
+    if (!pv)
+      return STG_E_INVALIDPOINTER;
+    size_t left = pos_ < body_.size() ? body_.size() - pos_ : 0;
+    ULONG n = static_cast<ULONG>((std::min)(static_cast<size_t>(cb), left));
+    if (n)
+      memcpy(pv, body_.data() + pos_, n);
+    pos_ += n;
+    if (pcbRead)
+      *pcbRead = n;
+    return n < cb ? S_FALSE : S_OK;
+  }
+  STDMETHODIMP Write(const void*, ULONG, ULONG*) override {
+    return STG_E_ACCESSDENIED;
+  }
+
+  // IStream
+  STDMETHODIMP Seek(LARGE_INTEGER move, DWORD origin,
+                    ULARGE_INTEGER* new_pos) override {
+    LONGLONG base;
+    switch (origin) {
+      case STREAM_SEEK_SET:
+        base = 0;
+        break;
+      case STREAM_SEEK_CUR:
+        base = static_cast<LONGLONG>(pos_);
+        break;
+      case STREAM_SEEK_END:
+        base = static_cast<LONGLONG>(body_.size());
+        break;
+      default:
+        return STG_E_INVALIDFUNCTION;
+    }
+    LONGLONG target = base + move.QuadPart;
+    if (target < 0)
+      return STG_E_INVALIDFUNCTION;
+    pos_ = static_cast<size_t>(target);
+    if (new_pos)
+      new_pos->QuadPart = static_cast<ULONGLONG>(pos_);
+    return S_OK;
+  }
+  STDMETHODIMP SetSize(ULARGE_INTEGER) override {
+    return STG_E_ACCESSDENIED;
+  }
+  STDMETHODIMP CopyTo(IStream* to, ULARGE_INTEGER cb, ULARGE_INTEGER* read,
+                      ULARGE_INTEGER* written) override {
+    if (!to)
+      return STG_E_INVALIDPOINTER;
+    size_t left = pos_ < body_.size() ? body_.size() - pos_ : 0;
+    size_t n = static_cast<size_t>(
+        (std::min)(cb.QuadPart, static_cast<ULONGLONG>(left)));
+    size_t done = 0;
+    HRESULT hr = S_OK;
+    while (done < n) {
+      ULONG chunk = static_cast<ULONG>((std::min)(n - done, size_t{1} << 30));
+      ULONG wrote = 0;
+      hr = to->Write(body_.data() + pos_ + done, chunk, &wrote);
+      done += wrote;
+      if (FAILED(hr) || wrote == 0)
+        break;
+    }
+    pos_ += done;
+    if (read)
+      read->QuadPart = done;
+    if (written)
+      written->QuadPart = done;
+    return hr;
+  }
+  STDMETHODIMP Commit(DWORD) override {
+    return S_OK;
+  }
+  STDMETHODIMP Revert() override {
+    return S_OK;
+  }
+  STDMETHODIMP LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override {
+    return STG_E_INVALIDFUNCTION;
+  }
+  STDMETHODIMP UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override {
+    return STG_E_INVALIDFUNCTION;
+  }
+  STDMETHODIMP Stat(STATSTG* stat, DWORD) override {
+    if (!stat)
+      return STG_E_INVALIDPOINTER;
+    *stat = {};
+    stat->type = STGTY_STREAM;
+    stat->cbSize.QuadPart = body_.size();
+    stat->grfMode = STGM_READ;
+    return S_OK;
+  }
+  STDMETHODIMP Clone(IStream** out) override {
+    if (!out)
+      return STG_E_INVALIDPOINTER;
+    // A copy only when asked for one (WebView2 reads the original).
+    auto clone = Microsoft::WRL::Make<BodyStream>(body_);
+    if (!clone)
+      return E_OUTOFMEMORY;
+    clone->pos_ = pos_;
+    *out = clone.Detach();
+    return S_OK;
+  }
+
+ private:
+  std::vector<uint8_t> body_;
+  size_t pos_ = 0;
+};
+
 class Exchange;
 
 // Every live exchange, by creation sequence, and the tagged ones by id. The
@@ -297,11 +419,17 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
   intptr_t WriteResponse(const uint8_t* buf, size_t len) {
     bool schedule = false;
     bool overflow = false;
+    bool overflow_pending = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (cancelled_)
         return -1;
-      body_.insert(body_.end(), buf, buf + len);
+      if (mode_ == Mode::kPending && body_.size() + len > kMaxBuffered) {
+        overflow_pending = true;
+        cancelled_ = true;
+      } else {
+        body_.insert(body_.end(), buf, buf + len);
+      }
       if (mode_ == Mode::kPush) {
         if (body_.size() > kMaxQueued) {
           overflow = true;
@@ -313,6 +441,10 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
       }
     }
     auto self = shared_from_this();
+    if (overflow_pending) {
+      g_hooks.run_on_ui([self] { self->FailPending(); });
+      return -1;
+    }
     if (overflow) {
       g_hooks.run_on_ui([self] {
         self->Fail("laufey: the page is not reading this response");
@@ -343,18 +475,45 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
   // The whole response is here: hand it to WebView2 in one piece.
   void CompleteBuffered() {
     std::vector<uint8_t> body;
-    int status;
+    int status = 0;
     std::vector<std::pair<std::string, std::string>> headers;
+    bool no_head;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (mode_ != Mode::kPending)
         return;
       mode_ = Mode::kBuffered;
-      body.swap(body_);
-      status = status_;
-      headers = headers_;
+      // Finished without a head: there is no response to give, and the
+      // request fails (as on the other backends).
+      no_head = !began_;
+      if (no_head) {
+        cancelled_ = true;
+        body_.clear();
+      } else {
+        body.swap(body_);
+        status = status_;
+        headers = headers_;
+      }
     }
-    Respond(status, headers, body.empty() ? nullptr : body.data(), body.size());
+    if (no_head)
+      CompleteWithoutResponse();
+    else
+      Respond(status, headers, std::move(body));
+    Unregister();
+  }
+
+  // A response still answered in one piece outgrew kMaxBuffered: the
+  // request fails. UI thread.
+  void FailPending() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (mode_ != Mode::kPending)
+        return;
+      mode_ = Mode::kBuffered;
+      body_.clear();
+      body_.shrink_to_fit();
+    }
+    CompleteWithoutResponse();
     Unregister();
   }
 
@@ -379,7 +538,7 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
       }
     }
     headers.emplace_back("x-laufey-stream", "push");
-    Respond(status, headers, nullptr, 0);
+    Respond(status, headers, {});
     auto self = shared_from_this();
     StartTimer(kAttachTimeoutMs, [self] {
       bool attached;
@@ -458,7 +617,8 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
     }
   }
 
-  // Stop: the runtime's next write fails, nothing more reaches the page.
+  // Stop: the runtime's next write fails, nothing more reaches the page,
+  // and the runtime hears of it (on_cancel) unless it finished already.
   void Cancel() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -467,6 +627,22 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
       body_.shrink_to_fit();
     }
     Unregister();
+    SchemeExchangeBase* handle = handle_;
+    if (handle) {
+      gate_.Cancel([handle] {
+        RuntimeLoader::GetInstance()->DispatchSchemeCancel(handle);
+      });
+    }
+  }
+
+  // What the runtime holds for this exchange (set before the runtime sees
+  // it; valid until FinishedByRuntime).
+  void set_handle(SchemeExchangeBase* handle) {
+    handle_ = handle;
+  }
+  // The runtime finished the exchange: no on_cancel from now on.
+  void FinishedByRuntime() {
+    gate_.Finish();
   }
 
   // Cancel, telling an attached page why. Also after the overflow check in
@@ -492,9 +668,9 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
 
   void Respond(int status,
                const std::vector<std::pair<std::string, std::string>>& headers,
-               const uint8_t* body, size_t len) {
-    ComPtr<IStream> stream;
-    stream.Attach(SHCreateMemStream(body, static_cast<UINT>(len)));
+               std::vector<uint8_t> body) {
+    // The stream takes the body: no second copy of it.
+    ComPtr<IStream> stream = Microsoft::WRL::Make<BodyStream>(std::move(body));
     std::wstring headers_w;
     for (const auto& [k, v] : headers)
       headers_w += Utf8ToWide(k) + L": " + Utf8ToWide(v) + L"\r\n";
@@ -509,6 +685,17 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
     deferral_->Complete();
     // WebView2 holds what it needs; drop the event objects now rather than
     // with the (possibly long-lived) exchange.
+    deferral_.Reset();
+    args_.Reset();
+    env_.Reset();
+  }
+
+  // Lets the request go on with no response from the handler: WebView2 has
+  // nothing to load a registered scheme from, so the page's request fails
+  // (a network error, as a cancel is on the other backends).
+  void CompleteWithoutResponse() {
+    if (deferral_)
+      deferral_->Complete();
     deferral_.Reset();
     args_.Reset();
     env_.Reset();
@@ -534,6 +721,8 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
   std::vector<uint8_t> request_body_;
   size_t req_cursor_ = 0;
 
+  SchemeExchangeBase* handle_ = nullptr;
+  laufey_common::SchemeCancelGate gate_;
   std::mutex mutex_;
   Mode mode_ = Mode::kPending;
   int status_ = 200;
@@ -564,6 +753,7 @@ class ExchangeHandle : public SchemeExchangeBase {
     return x_->WriteResponse(buf, len);
   }
   void Finish() override {
+    x_->FinishedByRuntime();
     x_->Finish();
     delete this;
   }
@@ -715,8 +905,10 @@ HRESULT HandleSchemeRequest(ICoreWebView2Environment* env,
 
     std::string flat = LaufeyFlattenHeaders(headers);
     // window_id is unused by the desktop bridge (single named channel).
-    RuntimeLoader::GetInstance()->DispatchSchemeRequest(
-        0, new ExchangeHandle(exchange), method, url, flat);
+    auto* handle = new ExchangeHandle(exchange);
+    exchange->set_handle(handle);
+    RuntimeLoader::GetInstance()->DispatchSchemeRequest(0, handle, method, url,
+                                                        flat);
     return S_OK;
   } catch (...) {
     return S_OK;

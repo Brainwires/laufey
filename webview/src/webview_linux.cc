@@ -14,8 +14,9 @@
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_scheme_body_stream.h"
+#include "laufey_scheme_cancel.h"
 #include "laufey_scheme_registry.h"
-#include "laufey_sync_call.h"
+#include "laufey_ui_tasks.h"
 #include "init_script.h"
 #include <webkit2/webkit2.h>
 #include <JavaScriptCore/JavaScript.h>
@@ -32,30 +33,17 @@
 #include <mutex>
 #include <set>
 
-// Helper to run a callback synchronously on the GTK main thread.
-// If already on the main thread, runs immediately.
+// Runs `fn` synchronously on the GTK main thread (inline when already
+// there). Through the UI task dispatcher (laufey_ui_tasks.h), so a call never
+// outlives the loop: false when `fn` did not run because the loop had ended,
+// and the caller answers with its defaults.
 template <typename F>
-static void gtk_invoke_sync(F&& fn) {
+static bool gtk_invoke_sync(F&& fn) {
   if (g_main_context_is_owner(g_main_context_default())) {
     fn();
-    return;
+    return true;
   }
-  // `ctx` lives in this frame; Done() is the idle callback's last access to
-  // it (laufey_sync_call.h).
-  struct Ctx {
-    F* fn;
-    laufey_common::SyncCall call;
-  };
-  Ctx ctx{&fn, {}};
-  g_idle_add(
-      [](gpointer data) -> gboolean {
-        auto* c = static_cast<Ctx*>(data);
-        (*c->fn)();
-        c->call.Done();
-        return G_SOURCE_REMOVE;
-      },
-      &ctx);
-  ctx.call.Wait();
+  return laufey_common::RunOnUiThreadAndWait(fn);
 }
 
 namespace keyboard {
@@ -755,7 +743,7 @@ class WebKitGTKBackend : public LaufeyBackend {
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
   void Focus(uint32_t window_id) override;
-  void PostUiTask(void (*task)(void*), void* data) override;
+  bool PostUiTask(void (*task)(void*), void* data) override;
   void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                                 void* user_data) override {
     laufey_common::SetSecondInstanceHandler(handler, user_data);
@@ -867,6 +855,11 @@ class WebKitGTKBackend : public LaufeyBackend {
 
   void HandleJsMessage(uint32_t window_id, const char* json);
 
+  // Drops the state of a window GTK destroyed on its own (the user closed it:
+  // delete-event fell through to GTK's default handler). CloseWindow() drops
+  // the state itself and never reaches this. GTK thread.
+  void ForgetDestroyedWindow(uint32_t window_id);
+
  private:
   LinuxWindowState* GetWindow(uint32_t window_id);
 
@@ -904,9 +897,19 @@ static void on_script_message(WebKitUserContentManager* manager,
 // "destroy" fires only after the widget is already being torn down -- too
 // late to veto anything, so it's just final cleanup. The close-requested
 // dispatch (and any veto) happens earlier, from "delete-event" below.
+//
+// A window CloseWindow() closes is unregistered (and its state dropped) before
+// gtk_widget_destroy, so `wid` is 0 here for it -- which also keeps this
+// handler from taking windows_mutex_, which CloseWindow holds while it
+// destroys. A window the user closed still has its id: its state goes here,
+// or every later call naming it would reach the destroyed widgets.
 static void on_window_destroy(GtkWidget* widget, gpointer user_data) {
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid > 0) {
+    // Lock order windows_mutex_ -> g_widget_mutex: the two are taken one
+    // after the other here, never nested.
+    if (g_gtk_backend)
+      g_gtk_backend->ForgetDestroyedWindow(wid);
     UnregisterWidget(widget);
     laufey_common::ForgetWindow(wid);
   }
@@ -951,6 +954,17 @@ WebKitGTKBackend::~WebKitGTKBackend() {
   }
   windows_.clear();
   g_gtk_backend = nullptr;
+}
+
+void WebKitGTKBackend::ForgetDestroyedWindow(uint32_t window_id) {
+  std::lock_guard<std::mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  if (!state)
+    return;
+  webkit_user_content_manager_unregister_script_message_handler(
+      state->content_manager, "laufey");
+  g_content_manager_to_laufey_id.erase(state->content_manager);
+  windows_.erase(window_id);
 }
 
 LinuxWindowState* WebKitGTKBackend::GetWindow(uint32_t window_id) {
@@ -1931,7 +1945,7 @@ void WebKitGTKBackend::Focus(uint32_t window_id) {
   });
 }
 
-void WebKitGTKBackend::PostUiTask(void (*task)(void*), void* data) {
+bool WebKitGTKBackend::PostUiTask(void (*task)(void*), void* data) {
   struct TaskData {
     void (*task)(void*);
     void* data;
@@ -1945,6 +1959,7 @@ void WebKitGTKBackend::PostUiTask(void (*task)(void*), void* data) {
         return G_SOURCE_REMOVE;
       },
       td);
+  return true;
 }
 
 void WebKitGTKBackend::InvokeJsCallback(uint32_t window_id,
@@ -2465,7 +2480,19 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
                       std::vector<uint8_t> request_body)
       : request_(WEBKIT_URI_SCHEME_REQUEST(g_object_ref(request))),
         request_body_(std::move(request_body)),
-        body_(std::make_shared<laufey_common::SchemeBodyWriter>()) {}
+        body_(std::make_shared<laufey_common::SchemeBodyWriter>()),
+        gate_(std::make_shared<laufey_common::SchemeCancelGate>()) {
+    // WebKit let the body stream go before it ended: the page aborted the
+    // request (or the document / window went away). WebKitGTK says nothing
+    // about a request cancelled before its head was sent, so a cancel is
+    // only seen once the head is.
+    std::shared_ptr<laufey_common::SchemeCancelGate> gate = gate_;
+    LinuxSchemeExchange* self = this;
+    body_->SetReaderGoneHandler([gate, self] {
+      gate->Cancel(
+          [self] { RuntimeLoader::GetInstance()->DispatchSchemeCancel(self); });
+    });
+  }
 
   ~LinuxSchemeExchange() override {
     body_->End();
@@ -2486,6 +2513,7 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   }
 
   void Begin(int status, const char* headers, size_t headers_len) override {
+    began_ = true;
     auto* d = new BeginData;
     d->request = WEBKIT_URI_SCHEME_REQUEST(g_object_ref(request_));
     d->body = body_;
@@ -2500,7 +2528,14 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   }
 
   void Finish() override {
+    // No on_cancel from now on (and one in progress has returned).
+    gate_->Finish();
     body_->End();  // EOF for WebKit, after what was written
+    if (!began_) {
+      // Finished without a head: no response, so the request fails (it was
+      // never finished at all, which left the page's request pending).
+      g_idle_add(FailOnMain, g_object_ref(request_));
+    }
     delete this;
   }
 
@@ -2512,6 +2547,17 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
     int status;
     std::vector<std::pair<std::string, std::string>> headers;
   };
+
+  static gboolean FailOnMain(gpointer data) {
+    auto* request = static_cast<WebKitURISchemeRequest*>(data);
+    GError* error =
+        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED,
+                            "the scheme handler finished without a response");
+    webkit_uri_scheme_request_finish_error(request, error);
+    g_error_free(error);
+    g_object_unref(request);
+    return G_SOURCE_REMOVE;
+  }
 
   static gboolean BeginOnMain(gpointer data) {
     auto* d = static_cast<BeginData*>(data);
@@ -2548,6 +2594,9 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   std::vector<uint8_t> request_body_;
   size_t req_cursor_ = 0;
   std::shared_ptr<laufey_common::SchemeBodyWriter> body_;
+  std::shared_ptr<laufey_common::SchemeCancelGate> gate_;
+  // Begin and Finish come from the runtime's thread, in that order.
+  bool began_ = false;
 };
 
 // A scheme request whose body is still being read (see OnAppSchemeRequest).

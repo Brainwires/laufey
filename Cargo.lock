@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "laufey"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bindgen",
  "tokio",
@@ -1890,6 +1890,7 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "image",
+ "laufey",
  "libloading 0.8.9",
  "muda",
  "notify-rust",

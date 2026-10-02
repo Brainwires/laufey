@@ -113,15 +113,23 @@ UNNotificationCategory* CategoryFor(
 
 // Makes sure `category_id` is registered (merged with the categories already
 // registered, this run's or an earlier one's), then runs `then`. Main queue.
+//
+// setNotificationCategories replaces the whole set, and the existing set
+// arrives asynchronously: two notifications with new categories shown at
+// once each read a set without the other's and the second set clobbered the
+// first. So every category this run adds is kept here (`added`, main queue
+// only) and every set written includes all of them.
 void EnsureCategory(NSString* category_id,
                     const std::vector<NotificationAction>& actions,
                     void (^then)(void)) {
   static NSMutableSet<NSString*>* known = [NSMutableSet set];
+  static NSMutableDictionary<NSString*, UNNotificationCategory*>* added =
+      [NSMutableDictionary dictionary];
   if (!category_id || [known containsObject:category_id]) {
     then();
     return;
   }
-  UNNotificationCategory* category = CategoryFor(category_id, actions);
+  added[category_id] = CategoryFor(category_id, actions);
   UNUserNotificationCenter* center =
       [UNUserNotificationCenter currentNotificationCenter];
   [center getNotificationCategoriesWithCompletionHandler:^(
@@ -129,10 +137,10 @@ void EnsureCategory(NSString* category_id,
     dispatch_async(dispatch_get_main_queue(), ^{
       NSMutableSet<UNNotificationCategory*>* all = [NSMutableSet set];
       for (UNNotificationCategory* c in existing) {
-        if (![c.identifier isEqualToString:category.identifier])
+        if (!added[c.identifier])
           [all addObject:c];
       }
-      [all addObject:category];
+      [all addObjectsFromArray:added.allValues];
       [center setNotificationCategories:all];
       for (UNNotificationCategory* c in all)
         [known addObject:c.identifier];

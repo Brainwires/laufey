@@ -303,8 +303,10 @@ bool ClipboardWriteImageLinux(const uint8_t* png, size_t len);
 char* ClipboardReadFormatsLinux();
 void ClipboardWatchLinux(bool on);
 
-// Runs `fn` on the GTK thread and waits (inline when already there).
-void GtkRunSync(const std::function<void()>& fn);
+// Runs `fn` on the GTK thread and waits (inline when already there). False
+// when `fn` did not run: the backend's loop had ended (the wait never
+// outlives it; see RunOnUiThreadAndWait in laufey_ui_tasks.h).
+bool GtkRunSync(const std::function<void()>& fn);
 // Queues `fn` on the GTK thread.
 void GtkRunAsync(std::function<void()> fn);
 // By default the GTK thread is whichever iterates the GLib default main

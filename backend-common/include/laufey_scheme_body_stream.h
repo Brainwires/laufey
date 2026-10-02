@@ -27,6 +27,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace laufey_common {
@@ -57,6 +58,9 @@ class SchemeBodyWriter {
   void End();
   // Fail the body: the reader's next read errors with `message`.
   void Fail(const char* message);
+  // Called once, on the thread that lets the stream go, if the reader goes
+  // away before the body ended or failed (the page aborted the request).
+  void SetReaderGoneHandler(std::function<void()> handler);
 
   // Tests: bytes written and not read yet; whether the reader is gone.
   size_t queued() const;

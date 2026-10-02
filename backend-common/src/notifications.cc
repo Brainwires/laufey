@@ -3,6 +3,7 @@
 // The portable notification core (API 41). See laufey_notifications.h.
 
 #include "laufey_notifications.h"
+#include "laufey_ui_tasks.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +13,9 @@
 #include <cstring>
 #include <deque>
 #include <iostream>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <set>
@@ -650,32 +653,62 @@ bool TestNotificationRespond(const char* tag, const char* action_id) {
   return DispatchNotificationClick(tag, action_id, nullptr);
 }
 
+namespace {
+
+// A permission callback, delivered on the UI thread as laufey.h promises:
+// the platforms answer on whatever thread their OS API completes on (the
+// toast thread on Windows, a D-Bus thread on Linux) or on the caller's.
+// Once the loop has ended it is called where the dispatcher answers it.
+std::function<void(int)> OnUiThread(laufey_permission_callback_fn cb,
+                                    void* user_data) {
+  return [cb, user_data](int status) {
+    UiTaskDispatcher& dispatcher = UiTaskDispatcher::Get();
+    if (dispatcher.IsUiThread()) {
+      cb(user_data, status);
+      return;
+    }
+    struct Answer {
+      laufey_permission_callback_fn cb;
+      void* user_data;
+      int status;
+    };
+    dispatcher.Dispatch(
+        [](void* data, bool /*ran*/) {
+          std::unique_ptr<Answer> a(static_cast<Answer*>(data));
+          a->cb(a->user_data, a->status);
+        },
+        new Answer{cb, user_data, status});
+  };
+}
+
+}  // namespace
+
 void QueryNotificationPermission(int kind, laufey_permission_callback_fn cb,
                                  void* user_data) {
   if (!cb)
     return;
+  std::function<void(int)> done = OnUiThread(cb, user_data);
   NotificationPlatform* platform = Platform();
   if (!platform || (kind != LAUFEY_PERMISSION_NOTIFICATIONS &&
                     kind != LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL)) {
-    cb(user_data, LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+    done(LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
     return;
   }
-  platform->QueryPermission(
-      kind, [cb, user_data](int status) { cb(user_data, status); });
+  platform->QueryPermission(kind, std::move(done));
 }
 
 void RequestNotificationPermission(int kind, laufey_permission_callback_fn cb,
                                    void* user_data) {
   if (!cb)
     return;
+  std::function<void(int)> done = OnUiThread(cb, user_data);
   NotificationPlatform* platform = Platform();
   if (!platform || (kind != LAUFEY_PERMISSION_NOTIFICATIONS &&
                     kind != LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL)) {
-    cb(user_data, LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+    done(LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
     return;
   }
-  platform->RequestPermission(
-      kind, [cb, user_data](int status) { cb(user_data, status); });
+  platform->RequestPermission(kind, std::move(done));
 }
 
 // --- From the platform

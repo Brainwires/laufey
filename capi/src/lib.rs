@@ -71,35 +71,35 @@ unsafe impl Sync for LaufeyBackendApi {}
 static BACKEND_API: OnceLock<&'static LaufeyBackendApi> = OnceLock::new();
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
 static BINDINGS: OnceLock<
-  Mutex<HashMap<u32, HashMap<String, BindingHandler>>>,
+  Mutex<HashMap<u32, HashMap<String, Arc<BindingHandler>>>>,
 > = OnceLock::new();
 static JS_CALL_NOTIFY: OnceLock<Notify> = OnceLock::new();
 static MENU_CLICK_HANDLERS: OnceLock<
-  Mutex<HashMap<u32, Box<dyn Fn(&str) + Send + Sync>>>,
+  Mutex<HashMap<u32, Arc<dyn Fn(&str) + Send + Sync>>>,
 > = OnceLock::new();
 static CONTEXT_MENU_HANDLERS: OnceLock<
-  Mutex<HashMap<u32, Box<dyn Fn(&str) + Send + Sync>>>,
+  Mutex<HashMap<u32, Arc<dyn Fn(&str) + Send + Sync>>>,
 > = OnceLock::new();
 static DOCK_MENU_HANDLER: OnceLock<
-  Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+  Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 > = OnceLock::new();
 static DOCK_REOPEN_HANDLER: OnceLock<
-  Mutex<Option<Box<dyn Fn(bool) + Send + Sync>>>,
+  Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>,
 > = OnceLock::new();
 static OPEN_URL_HANDLER: OnceLock<
-  Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+  Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 > = OnceLock::new();
-type SecondInstanceHandler = Box<dyn Fn(&[String], &str) + Send + Sync>;
+type SecondInstanceHandler = Arc<dyn Fn(&[String], &str) + Send + Sync>;
 static SECOND_INSTANCE_HANDLER: OnceLock<Mutex<Option<SecondInstanceHandler>>> =
   OnceLock::new();
 static TRAY_MENU_HANDLERS: OnceLock<
-  Mutex<HashMap<u32, Box<dyn Fn(&str) + Send + Sync>>>,
+  Mutex<HashMap<u32, Arc<dyn Fn(&str) + Send + Sync>>>,
 > = OnceLock::new();
 static TRAY_CLICK_HANDLERS: OnceLock<
-  Mutex<HashMap<u32, Box<dyn Fn() + Send + Sync>>>,
+  Mutex<HashMap<u32, Arc<dyn Fn() + Send + Sync>>>,
 > = OnceLock::new();
 static TRAY_DBLCLICK_HANDLERS: OnceLock<
-  Mutex<HashMap<u32, Box<dyn Fn() + Send + Sync>>>,
+  Mutex<HashMap<u32, Arc<dyn Fn() + Send + Sync>>>,
 > = OnceLock::new();
 static NOTIFICATION_HANDLERS: OnceLock<
   Mutex<HashMap<u32, NotificationHandler>>,
@@ -129,7 +129,8 @@ pub(crate) fn try_api() -> Option<&'static LaufeyBackendApi> {
   BACKEND_API.get().copied()
 }
 
-fn bindings() -> &'static Mutex<HashMap<u32, HashMap<String, BindingHandler>>> {
+fn bindings(
+) -> &'static Mutex<HashMap<u32, HashMap<String, Arc<BindingHandler>>>> {
   BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -181,6 +182,19 @@ pub enum Value {
   Binary(Vec<u8>),
 }
 
+/// Frees a value the caller owns (null is fine).
+///
+/// # Safety
+/// `val` must be null or an owned value of the backend behind `api`.
+unsafe fn free_value(api: &LaufeyBackendApi, val: *mut LaufeyValue) {
+  if val.is_null() {
+    return;
+  }
+  if let Some(free) = api.value_free {
+    free(val);
+  }
+}
+
 impl Value {
   /// # Safety
   /// `ptr` must be null or a valid pointer to a `LaufeyValue` produced by the
@@ -226,10 +240,12 @@ impl Value {
       let mut list = Vec::with_capacity(size);
       if let Some(get_item) = api.value_list_get {
         for i in 0..size {
+          // An owned copy of the item (laufey.h): converted, then freed.
           let item = get_item(ptr, i);
           if let Some(v) = Value::from_raw(item) {
             list.push(v);
           }
+          free_value(api, item);
         }
       }
       return Some(Value::List(list));
@@ -245,11 +261,13 @@ impl Value {
             if !key_ptr.is_null() {
               let key = CStr::from_ptr(key_ptr).to_string_lossy().into_owned();
               if let Some(get_val) = api.value_dict_get {
-                let c_key = CString::new(key.as_str()).unwrap();
-                let val = get_val(ptr, c_key.as_ptr());
+                // An owned copy of the entry (laufey.h): converted, then
+                // freed.
+                let val = get_val(ptr, key_ptr);
                 if let Some(v) = Value::from_raw(val) {
                   dict.insert(key, v);
                 }
+                free_value(api, val);
               }
             }
           }
@@ -297,13 +315,18 @@ impl Value {
           .value_double
           .map(|f| f(bd, *v))
           .unwrap_or(std::ptr::null_mut()),
-        Value::String(s) => {
-          let c_str = CString::new(s.as_str()).unwrap();
-          api
+        // A string with a NUL byte cannot cross the C ABI (C strings end at
+        // the first NUL): it becomes null rather than a truncated string.
+        Value::String(s) => match CString::new(s.as_str()) {
+          Ok(c_str) => api
             .value_string
             .map(|f| f(bd, c_str.as_ptr()))
-            .unwrap_or(std::ptr::null_mut())
-        }
+            .unwrap_or(std::ptr::null_mut()),
+          Err(_) => api
+            .value_null
+            .map(|f| f(bd))
+            .unwrap_or(std::ptr::null_mut()),
+        },
         Value::List(items) => {
           let list = api
             .value_list
@@ -327,7 +350,11 @@ impl Value {
           if !dict.is_null() {
             if let Some(set) = api.value_dict_set {
               for (k, v) in map {
-                let c_key = CString::new(k.as_str()).unwrap();
+                // A key with a NUL byte cannot cross the C ABI: the entry
+                // is left out.
+                let Ok(c_key) = CString::new(k.as_str()) else {
+                  continue;
+                };
                 let raw = v.to_raw();
                 set(dict, c_key.as_ptr(), raw);
               }
@@ -340,6 +367,19 @@ impl Value {
           .map(|f| f(bd, data.as_ptr() as *const c_void, data.len()))
           .unwrap_or(std::ptr::null_mut()),
       }
+    }
+  }
+
+  /// Whether a string or dict key anywhere in this value contains a NUL
+  /// byte (which the C ABI's strings cannot carry).
+  fn has_interior_nul(&self) -> bool {
+    match self {
+      Value::String(s) => s.contains('\0'),
+      Value::List(items) => items.iter().any(Value::has_interior_nul),
+      Value::Dict(map) => map
+        .iter()
+        .any(|(k, v)| k.contains('\0') || v.has_interior_nul()),
+      _ => false,
     }
   }
 
@@ -379,6 +419,9 @@ impl Value {
   }
 }
 
+const NUL_IN_RESULT: &str =
+  "the result contains a NUL byte, which cannot cross the laufey C ABI";
+
 pub struct JsCall {
   pub window_id: u32,
   pub call_id: u64,
@@ -387,7 +430,13 @@ pub struct JsCall {
 }
 
 impl JsCall {
+  /// Answers the call with `value`. A string in `value` (or a dict key)
+  /// containing a NUL byte cannot cross the C ABI, whose strings end at the
+  /// first NUL: the call is then rejected with an error saying so instead.
   pub fn resolve(self, value: Value) {
+    if value.has_interior_nul() {
+      return self.reject(Value::String(NUL_IN_RESULT.into()));
+    }
     let api = api();
     if let Some(respond) = api.js_call_respond {
       let raw = value.to_raw();
@@ -397,7 +446,13 @@ impl JsCall {
     }
   }
 
+  /// Rejects the call with `error` (NUL bytes as for [`JsCall::resolve`]).
   pub fn reject(self, error: Value) {
+    let error = if error.has_interior_nul() {
+      Value::String(NUL_IN_RESULT.into())
+    } else {
+      error
+    };
     let api = api();
     if let Some(respond) = api.js_call_respond {
       let raw = error.to_raw();
@@ -437,20 +492,23 @@ unsafe extern "C" fn js_call_handler(
     args: args_vec,
   };
 
-  let bindings = bindings().lock().unwrap();
-  if let Some(window_bindings) = bindings.get(&window_id) {
-    if let Some(handler) = window_bindings.get(&method) {
-      match handler {
-        BindingHandler::Sync(f) => f(call),
-        BindingHandler::Async(f) => {
-          let fut = f(call);
-          tokio::spawn(fut);
-        }
+  // Cloned out so the handler runs without the lock held: it may bind or
+  // unbind (which take the lock) itself.
+  let handler = bindings()
+    .lock()
+    .unwrap()
+    .get(&window_id)
+    .and_then(|b| b.get(&method).cloned());
+  if let Some(handler) = handler {
+    match handler.as_ref() {
+      BindingHandler::Sync(f) => f(call),
+      BindingHandler::Async(f) => {
+        let fut = f(call);
+        tokio::spawn(fut);
       }
-      return;
     }
+    return;
   }
-  drop(bindings);
   call.reject(Value::String(format!("No binding for '{}'", method)));
 }
 
@@ -515,11 +573,11 @@ pub async fn run() {
 // --- Custom URL scheme handler (in-process app transport) -------------------
 
 static SCHEME_HANDLER: OnceLock<
-  Mutex<Option<Box<dyn Fn(SchemeRequest) + Send + Sync>>>,
+  Mutex<Option<Arc<dyn Fn(SchemeRequest) + Send + Sync>>>,
 > = OnceLock::new();
 
 fn scheme_handler_store(
-) -> &'static Mutex<Option<Box<dyn Fn(SchemeRequest) + Send + Sync>>> {
+) -> &'static Mutex<Option<Arc<dyn Fn(SchemeRequest) + Send + Sync>>> {
   SCHEME_HANDLER.get_or_init(|| Mutex::new(None))
 }
 
@@ -535,7 +593,30 @@ pub struct SchemeRequest {
 
 /// Handle used to read the request body and stream the response back to the
 /// webview. Backed by the backend's `scheme_*` vtable functions.
-pub struct SchemeExchange(*mut ffi::laufey_scheme_exchange_t);
+pub struct SchemeExchange(*mut ffi::laufey_scheme_exchange_t, Arc<AtomicBool>);
+
+/// The cancel flag of every exchange the runtime holds, by exchange pointer:
+/// set by the backend's on_cancel, dropped when the exchange is finished
+/// (the backend never calls on_cancel once finish has returned, so a later
+/// exchange at the same address can't be marked by an earlier one's cancel).
+fn scheme_cancel_flags() -> &'static Mutex<HashMap<usize, Arc<AtomicBool>>> {
+  static FLAGS: OnceLock<Mutex<HashMap<usize, Arc<AtomicBool>>>> =
+    OnceLock::new();
+  FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+unsafe extern "C" fn scheme_cancel_trampoline(
+  _user_data: *mut c_void,
+  exchange: *mut ffi::laufey_scheme_exchange_t,
+) {
+  if let Some(flag) = scheme_cancel_flags()
+    .lock()
+    .unwrap()
+    .get(&(exchange as usize))
+  {
+    flag.store(true, Ordering::SeqCst);
+  }
+}
 
 // The exchange handle is owned and synchronized by the backend; the embedder
 // may move it across threads and share references across them (e.g. hold a
@@ -587,8 +668,30 @@ impl SchemeExchange {
     }
   }
 
+  /// Whether the webview cancelled the request (the fetch was aborted, the
+  /// document replaced, the window closed) before the response finished.
+  /// Once true, stop writing and call [`SchemeExchange::finish`]; the calls
+  /// stay safe until then. Any thread.
+  ///
+  /// Where a backend can't see a cancel (WebKitGTK before the head is sent,
+  /// a WebView2 request answered in one piece), it stays false and the next
+  /// [`SchemeExchange::write`] after the cancel returns a negative value
+  /// instead. See docs/custom-schemes.md.
+  pub fn is_cancelled(&self) -> bool {
+    self.1.load(Ordering::SeqCst)
+  }
+
   /// Complete the response and release the exchange.
   pub fn finish(self) {
+    {
+      let mut flags = scheme_cancel_flags().lock().unwrap();
+      if flags
+        .get(&(self.0 as usize))
+        .is_some_and(|f| Arc::ptr_eq(f, &self.1))
+      {
+        flags.remove(&(self.0 as usize));
+      }
+    }
     let api = api();
     if let Some(f) = api.scheme_response_finish {
       unsafe { f(api.backend_data, self.0) };
@@ -650,10 +753,18 @@ unsafe extern "C" fn scheme_request_trampoline(
     method: to_string(method),
     url: to_string(url),
     headers: unsafe { parse_flat_headers(headers, headers_len) },
-    exchange: SchemeExchange(exchange),
+    exchange: SchemeExchange(exchange, {
+      let flag = Arc::new(AtomicBool::new(false));
+      scheme_cancel_flags()
+        .lock()
+        .unwrap()
+        .insert(exchange as usize, flag.clone());
+      flag
+    }),
   };
-  let store = scheme_handler_store().lock().unwrap();
-  if let Some(handler) = store.as_ref() {
+  // Cloned out: the handler runs without the lock held.
+  let handler = scheme_handler_store().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler(req);
   } else {
     // No handler registered: release the exchange so the webview isn't hung.
@@ -699,16 +810,19 @@ pub fn register_scheme_handler<F>(scheme: &str, handler: F)
 where
   F: Fn(SchemeRequest) + Send + Sync + 'static,
 {
-  *scheme_handler_store().lock().unwrap() = Some(Box::new(handler));
+  // A scheme with a NUL byte is no scheme: nothing is registered.
+  let Ok(c_scheme) = CString::new(scheme) else {
+    return;
+  };
+  *scheme_handler_store().lock().unwrap() = Some(Arc::new(handler));
   let api = api();
   if let Some(register) = api.register_scheme_handler {
-    let c_scheme = CString::new(scheme).expect("scheme contains NUL");
     unsafe {
       register(
         api.backend_data,
         c_scheme.as_ptr(),
         Some(scheme_request_trampoline),
-        None,
+        Some(scheme_cancel_trampoline),
         std::ptr::null_mut(),
       );
     }
@@ -933,10 +1047,11 @@ impl Window {
     self
   }
 
+  /// A `title` containing a NUL byte cannot cross the C ABI; the call is
+  /// then a no-op.
   pub fn set_title(&self, title: &str) {
     let api = api();
-    if let Some(f) = api.set_title {
-      let c_title = CString::new(title).expect("Invalid title");
+    if let (Some(f), Ok(c_title)) = (api.set_title, CString::new(title)) {
       unsafe { f(api.backend_data, self.id, c_title.as_ptr()) };
     }
   }
@@ -946,10 +1061,10 @@ impl Window {
     self
   }
 
+  /// A `url` containing a NUL byte is not a URL; the call is then a no-op.
   pub fn navigate(&self, url: &str) {
     let api = api();
-    if let Some(f) = api.navigate {
-      let c_url = CString::new(url).expect("Invalid URL");
+    if let (Some(f), Ok(c_url)) = (api.navigate, CString::new(url)) {
       unsafe { f(api.backend_data, self.id, c_url.as_ptr()) };
     }
   }
@@ -1216,13 +1331,20 @@ impl Window {
     }
   }
 
+  /// A `script` containing a NUL byte cannot cross the C ABI: it is not
+  /// run, and `callback` receives an `Err` saying so.
   pub fn execute_js<F>(&self, script: &str, callback: Option<F>)
   where
     F: FnOnce(Result<Value, Value>) + Send + 'static,
   {
     let api = api();
     if let Some(f) = api.execute_js {
-      let c_script = CString::new(script).expect("Invalid script");
+      let Ok(c_script) = CString::new(script) else {
+        if let Some(cb) = callback {
+          cb(Err(Value::String("script contains a NUL byte".into())));
+        }
+        return;
+      };
 
       match callback {
         Some(cb_fn) => {
@@ -1545,7 +1667,10 @@ impl Window {
       .unwrap()
       .entry(self.id)
       .or_default()
-      .insert(name.to_string(), BindingHandler::Sync(Box::new(handler)));
+      .insert(
+        name.to_string(),
+        Arc::new(BindingHandler::Sync(Box::new(handler))),
+      );
   }
 
   pub fn add_binding_async<F, Fut>(&self, name: &str, handler: F)
@@ -1561,7 +1686,9 @@ impl Window {
       .or_default()
       .insert(
         name.to_string(),
-        BindingHandler::Async(Box::new(move |call| Box::pin(handler(call)))),
+        Arc::new(BindingHandler::Async(Box::new(move |call| {
+          Box::pin(handler(call))
+        }))),
       );
   }
 
@@ -1601,7 +1728,7 @@ impl Window {
 
     {
       let mut handlers = menu_click_handlers().lock().unwrap();
-      handlers.insert(self.id, Box::new(on_click));
+      handlers.insert(self.id, Arc::new(on_click));
     }
 
     let api = api();
@@ -1635,7 +1762,7 @@ impl Window {
 
     {
       let mut handlers = context_menu_handlers().lock().unwrap();
-      handlers.insert(self.id, Box::new(on_click));
+      handlers.insert(self.id, Arc::new(on_click));
     }
 
     let api = api();
@@ -1716,9 +1843,14 @@ fn show_dialog_blocking(
   let Some(f) = api.show_dialog else {
     return (false, None);
   };
-  let c_title = CString::new(title).expect("Invalid title");
-  let c_message = CString::new(message).expect("Invalid message");
-  let c_default = CString::new(default_value).expect("Invalid default value");
+  // Text with a NUL byte cannot cross the C ABI: no dialog, as if cancelled.
+  let (Ok(c_title), Ok(c_message), Ok(c_default)) = (
+    CString::new(title),
+    CString::new(message),
+    CString::new(default_value),
+  ) else {
+    return (false, None);
+  };
   let mut out_input: *mut c_char = std::ptr::null_mut();
   let want_input = dialog_type == LAUFEY_DIALOG_PROMPT;
   // SAFETY: All pointers are valid for the duration of the call. The
@@ -1786,12 +1918,12 @@ pub fn read_clipboard_text() -> Option<String> {
 ///
 /// Passing an empty string clears the clipboard. Mirrors the web
 /// `navigator.clipboard.writeText()` API. No-op if the backend does not
-/// support clipboard access. Any thread on API 39 backends.
+/// support clipboard access, or if `text` contains a NUL byte (which cannot
+/// cross the C ABI). Any thread on API 39 backends.
 pub fn write_clipboard_text(text: &str) {
   let api = api();
-  if let Some(f) = api.write_clipboard_text {
-    let c_text =
-      CString::new(text).expect("clipboard text contained a NUL byte");
+  if let (Some(f), Ok(c_text)) = (api.write_clipboard_text, CString::new(text))
+  {
     // SAFETY: `c_text` outlives the call; the backend copies the bytes.
     unsafe { f(api.backend_data, c_text.as_ptr()) };
   }
@@ -2114,14 +2246,20 @@ unsafe extern "C" fn menu_click_callback(
     return;
   }
   let id = CStr::from_ptr(item_id).to_string_lossy();
-  let handlers = menu_click_handlers().lock().unwrap();
-  if let Some(handler) = handlers.get(&window_id) {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = menu_click_handlers()
+    .lock()
+    .unwrap()
+    .get(&window_id)
+    .cloned();
+  if let Some(handler) = handler {
     handler(&id);
   }
 }
 
 fn menu_click_handlers(
-) -> &'static Mutex<HashMap<u32, Box<dyn Fn(&str) + Send + Sync>>> {
+) -> &'static Mutex<HashMap<u32, Arc<dyn Fn(&str) + Send + Sync>>> {
   MENU_CLICK_HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2134,14 +2272,20 @@ unsafe extern "C" fn context_menu_click_callback(
     return;
   }
   let id = CStr::from_ptr(item_id).to_string_lossy();
-  let handlers = context_menu_handlers().lock().unwrap();
-  if let Some(handler) = handlers.get(&window_id) {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = context_menu_handlers()
+    .lock()
+    .unwrap()
+    .get(&window_id)
+    .cloned();
+  if let Some(handler) = handler {
     handler(&id);
   }
 }
 
 fn context_menu_handlers(
-) -> &'static Mutex<HashMap<u32, Box<dyn Fn(&str) + Send + Sync>>> {
+) -> &'static Mutex<HashMap<u32, Arc<dyn Fn(&str) + Send + Sync>>> {
   CONTEXT_MENU_HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2158,13 +2302,13 @@ pub enum DockBounceType {
   Critical,
 }
 
-fn dock_menu_handler() -> &'static Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>
+fn dock_menu_handler() -> &'static Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>
 {
   DOCK_MENU_HANDLER.get_or_init(|| Mutex::new(None))
 }
 
 fn dock_reopen_handler(
-) -> &'static Mutex<Option<Box<dyn Fn(bool) + Send + Sync>>> {
+) -> &'static Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>> {
   DOCK_REOPEN_HANDLER.get_or_init(|| Mutex::new(None))
 }
 
@@ -2177,7 +2321,9 @@ unsafe extern "C" fn dock_menu_click_callback(
     return;
   }
   let id = CStr::from_ptr(item_id).to_string_lossy();
-  if let Some(handler) = dock_menu_handler().lock().unwrap().as_ref() {
+  // Cloned out: the handler runs without the lock held.
+  let handler = dock_menu_handler().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler(&id);
   }
 }
@@ -2186,21 +2332,25 @@ unsafe extern "C" fn dock_reopen_callback(
   _user_data: *mut c_void,
   has_visible_windows: bool,
 ) {
-  if let Some(handler) = dock_reopen_handler().lock().unwrap().as_ref() {
+  // Cloned out: the handler runs without the lock held.
+  let handler = dock_reopen_handler().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler(has_visible_windows);
   }
 }
 
 /// Set a short text badge on the app's dock icon (macOS) or taskbar icon
 /// (Windows), or prefix the focused window's title with `"(text) "` (Linux).
-/// Pass `None` or an empty string to clear the badge.
+/// Pass `None` or an empty string to clear the badge. Text containing a NUL
+/// byte cannot cross the C ABI; the call is then a no-op.
 pub fn set_dock_badge(text: Option<&str>) {
   let api = api();
   if let Some(f) = api.set_dock_badge {
     match text {
       Some(t) if !t.is_empty() => {
-        let c_text = CString::new(t).expect("Invalid badge text");
-        unsafe { f(api.backend_data, c_text.as_ptr()) };
+        if let Ok(c_text) = CString::new(t) {
+          unsafe { f(api.backend_data, c_text.as_ptr()) };
+        }
       }
       _ => unsafe { f(api.backend_data, std::ptr::null()) },
     }
@@ -2233,7 +2383,7 @@ where
 
   {
     let mut handler = dock_menu_handler().lock().unwrap();
-    *handler = Some(Box::new(on_click));
+    *handler = Some(Arc::new(on_click));
   }
 
   let api = api();
@@ -2294,7 +2444,7 @@ where
 {
   {
     let mut slot = dock_reopen_handler().lock().unwrap();
-    *slot = Some(Box::new(handler));
+    *slot = Some(Arc::new(handler));
   }
 
   let api = api();
@@ -2311,7 +2461,7 @@ where
 
 // --- Deep links / custom URL schemes ---
 
-fn open_url_handler() -> &'static Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>
+fn open_url_handler() -> &'static Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>
 {
   OPEN_URL_HANDLER.get_or_init(|| Mutex::new(None))
 }
@@ -2325,7 +2475,9 @@ unsafe extern "C" fn open_url_callback(
   }
   // The OS is the source here, so don't assume well-formed UTF-8.
   let url = CStr::from_ptr(url).to_string_lossy();
-  if let Some(handler) = open_url_handler().lock().unwrap().as_ref() {
+  // Cloned out: the handler runs without the lock held.
+  let handler = open_url_handler().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler(&url);
   }
 }
@@ -2360,7 +2512,7 @@ where
   // were still empty.
   {
     let mut slot = open_url_handler().lock().unwrap();
-    *slot = Some(Box::new(handler));
+    *slot = Some(Arc::new(handler));
   }
 
   let api = api();
@@ -2403,7 +2555,9 @@ unsafe extern "C" fn second_instance_callback(
   } else {
     CStr::from_ptr(cwd).to_string_lossy().into_owned()
   };
-  if let Some(handler) = second_instance_handler().lock().unwrap().as_ref() {
+  // Cloned out: the handler runs without the lock held.
+  let handler = second_instance_handler().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler(&args, &cwd);
   }
 }
@@ -2436,7 +2590,7 @@ where
   // synchronously inside the call below.
   {
     let mut slot = second_instance_handler().lock().unwrap();
-    *slot = Some(Box::new(handler));
+    *slot = Some(Arc::new(handler));
   }
 
   let api = api();
@@ -2600,17 +2754,17 @@ fn passkey_request_with(
 // --- Tray / status-bar icon ---
 
 fn tray_menu_handlers(
-) -> &'static Mutex<HashMap<u32, Box<dyn Fn(&str) + Send + Sync>>> {
+) -> &'static Mutex<HashMap<u32, Arc<dyn Fn(&str) + Send + Sync>>> {
   TRAY_MENU_HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn tray_click_handlers(
-) -> &'static Mutex<HashMap<u32, Box<dyn Fn() + Send + Sync>>> {
+) -> &'static Mutex<HashMap<u32, Arc<dyn Fn() + Send + Sync>>> {
   TRAY_CLICK_HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn tray_dblclick_handlers(
-) -> &'static Mutex<HashMap<u32, Box<dyn Fn() + Send + Sync>>> {
+) -> &'static Mutex<HashMap<u32, Arc<dyn Fn() + Send + Sync>>> {
   TRAY_DBLCLICK_HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2623,8 +2777,10 @@ unsafe extern "C" fn tray_menu_click_callback(
     return;
   }
   let id = CStr::from_ptr(item_id).to_string_lossy();
-  let handlers = tray_menu_handlers().lock().unwrap();
-  if let Some(handler) = handlers.get(&tray_id) {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = tray_menu_handlers().lock().unwrap().get(&tray_id).cloned();
+  if let Some(handler) = handler {
     handler(&id);
   }
 }
@@ -2633,8 +2789,10 @@ unsafe extern "C" fn tray_click_callback(
   _user_data: *mut c_void,
   tray_id: u32,
 ) {
-  let handlers = tray_click_handlers().lock().unwrap();
-  if let Some(handler) = handlers.get(&tray_id) {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = tray_click_handlers().lock().unwrap().get(&tray_id).cloned();
+  if let Some(handler) = handler {
     handler();
   }
 }
@@ -2643,8 +2801,14 @@ unsafe extern "C" fn tray_dblclick_callback(
   _user_data: *mut c_void,
   tray_id: u32,
 ) {
-  let handlers = tray_dblclick_handlers().lock().unwrap();
-  if let Some(handler) = handlers.get(&tray_id) {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = tray_dblclick_handlers()
+    .lock()
+    .unwrap()
+    .get(&tray_id)
+    .cloned();
+  if let Some(handler) = handler {
     handler();
   }
 }
@@ -2739,7 +2903,7 @@ impl TrayIcon {
   {
     {
       let mut handlers = tray_click_handlers().lock().unwrap();
-      handlers.insert(self.id, Box::new(handler));
+      handlers.insert(self.id, Arc::new(handler));
     }
     let api = api();
     if let Some(f) = api.set_tray_click_handler {
@@ -2819,7 +2983,7 @@ impl TrayIcon {
     }
     {
       let mut handlers = tray_dblclick_handlers().lock().unwrap();
-      handlers.insert(self.id, Box::new(handler));
+      handlers.insert(self.id, Arc::new(handler));
     }
     let api = api();
     if let Some(f) = api.set_tray_double_click_handler {
@@ -2841,9 +3005,11 @@ impl TrayIcon {
     let api = api();
     if let Some(f) = api.set_tray_tooltip {
       match text {
+        // Text with a NUL byte cannot cross the C ABI: a no-op.
         Some(t) if !t.is_empty() => {
-          let c_text = CString::new(t).expect("Invalid tooltip");
-          unsafe { f(api.backend_data, self.id, c_text.as_ptr()) };
+          if let Ok(c_text) = CString::new(t) {
+            unsafe { f(api.backend_data, self.id, c_text.as_ptr()) };
+          }
         }
         _ => unsafe { f(api.backend_data, self.id, std::ptr::null()) },
       }
@@ -2860,7 +3026,7 @@ impl TrayIcon {
     let value = Value::List(template.iter().map(|i| i.to_value()).collect());
     {
       let mut handlers = tray_menu_handlers().lock().unwrap();
-      handlers.insert(self.id, Box::new(on_click));
+      handlers.insert(self.id, Arc::new(on_click));
     }
     let api = api();
     if let Some(f) = api.set_tray_menu {
@@ -2934,10 +3100,12 @@ impl Drop for TrayIcon {
 /// laufey::set_js_namespace("MyApp");
 /// // JS code can now use: window.MyApp.greet("world")
 /// ```
+///
+/// A `name` containing a NUL byte is no JS identifier; the call is then a
+/// no-op.
 pub fn set_js_namespace(name: &str) {
   let api = api();
-  if let Some(f) = api.set_js_namespace {
-    let c_name = CString::new(name).unwrap();
+  if let (Some(f), Ok(c_name)) = (api.set_js_namespace, CString::new(name)) {
     unsafe { f(api.backend_data, c_name.as_ptr()) };
   }
 }
@@ -4193,7 +4361,303 @@ mod tests {
     let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
     fake.print_to_pdf = Some(fake_print_to_pdf);
     fake.post_ui_task = Some(fake_post_ui_task);
+    nul::install(&mut fake);
     let _ = BACKEND_API.set(Box::leak(Box::new(fake)));
+  }
+
+  // on_cancel marks the exchange it names, and only that one: is_cancelled
+  // turns true for it, an exchange finished before is forgotten, and a
+  // later exchange at the same address starts uncancelled.
+  #[test]
+  fn scheme_cancel_marks_only_its_exchange() {
+    install_pdf_fake();
+    let ptr = 0x5ce0_usize as *mut ffi::laufey_scheme_exchange_t;
+    let other = 0x5ce8_usize as *mut ffi::laufey_scheme_exchange_t;
+    let held: Arc<Mutex<Vec<SchemeRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    // A store of its own would race the other tests' registrations; the
+    // trampoline reads the process-wide one, so set it directly.
+    *scheme_handler_store().lock().unwrap() = Some(Arc::new({
+      let held = held.clone();
+      move |req: SchemeRequest| held.lock().unwrap().push(req)
+    }));
+    let request = |p| unsafe {
+      scheme_request_trampoline(
+        std::ptr::null_mut(),
+        1,
+        p,
+        c"GET".as_ptr(),
+        c"app://x/".as_ptr(),
+        std::ptr::null(),
+        0,
+      )
+    };
+    request(ptr);
+    request(other);
+    let mut reqs = std::mem::take(&mut *held.lock().unwrap());
+    assert_eq!(reqs.len(), 2);
+    assert!(!reqs[0].exchange.is_cancelled());
+    unsafe { scheme_cancel_trampoline(std::ptr::null_mut(), ptr) };
+    assert!(reqs[0].exchange.is_cancelled());
+    assert!(
+      !reqs[1].exchange.is_cancelled(),
+      "another exchange was marked"
+    );
+    for r in reqs.drain(..) {
+      r.exchange.finish();
+    }
+    // Finished: the address is free, and a new exchange there is fresh.
+    unsafe { scheme_cancel_trampoline(std::ptr::null_mut(), ptr) };
+    request(ptr);
+    let again = held.lock().unwrap().pop().unwrap();
+    assert!(!again.exchange.is_cancelled());
+    again.exchange.finish();
+    *scheme_handler_store().lock().unwrap() = None;
+  }
+
+  // Handlers run after their slot's lock is released: one that replaces
+  // itself (or calls back into the laufey API, which takes the same locks)
+  // must not deadlock.
+  #[test]
+  fn handlers_run_without_their_slot_lock() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      *dock_reopen_handler().lock().unwrap() = Some(Arc::new(|_| {
+        *dock_reopen_handler().lock().unwrap() = None;
+      }));
+      unsafe { dock_reopen_callback(std::ptr::null_mut(), false) };
+      *open_url_handler().lock().unwrap() = Some(Arc::new(|_: &str| {
+        *open_url_handler().lock().unwrap() = None;
+      }));
+      unsafe { open_url_callback(std::ptr::null_mut(), c"x://y".as_ptr()) };
+      menu_click_handlers().lock().unwrap().insert(
+        77,
+        Arc::new(|_: &str| {
+          menu_click_handlers().lock().unwrap().remove(&77);
+        }),
+      );
+      unsafe {
+        menu_click_callback(std::ptr::null_mut(), 77, c"item".as_ptr())
+      };
+      let _ = tx.send(
+        dock_reopen_handler().lock().unwrap().is_none()
+          && open_url_handler().lock().unwrap().is_none()
+          && !menu_click_handlers().lock().unwrap().contains_key(&77),
+      );
+    });
+    let cleared = rx
+      .recv_timeout(std::time::Duration::from_secs(10))
+      .expect("a handler deadlocked on its own slot");
+    assert!(cleared);
+  }
+
+  // Strings reach the backend as C strings, which end at the first NUL. A
+  // caller-supplied string with a NUL byte (arbitrary JS can produce one)
+  // must make the wrapper fail safely — no backend call, the function's
+  // failure value — and never panic (the process aborts on a panic across
+  // the runtime boundary).
+  mod nul {
+    use super::super::*;
+    use std::sync::Mutex;
+
+    // What reached the fake backend, by entry point.
+    pub static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    // (result, error) pointers of the last js_call_respond.
+    pub static RESPONDED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+    // Sentinel "values": the tests only need to tell constructors apart.
+    pub const NULL_VALUE: usize = 0x10;
+    pub const STRING_VALUE: usize = 0x20;
+    pub const DICT_VALUE: usize = 0x30;
+
+    fn seen(what: &str, s: *const c_char) {
+      let text = if s.is_null() {
+        "<null>".to_string()
+      } else {
+        unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned()
+      };
+      SEEN.lock().unwrap().push(format!("{what}:{text}"));
+    }
+
+    unsafe extern "C" fn set_title(_: *mut c_void, _: u32, t: *const c_char) {
+      seen("set_title", t);
+    }
+    unsafe extern "C" fn navigate(_: *mut c_void, _: u32, u: *const c_char) {
+      seen("navigate", u);
+    }
+    unsafe extern "C" fn execute_js(
+      _: *mut c_void,
+      _: u32,
+      script: *const c_char,
+      _: ffi::laufey_js_result_fn,
+      _: *mut c_void,
+    ) {
+      seen("execute_js", script);
+    }
+    unsafe extern "C" fn show_dialog(
+      _: *mut c_void,
+      _: u32,
+      _: c_int,
+      title: *const c_char,
+      _: *const c_char,
+      _: *const c_char,
+      _: *mut *mut c_char,
+    ) -> c_int {
+      seen("show_dialog", title);
+      1
+    }
+    unsafe extern "C" fn write_clipboard_text(
+      _: *mut c_void,
+      t: *const c_char,
+    ) {
+      seen("write_clipboard_text", t);
+    }
+    unsafe extern "C" fn set_dock_badge(_: *mut c_void, t: *const c_char) {
+      seen("set_dock_badge", t);
+    }
+    unsafe extern "C" fn set_tray_tooltip(
+      _: *mut c_void,
+      _: u32,
+      t: *const c_char,
+    ) {
+      seen("set_tray_tooltip", t);
+    }
+    unsafe extern "C" fn set_js_namespace(_: *mut c_void, n: *const c_char) {
+      seen("set_js_namespace", n);
+    }
+    unsafe extern "C" fn register_scheme_handler(
+      _: *mut c_void,
+      scheme: *const c_char,
+      _: ffi::laufey_scheme_request_fn,
+      _: ffi::laufey_scheme_cancel_fn,
+      _: *mut c_void,
+    ) {
+      seen("register_scheme_handler", scheme);
+    }
+    unsafe extern "C" fn value_null(_: *mut c_void) -> *mut LaufeyValue {
+      NULL_VALUE as *mut LaufeyValue
+    }
+    unsafe extern "C" fn value_string(
+      _: *mut c_void,
+      v: *const c_char,
+    ) -> *mut LaufeyValue {
+      seen("value_string", v);
+      STRING_VALUE as *mut LaufeyValue
+    }
+    unsafe extern "C" fn value_dict(_: *mut c_void) -> *mut LaufeyValue {
+      DICT_VALUE as *mut LaufeyValue
+    }
+    unsafe extern "C" fn value_dict_set(
+      _: *mut LaufeyValue,
+      key: *const c_char,
+      _: *mut LaufeyValue,
+    ) -> bool {
+      seen("value_dict_set", key);
+      true
+    }
+    unsafe extern "C" fn js_call_respond(
+      _: *mut c_void,
+      _: u64,
+      result: *mut LaufeyValue,
+      error: *mut LaufeyValue,
+    ) {
+      RESPONDED
+        .lock()
+        .unwrap()
+        .push((result as usize, error as usize));
+    }
+
+    pub fn install(fake: &mut LaufeyBackendApi) {
+      fake.set_title = Some(set_title);
+      fake.navigate = Some(navigate);
+      fake.execute_js = Some(execute_js);
+      fake.show_dialog = Some(show_dialog);
+      fake.write_clipboard_text = Some(write_clipboard_text);
+      fake.set_dock_badge = Some(set_dock_badge);
+      fake.set_tray_tooltip = Some(set_tray_tooltip);
+      fake.set_js_namespace = Some(set_js_namespace);
+      fake.register_scheme_handler = Some(register_scheme_handler);
+      fake.value_null = Some(value_null);
+      fake.value_string = Some(value_string);
+      fake.value_dict = Some(value_dict);
+      fake.value_dict_set = Some(value_dict_set);
+      fake.js_call_respond = Some(js_call_respond);
+    }
+  }
+
+  #[test]
+  fn strings_with_nul_bytes_fail_safely_instead_of_panicking() {
+    use std::sync::mpsc;
+    install_pdf_fake();
+    let seen = || nul::SEEN.lock().unwrap().clone();
+    let w = Window::from_id(5);
+
+    // Unit-returning wrappers: a no-op, the backend is not called.
+    w.set_title("a\0b");
+    w.navigate("app://x/\0");
+    write_clipboard_text("x\0y");
+    set_dock_badge(Some("1\0"));
+    TrayIcon::from_id(3).set_tooltip(Some("t\0"));
+    set_js_namespace("Na\0me");
+    register_scheme_handler("sch\0eme", |_req| {});
+    assert!(seen().is_empty(), "reached the backend: {:?}", seen());
+
+    // execute_js: not run, the callback hears why.
+    let (tx, rx) = mpsc::channel();
+    w.execute_js("1\0", Some(move |r| tx.send(r).unwrap()));
+    let Err(err) = rx.recv().unwrap() else {
+      panic!("execute_js with a NUL ran");
+    };
+    assert!(
+      err.as_string().unwrap().contains("NUL"),
+      "{:?}",
+      err.as_string()
+    );
+
+    // Dialogs: as if cancelled.
+    assert!(!w.confirm("t\0", "m"));
+    assert_eq!(w.prompt("t", "m\0", "d"), None);
+    assert!(!confirm("t", "m\0"));
+
+    // Values: a string becomes null, a key is left out.
+    assert_eq!(
+      Value::String("a\0b".into()).to_raw() as usize,
+      nul::NULL_VALUE
+    );
+    let mut map = HashMap::new();
+    map.insert("k\0".to_string(), Value::Null);
+    assert_eq!(Value::Dict(map).to_raw() as usize, nul::DICT_VALUE);
+    assert!(seen().is_empty(), "reached the backend: {:?}", seen());
+
+    // A JS call answered with a NUL-bearing value is rejected instead.
+    JsCall {
+      window_id: 5,
+      call_id: 9,
+      method: "m".into(),
+      args: vec![],
+    }
+    .resolve(Value::List(vec![Value::String("x\0".into())]));
+    let (result, error) = *nul::RESPONDED.lock().unwrap().last().unwrap();
+    assert_eq!(result, 0, "resolved despite the NUL");
+    assert_eq!(error, nul::STRING_VALUE);
+    assert!(seen()
+      .iter()
+      .any(|s| s.starts_with("value_string:the result")));
+
+    // The same calls without a NUL do reach the backend.
+    nul::SEEN.lock().unwrap().clear();
+    w.set_title("ok");
+    w.navigate("app://x/");
+    set_js_namespace("Name");
+    assert!(w.confirm("t", "m"));
+    let got = seen();
+    for want in [
+      "set_title:ok",
+      "navigate:app://x/",
+      "set_js_namespace:Name",
+      "show_dialog:t",
+    ] {
+      assert!(got.iter().any(|s| s == want), "missing {want}: {got:?}");
+    }
   }
 
   // Regression guard for print_to_pdf's marshaling and file handling,

@@ -11,6 +11,7 @@
 
 #include "include/cef_resource_handler.h"
 #include "include/cef_scheme.h"
+#include "laufey_scheme_cancel.h"
 
 // The built-in custom standard scheme laufey registers for in-process app
 // serving (e.g. "app://..."). Declared as a standard, secure, fetch/CORS-
@@ -69,6 +70,11 @@ class LaufeySchemeHandler : public CefResourceHandler {
   bool cancelled_ = false;
   // The body outgrew kMaxQueuedResponseBytes unread: the response failed.
   bool failed_ = false;
+  // Set on the IO thread once Open handed the exchange to the runtime.
+  bool dispatched_ = false;
+  // Reports the engine's cancel to the runtime (on_cancel) at most once and
+  // never after FinishResponse.
+  laufey_common::SchemeCancelGate cancel_gate_;
 
   // Deferred CEF continuations. When a Read arrives with no body buffered, the
   // caller's output buffer (`pending_data_` / `pending_cap_`, valid until the

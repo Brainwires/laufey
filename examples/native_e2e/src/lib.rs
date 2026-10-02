@@ -29,6 +29,7 @@
 
 mod auth_thread_checks;
 mod body_echo;
+mod close_checks;
 mod io_checks;
 mod lna_checks;
 mod menu_notification_checks;
@@ -2333,6 +2334,10 @@ async fn window_api_checks() {
     }
   }
 
+  // -- a window the user closes ------------------------------------------------
+  // While `w` is still open, so the app has a window left.
+  close_checks::run().await;
+
   w.close();
 }
 
@@ -2589,6 +2594,24 @@ async fn lifetime_checks() {
   check(
     &format!("the runtime is shut down exactly once (got {calls})"),
     calls == 1,
+  );
+  // The loop has ended: calls that wait for the UI thread (getters, screens)
+  // must return their defaults at once instead of waiting for a loop that
+  // will never run again (which also kept the backend's shutdown, waiting
+  // for this thread, from ever finishing).
+  let id = open_at_quit.id();
+  let (tx, rx) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    let w = Window::from_id(id);
+    let _ = w.get_size();
+    let _ = w.get_position();
+    let _ = w.get_visible();
+    let _ = laufey::screens();
+    let _ = tx.send(());
+  });
+  check(
+    "UI-thread calls after the loop ended return instead of hanging",
+    rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
   );
   // Then return instead of exiting: the backend must join this thread and
   // end the process itself. On Unix an atexit guard checks that the process

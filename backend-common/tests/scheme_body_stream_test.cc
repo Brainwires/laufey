@@ -8,6 +8,7 @@
 // a synchronous reader works too. Plain asserts, no WebKit.
 
 #include "laufey_scheme_body_stream.h"
+#include "laufey_scheme_cancel.h"
 
 #include <algorithm>
 #include <atomic>
@@ -207,6 +208,63 @@ static void TestReaderGoneFailsTheWriter() {
   g_object_unref(s2);
 }
 
+// The reader-gone hook behind on_cancel (WebKitGTK): fired once when WebKit
+// lets the stream go before the body ended, not after a normal end.
+static void TestReaderGoneHook() {
+  int gone = 0;
+  auto writer = std::make_shared<SchemeBodyWriter>();
+  writer->SetReaderGoneHandler([&] { gone++; });
+  GInputStream* stream = writer->CreateStream();
+  CHECK(g_input_stream_close(stream, nullptr, nullptr));
+  g_object_unref(stream);  // finalize: closed already, not reported again
+  CHECK(gone == 1);
+
+  int gone2 = 0;
+  auto w2 = std::make_shared<SchemeBodyWriter>();
+  w2->SetReaderGoneHandler([&] { gone2++; });
+  GInputStream* s2 = w2->CreateStream();
+  w2->End();  // the response ended: letting it go is no cancel
+  g_object_unref(s2);
+  CHECK(gone2 == 0);
+}
+
+// SchemeCancelGate: one report, none after Finish, and Finish waits for a
+// report in progress on another thread (the exchange must outlive it).
+static void TestCancelGate() {
+  laufey_common::SchemeCancelGate gate;
+  int reports = 0;
+  gate.Cancel([&] { reports++; });
+  gate.Cancel([&] { reports++; });
+  CHECK(reports == 1 && gate.cancelled());
+  gate.Finish();
+
+  laufey_common::SchemeCancelGate finished;
+  finished.Finish();
+  finished.Cancel([&] { reports++; });
+  CHECK(reports == 1 && !finished.cancelled());
+
+  // Finished from inside the report, on the same thread: no deadlock.
+  laufey_common::SchemeCancelGate reentrant;
+  reentrant.Cancel([&] { reentrant.Finish(); });
+  CHECK(reentrant.cancelled());
+
+  // A report in progress holds Finish until it returns.
+  laufey_common::SchemeCancelGate racing;
+  std::atomic<bool> in_report{false}, report_done{false};
+  std::thread reporter([&] {
+    racing.Cancel([&] {
+      in_report = true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      report_done = true;
+    });
+  });
+  while (!in_report)
+    std::this_thread::yield();
+  racing.Finish();
+  CHECK(report_done);
+  reporter.join();
+}
+
 static void TestSynchronousReaderAndEof() {
   auto writer = std::make_shared<SchemeBodyWriter>();
   GInputStream* stream = writer->CreateStream();
@@ -257,6 +315,8 @@ int main() {
   TestReaderWokenByAnotherThread();
   TestCapFailsBothSides();
   TestReaderGoneFailsTheWriter();
+  TestReaderGoneHook();
+  TestCancelGate();
   TestSynchronousReaderAndEof();
   if (g_failures) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);

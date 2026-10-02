@@ -19,6 +19,7 @@
 #define LAUFEY_UI_TASKS_H_
 
 #include <laufey.h>
+#include "laufey_sync_call.h"
 
 #include <cstdint>
 #include <functional>
@@ -27,6 +28,11 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__) && defined(__OBJC__)
+#include <dispatch/dispatch.h>
+#include <pthread.h>
+#endif
 
 namespace laufey_common {
 
@@ -87,6 +93,33 @@ class UiTaskDispatcher {
     }
     if (post_now)
       Post(id);
+  }
+
+  // Like Dispatch, but queued through `post` instead of the bound queue: for
+  // a caller that keeps its own transport (GCD's main queue, which AppKit
+  // also drains inside its modal loops; GLib's default context). Works
+  // before Bind. The delivery guarantee is Dispatch's: the task runs once,
+  // or Close answers it with `ran` false.
+  void DispatchVia(const PostFn& post, laufey_ui_task_fn task, void* data) {
+    if (!task)
+      return;
+    uint64_t id = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!closed_) {
+        id = ++next_id_;
+        pending_.emplace(id, Pending{task, data});
+      }
+    }
+    if (id == 0) {
+      task(data, false);
+      return;
+    }
+    auto* ref = new Ref{this, id};
+    if (!post || !post(&UiTaskDispatcher::Run, ref)) {
+      delete ref;
+      Cancel(id);
+    }
   }
 
   // The backend's loop has ended (or the backend runs without one): every
@@ -186,6 +219,69 @@ class UiTaskDispatcher {
   std::unordered_map<uint64_t, Pending> pending_;
   std::vector<uint64_t> unposted_;
 };
+
+// Runs `fn` on the UI thread and blocks until it has run, or until it can no
+// longer run: every synchronous UI-thread hop of the backends
+// (cef_invoke_sync, gtk_invoke_sync, GtkRunSync, the WebView2 and macOS
+// getters) goes through here, so none of them outlives the loop. True if
+// `fn` ran; false when the loop had ended (Close) or the task could not be
+// queued — the caller then answers with its defaults. Before Bind the task
+// is held, and posted by Bind.
+//
+// `via`, when given, is the transport to queue it through instead of the
+// bound queue (UiTaskDispatcher::DispatchVia).
+//
+// Never call it on the UI thread: the caller runs `fn` inline there (each
+// backend checks its own notion of the thread first, which also holds before
+// Bind).
+template <typename F>
+bool RunOnUiThreadAndWait(
+    F& fn,
+    const UiTaskDispatcher::PostFn& via = nullptr,
+    UiTaskDispatcher& dispatcher = UiTaskDispatcher::Get()) {
+  // `ctx` lives in this frame; Done() is the task's last access to it
+  // (laufey_sync_call.h).
+  struct Ctx {
+    explicit Ctx(F* f) : fn(f) {}
+    F* fn;
+    bool ran = false;
+    SyncCall call;
+  };
+  Ctx ctx(&fn);
+  laufey_ui_task_fn task = [](void* data, bool ran) {
+    auto* c = static_cast<Ctx*>(data);
+    if (ran) {
+      (*c->fn)();
+      c->ran = true;
+    }
+    c->call.Done();
+  };
+  if (via)
+    dispatcher.DispatchVia(via, task, &ctx);
+  else
+    dispatcher.Dispatch(task, &ctx);
+  ctx.call.Wait();
+  return ctx.ran;
+}
+
+#if defined(__APPLE__) && defined(__OBJC__)
+// Runs `block` on the main thread and waits for it; inline when already
+// there (a getter called from a handler on the main thread must not
+// deadlock). Over GCD's main queue, which AppKit also drains inside its
+// modal loops, and through the dispatcher, so the wait ends with the loop:
+// false when `block` did not run (the caller answers with its defaults).
+inline bool RunOnMainSync(void (^block)(void)) {
+  if (pthread_main_np()) {
+    block();
+    return true;
+  }
+  auto run = [block] { block(); };
+  return RunOnUiThreadAndWait(run, [](void (*task)(void*), void* data) {
+    dispatch_async_f(dispatch_get_main_queue(), data, task);
+    return true;
+  });
+}
+#endif
 
 }  // namespace laufey_common
 

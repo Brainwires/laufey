@@ -149,28 +149,17 @@ void ConfigureWin32WindowAsPanel(void* hwnd_ptr) {
 }
 #endif
 
-// Helper to run a callback synchronously on the CEF UI thread.
-// If already on the UI thread, runs immediately.
-//
-// `call` lives in this frame and Done() is the UI task's last access to it:
-// Done() notifies under the lock, since the waiter returns (destroying `call`)
-// as soon as it sees the call complete. A notify after the unlock corrupted
-// the next wait on macOS, which then never woke (the e2e hung in screens())
-// or crashed. See laufey_sync_call.h.
+// Runs `fn` synchronously on the CEF UI thread (inline when already there).
+// Through the UI task dispatcher (laufey_ui_tasks.h), so a call never
+// outlives the loop: false when `fn` did not run because the loop had ended
+// or CEF refused the task, and the caller answers with its defaults.
 template <typename F>
-static void cef_invoke_sync(F&& fn) {
+static bool cef_invoke_sync(F&& fn) {
   if (CefCurrentlyOn(TID_UI)) {
     fn();
-    return;
+    return true;
   }
-  laufey_common::SyncCall call;
-  CefPostTask(TID_UI, base::BindOnce(
-                          [](F* fn, laufey_common::SyncCall* call) {
-                            (*fn)();
-                            call->Done();
-                          },
-                          &fn, &call));
-  call.Wait();
+  return laufey_common::RunOnUiThreadAndWait(fn);
 }
 
 // --- Backend API functions (cross-platform, using CEF Views) ---
@@ -2681,28 +2670,37 @@ static uint32_t Backend_WindowCapabilities(void* /*data*/) {
   if (!(wayland && *wayland))
     caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
 #endif
-  // Drag and drop and file dialogs (API >= 39). OnDragEnter has the paths
-  // from the start. macOS sheets and Windows owner windows are modal; on
-  // Linux the GTK dialog can't be made modal to Chromium's (non-GTK) window,
-  // and the GTK drag source needs an X11 display.
+  // Drag and drop and file dialogs (API >= 39). The paths of an external
+  // drop come from the OS's drag data when the drag enters (CEF calls
+  // OnDragEnter only for Alloy-style browsers; see LaufeyNativeDragFilePaths).
+  // macOS sheets and Windows owner windows are modal; on Linux the GTK dialog
+  // can't be made modal to Chromium's (non-GTK) window.
+  caps |= LAUFEY_WINDOW_CAP_FILE_DIALOGS;
+#if defined(__APPLE__)
   caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
           LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
-          LAUFEY_WINDOW_CAP_FILE_DIALOGS;
-#if defined(__APPLE__)
-  caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT |
+          LAUFEY_WINDOW_CAP_FILE_DRAG_OUT |
           LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES |
           LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
 #elif defined(_WIN32)
-  caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+  caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
+          LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
+          LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
 #else
+  // Linux: the drop's paths are read from X11's XdndSelection and the GTK
+  // drag source needs an X11 display. Under Wayland there is no X drag data
+  // to read, so a drop could never carry its paths: neither is reported.
   EnsureGtkReady();
   bool x11 = false;
   laufey_common::GtkRunSync([&] {
     GdkDisplay* display = gdk_display_get_default();
     x11 = display && strstr(G_OBJECT_TYPE_NAME(display), "X11") != nullptr;
   });
-  if (x11)
-    caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT;
+  if (x11) {
+    caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
+            LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
+            LAUFEY_WINDOW_CAP_FILE_DRAG_OUT;
+  }
 #endif
   return caps;
 }
@@ -3439,6 +3437,7 @@ void RuntimeLoader::RuntimeThread() {
     std::cerr << "Runtime start returned error: " << result << std::endl;
   }
   running_ = false;
+  runtime_exit_.Done();
 }
 
 void RuntimeLoader::Shutdown() {
@@ -3447,7 +3446,17 @@ void RuntimeLoader::Shutdown() {
   }
 
   if (runtime_thread_.joinable()) {
-    runtime_thread_.join();
+    // The loop has ended (UiLoopEnded), so the runtime's synchronous UI calls
+    // already return. A runtime that still ignores the shutdown is abandoned
+    // after the timeout, as on Winit, rather than hanging the exit.
+    if (runtime_exit_.WaitFor(kRuntimeShutdownTimeout)) {
+      runtime_thread_.join();
+    } else {
+      std::cerr << "laufey: the runtime did not stop within "
+                << kRuntimeShutdownTimeout.count()
+                << " ms of shutdown; exiting without it" << std::endl;
+      runtime_thread_.detach();
+    }
   }
 }
 
@@ -3581,6 +3590,18 @@ void RuntimeLoader::SetSchemeRequestHandler(const std::string& scheme,
                             },
                             s));
   }
+}
+
+void RuntimeLoader::DispatchSchemeCancel(void* exchange) {
+  laufey_scheme_cancel_fn on_cancel;
+  void* user_data;
+  {
+    std::lock_guard<std::mutex> lock(scheme_mutex_);
+    on_cancel = scheme_cancel_handler_;
+    user_data = scheme_user_data_;
+  }
+  if (on_cancel)
+    on_cancel(user_data, reinterpret_cast<laufey_scheme_exchange_t*>(exchange));
 }
 
 void RuntimeLoader::DispatchSchemeRequest(uint32_t window_id, void* exchange,

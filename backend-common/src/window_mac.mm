@@ -10,22 +10,12 @@
 #include <map>
 #include <mutex>
 
+#include "laufey_ui_tasks.h"
 #include "laufey_window.h"
 
 namespace laufey_common {
 
 namespace {
-
-// Runs `block` on the main thread and waits for it; inline when already
-// there (a getter called from a handler on the main thread must not
-// deadlock).
-void RunOnMainSync(dispatch_block_t block) {
-  if ([NSThread isMainThread]) {
-    block();
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), block);
-  }
-}
 
 CGFloat PrimaryScreenHeight() {
   NSScreen* primary = [[NSScreen screens] firstObject];

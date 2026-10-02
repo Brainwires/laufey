@@ -563,29 +563,43 @@ outward-facing surfaces are nightly.
 
 ## 10. CI architecture
 
-Today CI builds only Winit + lint + a `capi` unit/doc test. To test all
-backends:
+`.github/workflows/ci.yml` runs on every pull request to `main`, every push to
+`main`, `denext/integration` or a `v*` tag, nightly (so flakes and runner-image
+drift show up between merges) and on demand:
 
-1. **Build jobs** for CEF and WebView per OS. CEF is expensive (downloads/builds
-   ~GBs) — cache aggressively; consider running CEF nightly while WebView +
-   Winit gate per-PR.
-2. **Test matrix**
-   `backend ∈ {cef, webview, winit} × os ∈ {linux, macos,
-   windows}`, each
-   launching the shared runtime under the right wrapper:
+- **`lint`** — `cargo fmt --check`, `cargo clippy --workspace -D warnings`,
+  `clang-format` 22.1.5 over `capi`, `cef/src` and `webview/src`,
+  `deno fmt --check`, `deno lint`.
+- **`test`** — the `laufey` crate's unit and doc tests (`cargo test -p laufey`),
+  and backend-common's plain C++ tests (data directory, launch config, single
+  instance).
+- **`test-winit-common`** (Linux, macOS, Windows) — the Winit backend crate's
+  unit tests, among them the check that its hand-written API table has the exact
+  layout of `laufey_backend_api_t`.
+- **`tsan`** — the synchronous UI-hop rendezvous (`laufey_sync_call.h`), the
+  passkey ceremony and the single-instance lock under ThreadSanitizer.
+- **`build-winit` / `build-webview` / `build-cef`** — every backend for every
+  release target (`build-webview` also runs backend-common's `ctest` suite);
+  their packages are the release artifacts.
+- **`native-e2e`** — the `native_e2e` battery (`§8`) under every backend:
+  `{winit, webview, cef}` on macOS 14 and Windows, `cef` and `webview` on Ubuntu
+  22.04, `webview` on Windows on Arm and `cef` on Linux arm64. Each step runs
+  `scripts/native-e2e-run.sh <backend> [mode]`: Layer 0, the D-Bus observer
+  (`--layer1`, cef/linux), and the mode batteries of `§14`–`§20`, with storage,
+  single-instance and (Windows) the toast cold start on their own. Linux runs
+  headless under Xvfb with a private session bus; the window-API, HiDPI, I/O,
+  system and menu modes add a window manager (openbox) and real X input
+  (xdotool). The Layer-0 battery itself is excluded on webview/linux (WebKitGTK
+  under the worker-thread runtime), where the request-body and Local Network
+  Access checks run on their own instead.
+- **`e2e-cef-linux`** — the older `cef_e2e` binding harness under Xvfb.
+- **`release`** — on a `v*` tag, after **all** of the jobs above pass: checks
+  the tag against the `laufey` crate version, publishes the crate and creates
+  the GitHub release with the build artifacts and `SHA256SUMS`.
 
-   ```
-   # Linux (covers cef/webview appindicator AND winit tray-icon):
-   xvfb-run -a dbus-run-session -- sni-driver <backend-bin> --runtime libnative_e2e.so
-   # macOS (self-AX + readback, in-process, no permission):
-   <backend-bin> --runtime libnative_e2e.dylib
-   # Windows (readback + FlaUI attach):
-   <backend-bin> --runtime native_e2e.dll
-   ```
-
-Because the runtime is written once and the observers are backend-agnostic, the
-_incremental_ cost of "all backends" is mostly build time and matrix legs, not
-new test code.
+The nightly run is the same workflow, not a wider one: what the hosted runners
+cannot drive (modal dialogs, outward-facing notification UI, the macOS / Windows
+Layer-1 observers of `§7.2`–`§7.3`) is not covered in CI.
 
 When a run goes wrong in CI it leaves evidence: `native-e2e-run.sh` streams the
 backend's output (so a hang shows how far the battery got) and prints its exit
@@ -597,21 +611,15 @@ and the crashed thread of each report (`scripts/print-crash-report.py`).
 
 ---
 
-## 11. Rollout
+## 11. Status
 
-1. **Layer 0 battery** — the capability-probing `native_e2e` runtime: readback +
-   event-callback + clipboard + scheme + menu/tray assertions, each tagged with
-   its required capability and the `PASS/FAIL/N/A` protocol. Highest ROI, covers
-   recent code (opacity, clipboard, app_id). ~2–3 days.
-2. **Backend-launch matrix** driving that runtime under CEF/WebView/Winit; reuse
-   `sni-driver` as the Linux wrapper for all three. ~2 days.
-3. **Layer 1 Linux** — land `sni-driver` + `e2e-linux-native` job. Flagship.
-   ~2–3 days (driver already compiles).
-4. **Layer 1 macOS** — embed the self-AX verifier; add to the macOS leg. ~2
-   days.
-5. **Layer 1 Windows** — FlaUI menu suite; tray scraping nightly. ~2–3 days.
-6. **CI** — add CEF/WebView build jobs (cache CEF; CEF nightly if needed).
-7. **Nightly** — dialogs/modal/outward-facing; later Servo branch and iOS.
+Landed: the capability-probing Layer-0 battery (`native_e2e`), the
+backend-launch matrix above, the Linux Layer-1 D-Bus observer
+(`native_e2e_driver`, run by `--layer1`), and CEF / WebView build jobs. Not
+landed: the macOS self-Accessibility and Windows UI Automation observers
+(`§7.2`, `§7.3`) — macOS and Windows chrome is checked in-process only — and a
+job for dialogs and other modal / outward-facing surfaces (the nightly run
+repeats the PR checks).
 
 ---
 
@@ -732,6 +740,14 @@ one that doesn't must refuse (setters return `false`).
 - **Title bar / backdrops**: each setter succeeds exactly when the capability is
   reported; a hidden title bar puts the content origin at the frame origin and
   the default one moves it back.
+- **A window the user closes** (`close_checks.rs`): a second window is closed
+  through the window system, not `close_window` — Alt+F4 through the window
+  manager on X11 (N/A without one), `WM_CLOSE` posted to it on Windows,
+  `-[NSWindow performClose:]` on macOS — with a JS call from its page still
+  pending. It must then read as closed (size 0x0, position (0, 0)), and the
+  getters, setters, `execute_js`, `navigate` and the answer to the pending call
+  that name it must all be no-ops: the backend's own destroy path drops the
+  window's state, so none of them reaches the destroyed native window.
 
 `--lifetime` (its own run, since it ends the process): with keep-alive on, the
 last window closes and the loop survives (no runtime shutdown), a new window

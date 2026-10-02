@@ -81,14 +81,28 @@ class SchemeBodyQueue {
     Wake();
   }
 
+  // Called once if the reader goes away before the body ended or failed.
+  void SetReaderGoneHandler(std::function<void()> handler) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    on_reader_gone_ = std::move(handler);
+  }
+
   // The reader is gone (WebKit closed / finalized the stream).
   void Close() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    closed_ = true;
-    chunks_.clear();
-    front_ = 0;
-    queued_ = 0;
-    cv_.notify_all();
+    std::function<void()> gone;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!closed_ && !ended_ && !failed_)
+        gone = std::move(on_reader_gone_);
+      on_reader_gone_ = nullptr;
+      closed_ = true;
+      chunks_.clear();
+      front_ = 0;
+      queued_ = 0;
+      cv_.notify_all();
+    }
+    if (gone)
+      gone();
   }
 
   bool Readable() {
@@ -191,6 +205,7 @@ class SchemeBodyQueue {
   bool closed_ = false;
   std::string error_;
   GMainContext* context_ = nullptr;
+  std::function<void()> on_reader_gone_;
 };
 
 }  // namespace laufey_common
@@ -362,6 +377,10 @@ void SchemeBodyWriter::Fail(const char* message) {
 
 size_t SchemeBodyWriter::queued() const {
   return queue_->queued();
+}
+
+void SchemeBodyWriter::SetReaderGoneHandler(std::function<void()> handler) {
+  queue_->SetReaderGoneHandler(std::move(handler));
 }
 
 bool SchemeBodyWriter::reader_gone() const {

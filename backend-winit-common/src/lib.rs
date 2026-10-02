@@ -12,6 +12,9 @@ pub mod tray;
 pub mod ui_tasks;
 pub mod window_api;
 
+#[cfg(test)]
+mod abi_layout_tests;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -929,6 +932,9 @@ pub const LAUFEY_TEST_INPUT_CURSOR_LEAVE: c_int = 5;
 pub const LAUFEY_TEST_INPUT_MODIFIERS: c_int = 6;
 
 unsafe impl Send for LaufeyBackendApi {}
+// Read-only once handed to the runtime (function pointers plus the opaque
+// backend_data the runtime passes back); every thread calls through it.
+unsafe impl Sync for LaufeyBackendApi {}
 
 pub type RuntimeInitFn = unsafe extern "C" fn(*const LaufeyBackendApi) -> c_int;
 pub type RuntimeStartFn = unsafe extern "C" fn() -> c_int;
@@ -1129,9 +1135,12 @@ pub unsafe extern "C" fn value_list_size(val: *mut LaufeyValue) -> usize {
     _ => 0,
   }
 }
+/// The item at `idx` of a list, borrowed from it (null if absent). Backend
+/// internal; the exported [`value_list_get`] hands out an owned copy.
+///
 /// # Safety
-/// Caller must pass valid pointers as defined by the LAUFEY C API contract.
-pub unsafe extern "C" fn value_list_get(
+/// `val` must be null or a valid value of this backend.
+pub(crate) unsafe fn value_list_item_ref(
   val: *mut LaufeyValue,
   idx: usize,
 ) -> *mut LaufeyValue {
@@ -1145,9 +1154,13 @@ pub unsafe extern "C" fn value_list_get(
     _ => std::ptr::null_mut(),
   }
 }
+/// The value under `key` of a dict, borrowed from it (null if absent).
+/// Backend internal; the exported [`value_dict_get`] hands out an owned copy.
+///
 /// # Safety
-/// Caller must pass valid pointers as defined by the LAUFEY C API contract.
-pub unsafe extern "C" fn value_dict_get(
+/// `val` must be null or a valid value of this backend; `key` null or a C
+/// string.
+pub(crate) unsafe fn value_dict_entry_ref(
   val: *mut LaufeyValue,
   key: *const c_char,
 ) -> *mut LaufeyValue {
@@ -1163,6 +1176,52 @@ pub unsafe extern "C" fn value_dict_get(
       .unwrap_or(std::ptr::null_mut()),
     _ => std::ptr::null_mut(),
   }
+}
+/// A deep copy of `ptr` (null for null).
+unsafe fn laufey_clone(ptr: *mut LaufeyValue) -> *mut LaufeyValue {
+  if ptr.is_null() {
+    return std::ptr::null_mut();
+  }
+  let copy = match laufey_ref(ptr) {
+    SimpleValue::Null => SimpleValue::Null,
+    SimpleValue::Bool(v) => SimpleValue::Bool(*v),
+    SimpleValue::Int(v) => SimpleValue::Int(*v),
+    SimpleValue::Double(v) => SimpleValue::Double(*v),
+    SimpleValue::String(v) => SimpleValue::String(v.clone()),
+    SimpleValue::List(items) => {
+      SimpleValue::List(items.iter().map(|i| laufey_clone(*i)).collect())
+    }
+    SimpleValue::Dict(entries) => SimpleValue::Dict(
+      entries
+        .iter()
+        .map(|(k, v)| (k.clone(), laufey_clone(*v)))
+        .collect(),
+    ),
+    SimpleValue::Binary(v) => SimpleValue::Binary(v.clone()),
+  };
+  sv_to_laufey(copy)
+}
+/// The item at `idx` of a list as a new value the caller owns and frees
+/// with `value_free` (null if absent), as on every backend (laufey.h).
+///
+/// # Safety
+/// Caller must pass valid pointers as defined by the LAUFEY C API contract.
+pub unsafe extern "C" fn value_list_get(
+  val: *mut LaufeyValue,
+  idx: usize,
+) -> *mut LaufeyValue {
+  laufey_clone(value_list_item_ref(val, idx))
+}
+/// The value under `key` of a dict as a new value the caller owns and frees
+/// with `value_free` (null if absent), as on every backend (laufey.h).
+///
+/// # Safety
+/// Caller must pass valid pointers as defined by the LAUFEY C API contract.
+pub unsafe extern "C" fn value_dict_get(
+  val: *mut LaufeyValue,
+  key: *const c_char,
+) -> *mut LaufeyValue {
+  laufey_clone(value_dict_entry_ref(val, key))
 }
 /// # Safety
 /// Caller must pass valid pointers as defined by the LAUFEY C API contract.
@@ -1857,7 +1916,7 @@ unsafe fn laufey_dict_string(
   key: &str,
 ) -> Option<String> {
   let c_key = CString::new(key).ok()?;
-  let val = value_dict_get(dict, c_key.as_ptr());
+  let val = value_dict_entry_ref(dict, c_key.as_ptr());
   if val.is_null() || !value_is_string(val) {
     return None;
   }
@@ -1883,7 +1942,7 @@ pub unsafe fn parse_menu_template(
   }
   let count = value_list_size(template);
   for i in 0..count {
-    let entry = value_list_get(template, i);
+    let entry = value_list_item_ref(template, i);
     if entry.is_null() || !value_is_dict(entry) {
       continue;
     }
@@ -1901,7 +1960,7 @@ pub unsafe fn parse_menu_template(
     }
     // Check for submenu
     let c_submenu = CString::new("submenu").unwrap();
-    let submenu_val = value_dict_get(entry, c_submenu.as_ptr());
+    let submenu_val = value_dict_entry_ref(entry, c_submenu.as_ptr());
     if !submenu_val.is_null() && value_is_list(submenu_val) {
       let label = laufey_dict_string(entry, "label").unwrap_or_default();
       let children = parse_menu_template(submenu_val);
@@ -1916,7 +1975,7 @@ pub unsafe fn parse_menu_template(
     let id = laufey_dict_string(entry, "id").unwrap_or_else(|| label.clone());
     let accelerator = laufey_dict_string(entry, "accelerator");
     let c_enabled = CString::new("enabled").unwrap();
-    let enabled_val = value_dict_get(entry, c_enabled.as_ptr());
+    let enabled_val = value_dict_entry_ref(entry, c_enabled.as_ptr());
     let enabled = if enabled_val.is_null() || !value_is_bool(enabled_val) {
       true
     } else {
@@ -5382,7 +5441,16 @@ pub fn shutdown_runtime(timeout: std::time::Duration) {
   let _ = rx.recv_timeout(timeout);
 }
 
+/// The vtable handed to the runtime, moved to a static home: the runtime
+/// keeps the pointer `laufey_runtime_init` receives for the rest of the
+/// process (laufey.h), so it must outlive every frame — the runtime thread's
+/// included, which ends before other threads stop calling through it.
+fn into_static_api(api: LaufeyBackendApi) -> &'static LaufeyBackendApi {
+  Box::leak(Box::new(api))
+}
+
 pub fn load_and_start_runtime(api: LaufeyBackendApi) {
+  let api = into_static_api(api);
   // This thread runs the event loop: dispatch_ui_task's UI thread.
   ui_tasks::bind_current_thread();
   // Install `application:openURLs:` before the runtime comes up: AppKit only
@@ -5422,7 +5490,7 @@ pub fn load_and_start_runtime(api: LaufeyBackendApi) {
             }
           };
 
-        let result = init(&api);
+        let result = init(api);
         if result != 0 {
           eprintln!("Runtime init failed with code: {}", result);
           return;
@@ -5450,6 +5518,60 @@ pub fn load_and_start_runtime(api: LaufeyBackendApi) {
       );
       println!("Starting without runtime integration...");
     }
+  }
+}
+
+#[cfg(test)]
+mod value_ownership_tests {
+  use super::*;
+
+  // value_list_get / value_dict_get hand out a new value the caller owns
+  // (laufey.h), as the CEF and WebView backends do: freeing it must leave
+  // the container intact (it was a borrowed pointer into it before, so the
+  // runtime's free was a double free here and a leak on the other backends).
+  #[test]
+  fn list_and_dict_get_return_owned_copies() {
+    unsafe {
+      let null = std::ptr::null_mut();
+      let list = value_list(null);
+      value_list_append(list, value_string(null, c"item".as_ptr()));
+      let dict = value_dict(null);
+      value_dict_set(dict, c"k".as_ptr(), value_string(null, c"v".as_ptr()));
+      value_list_append(list, dict);
+
+      for _ in 0..2 {
+        let item = value_list_get(list, 0);
+        let mut len = 0;
+        let s = value_get_string(item, &mut len);
+        assert_eq!(CStr::from_ptr(s).to_str().unwrap(), "item");
+        value_free_string(s);
+        value_free(item);
+
+        let d = value_list_get(list, 1);
+        let v = value_dict_get(d, c"k".as_ptr());
+        let s = value_get_string(v, &mut len);
+        assert_eq!(CStr::from_ptr(s).to_str().unwrap(), "v");
+        value_free_string(s);
+        value_free(v);
+        value_free(d);
+      }
+      assert!(value_list_get(list, 5).is_null());
+      assert!(value_dict_get(dict, c"missing".as_ptr()).is_null());
+      value_free(list);
+    }
+  }
+
+  // The vtable the runtime gets lives for the rest of the process.
+  #[test]
+  fn the_runtime_vtable_outlives_its_creator() {
+    let api: &'static LaufeyBackendApi = std::thread::spawn(|| {
+      let mut api: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+      api.version = 4242;
+      into_static_api(api)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(api.version, 4242);
   }
 }
 

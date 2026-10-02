@@ -297,5 +297,17 @@ if ! grep -q '^\[e2e\] OVERALL ' "$log"; then
   rm -f "$log"
   exit 1
 fi
+# WebKitGTK window battery: GTK reports a call on a destroyed widget as a
+# critical instead of crashing (the window the user closes in
+# close_checks.rs is reached through a freed GtkWindow when its state
+# outlives it). A clean run has none, so any is a failure.
+if is_linux && [ "$backend" = webview ] &&
+  { [ "$mode" = "--window-api" ] || [ "$mode" = "--hidpi" ]; } &&
+  grep -q 'laufey_webview:[0-9]*): Gtk-CRITICAL' "$log"; then
+  grep 'Gtk-CRITICAL' "$log" >&2
+  echo "native e2e: GTK reported criticals (a call reached a destroyed widget)" >&2
+  rm -f "$log"
+  exit 1
+fi
 rm -f "$log"
 exit "$status"

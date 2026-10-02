@@ -4,6 +4,7 @@
 #define LAUFEY_RUNTIME_LOADER_H_
 
 #include <string>
+#include <chrono>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -11,6 +12,7 @@
 #include <map>
 
 #include "laufey.h"
+#include "laufey_sync_call.h"
 #include "scheme_exchange.h"
 #include "webview_value.h"
 
@@ -100,6 +102,11 @@ class RuntimeLoader {
   void DispatchSchemeRequest(uint32_t window_id, SchemeExchangeBase* exchange,
                              const std::string& method, const std::string& url,
                              const std::string& flat_headers);
+  // The engine cancelled `exchange` before the runtime finished it: call the
+  // registered on_cancel, if any. Backends call it through their
+  // SchemeCancelGate (laufey_scheme_cancel.h): at most once, never after
+  // the exchange was finished.
+  void DispatchSchemeCancel(SchemeExchangeBase* exchange);
 
   void SetKeyboardEventHandler(laufey_keyboard_event_fn handler,
                                void* user_data) {
@@ -290,6 +297,10 @@ class RuntimeLoader {
   laufey_runtime_shutdown_fn shutdown_fn_ = nullptr;
 
   std::thread runtime_thread_;
+  // Signalled as the runtime thread ends (laufey_start returned).
+  laufey_common::ThreadExit runtime_exit_;
+  // How long Shutdown waits for the runtime thread before abandoning it.
+  static constexpr std::chrono::milliseconds kRuntimeShutdownTimeout{10000};
   std::atomic<bool> running_{false};
 
   LaufeyBackend* backend_ = nullptr;
@@ -440,7 +451,9 @@ class LaufeyBackend {
 
   // Global operations
   virtual void Quit() = 0;
-  virtual void PostUiTask(void (*task)(void*), void* data) = 0;
+  // Queues `task(data)` on the UI thread; false if it could not be queued
+  // (it will never run).
+  virtual bool PostUiTask(void (*task)(void*), void* data) = 0;
   virtual void Run() = 0;
 
   // JS interop (broadcast to all windows for callback operations)

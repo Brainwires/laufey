@@ -9,7 +9,7 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::future::Future;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::io::take_backend_string;
 use crate::{api, LaufeyBackendApi, Window};
@@ -144,7 +144,7 @@ impl std::fmt::Display for ShortcutError {
 
 impl std::error::Error for ShortcutError {}
 
-type ShortcutHandler = Box<dyn Fn(&str) + Send + Sync>;
+type ShortcutHandler = Arc<dyn Fn(&str) + Send + Sync>;
 
 fn shortcut_handler() -> &'static Mutex<Option<ShortcutHandler>> {
   static SLOT: OnceLock<Mutex<Option<ShortcutHandler>>> = OnceLock::new();
@@ -159,7 +159,10 @@ unsafe extern "C" fn shortcut_trampoline(
     return;
   }
   let accel = unsafe { CStr::from_ptr(accelerator) }.to_string_lossy();
-  if let Some(handler) = shortcut_handler().lock().unwrap().as_ref() {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = shortcut_handler().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler(&accel);
   }
 }
@@ -172,7 +175,7 @@ pub fn on_shortcut<F>(handler: F)
 where
   F: Fn(&str) + Send + Sync + 'static,
 {
-  *shortcut_handler().lock().unwrap() = Some(Box::new(handler));
+  *shortcut_handler().lock().unwrap() = Some(Arc::new(handler));
   let api = api();
   if let Some(f) = api.set_shortcut_handler {
     unsafe {
@@ -457,6 +460,24 @@ impl Window {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  // A handler that replaces itself (it takes the slot's lock) must not
+  // deadlock: the trampoline calls it after releasing that lock.
+  #[test]
+  fn shortcut_handler_runs_without_the_slot_lock() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      *shortcut_handler().lock().unwrap() = Some(Arc::new(move |_: &str| {
+        *shortcut_handler().lock().unwrap() = None;
+      }));
+      unsafe { shortcut_trampoline(std::ptr::null_mut(), c"Ctrl+K".as_ptr()) };
+      let _ = tx.send(shortcut_handler().lock().unwrap().is_none());
+    });
+    let cleared = rx
+      .recv_timeout(std::time::Duration::from_secs(10))
+      .expect("the handler deadlocked on its own slot");
+    assert!(cleared);
+  }
 
   fn block_on<F: Future>(fut: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()

@@ -7,8 +7,15 @@ browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
 `LAUFEY_API_VERSION` (currently `43`) versions the contract. The `version` field
-on the API table lets a runtime detect the backend's vintage and avoid calling
-function pointers a backend predates (older backends leave new pointers `NULL`).
+on the API table names the version the backend was built against, and the match
+is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
+differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
+a runtime and a backend must come from the same laufey release. The "NULL on
+backends older than API version N" notes in `laufey.h` record when each entry
+point appeared; under the exact match a runtime never meets such a backend.
+Entry points a backend does not implement — Winit has no web engine, no tray
+menus on Linux, and so on — are still `NULL`, so a runtime null-checks them as
+before.
 
 ## Runtime entry points
 
@@ -171,9 +178,12 @@ JS-callback handles:
 - **Free:** `value_free`.
 
 **Ownership.** Constructors return a value the caller owns and must `value_free`
-(unless handed off). Functions that accept a template — `set_application_menu`,
-`show_context_menu`, `set_tray_menu`, `set_dock_menu`, `show_notification` —
-take ownership of the passed value and free it themselves.
+(unless handed off). So do `value_list_get` and `value_dict_get`: each returns a
+new value (a copy of the item or entry), or `NULL` when there is none, which the
+caller frees with `value_free`; the container is unchanged by that. Functions
+that accept a template — `set_application_menu`, `show_context_menu`,
+`set_tray_menu`, `set_dock_menu`, `show_notification` — take ownership of the
+passed value and free it themselves.
 
 A `_callback` value wraps a JS function passed as an argument: read its
 `value_get_callback_id`, then call it later with `invoke_js_callback(id, args)`
@@ -228,9 +238,9 @@ embedded browser over an in-memory byte channel instead of a TCP loopback.
 
 If the webview cancels (navigation away, window closed) before the response
 finishes, `scheme_response_write` / `scheme_request_read_body` return negative;
-the runtime should stop and call `scheme_response_finish`. Backends predating
-API version 26 leave these pointers `NULL`; the runtime must null-check and fall
-back to a socket transport.
+the runtime should stop and call `scheme_response_finish`. A backend without a
+web engine (Winit) leaves these pointers `NULL`; the runtime must null-check and
+fall back to a socket transport.
 
 ### Registered schemes are real origins
 
@@ -363,6 +373,17 @@ the loop has ended or ends before the task ran. The backend answers every
 pending task that way on the thread that ends the loop, **before** it calls
 `laufey_runtime_shutdown`, and answers later dispatches synchronously. A
 headless worker (no loop) answers every dispatch with `ran == false`.
+
+The backends' own synchronous hops ride the same guarantee: an entry point a
+runtime thread calls that has to run on the UI thread and answer (a getter such
+as `get_window_size`, `is_visible`, `get_screens`, a clipboard read, a dialog)
+waits for the UI thread through the same dispatcher. Called after the loop has
+ended, or still waiting when it ends, such a call returns at once with its
+defaults (`0`, `false`, `NULL`, an empty list) instead of waiting forever. Once
+the loop has ended the backend calls `laufey_runtime_shutdown` and waits up to
+10 seconds for the runtime's thread to return from `laufey_runtime_start` (5 on
+Winit); a runtime still running then is abandoned and the process exits without
+it.
 
 `is_ui_thread` is true on the thread that runs those tasks: the process main
 thread on macOS (every backend) and for the WebView backends, CEF's `TID_UI`

@@ -2,7 +2,7 @@
 //
 // NSPasteboard-backed clipboard: text, HTML, PNG images, the formats present
 // and a change watcher. Pasteboard access is forwarded to the main thread
-// (dispatch_sync when called elsewhere), matching the convention used by the
+// (RunOnMainSync when called elsewhere), matching the convention used by the
 // AppKit dialog/menu code in this directory, so every call is safe from any
 // thread.
 //
@@ -12,6 +12,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_ui_tasks.h"
 
 #import <Cocoa/Cocoa.h>
 
@@ -25,11 +26,7 @@ namespace laufey_common {
 namespace {
 
 void OnMain(void (^body)(void)) {
-  if ([NSThread isMainThread]) {
-    body();
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), body);
-  }
+  RunOnMainSync(body);
 }
 
 char* StrdupCapped(NSString* str) {

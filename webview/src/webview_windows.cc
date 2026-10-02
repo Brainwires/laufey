@@ -9,6 +9,7 @@
 #include "laufey_json.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_ui_tasks.h"
 #include "laufey_window.h"
 #include "init_script.h"
 #include "wv2_scheme_stream.h"
@@ -197,20 +198,42 @@ void WinSetClientSize(HWND hwnd, int width, int height, UINT extra_flags) {
 
 // The frame (physical) around the client area while the window was last in
 // the normal state, for normal bounds of a maximized / fullscreen window.
-// UI thread only.
+// Noted and forgotten on the UI thread, read from the runtime's thread
+// (get_window_normal_bounds): every access holds WinNormalFramesMutex().
 std::map<HWND, SIZE>& WinNormalFrames() {
   static std::map<HWND, SIZE> frames;
   return frames;
+}
+
+std::mutex& WinNormalFramesMutex() {
+  static std::mutex mutex;
+  return mutex;
 }
 
 void WinNoteNormalFrame(HWND hwnd) {
   RECT window_rect, client;
   if (GetWindowRect(hwnd, &window_rect) && GetClientRect(hwnd, &client) &&
       client.right > 0 && client.bottom > 0) {
+    std::lock_guard<std::mutex> lock(WinNormalFramesMutex());
     WinNormalFrames()[hwnd] = {
         (window_rect.right - window_rect.left) - client.right,
         (window_rect.bottom - window_rect.top) - client.bottom};
   }
+}
+
+void WinForgetNormalFrame(HWND hwnd) {
+  std::lock_guard<std::mutex> lock(WinNormalFramesMutex());
+  WinNormalFrames().erase(hwnd);
+}
+
+// The noted normal frame of `hwnd`, if any.
+bool WinNormalFrame(HWND hwnd, SIZE* frame) {
+  std::lock_guard<std::mutex> lock(WinNormalFramesMutex());
+  auto it = WinNormalFrames().find(hwnd);
+  if (it == WinNormalFrames().end())
+    return false;
+  *frame = it->second;
+  return true;
 }
 
 // A screen rectangle in its monitor's DIP.
@@ -341,7 +364,7 @@ class WebView2Backend : public LaufeyBackend {
   void SetQuitOnLastWindowClosed(bool quit) override {
     laufey_common::SetQuitOnLastWindowClosed(quit);
   }
-  void PostUiTask(void (*task)(void*), void* data) override;
+  bool PostUiTask(void (*task)(void*), void* data) override;
   void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                                 void* user_data) override {
     laufey_common::SetSecondInstanceHandler(handler, user_data);
@@ -577,6 +600,11 @@ class WebView2Backend : public LaufeyBackend {
   bool HandleFileDropMessage(uint32_t window_id, const wchar_t* message,
                              ICoreWebView2WebMessageReceivedEventArgs* args);
 
+  // Drops the state of a window that is being destroyed (WM_DESTROY): the
+  // user closed it, or CloseWindow() destroyed it (which erases the entry
+  // itself as well). UI thread.
+  void ForgetDestroyedWindow(uint32_t window_id);
+
  private:
   WinWindowState* GetWindow(uint32_t window_id);
   void InitializeWebViewForWindow(uint32_t window_id, HWND hwnd);
@@ -617,8 +645,9 @@ class WebView2Backend : public LaufeyBackend {
   // Like RunOnUiThread, but blocks until the task has run. For calls whose
   // arguments only outlive the call itself (e.g. a caller-owned
   // laufey_value_t*). Callers must not hold locks that UI-thread message
-  // handlers also take.
-  void RunOnUiThreadSync(std::function<void()> task);
+  // handlers also take. False when the task did not run because the loop
+  // had ended (the caller answers with its defaults).
+  bool RunOnUiThreadSync(std::function<void()> task);
 
   std::map<uint32_t, WinWindowState> windows_;
   std::once_flag shortcuts_once_;
@@ -827,10 +856,16 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       // deferred close resolved via close_window still quits the message
       // loop when the last window goes away.
       if (wid > 0) {
+        // A window the user closed (WM_CLOSE -> DestroyWindow) still has its
+        // entry: drop it, or every later call naming the id would reach the
+        // destroyed HWND and its web view. Lock order windows_mutex_ ->
+        // g_hwnd_mutex, as in ~WebView2Backend.
+        if (g_win_backend)
+          g_win_backend->ForgetDestroyedWindow(wid);
         laufey_common::ForgetWindow(wid);
         laufey_wv2::CancelStreamsForWindow(wid);
       }
-      WinNormalFrames().erase(hwnd);
+      WinForgetNormalFrame(hwnd);
       win32_menu::ForgetWindow(hwnd);
       std::lock_guard<std::recursive_mutex> lock(g_hwnd_mutex);
       // A tray app can keep running with no window
@@ -935,22 +970,14 @@ void WebView2Backend::RunOnUiThread(std::function<void()> task) {
   }
 }
 
-void WebView2Backend::RunOnUiThreadSync(std::function<void()> task) {
+bool WebView2Backend::RunOnUiThreadSync(std::function<void()> task) {
   if (GetCurrentThreadId() == ui_thread_id_) {
     task();
-    return;
+    return true;
   }
-  std::mutex m;
-  std::condition_variable cv;
-  bool done = false;
-  RunOnUiThread([&] {
-    task();
-    std::lock_guard<std::mutex> lock(m);
-    done = true;
-    cv.notify_one();
-  });
-  std::unique_lock<std::mutex> lock(m);
-  cv.wait(lock, [&] { return done; });
+  // Through the UI task dispatcher (the same WM_UI_TASK queue), so the wait
+  // ends with the loop instead of outliving it.
+  return laufey_common::RunOnUiThreadAndWait(task);
 }
 
 WebView2Backend::~WebView2Backend() {
@@ -965,6 +992,18 @@ WebView2Backend::~WebView2Backend() {
   }
   windows_.clear();
   g_win_backend = nullptr;
+}
+
+void WebView2Backend::ForgetDestroyedWindow(uint32_t window_id) {
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  if (!state)
+    return;
+  // WM_DESTROY reaches the parent before its children are destroyed: the
+  // controller can still close cleanly here.
+  if (state->controller)
+    state->controller->Close();
+  windows_.erase(window_id);
 }
 
 WinWindowState* WebView2Backend::GetWindow(uint32_t window_id) {
@@ -1160,8 +1199,11 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
 
             std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
             auto* state = GetWindow(window_id);
-            if (!state)
+            if (!state) {
+              // The window closed while the web view was being created.
+              controller->Close();
               return S_OK;
+            }
 
             state->controller = controller;
             controller->get_CoreWebView2(&state->webview);
@@ -1480,8 +1522,10 @@ void WebView2Backend::CloseWindow(uint32_t window_id) {
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (state) {
-    if (state->controller)
+    if (state->controller) {
       state->controller->Close();
+      state->controller.Reset();
+    }
     // Deliberately not erased from g_hwnd_to_laufey_id here: WM_DESTROY
     // (sent synchronously by DestroyWindow) owns unregistration and the
     // last-window quit check, for this path and the WM_CLOSE path alike.
@@ -2136,10 +2180,7 @@ bool WebView2Backend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
   // The frame's origin (get_position) and the client size inside it
   // (get_size), the frame being the one the window had while normal.
   SIZE frame;
-  auto it = WinNormalFrames().find(state->hwnd);
-  if (it != WinNormalFrames().end()) {
-    frame = it->second;
-  } else {
+  if (!WinNormalFrame(state->hwnd, &frame)) {
     RECT r = {0, 0, 0, 0};
     AdjustWindowRectExForDpi(
         &r, static_cast<DWORD>(GetWindowLongPtrW(state->hwnd, GWL_STYLE)),
@@ -2197,12 +2238,18 @@ void WebView2Backend::PasskeyRequest(uint32_t window_id, uint32_t kind,
   });
 }
 
-void WebView2Backend::PostUiTask(void (*task)(void*), void* data) {
-  // Always deliverable: the message-only dispatcher window exists from
-  // construction, so this works even before the first real window is created
-  // (the old "post to the first window" path silently dropped the task then).
-  PostMessageW(dispatcher_hwnd_, WM_UI_TASK, 0,
-               reinterpret_cast<LPARAM>(new UiTaskData{task, data}));
+bool WebView2Backend::PostUiTask(void (*task)(void*), void* data) {
+  // Deliverable from construction on: the message-only dispatcher window
+  // exists by then, so this works even before the first real window is
+  // created (the old "post to the first window" path silently dropped the
+  // task then). Fails once the window is gone or the queue is full.
+  auto* td = new UiTaskData{task, data};
+  if (!PostMessageW(dispatcher_hwnd_, WM_UI_TASK, 0,
+                    reinterpret_cast<LPARAM>(td))) {
+    delete td;
+    return false;
+  }
+  return true;
 }
 
 void WebView2Backend::InvokeJsCallback(uint32_t window_id, uint64_t callback_id,

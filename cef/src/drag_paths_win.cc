@@ -27,6 +27,14 @@ namespace {
 std::mutex g_paths_mutex;
 std::vector<std::string> g_paths;
 
+// The wrappers alive now (each registered on one window; OLE releases it
+// when the registration is revoked, the window's teardown included). A
+// window is hooked when its registered target is one of these: an HWND
+// value is reused once its window is gone, so a set of hooked HWNDs (never
+// pruned) took a new window for an old one and left it unhooked.
+std::mutex g_wrappers_mutex;
+std::set<const IDropTarget*> g_wrappers;
+
 // The files a drag's data object carries as CF_HDROP (empty for any other
 // drag).
 std::vector<std::string> HDropPaths(IDataObject* data) {
@@ -57,6 +65,13 @@ class PathRecordingDropTarget : public IDropTarget {
  public:
   explicit PathRecordingDropTarget(IDropTarget* inner) : inner_(inner) {
     inner_->AddRef();
+    std::lock_guard<std::mutex> lock(g_wrappers_mutex);
+    g_wrappers.insert(this);
+  }
+
+  static bool IsWrapper(const IDropTarget* target) {
+    std::lock_guard<std::mutex> lock(g_wrappers_mutex);
+    return g_wrappers.count(target) > 0;
   }
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
@@ -98,6 +113,10 @@ class PathRecordingDropTarget : public IDropTarget {
 
  private:
   ~PathRecordingDropTarget() {
+    {
+      std::lock_guard<std::mutex> lock(g_wrappers_mutex);
+      g_wrappers.erase(this);
+    }
     inner_->Release();
   }
 
@@ -116,13 +135,14 @@ class PathRecordingDropTarget : public IDropTarget {
 }  // namespace
 
 void LaufeyHookWindowDropTarget(HWND hwnd) {
-  static std::set<HWND> hooked;
-  if (!hwnd || hooked.count(hwnd))
+  if (!hwnd)
     return;
   // RegisterDragDrop keeps the window's target in this window property;
   // there is no API that returns it.
   auto* inner =
       static_cast<IDropTarget*>(GetPropW(hwnd, L"OleDropTargetInterface"));
+  if (inner && PathRecordingDropTarget::IsWrapper(inner))
+    return;  // already hooked
   if (!inner) {
     std::cerr << "laufey: no drop target on the window yet; external file "
                  "drops won't carry paths"
@@ -132,9 +152,7 @@ void LaufeyHookWindowDropTarget(HWND hwnd) {
   inner->AddRef();
   auto* wrapper = new PathRecordingDropTarget(inner);
   if (SUCCEEDED(RevokeDragDrop(hwnd))) {
-    if (SUCCEEDED(RegisterDragDrop(hwnd, wrapper))) {
-      hooked.insert(hwnd);
-    } else {
+    if (FAILED(RegisterDragDrop(hwnd, wrapper))) {
       // Put Chromium's back.
       RegisterDragDrop(hwnd, inner);
     }

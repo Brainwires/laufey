@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "laufey_notifications.h"
+#include "laufey_ui_tasks.h"
 
 using namespace laufey_common;
 
@@ -250,6 +251,9 @@ int main() {
     return 77;
   }
   g_free(daemon);
+  // This thread is the UI thread, where permission callbacks are delivered
+  // (inline: the Linux platform answers on the caller's thread).
+  UiTaskDispatcher::Get().Bind([](void (*)(void*), void*) { return false; });
 
   GTestDBus* bus = g_test_dbus_new(G_TEST_DBUS_NONE);
   g_test_dbus_up(bus);  // sets DBUS_SESSION_BUS_ADDRESS

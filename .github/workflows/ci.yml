@@ -851,8 +851,20 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    # Never release past a failing end-to-end or ThreadSanitizer run.
-    needs: [build-winit, build-webview, build-cef, native-e2e, tsan]
+    # Every check gates the release, not only the builds whose artifacts it
+    # publishes.
+    needs:
+      [
+        lint,
+        test,
+        test-winit-common,
+        tsan,
+        native-e2e,
+        e2e-cef-linux,
+        build-winit,
+        build-webview,
+        build-cef,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: write

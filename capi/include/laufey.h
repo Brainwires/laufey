@@ -11,6 +11,13 @@
 extern "C" {
 #endif
 
+// The version of this header. A backend sets `version` in its API table to
+// the value it was built with, and the runtime side (the `laufey` crate's
+// init_api) accepts only an exact match: runtime and backend must come from
+// the same laufey release. "NULL on backends older than API version N" below
+// records when an entry point appeared; a runtime that enforces the exact
+// match never meets such a backend, but entry points a backend does not
+// implement are still NULL and must be null-checked.
 #define LAUFEY_API_VERSION 43
 
 // Window handle types for get_window_handle_type
@@ -810,9 +817,16 @@ typedef void (*laufey_scheme_request_fn)(void* user_data, uint32_t window_id,
                                          const char* headers,
                                          size_t headers_len);
 
-// Invoked if the webview cancels the request (navigation away, window closed)
-// before the response is finished. After this fires the embedder must stop
-// writing and call scheme_response_finish to release `exchange`. Optional.
+// Invoked if the webview cancels the request (navigation away, window closed,
+// the fetch aborted) before the response is finished. After this fires the
+// embedder must stop writing and call scheme_response_finish to release
+// `exchange`. Optional. Called at most once per exchange, on a backend
+// thread, never once scheme_response_finish has returned; `exchange` stays
+// valid for the call. The embedder may call scheme_response_finish from
+// inside it, but must not block in it on a finish made on another thread.
+// Where a backend can't observe a cancel (WebKitGTK before the response head
+// is sent; WebView2 for a response it takes in one piece) it is not called,
+// and the next scheme_response_write fails instead.
 typedef void (*laufey_scheme_cancel_fn)(void* user_data,
                                         laufey_scheme_exchange_t* exchange);
 
@@ -881,8 +895,12 @@ struct laufey_backend_api {
   void (*value_free_string)(char* str);
 
   size_t (*value_list_size)(laufey_value_t* val);
+  // A new value — a copy of the item at `index` — that the caller owns and
+  // frees with value_free; NULL when there is none.
   laufey_value_t* (*value_list_get)(laufey_value_t* val, size_t index);
 
+  // A new value — a copy of the entry under `key` — that the caller owns and
+  // frees with value_free; NULL when there is none.
   laufey_value_t* (*value_dict_get)(laufey_value_t* dict, const char* key);
   bool (*value_dict_has)(laufey_value_t* dict, const char* key);
   size_t (*value_dict_size)(laufey_value_t* dict);
@@ -1277,6 +1295,8 @@ struct laufey_backend_api {
 
   // Complete the response and release `exchange`. After this returns the handle
   // is invalid. Call exactly once per exchange (including after a cancel).
+  // Finishing an exchange that never called scheme_response_begin gives the
+  // page no response: its request fails (a network error), on every backend.
   void (*scheme_response_finish)(void* backend_data,
                                  laufey_scheme_exchange_t* exchange);
 

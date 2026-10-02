@@ -17,7 +17,9 @@
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
 #include "laufey_auth_session.h"
+#include "laufey_scheme_cancel.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_ui_tasks.h"
 #include "laufey_system.h"
 #include "laufey_window.h"
 #include "init_script.h"
@@ -25,6 +27,7 @@
 #include <atomic>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 
 @class LaufeyScriptMessageHandler;
@@ -98,7 +101,7 @@ class WKWebViewBackend : public LaufeyBackend {
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
   void Focus(uint32_t window_id) override;
-  void PostUiTask(void (*task)(void*), void* data) override;
+  bool PostUiTask(void (*task)(void*), void* data) override;
   void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                                 void* user_data) override {
     laufey_common::SetSecondInstanceHandler(handler, user_data);
@@ -617,13 +620,36 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
 // Serves "app" and every scheme the embedder registered (see
 // RegisterSchemeHandler); the same handler object is installed for each.
 
+class MacSchemeExchange;
+
+// One in-flight WKURLSchemeTask: `stopped` is set when WebKit stops it
+// (-stopURLSchemeTask:), after which it must not be messaged; `gate`
+// reports that stop to the runtime (on_cancel) unless it finished first.
+struct MacSchemeTaskState {
+  std::atomic<bool> stopped{false};
+  laufey_common::SchemeCancelGate gate;
+  // Set on the main thread before the runtime sees it; deleted (on the main
+  // thread) only after gate.Finish().
+  MacSchemeExchange* exchange = nullptr;
+};
+
+// The in-flight tasks of every scheme handler, by task. An entry goes when
+// WebKit stops the task or when its exchange finishes, whichever is first.
+static std::mutex g_scheme_tasks_mutex;
+static std::map<void*, std::shared_ptr<MacSchemeTaskState>>& SchemeTasks() {
+  static auto* tasks =
+      new std::map<void*, std::shared_ptr<MacSchemeTaskState>>();
+  return *tasks;
+}
+
 // Exchange wrapping a WKURLSchemeTask. WKURLSchemeTask methods must be invoked
-// on the main thread, so each response step hops there; a `stopped_` flag
-// (set from -stopURLSchemeTask:) prevents messaging an already-cancelled task.
+// on the main thread, so each response step hops there; the task's `stopped`
+// flag prevents messaging an already-cancelled task.
 class MacSchemeExchange : public SchemeExchangeBase {
  public:
-  MacSchemeExchange(id<WKURLSchemeTask> task, NSData* body)
-      : task_(task), body_(body) {}
+  MacSchemeExchange(id<WKURLSchemeTask> task, NSData* body,
+                    std::shared_ptr<MacSchemeTaskState> state)
+      : task_(task), body_(body), state_(std::move(state)) {}
 
   intptr_t ReadRequestBody(uint8_t* buf, size_t cap) override {
     if (cap == 0 || !body_)
@@ -640,13 +666,25 @@ class MacSchemeExchange : public SchemeExchangeBase {
   void Begin(int status, const char* headers, size_t headers_len) override {
     auto pairs = LaufeyParseFlatHeaders(headers, headers_len);
     NSMutableDictionary* hdr = [NSMutableDictionary dictionary];
-    for (const auto& [k, v] : pairs)
-      hdr[@(k.c_str())] = @(v.c_str());
+    for (const auto& [k, v] : pairs) {
+      NSString* name = [NSString stringWithUTF8String:k.c_str()];
+      NSString* value = [NSString stringWithUTF8String:v.c_str()];
+      if (!name || !value)
+        continue;  // not UTF-8
+      // A header field may repeat (Set-Cookie); NSHTTPURLResponse takes a
+      // dictionary, so join the values the way HTTP folds them, as
+      // CFNetwork does for a network response.
+      NSString* previous = hdr[name];
+      hdr[name] = previous
+                      ? [NSString stringWithFormat:@"%@, %@", previous, value]
+                      : value;
+    }
     NSURL* url = task_.request.URL;
     id<WKURLSchemeTask> task = task_;
-    std::atomic<bool>* stopped = &stopped_;
+    std::shared_ptr<MacSchemeTaskState> state = state_;
+    began_.store(true);
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (stopped->load())
+      if (state->stopped.load())
         return;
       NSHTTPURLResponse* resp =
           [[NSHTTPURLResponse alloc] initWithURL:url
@@ -661,13 +699,13 @@ class MacSchemeExchange : public SchemeExchangeBase {
   }
 
   intptr_t WriteResponse(const uint8_t* buf, size_t len) override {
-    if (stopped_.load())
+    if (state_->stopped.load())
       return -1;
     NSData* data = [NSData dataWithBytes:buf length:len];
     id<WKURLSchemeTask> task = task_;
-    std::atomic<bool>* stopped = &stopped_;
+    std::shared_ptr<MacSchemeTaskState> state = state_;
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (stopped->load())
+      if (state->stopped.load())
         return;
       @try {
         [task didReceiveData:data];
@@ -678,39 +716,54 @@ class MacSchemeExchange : public SchemeExchangeBase {
   }
 
   void Finish() override {
+    // No on_cancel from now on (and one in progress has returned).
+    state_->gate.Finish();
     id<WKURLSchemeTask> task = task_;
-    std::atomic<bool>* stopped = &stopped_;
+    std::shared_ptr<MacSchemeTaskState> state = state_;
+    bool began = began_.load();
     MacSchemeExchange* self = this;
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (!stopped->load()) {
+      if (!state->stopped.load()) {
         @try {
-          [task didFinish];
+          if (began) {
+            [task didFinish];
+          } else {
+            // Finished without a head: no response, so the request fails
+            // (WebKit throws on didFinish before didReceiveResponse, which
+            // left the request pending forever).
+            [task
+                didFailWithError:[NSError
+                                     errorWithDomain:NSURLErrorDomain
+                                                code:NSURLErrorBadServerResponse
+                                            userInfo:nil]];
+          }
         } @catch (...) {
         }
       }
+      {
+        std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
+        auto& tasks = SchemeTasks();
+        auto it = tasks.find((__bridge void*)task);
+        if (it != tasks.end() && it->second == state)
+          tasks.erase(it);
+      }
       delete self;
     });
-  }
-
-  void MarkStopped() {
-    stopped_.store(true);
   }
 
  private:
   id<WKURLSchemeTask> task_;
   NSData* body_;
   size_t cursor_ = 0;
-  std::atomic<bool> stopped_{false};
+  std::shared_ptr<MacSchemeTaskState> state_;
+  std::atomic<bool> began_{false};
 };
 
 @interface LaufeyURLSchemeHandler : NSObject <WKURLSchemeHandler>
 @property(nonatomic, assign) uint32_t windowId;
 @end
 
-@implementation LaufeyURLSchemeHandler {
-  std::map<void*, MacSchemeExchange*> _tasks;
-  std::mutex _mutex;
-}
+@implementation LaufeyURLSchemeHandler
 
 - (void)webView:(WKWebView*)webView
     startURLSchemeTask:(id<WKURLSchemeTask>)task {
@@ -728,23 +781,37 @@ class MacSchemeExchange : public SchemeExchangeBase {
   // Note: WKURLSchemeHandler does not expose the request body for all request
   // kinds (a long-standing WebKit limitation); HTTPBody is forwarded when
   // present.
-  MacSchemeExchange* exchange = new MacSchemeExchange(task, req.HTTPBody);
+  auto state = std::make_shared<MacSchemeTaskState>();
   {
-    std::lock_guard<std::mutex> lock(_mutex);
-    _tasks[(__bridge void*)task] = exchange;
+    std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
+    SchemeTasks()[(__bridge void*)task] = state;
   }
+  MacSchemeExchange* exchange =
+      new MacSchemeExchange(task, req.HTTPBody, state);
+  state->exchange = exchange;
   RuntimeLoader::GetInstance()->DispatchSchemeRequest(self.windowId, exchange,
                                                       method, url, flat);
 }
 
 - (void)webView:(WKWebView*)webView
     stopURLSchemeTask:(id<WKURLSchemeTask>)task {
-  std::lock_guard<std::mutex> lock(_mutex);
-  auto it = _tasks.find((__bridge void*)task);
-  if (it != _tasks.end()) {
-    it->second->MarkStopped();
-    _tasks.erase(it);
+  std::shared_ptr<MacSchemeTaskState> state;
+  {
+    std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
+    auto& tasks = SchemeTasks();
+    auto it = tasks.find((__bridge void*)task);
+    if (it == tasks.end())
+      return;
+    state = it->second;
+    state->stopped.store(true);
+    tasks.erase(it);
   }
+  // The page gave up on the request: tell the runtime, unless it finished.
+  // The exchange is deleted on this thread, after gate.Finish().
+  MacSchemeExchange* exchange = state->exchange;
+  state->gate.Cancel([exchange] {
+    RuntimeLoader::GetInstance()->DispatchSchemeCancel(exchange);
+  });
 }
 
 @end
@@ -2015,7 +2082,7 @@ void WKWebViewBackend::SetWindowSize(uint32_t window_id, int width,
 
 double WKWebViewBackend::GetWindowScaleFactor(uint32_t window_id) {
   __block double result = 1.0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2028,7 +2095,7 @@ double WKWebViewBackend::GetWindowScaleFactor(uint32_t window_id) {
 void WKWebViewBackend::GetWindowSize(uint32_t window_id, int* width,
                                      int* height) {
   __block int w = 0, h = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2049,7 +2116,7 @@ void WKWebViewBackend::GetWindowSize(uint32_t window_id, int* width,
 void WKWebViewBackend::GetWindowOuterSize(uint32_t window_id, int* width,
                                           int* height) {
   __block int w = 0, h = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2081,7 +2148,7 @@ void WKWebViewBackend::SetWindowPosition(uint32_t window_id, int x, int y) {
 void WKWebViewBackend::GetWindowInnerPosition(uint32_t window_id, int* x,
                                               int* y) {
   __block int px = 0, py = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2100,7 +2167,7 @@ void WKWebViewBackend::GetWindowInnerPosition(uint32_t window_id, int* x,
 
 void WKWebViewBackend::GetWindowPosition(uint32_t window_id, int* x, int* y) {
   __block int px = 0, py = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2136,7 +2203,7 @@ void WKWebViewBackend::SetResizable(uint32_t window_id, bool resizable) {
 
 bool WKWebViewBackend::IsResizable(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2161,7 +2228,7 @@ void WKWebViewBackend::SetAlwaysOnTop(uint32_t window_id, bool always_on_top) {
 
 bool WKWebViewBackend::IsAlwaysOnTop(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2189,7 +2256,7 @@ void WKWebViewBackend::SetWindowOpacity(uint32_t window_id, double opacity) {
 
 double WKWebViewBackend::GetWindowOpacity(uint32_t window_id) {
   __block double result = 1.0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2213,7 +2280,7 @@ void WKWebViewBackend::SetClickPassthrough(uint32_t window_id, bool enabled) {
 
 bool WKWebViewBackend::IsClickPassthrough(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2241,7 +2308,7 @@ void WKWebViewBackend::SetClickPassthroughForward(uint32_t window_id,
 
 bool WKWebViewBackend::IsClickPassthroughForward(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2442,7 +2509,7 @@ void WKWebViewBackend::UpdateForwardMonitors() {
 
 bool WKWebViewBackend::IsVisible(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2515,10 +2582,11 @@ void WKWebViewBackend::Focus(uint32_t window_id) {
   });
 }
 
-void WKWebViewBackend::PostUiTask(void (*task)(void*), void* data) {
+bool WKWebViewBackend::PostUiTask(void (*task)(void*), void* data) {
   dispatch_async(dispatch_get_main_queue(), ^{
     task(data);
   });
+  return true;
 }
 
 void WKWebViewBackend::InvokeJsCallback(uint32_t window_id,
@@ -2668,13 +2736,9 @@ void WKWebViewBackend::ShowContextMenuEx(uint32_t window_id, int x, int y,
   });
 }
 
-// Runs `block` on the main thread and waits (inline when already there).
-static void RunOnMainSync(void (^block)(void)) {
-  if ([NSThread isMainThread])
-    block();
-  else
-    dispatch_sync(dispatch_get_main_queue(), block);
-}
+// Runs `block` on the main thread and waits (inline when already there; see
+// laufey_ui_tasks.h).
+using laufey_common::RunOnMainSync;
 
 // The web view's _WKInspector (private; what Safari's Develop menu drives),
 // or nil.
@@ -2848,11 +2912,7 @@ bool WKWebViewBackend::TestTriggerFileDrop(uint32_t window_id, int phase,
     delivered = laufey_common::TestTriggerFileDrop(window_id, phase, x, y,
                                                    paths, count);
   };
-  if ([NSThread isMainThread]) {
-    body();
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), body);
-  }
+  laufey_common::RunOnMainSync(body);
   return delivered;
 }
 

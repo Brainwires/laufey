@@ -142,6 +142,16 @@ that has nothing to send for a long time learns of the cancellation only at its
 next write, so a heartbeat (an SSE comment line such as `:\n\n`) bounds how long
 a dead stream lingers.
 
+The backend also tells the handler directly: the `on_cancel` callback passed to
+`register_scheme_handler` (in the `laufey` crate,
+`SchemeExchange::is_cancelled()` turns true) fires at most once per exchange,
+never after `finish` has returned, when the engine gives up on the request: CEF
+cancels the request, WKWebView stops the scheme task, WebKitGTK lets the body
+stream go before it ended, WebView2 cancels a streamed response (the reader
+cancelled, the document gone). WebKitGTK says nothing about a request cancelled
+before its head was sent, and WebView2 nothing about a response it takes in one
+piece; there, as everywhere, the next `write` failing is the signal.
+
 A handler's `write` **never blocks**: the runtime writes from its event loop
 thread, so a write that waited for a slow page would stall the whole app. Each
 backend takes the bytes and hands them on as the engine reads:
@@ -158,10 +168,17 @@ backend takes the bytes and hands them on as the engine reads:
 - **WebView2** streams through the page (below).
 
 The queue for a page that isn't reading is capped at **64 MiB** on WebKitGTK,
-CEF and WebView2: past that the response fails (the page's `fetch` or read
-rejects) and the handler's next `write` returns a negative value, instead of the
-body growing without bound. WKWebView hands everything to WebKit, so it has no
-cap of its own.
+CEF and WebView2 (for a response WebView2 streams through the page, below): past
+that the response fails (the page's `fetch` or read rejects) and the handler's
+next `write` returns a negative value, instead of the body growing without
+bound. WKWebView hands everything to WebKit, so it has no cap of its own. A
+response WebView2 answers in one piece is held whole until the handler finishes
+it, whether or not the page reads, so it is capped separately at **512 MiB**:
+past that the request fails.
+
+A handler that calls `finish` without ever calling `begin` gives the page no
+response: its request fails, as a network error does (the `fetch` rejects), on
+every backend.
 
 WKWebView, WebKitGTK and CEF hand each write to the page as it arrives. WebView2
 cannot: it reads a `WebResourceRequested` response stream to its end before the
@@ -181,7 +198,8 @@ streams through the page instead:
   chunks, so the page reads it incrementally; status, status text, headers,
   binary bodies and `Content-Encoding` (decoded with `DecompressionStream`)
   behave as before. A tagged response that finishes within 50 ms, and every
-  other request, is answered in one piece as before.
+  other request, is answered in one piece as before: the body is held until the
+  handler finishes (up to 512 MiB) and handed to WebView2 without another copy.
 - The page acknowledges what it reads: at most 4 MiB is in flight to a page that
   is not reading. Beyond that the backend holds up to 64 MiB, and a response
   that outgrows it fails (the page's read rejects and the handler's write
