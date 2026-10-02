@@ -74,6 +74,16 @@ value wins over the file. So a launcher can still force a value, and setups that
 rely on the environment keep working unchanged. A key absent from the file and
 from the environment is simply unset. The file is read once per process.
 
+The exceptions are the keys that isolate or lock down the installed app; for
+them the shipped file wins:
+
+- `appId` and `dataDir`: when the file has the key, `LAUFEY_APP_ID` /
+  `LAUFEY_DATA_DIR` are ignored. Environment variables are inherited, so an app
+  started by another laufey app would otherwise open that app's profile and take
+  its single-instance lock.
+- `inspectable: false`: `LAUFEY_INSPECTABLE=1` cannot turn DevTools back on (it
+  is reported and ignored); `LAUFEY_INSPECTABLE=0` still turns them off.
+
 The keys are resolved one at a time before they are combined. For example, a
 file with `dataDir` launched with `LAUFEY_APP_ID` set still uses the file's
 `dataDir`, because `LAUFEY_DATA_DIR` isn't set and a data dir outranks an app id

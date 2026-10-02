@@ -39,9 +39,11 @@ DevTools are on by default. An app turns them off for the whole process with the
 { "appId": "com.example.app", "inspectable": false }
 ```
 
-`LAUFEY_INSPECTABLE=0` (or `false`) turns them off, `1` (or `true`) on; a set
-variable wins over the file. The setting is read once, at startup, because the
-engines take it when a web view is created. Off means:
+`LAUFEY_INSPECTABLE=0` (or `false`) turns them off, `1` (or `true`) on, unless
+the launch file says `"inspectable": false`: a shipped "off" can't be turned
+back on from the environment (the variable is reported and ignored). The setting
+is read once, at startup, because the engines take it when a web view is
+created. Off means:
 
 | Engine    | What laufey sets                                                                                                                                                                                                                                                                                                                                                                                   |
 | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
