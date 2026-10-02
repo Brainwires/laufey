@@ -769,6 +769,14 @@ GTK thread). Capability-probed like the rest:
   backend's own XDND handling must report ENTER, OVER at the pointer, and a DROP
   at the release point with the file's path. Needs `LAUFEY_E2E_XDOTOOL` and
   `LAUFEY_E2E_XDND_SOURCE`, which `native-e2e-run.sh --io` sets on Linux.
+  **Known bug (CEF on Linux):** the drag reaches the page (the injected observer
+  reports every phase) but CEF 149 never calls `CefDragHandler::OnDragEnter` for
+  it, so the CEF backend has no paths and nothing reaches `on_file_drop`; the
+  battery reports that case as N/A (and fails as soon as a phase arrives without
+  the rest). The CEF runs pass `--password-store=basic`: otherwise Chromium asks
+  the session bus's keyring to unlock, and gnome-keyring's `gcr-prompter` grabs
+  the pointer and keyboard for the rest of the run, which swallows every xdotool
+  event.
 - **Drag out**: a relative path and a drag with no mouse button held both fail.
   A real drag out needs a person or OS-level input injection on the drag source
   side and is not part of the battery.

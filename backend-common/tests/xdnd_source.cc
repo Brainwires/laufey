@@ -10,8 +10,8 @@
 //   laufey_xdnd_source <x> <y> <path>...
 //
 // Prints "ready <x> <y> <width> <height>" (the window's area in root-window
-// pixels) once it is mapped, "drag-end" when a drag ends, and exits after a
-// drag or after 60 seconds.
+// pixels) once it is mapped, then "pressed <button>", "drag-begin" and
+// "drag-end" as the drag goes, and exits after a drag or after 60 seconds.
 
 #include <gtk/gtk.h>
 
@@ -31,6 +31,17 @@ void OnDragDataGet(GtkWidget*, GdkDragContext*, GtkSelectionData* data, guint,
     uris.push_back(const_cast<gchar*>(u.c_str()));
   uris.push_back(nullptr);
   gtk_selection_data_set_uris(data, uris.data());
+}
+
+gboolean OnButtonPress(GtkWidget*, GdkEventButton* event, gpointer) {
+  std::printf("pressed %d\n", event->button);
+  std::fflush(stdout);
+  return FALSE;
+}
+
+void OnDragBegin(GtkWidget*, GdkDragContext*, gpointer) {
+  std::printf("drag-begin\n");
+  std::fflush(stdout);
 }
 
 void OnDragEnd(GtkWidget*, GdkDragContext*, gpointer) {
@@ -92,6 +103,9 @@ int main(int argc, char** argv) {
   gtk_drag_source_set(box, GDK_BUTTON1_MASK, &target, 1, GDK_ACTION_COPY);
   g_signal_connect(box, "drag-data-get", G_CALLBACK(OnDragDataGet), nullptr);
   g_signal_connect(box, "drag-end", G_CALLBACK(OnDragEnd), nullptr);
+  g_signal_connect(box, "drag-begin", G_CALLBACK(OnDragBegin), nullptr);
+  g_signal_connect(box, "button-press-event", G_CALLBACK(OnButtonPress),
+                   nullptr);
 
   gtk_widget_show_all(window);
   g_timeout_add(50, ReportReady, window);

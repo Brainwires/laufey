@@ -135,6 +135,13 @@ esac
 args=()
 if [ "$backend" = "cef" ]; then
   args+=(--disable-features=LocalNetworkAccessChecks)
+  # Chromium's password store would ask the private session bus's keyring
+  # to unlock: gnome-keyring then shows gcr-prompter, which grabs the
+  # pointer and keyboard for the rest of the run, so real X input (xdotool)
+  # goes to the prompt instead of the app.
+  if [ "$(uname -s)" = "Linux" ]; then
+    args+=(--password-store=basic)
+  fi
   # On Windows the display itself is scaled (windows-display-scale.ps1).
   if [ "$mode" = "--hidpi" ] && [ "$(uname -s)" = "Linux" ]; then
     args+=("--force-device-scale-factor=$LAUFEY_E2E_EXPECT_SCALE")
