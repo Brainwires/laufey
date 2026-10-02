@@ -7,8 +7,15 @@ browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
 `LAUFEY_API_VERSION` (currently `43`) versions the contract. The `version` field
-on the API table lets a runtime detect the backend's vintage and avoid calling
-function pointers a backend predates (older backends leave new pointers `NULL`).
+on the API table names the version the backend was built against, and the match
+is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
+differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
+a runtime and a backend must come from the same laufey release. The "NULL on
+backends older than API version N" notes in `laufey.h` record when each entry
+point appeared; under the exact match a runtime never meets such a backend.
+Entry points a backend does not implement — Winit has no web engine, no tray
+menus on Linux, and so on — are still `NULL`, so a runtime null-checks them as
+before.
 
 ## Runtime entry points
 
@@ -231,9 +238,9 @@ embedded browser over an in-memory byte channel instead of a TCP loopback.
 
 If the webview cancels (navigation away, window closed) before the response
 finishes, `scheme_response_write` / `scheme_request_read_body` return negative;
-the runtime should stop and call `scheme_response_finish`. Backends predating
-API version 26 leave these pointers `NULL`; the runtime must null-check and fall
-back to a socket transport.
+the runtime should stop and call `scheme_response_finish`. A backend without a
+web engine (Winit) leaves these pointers `NULL`; the runtime must null-check and
+fall back to a socket transport.
 
 ### Registered schemes are real origins
 

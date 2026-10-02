@@ -11,6 +11,13 @@
 extern "C" {
 #endif
 
+// The version of this header. A backend sets `version` in its API table to
+// the value it was built with, and the runtime side (the `laufey` crate's
+// init_api) accepts only an exact match: runtime and backend must come from
+// the same laufey release. "NULL on backends older than API version N" below
+// records when an entry point appeared; a runtime that enforces the exact
+// match never meets such a backend, but entry points a backend does not
+// implement are still NULL and must be null-checked.
 #define LAUFEY_API_VERSION 43
 
 // Window handle types for get_window_handle_type
