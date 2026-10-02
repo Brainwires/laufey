@@ -13,7 +13,9 @@
 //!   3. spawns the backend + runtime and waits for the tray item to register,
 //!   4. reads the item's `org.kde.StatusNotifierItem` properties, walks its
 //!      `com.canonical.dbusmenu` menu, and fires a menu `Event` that must
-//!      round-trip to the app's `laufey_menu_click_fn`.
+//!      round-trip to the app's `laufey_menu_click_fn` (the battery, run with
+//!      LAUFEY_E2E_HOLD, checks that it arrived), then
+//!   5. waits for the backend and fails unless its battery passed.
 //!
 //! On non-Linux targets this compiles to a stub so `cargo check --workspace`
 //! stays green everywhere. See docs/e2e-testing.md §7.1.
@@ -311,12 +313,19 @@ mod linux {
       .spawn()
       .expect("spawn backend");
 
-    let (bus_name, sni_path) =
-      tokio::time::timeout(Duration::from_secs(20), item_rx.recv())
+    // The battery creates its tray part-way through (after its windows and
+    // the custom-scheme checks), which takes a while on a CEF cold start.
+    let Some((bus_name, sni_path)) =
+      tokio::time::timeout(Duration::from_secs(120), item_rx.recv())
         .await
         .ok()
         .flatten()
-        .expect("[e2e] FAIL: backend never registered a StatusNotifierItem");
+    else {
+      let _ = child.start_kill();
+      eprintln!("[e2e] FAIL backend never registered a StatusNotifierItem");
+      eprintln!("[e2e] OVERALL FAIL");
+      std::process::exit(1);
+    };
     check("StatusNotifierItem registered on bus", true, &failed);
 
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -336,7 +345,20 @@ mod linux {
       );
     }
 
-    let _ = child.start_kill();
+    // The battery (LAUFEY_E2E_HOLD) waits for the Event fired above to reach
+    // its on_click, then finishes and exits with its own verdict.
+    match tokio::time::timeout(Duration::from_secs(240), child.wait()).await {
+      Ok(Ok(status)) => check(
+        &format!("backend battery passed under the observer ({status})"),
+        status.success(),
+        &failed,
+      ),
+      Ok(Err(e)) => check(&format!("backend wait: {e}"), false, &failed),
+      Err(_) => {
+        let _ = child.start_kill();
+        check("backend exited within 240s", false, &failed);
+      }
+    }
     if failed.load(std::sync::atomic::Ordering::SeqCst) {
       eprintln!("[e2e] OVERALL FAIL");
       std::process::exit(1);

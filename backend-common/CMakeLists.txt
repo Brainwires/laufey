@@ -277,6 +277,16 @@ if(LAUFEY_BUILD_TESTS)
       ${LAUFEY_COMMON_GTK_INCLUDE_DIRS}
     )
 
+    # The XDND drag source the Linux native e2e drags real files out of
+    # with xdotool (scripts/native-e2e-run.sh --io).
+    add_executable(laufey_xdnd_source tests/xdnd_source.cc)
+    target_link_libraries(laufey_xdnd_source PRIVATE
+      ${LAUFEY_COMMON_GTK_LIBRARIES}
+    )
+    target_include_directories(laufey_xdnd_source PRIVATE
+      ${LAUFEY_COMMON_GTK_INCLUDE_DIRS}
+    )
+
     # The GlobalShortcuts portal client against a mock portal on a private
     # D-Bus session bus (GTestDBus; skipped when dbus-daemon is missing).
     add_executable(laufey_shortcuts_portal_test

@@ -30,6 +30,7 @@
 mod body_echo;
 mod io_checks;
 mod menu_notification_checks;
+mod os_view;
 mod stream_checks;
 mod system_checks;
 
@@ -70,6 +71,18 @@ fn check(name: &str, ok: bool) {
 /// Capability absent on this backend — informational, never fails the run.
 fn na(name: &str) {
   eprintln!("[e2e] N/A  {name}");
+}
+
+/// N/A for a change only a window manager applies (maximize, minimize,
+/// fullscreen on Linux), unless the run started one: scripts/native-e2e-run.sh
+/// sets LAUFEY_E2E_WM_RUNNING when it runs a window manager under Xvfb, and
+/// then nothing applying the change is a failure.
+fn wm_na(name: &str) {
+  if std::env::var_os("LAUFEY_E2E_WM_RUNNING").is_some() {
+    check(&format!("{name} (a window manager is running)"), false);
+  } else {
+    na(name);
+  }
 }
 
 /// Decorated macOS / Windows chrome puts the content origin below (and
@@ -126,6 +139,26 @@ async fn page_inner_size(win: &Window) -> Option<(i32, i32)> {
     }
     _ => None,
   }
+}
+
+/// A number the page computes from `expr`, or `None` without a page.
+async fn page_number(win: &Window, expr: &str) -> Option<f64> {
+  for _ in 0..30 {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    win.execute_js(
+      expr,
+      Some(move |r: Result<Value, Value>| {
+        let _ = tx.send(r);
+      }),
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(1), rx).await {
+      Ok(Ok(Ok(Value::Int(n)))) => return Some(n as f64),
+      Ok(Ok(Ok(Value::Double(d)))) => return Some(d),
+      // No answer yet (the page may still be loading): ask again.
+      _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+    }
+  }
+  None
 }
 
 /// The page fills the size set_size asked for: `get_size` is the content
@@ -519,9 +552,13 @@ async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
   let done = wait_for(
     || {
       let r = reports.lock().unwrap();
-      r.contains_key("script") || cases.iter().all(|c| r.contains_key(c.label))
+      r.contains_key("script")
+        || (cases.iter().all(|c| r.contains_key(c.label))
+          && body_echo::MIME_CHECKS
+            .iter()
+            .all(|(label, _)| r.contains_key(*label)))
     },
-    300,
+    600,
     100,
   )
   .await;
@@ -559,6 +596,14 @@ async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
       ),
       same && len == c.body.len() as i64,
     );
+  }
+  for (label, what) in body_echo::MIME_CHECKS {
+    let (ok, _, detail) = reports.get(*label).cloned().unwrap_or((
+      false,
+      -1,
+      "no report".to_string(),
+    ));
+    check(&format!("custom scheme: {what} ({detail})"), ok);
   }
   Some(win)
 }
@@ -1291,6 +1336,10 @@ fn e2e_main() {
     let require_tray =
       std::env::var("LAUFEY_E2E_REQUIRE_TRAY").is_ok_and(|v| !v.is_empty());
     let tray = TrayIcon::new();
+    // Every tray menu click, counted for the Layer-1 hold below (the D-Bus
+    // observer's dbusmenu Event must arrive here too).
+    let tray_clicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut own_tray_clicks = 0usize;
     if tray.id() == 0 {
       if require_tray {
         check(
@@ -1305,6 +1354,7 @@ fn e2e_main() {
       tray.set_icon(TINY_PNG);
       let tray_click = Arc::new(std::sync::Mutex::new(None::<String>));
       let tc = tray_click.clone();
+      let counted = tray_clicks.clone();
       tray.set_menu(
         &[
           MenuItem::Item {
@@ -1320,10 +1370,15 @@ fn e2e_main() {
             role: "quit".into(),
           },
         ],
-        move |id| *tc.lock().unwrap() = Some(id.to_string()),
+        move |id| {
+          let n = counted.fetch_add(1, Ordering::SeqCst) + 1;
+          eprintln!("[e2e] tray menu click #{n}: {id}");
+          *tc.lock().unwrap() = Some(id.to_string());
+        },
       );
       tokio::time::sleep(std::time::Duration::from_millis(200)).await;
       if laufey::test_click_menu_item("tray_ping") {
+        own_tray_clicks = 1;
         check(
           "tray menu click round-trips to on_click with id 'tray_ping'",
           tray_click.lock().unwrap().as_deref() == Some("tray_ping"),
@@ -1669,9 +1724,20 @@ fn e2e_main() {
     // the tray + menu registered so it can read the StatusNotifierItem, walk
     // the dbusmenu layout, and fire a menu Event that round-trips to the
     // `on_click` above. The driver kills us when it's done.
+    // The battery's own test_click_menu_item made one click; the observer's
+    // Event is the next, and it may already have arrived.
     if std::env::var_os("LAUFEY_E2E_HOLD").is_some() {
       eprintln!("[e2e] holding for Layer-1 observer");
-      tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+      let reached = wait_for(
+        || tray_clicks.load(Ordering::SeqCst) > own_tray_clicks,
+        600,
+        50,
+      )
+      .await;
+      check(
+        "Layer 1: the observer's dbusmenu Event reaches the tray's on_click",
+        reached,
+      );
     }
 
     // A menu-bar-only macOS app uses the Accessory activation policy. Closing
@@ -1726,13 +1792,21 @@ async fn window_api_checks() {
   eprintln!("[e2e] window capabilities = {:#x}", caps.bits);
   check("window capabilities are reported (API 38)", caps.bits != 0);
 
-  let w = Window::new(520, 420).title("native-e2e-window-api");
+  const TITLE: &str = "native-e2e-window-api";
+  let w = Window::new(520, 420).title(TITLE);
   let id = w.id();
   w.show();
   let sized = wait_for(|| w.get_size().0 != 0, 100, 50).await;
   if !sized {
     check("window-api window reports a size", false);
     return;
+  }
+  // --hidpi: the rest of this battery then runs at that scale too.
+  if let Some(scale) = std::env::var("LAUFEY_E2E_EXPECT_SCALE")
+    .ok()
+    .and_then(|v| v.parse::<f64>().ok())
+  {
+    hidpi_checks(&w, TITLE, scale).await;
   }
 
   // -- screens --------------------------------------------------------------
@@ -1970,7 +2044,7 @@ async fn window_api_checks() {
         "maximize did not report a wrong state",
         w.get_state().is_normal(),
       );
-      na("maximize (no window manager applied it)");
+      wm_na("maximize (no window manager applied it)");
     }
 
     // minimize / restore
@@ -2005,7 +2079,7 @@ async fn window_api_checks() {
         "minimize did not report a wrong state",
         !w.get_state().maximized && !w.get_state().fullscreen,
       );
-      na("minimize (no window manager applied it)");
+      wm_na("minimize (no window manager applied it)");
       w.restore();
     }
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -2068,7 +2142,7 @@ async fn window_api_checks() {
         "fullscreen did not report a wrong state",
         !w.get_state().maximized,
       );
-      na("fullscreen (no window manager applied it)");
+      wm_na("fullscreen (no window manager applied it)");
     }
     let events = events.lock().unwrap().clone();
     check(
@@ -2164,6 +2238,119 @@ async fn window_api_checks() {
   }
 
   w.close();
+}
+
+/// LAUFEY_E2E_EXPECT_SCALE (scripts/native-e2e-run.sh --hidpi): the display
+/// runs at a device scale factor of `scale`. laufey's sizes and positions
+/// stay in DIPs (CSS pixels), the page's devicePixelRatio and the reported
+/// scales are `scale`, and the window system really has the window at
+/// `scale` times its DIP size and origin. (The WebView2 / CEF DIP handling
+/// was only verified at 1x before.)
+async fn hidpi_checks(w: &Window, title: &str, scale: f64) {
+  let near = |got: f64| (got - scale).abs() < 0.01;
+  let ws = w.get_scale_factor();
+  check(
+    &format!("HiDPI: the window's scale factor is {scale} (got {ws})"),
+    near(ws),
+  );
+  if laufey::window_capabilities().screens() {
+    let primary = laufey::screens().into_iter().find(|s| s.is_primary);
+    let got = primary.map(|s| s.scale_factor).unwrap_or(0.0);
+    check(
+      &format!(
+        "HiDPI: the primary screen's scale factor is {scale} (got {got})"
+      ),
+      near(got),
+    );
+  }
+  match page_number(w, "window.devicePixelRatio").await {
+    Some(dpr) => check(
+      &format!("HiDPI: the page's devicePixelRatio is {scale} (got {dpr})"),
+      near(dpr),
+    ),
+    None => na("HiDPI: devicePixelRatio (no page on this backend)"),
+  }
+
+  // Sizes are DIPs: the page is exactly that many CSS pixels, and the
+  // window system has `scale` times as many physical pixels.
+  let want = (600, 400);
+  w.set_size(want.0, want.1);
+  let sized = wait_for(
+    || {
+      let (sw, sh) = w.get_size();
+      (sw - want.0).abs() <= 1 && (sh - want.1).abs() <= 1
+    },
+    60,
+    50,
+  )
+  .await;
+  let (sw, sh) = w.get_size();
+  check(
+    &format!("HiDPI: get_size is the DIP size set (got {sw}x{sh})"),
+    sized,
+  );
+  check_page_size("HiDPI: the page area is the DIP size", w, want).await;
+
+  // Positions are DIPs too.
+  w.set_position(100, 80);
+  let placed = wait_for(
+    || {
+      let (x, y) = w.get_position();
+      (x - 100).abs() <= 2 && (y - 80).abs() <= 2
+    },
+    60,
+    50,
+  )
+  .await;
+  let (px, py) = w.get_position();
+  if placed {
+    check("HiDPI: get_position is the DIP position set", true);
+  } else if cfg!(target_os = "linux") {
+    // The window manager may place the frame elsewhere; the content-origin
+    // check below still compares laufey's DIPs with the real pixels.
+    na(&format!(
+      "HiDPI: get_position is the DIP position set (WM placed it at {px},{py})"
+    ));
+  } else {
+    check(
+      &format!("HiDPI: get_position is the DIP position set (got {px},{py})"),
+      false,
+    );
+  }
+  tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+  let can_measure = cfg!(windows) || os_view::xdotool().is_some();
+  match os_view::content_rect(title) {
+    Some((x, y, pw, ph)) => {
+      let (sw, sh) = w.get_size();
+      let (ew, eh) = (sw as f64 * scale, sh as f64 * scale);
+      check(
+        &format!(
+          "HiDPI: the window system has the content at {ew}x{eh} physical pixels (got {pw}x{ph})"
+        ),
+        (pw as f64 - ew).abs() <= scale + 1.0
+          && (ph as f64 - eh).abs() <= scale + 1.0,
+      );
+      let (ix, iy) = w.get_inner_position();
+      let (ex, ey) = (ix as f64 * scale, iy as f64 * scale);
+      check(
+        &format!(
+          "HiDPI: the content origin {ix},{iy} (DIP) is at {ex},{ey} physical (got {x},{y})"
+        ),
+        (x as f64 - ex).abs() <= 2.0 * scale + 1.0
+          && (y as f64 - ey).abs() <= 2.0 * scale + 1.0,
+      );
+    }
+    None if can_measure => check(
+      "HiDPI: the window system reports the window's geometry",
+      false,
+    ),
+    None => {
+      na("HiDPI: physical geometry (no way to ask the window system here)")
+    }
+  }
+  w.set_size(520, 420);
+  let _ = wait_for(|| (w.get_size().0 - 520).abs() <= 4, 40, 50).await;
 }
 
 /// A tray-only app: with no window at all, a click on the tray icon still
@@ -2327,8 +2514,8 @@ async fn passkey_answer(
 /// at a time, and a real OS round trip — on macOS an unsigned host is refused
 /// by the OS at once (`invalid_rp`); on Windows the request shows the system
 /// dialog and laufey's own timeout ends it (`timeout`;
-/// LAUFEY_E2E_PASSKEY_EXPECT pins the code where the run is known to have an
-/// interactive desktop). Exactly-once delivery is covered by
+/// LAUFEY_E2E_PASSKEY_EXPECT overrides the expected code for a machine where
+/// the dialog ends differently). Exactly-once delivery is covered by
 /// backend-common's passkey_test (the Rust future can't observe a second
 /// call).
 async fn passkey_checks(window_id: u32) {
@@ -2442,12 +2629,15 @@ async fn passkey_checks(window_id: u32) {
   let expected: Vec<String> = match std::env::var("LAUFEY_E2E_PASSKEY_EXPECT") {
     Ok(v) if !v.is_empty() => vec![v],
     _ if cfg!(target_os = "macos") => vec!["invalid_rp".into()],
-    // Windows: the dialog's fate depends on the session (none without an
-    // interactive desktop).
-    _ => ["timeout", "cancelled", "not_supported", "unknown"]
-      .iter()
-      .map(|s| s.to_string())
-      .collect(),
+    // Windows: webauthn.dll shows its dialog on the runner's interactive
+    // desktop and waits there for a security key nobody inserts. Nothing
+    // answers before laufey's own 2 s timer (StartTimeout), which aborts
+    // the ceremony with `timeout` and cancels the OS operation. Every
+    // windows-latest run since passkeys landed got exactly that (10 of 10
+    // CEF and WebView2 runs of the integration branch, 2026-10-01/02);
+    // `cancelled` would mean the OS gave up first, `not_supported` that
+    // webauthn.dll is missing (handled above), and `unknown` a failure.
+    _ => vec!["timeout".into()],
   };
   check(
     &format!("passkey get from the OS -> one of {expected:?} (got {code})"),

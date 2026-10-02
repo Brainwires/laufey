@@ -195,10 +195,18 @@ never shows.
 
 Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
 and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body
-over 1 MB, and an empty body) to the scheme handler, which reads each one with
-`read_body` and echoes it. The battery checks that the handler received exactly
-the bytes sent and that the page got an identical echo
-(`examples/native_e2e/src/body_echo.rs`).
+over 1 MB, an empty body, bodies of 256 KiB − 1, 256 KiB, 256 KiB + 1 and 512
+KiB around the chunk WebKitGTK reads them in, and eight bodies in flight at
+once) to the scheme handler, which reads each one with `read_body` and echoes
+it. The battery checks that the handler received exactly the bytes sent and that
+the page got an identical echo (`examples/native_e2e/src/body_echo.rs`). The
+same page then checks that a response's `Content-Type` reaches the engine as its
+MIME type and charset: a `text/plain; charset=iso-8859-1` response keeps that
+header and its `XMLHttpRequest` text decodes as Latin-1 (a quoted charset too),
+`application/json` keeps its type, and documents loaded in a frame are
+`text/html` in UTF-8 or windows-1252 as declared, or `text/plain` shown as text.
+WebKitGTK once sent no MIME type (a navigation became a download) and CEF once
+passed `text/html; charset=utf-8` whole as the MIME type (an empty document).
 
 Responses that never end are read incrementally: a page at `app://e2e-stream/`
 reads a never-ending response with `fetch` (its first chunks, status and
@@ -272,7 +280,7 @@ backends.
 
 ## 7. The observers
 
-### 7.1 Linux — D-Bus watcher/observer (written, compiles)
+### 7.1 Linux — D-Bus watcher/observer (runs in CI on cef/linux)
 
 On Linux, both native-chrome implementations expose the tray over the
 freedesktop **StatusNotifierItem** spec and the menu over
@@ -295,6 +303,13 @@ Run line (works for **any** backend binary):
 ```
 xvfb-run -a dbus-run-session -- sni-driver <backend-bin> --runtime libnative_e2e.so
 ```
+
+In CI: `scripts/native-e2e-run.sh cef --layer1` on every cef/linux leg (x64 and
+arm64), with the Ayatana runtime library installed and
+`LAUFEY_E2E_REQUIRE_TRAY=1`. The battery runs under the driver with
+`LAUFEY_E2E_HOLD` set, waits for the driver's dbusmenu `Event` to reach the
+tray's `on_click` (a FAIL if it doesn't), and the driver fails unless the
+battery's own verdict is PASS.
 
 Key facts baked into the driver:
 
@@ -663,7 +678,16 @@ runtime sees need real processes, so they have their own runtime,
 - macOS: files opened with the bundle through LaunchServices (`open -a`) reach
   `on_open_url` as `file://` URLs, both when they start the app and while it
   runs, and a file on the command line of a directly exec'd binary reaches
-  `argv` only.
+  `argv` only;
+- Windows and Linux: a test URL scheme registered with the OS as an installer
+  would (`HKCU\Software\Classes\laufey-si-test` with a `shell\open\command` of
+  `"<backend>" --runtime "<runtime>" "%1"`; a `.desktop` file with
+  `x-scheme-handler/laufey-si-test` made the default with `xdg-mime`, in a
+  private XDG home), and links opened through the OS (`Start-Process`,
+  `xdg-open`): at a cold start the runtime sees the URL in its arguments, and
+  while an instance runs the OS-started second launch forwards it to
+  `second_instance`. (On Windows and Linux there is no `on_open_url`: the OS
+  starts a process, so `test_trigger_open_url` stays macOS-only.)
 
 The buffered `open_url` round trip (`test_trigger_open_url`) stays in Layer 0
 (`native-e2e-run.sh`). The lock's framing, limits and naming are unit-tested in
@@ -698,8 +722,24 @@ last window closes and the loop survives (no runtime shutdown), a new window
 opens, then `quit()` with a window open must end the loop, observed as the
 backend calling the runtime's shutdown.
 
-On Linux the CI legs run without a window manager; biscuits runs `--window-api`
-under xfwm4 for the state checks.
+The Layer-0 battery runs it on Linux without a window manager, where nothing
+applies maximize / minimize / fullscreen (N/A). CI also runs `--window-api` on
+its own on every leg, and on Linux under a window manager (openbox, started by
+`native-e2e-run.sh` inside the Xvfb session; `LAUFEY_E2E_WM` picks another,
+`none` turns it off): there the battery sets `LAUFEY_E2E_WM_RUNNING` and the
+state changes must apply, so an N/A becomes a FAIL.
+
+`--hidpi` runs the same battery at a device scale factor of 2: CEF on Linux with
+`--force-device-scale-factor=2`, WebKitGTK with `GDK_SCALE=2` (on a 2560x1600
+Xvfb screen), and on Windows at the display's own scale, which
+`scripts/windows-display-scale.ps1` raises first (the largest display mode, then
+the per-user scale the Settings app sets; `LAUFEY_E2E_EXPECT_SCALE` is what it
+reached). It checks the window's scale factor, the primary screen's, the page's
+`devicePixelRatio`, that `get_size` / `get_position` stay in DIPs and the page
+is that many CSS pixels, and that the window system (xdotool on X11,
+`GetClientRect` / `ClientToScreen` on Windows) has the content at `scale` times
+its DIP size and origin. macOS runners have one 1x display, so it doesn't run
+there.
 
 ## 17. Drag and drop, file dialogs and the clipboard (API 39)
 
@@ -723,9 +763,15 @@ GTK thread). Capability-probed like the rest:
   the macOS CI runners the panels run out of process (`ok:` is not implemented
   and a posted Return doesn't reach them), so there the accepts are N/A and only
   opening, cancelling and busy are checked.
+- **A real drop (X11)**: `laufey_xdnd_source` (a small GTK program built with
+  the backend's tests) offers a file as `text/uri-list` over XDND, as a file
+  manager does; xdotool presses on it, drags into the window and releases. The
+  backend's own XDND handling must report ENTER, OVER at the pointer, and a DROP
+  at the release point with the file's path. Needs `LAUFEY_E2E_XDOTOOL` and
+  `LAUFEY_E2E_XDND_SOURCE`, which `native-e2e-run.sh --io` sets on Linux.
 - **Drag out**: a relative path and a drag with no mouse button held both fail.
-  A real drag out (and a real OS drop) needs a person or OS-level input
-  injection and is not part of the battery.
+  A real drag out needs a person or OS-level input injection on the drag source
+  side and is not part of the battery.
 
 The portable pieces (the drop dispatch, the dialog slot's exactly-once
 completion, option copying, `file://` parsing, CF_HTML) are unit-tested in
@@ -744,9 +790,10 @@ that it says so). `--devtools-off` runs the DevTools part again under
   OS registration answered with the canonical form, listed, another spelling
   refused as `ALREADY_REGISTERED`, `INVALID` for a modifier-less key and an
   unknown key, a press through `test_trigger_shortcut` reaching the handler with
-  the canonical form, and on Windows a real key press injected with `SendInput`
-  arriving as `WM_HOTKEY`. Then the **conflict**: the battery starts a second
-  copy of the backend (`LAUFEY_E2E_ONLY=shortcut-holder`, its own data
+  the canonical form, and a real key press: on Windows injected with `SendInput`
+  and arriving as `WM_HOTKEY`, on X11 injected with xdotool (XTEST) and matched
+  against the shortcut's key grab. Then the **conflict**: the battery starts a
+  second copy of the backend (`LAUFEY_E2E_ONLY=shortcut-holder`, its own data
   directory) that registers a shortcut and reports through a file; this process
   must get `CONFLICT` for the same shortcut from the OS (Carbon's exclusive hot
   keys, `RegisterHotKey`, an X11 grab), and `OK` once the holder has released it
@@ -782,9 +829,10 @@ that it says so). See [menus.md](menus.md) and
   `test_trigger_menu_accelerator` fires the first through the backend's own
   dispatch (`-[NSMenu performKeyEquivalent:]`, `TranslateAccelerator` with the
   modifiers in the thread's keyboard state, `gtk_accel_groups_activate`, the CEF
-  window accelerator) and not the disabled one or an unbound combination. On
-  Windows a real `Ctrl+Shift+F9` injected with `SendInput` while the window has
-  the focus fires it too (N/A when the window can't take the focus).
+  window accelerator) and not the disabled one or an unbound combination. A real
+  `Ctrl+Shift+F9` fires it too: on Windows injected with `SendInput` while the
+  window has the focus (N/A when the window can't take the focus), on X11 with
+  xdotool after the window manager has activated the window.
 - **Context-menu close**: an empty menu reports its close at once; a real menu
   is dismissed with `test_dismiss_context_menu` and its close callback fires
   exactly once, with no click (a menu the OS refused to show closes by itself,
