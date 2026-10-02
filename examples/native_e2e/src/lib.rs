@@ -2373,8 +2373,15 @@ async fn hidpi_checks(w: &Window, title: &str, scale: f64) {
     // does the page catch up, and does another resize reach it?
     for ms in [1000u64, 3000, 6000] {
       tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+      // Whether Chromium sees the page as hidden (an occluded window's
+      // renderer makes no frames, and a resize waits for the last one's
+      // acknowledgement), and its scale.
+      let hidden =
+        page_number(w, "document.visibilityState === 'hidden' ? 1 : 0").await;
+      let dpr = page_number(w, "window.devicePixelRatio").await;
       eprintln!(
-        "[e2e]   HiDPI diag: +{ms} ms page {:?} get_size {:?} visible {}",
+        "[e2e]   HiDPI diag: +{ms} ms page {:?} get_size {:?} visible {} \
+         page hidden {hidden:?} dpr {dpr:?}",
         page_inner_size(w).await,
         w.get_size(),
         w.get_visible()
