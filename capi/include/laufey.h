@@ -387,8 +387,10 @@ typedef void (*laufey_menu_closed_fn)(void* user_data, uint32_t window_id);
 //   "action"  string   the action button's id, or null for the body
 //   "data"    string   the notification's "data", or null
 //   "launch"  bool     true when the response arrived before any handler was
-//                      registered: the click that launched the app (or one
-//                      made while it was starting)
+//                      registered (the click that launched the app, or one
+//                      made while it was starting), and on Windows for the
+//                      click COM started the app for, however soon a handler
+//                      was registered
 // Fires on a backend thread (not necessarily the UI thread).
 typedef void (*laufey_notification_response_fn)(void* user_data,
                                                 const char* response_json);

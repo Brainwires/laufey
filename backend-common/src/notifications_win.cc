@@ -47,6 +47,7 @@
 #include <wrl/implements.h>
 #include <wrl/wrappers/corewrappers.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -453,6 +454,23 @@ bool FirstDelivery(const std::string& args) {
   return seen.emplace(args, now).second;
 }
 
+// Whether COM started this process for a toast click (LocalServer32 runs it
+// with -ToastActivated) and that click hasn't been delivered yet: it is the
+// launch, however soon the app registered its response handler.
+std::atomic<bool> g_launch_click_pending{false};
+
+bool StartedForToastClick() {
+  int argc = 0;
+  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (!argv)
+    return false;
+  bool found = false;
+  for (int i = 1; i < argc && !found; ++i)
+    found = _wcsicmp(argv[i], L"-ToastActivated") == 0;
+  LocalFree(argv);
+  return found;
+}
+
 void HandleActivationArguments(const std::string& args) {
   std::string tag, action, data;
   bool has_action = false, has_data = false;
@@ -460,8 +478,9 @@ void HandleActivationArguments(const std::string& args) {
     return;
   if (!FirstDelivery(args))
     return;
+  bool launch = g_launch_click_pending.exchange(false);
   DispatchNotificationClick(tag, has_action ? action.c_str() : nullptr,
-                            has_data ? &data : nullptr);
+                            has_data ? &data : nullptr, launch);
 }
 
 class ToastActivator : public RuntimeClass<RuntimeClassFlags<ClassicCom>,
@@ -1019,6 +1038,7 @@ std::unique_ptr<NotificationPlatform> CreateNotificationPlatform() {
 void InitNotificationsAtLaunch() {
   static std::once_flag once;
   std::call_once(once, [] {
+    g_launch_click_pending = StartedForToastClick();
     // Register the activator class object in the toast thread's apartment:
     // from now on a click on one of this app's toasts is delivered here.
     ToastThread::Get().RunSync([] {

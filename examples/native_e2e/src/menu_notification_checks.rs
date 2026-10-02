@@ -75,6 +75,35 @@ pub async fn run() {
   }
 }
 
+/// The process COM started for a toast click (its command line has
+/// "-ToastActivated"): the click reaches the response handler, as the
+/// launch, and is written to `%TEMP%\laufey-coldstart-result.txt`
+/// ("tag\naction\ndata\nlaunch") for the script that clicked. Ends the
+/// process.
+pub async fn cold_start() -> ! {
+  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+  laufey::set_notification_response_handler(move |r| {
+    let _ = tx.send(r);
+  });
+  let out = std::env::temp_dir().join("laufey-coldstart-result.txt");
+  let got = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await;
+  let text = match got {
+    Ok(Some(r)) => format!(
+      "{}\n{}\n{}\n{}\n",
+      r.tag,
+      r.action.unwrap_or_default(),
+      r.data.unwrap_or_default(),
+      r.launch
+    ),
+    _ => "timeout\n".to_string(),
+  };
+  let _ = std::fs::write(&out, text);
+  eprintln!("[e2e-coldstart] wrote {}", out.display());
+  let _ = std::io::Write::flush(&mut std::io::stderr());
+  // As finish(): _exit skips the backend's static teardown.
+  unsafe { super::libc_exit(0) }
+}
+
 // ---------------------------------------------------------------------------
 // Menus
 // ---------------------------------------------------------------------------

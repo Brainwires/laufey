@@ -805,6 +805,14 @@ that it says so). See [menus.md](menus.md) and
 - **Windows activation**: the COM activator the app registered answers a
   `CoCreateInstance` + `INotificationActivationCallback::Activate` (what Windows
   does for a click on a toast) and the response arrives.
+- **Windows cold start** (`scripts/notification-coldstart-e2e.ps1 <backend>`,
+  after the step above registered the app): with no copy of the app running, the
+  script points the activator's `LocalServer32` at a copy of the backend (with
+  the runtime colocated and a `laufey-launch.json` naming the same app id) and
+  clicks through COM, so Windows starts that copy with
+  `-ToastActivated -Embedding`; the runtime's cold-start mode writes the
+  response it received, and the script checks its tag, action, data and
+  `launch: true`.
 
 The portable pieces are unit-tested in
 `backend-common/tests/menu_notifications_test.cc` (template parsing and

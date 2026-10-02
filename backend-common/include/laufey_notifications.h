@@ -115,9 +115,11 @@ void DispatchNotificationShown(const std::string& tag);
 // action button. `data` is what the OS kept with it (null if unknown; the
 // core falls back to what this process recorded). Goes to the live
 // notification's callback, else to the response handler (or its buffer).
-// Returns true if a callback or handler received it.
+// Returns true if a callback or handler received it. `launch` marks the
+// response as the click that started this process (Windows' cold start) even
+// when a handler was already registered when it arrived.
 bool DispatchNotificationClick(const std::string& tag, const char* action,
-                               const std::string* data);
+                               const std::string* data, bool launch = false);
 // The notification `tag` was dismissed, expired or failed to show.
 void DispatchNotificationClosed(const std::string& tag);
 

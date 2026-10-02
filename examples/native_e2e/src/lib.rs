@@ -569,6 +569,12 @@ fn e2e_main() {
     // Pump the laufey event loop (JS-call dispatch, timers).
     tokio::spawn(async { laufey::run().await });
 
+    // Windows: started by COM for a click on one of the app's toasts while it
+    // wasn't running (scripts/notification-coldstart-e2e.ps1).
+    if std::env::args().any(|a| a.eq_ignore_ascii_case("-ToastActivated")) {
+      menu_notification_checks::cold_start().await;
+    }
+
     // ---- C. custom scheme registration -----------------------------------
     // Registered BEFORE the first window: the engines read their scheme
     // tables when a web view is created (WebView2 fixes the set for the whole
@@ -1891,6 +1897,26 @@ async fn window_api_checks() {
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let before_pos = w.get_position();
     let before_size = w.get_size();
+    // Bounds become the normal bounds once they have rested
+    // (kNormalBoundsSettleMs, timed from when the OS reports them). On a busy
+    // runner the move can be reported late enough that the sleep above isn't
+    // a rest yet: wait until the tracker has settled on these bounds, so the
+    // checks below test maximize / fullscreen, not the runner's load.
+    if caps.normal_bounds() {
+      let _ = wait_for(
+        || {
+          w.get_normal_bounds().is_some_and(|r| {
+            (r.x - before_pos.0).abs() <= 4
+              && (r.y - before_pos.1).abs() <= 4
+              && (r.width - before_size.0).abs() <= 4
+              && (r.height - before_size.1).abs() <= 4
+          })
+        },
+        60,
+        50,
+      )
+      .await;
+    }
 
     // maximize / unmaximize
     w.maximize();

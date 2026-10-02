@@ -702,7 +702,7 @@ void DispatchNotificationShown(const std::string& tag) {
 }
 
 bool DispatchNotificationClick(const std::string& tag, const char* action,
-                               const std::string* data) {
+                               const std::string* data, bool launch) {
   laufey_notification_event_fn fn = nullptr;
   void* ud = nullptr;
   uint32_t id = 0;
@@ -732,7 +732,8 @@ bool DispatchNotificationClick(const std::string& tag, const char* action,
       }
       rfn = g_response_fn;
       rud = g_response_data;
-      json = BuildNotificationResponseJson(tag, action, d, rfn == nullptr);
+      json = BuildNotificationResponseJson(tag, action, d,
+                                           launch || rfn == nullptr);
       if (!rfn) {
         if (g_pending_responses.size() >=
             LAUFEY_MAX_PENDING_NOTIFICATION_RESPONSES)

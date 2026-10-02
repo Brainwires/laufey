@@ -128,7 +128,9 @@ At launch every laufey process registers the activator's class object
 (`CoRegisterClassObject`). A click on a toast while the app runs reaches it in
 that process; while the app isn't running, Windows starts the executable from
 `LocalServer32`, so its command line carries `-ToastActivated -Embedding`, and
-the click is delivered to the response handler with `launch: true`.
+the click is delivered to the response handler with `launch: true` (even if the
+handler was registered before COM handed the click over).
+`scripts/notification-coldstart-e2e.ps1` tests that round trip.
 
 A toast that times out moves to the notification center; laufey reports it
 closed, and a later click there arrives as a response. Uninstallers should
