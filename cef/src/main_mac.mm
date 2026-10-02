@@ -14,6 +14,7 @@
 #include "laufey_launch_config.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
@@ -463,6 +464,9 @@ int main(int argc, char* argv[]) {
     // the delegate isn't released immediately under ARC.
     static LaufeyAppDelegate* delegate = [[LaufeyAppDelegate alloc] init];
     NSApp.delegate = delegate;
+    // The notification-center delegate must be in place before AppKit
+    // finishes launching, or the click that launched the app is lost.
+    laufey_common::InitNotificationsAtLaunch();
 
     // Files and URLs reach the runtime through argv (direct exec) or the
     // open-url handler (LaunchServices), never both; forwarded launches are

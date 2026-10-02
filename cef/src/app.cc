@@ -11,6 +11,9 @@
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 #include "scheme_handler.h"
+#if defined(_WIN32) || defined(__linux__)
+#include "views_menu.h"
+#endif
 
 #include <algorithm>
 #include <iostream>
@@ -187,10 +190,22 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
   if (laufey_id_ > 0) {
     RuntimeLoader::GetInstance()->UnregisterBrowser(laufey_id_);
     laufey_common::ForgetWindow(laufey_id_);
+#if defined(_WIN32) || defined(__linux__)
+    laufey_cef_menu::ForgetWindow(laufey_id_);
+#endif
   }
   RemoveNativeMouseMonitor();
   browser_view_ = nullptr;
 }
+
+#if defined(_WIN32) || defined(__linux__)
+bool LaufeyWindowDelegate::OnAccelerator(CefRefPtr<CefWindow> /*window*/,
+                                         int command_id) {
+  // An app menu item's accelerator (views_menu.cc).
+  return laufey_id_ > 0 &&
+         laufey_cef_menu::OnAccelerator(laufey_id_, command_id);
+}
+#endif
 
 bool LaufeyWindowDelegate::CanClose(CefRefPtr<CefWindow> window) {
   // The close-requested negotiation lives here, not in DoClose: laufey's

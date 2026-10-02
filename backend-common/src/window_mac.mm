@@ -143,9 +143,20 @@ int SetFullscreenTransition(NSWindow* w, int transition) {
   return 0;
 }
 
+// Whether a fullscreen Space transition is running.
+bool InFullscreenTransition(NSWindow* w) {
+  std::lock_guard<std::mutex> lock(g_watch_mutex);
+  Watch* watch = FindWatch(w);
+  return watch && watch->fs_transition != 0;
+}
+
 void ReportAndTrack(NSWindow* w, uint32_t window_id) {
   uint32_t state = StateOf(w);
-  bool normal = state == 0;
+  // The frames of a fullscreen transition (the window growing into its
+  // Space, or shrinking out of it) are not normal bounds, though the state
+  // still reads normal until the transition ends: noting them made the
+  // fullscreen frame the "normal bounds" once it had rested long enough.
+  bool normal = state == 0 && !IsFullscreen(w) && !InFullscreenTransition(w);
   int64_t now = MonotonicMs();
   if (!normal && LastReportedWindowState(window_id) == 0)
     NoteWindowLeftNormal(window_id, now);

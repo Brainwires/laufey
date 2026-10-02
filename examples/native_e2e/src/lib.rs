@@ -29,6 +29,7 @@
 
 mod body_echo;
 mod io_checks;
+mod menu_notification_checks;
 mod stream_checks;
 mod system_checks;
 
@@ -635,6 +636,11 @@ fn e2e_main() {
       }
       Ok("devtools-off") => {
         system_checks::devtools_off().await;
+        finish();
+      }
+      // Menus and notifications (API 41).
+      Ok("menus-notifications") => {
+        menu_notification_checks::run().await;
         finish();
       }
       Ok("shortcut-holder") => {
@@ -1979,6 +1985,8 @@ async fn window_api_checks() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // fullscreen
+    let fs_before_pos = w.get_position();
+    let fs_before_size = w.get_size();
     w.set_fullscreen(true);
     if wait_state(&w, |s| s.fullscreen, 10000).await {
       check("set_fullscreen(true) -> is_fullscreen", true);
@@ -1991,6 +1999,28 @@ async fn window_api_checks() {
         )
         .await,
       );
+      if caps.normal_bounds() {
+        // Long enough for the transition's last frame to have "settled"
+        // (laufey_window.h kNormalBoundsSettleMs), which is how the
+        // fullscreen frame used to become the normal bounds on macOS.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        match w.get_normal_bounds() {
+          Some(r) => {
+            let size_ok = (r.width - fs_before_size.0).abs() <= 4
+              && (r.height - fs_before_size.1).abs() <= 4;
+            let pos_ok = !caps.set_position()
+              || ((r.x - fs_before_pos.0).abs() <= 40
+                && (r.y - fs_before_pos.1).abs() <= 40);
+            check(
+              &format!(
+                "normal bounds while fullscreen are the pre-fullscreen bounds (got {r:?}, before {fs_before_pos:?} {fs_before_size:?})"
+              ),
+              size_ok && pos_ok,
+            );
+          }
+          None => check("normal bounds available while fullscreen", false),
+        }
+      }
       w.set_fullscreen(false);
       check(
         "set_fullscreen(false) -> !is_fullscreen",

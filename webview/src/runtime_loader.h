@@ -760,11 +760,54 @@ class LaufeyBackend {
   }
   virtual void CloseNotification(uint32_t /*notification_id*/) {}
 
+  // --- Notifications: scheduling, actions, responses (API >= 41) ---
+  // See laufey.h. The desktop backends override these with
+  // laufey_notifications.h (backend-common, which iOS doesn't link). The
+  // defaults are a backend without notifications.
+  virtual uint32_t NotificationCapabilities() {
+    return 0;
+  }
+  virtual void SetNotificationResponseHandler(
+      laufey_notification_response_fn /*handler*/, void* /*user_data*/) {}
+  virtual void ListScheduledNotifications(laufey_notification_list_fn cb,
+                                          void* user_data) {
+    if (cb)
+      cb(user_data, "[]");
+  }
+  virtual void CancelNotification(const char* /*tag*/) {}
+  virtual bool TestNotificationRespond(const char* /*tag*/,
+                                       const char* /*action_id*/) {
+    return false;
+  }
+
+  // --- Menus: context-menu close, accelerators (API >= 41) ---
+  // The defaults are a backend without them: a context menu request that
+  // shows nothing reports its close at once.
+  virtual uint32_t MenuCapabilities() {
+    return 0;
+  }
+  virtual void ShowContextMenuEx(uint32_t window_id, int /*x*/, int /*y*/,
+                                 laufey_value_t* /*menu_template*/,
+                                 const laufey_backend_api_t* /*api*/,
+                                 laufey_menu_click_fn /*on_click*/,
+                                 void* /*on_click_data*/,
+                                 laufey_menu_closed_fn on_closed,
+                                 void* on_closed_data) {
+    if (on_closed)
+      on_closed(on_closed_data, window_id);
+  }
+  virtual bool TestDismissContextMenu() {
+    return false;
+  }
+  virtual bool TestTriggerMenuAccelerator(uint32_t /*window_id*/,
+                                          const char* /*accelerator*/) {
+    return false;
+  }
+
   // --- Permissions / runtime authorization ---
-  // Default: synchronously report UNSUPPORTED. macOS subclass overrides
-  // to drive UNUserNotificationCenter. Windows/Linux subclasses report
-  // GRANTED for LAUFEY_PERMISSION_NOTIFICATIONS (the balloon / libnotify
-  // APIs they use have no permission model).
+  // Default: synchronously report UNSUPPORTED. The desktop backends
+  // override it with laufey_notifications.h (UNUserNotificationCenter, the
+  // toast setting, a notification server on the session bus).
   virtual void QueryPermission(int /*kind*/, laufey_permission_callback_fn cb,
                                void* user_data) {
     if (cb)

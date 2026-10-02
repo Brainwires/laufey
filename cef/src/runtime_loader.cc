@@ -6,6 +6,8 @@
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_launch_config.h"
+#include "laufey_menu.h"
+#include "laufey_notifications.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_single_instance.h"
@@ -1257,9 +1259,14 @@ static void Backend_ReleaseJsCallback(void* data, uint64_t callback_id) {
 // --- Platform-specific menu (stub on Windows, implemented in runtime_loader.mm
 // on macOS) ---
 
+#if defined(_WIN32) || defined(__linux__)
 #if defined(_WIN32)
 #include <win32_menu.h>
+#endif
+#include "views_menu.h"
 
+// The application menu is a CEF Views menu bar on Windows and Linux (see
+// views_menu.h): a native menu bar can't be attached to a Views window.
 static void Backend_SetApplicationMenu(void* data, uint32_t window_id,
                                        laufey_value_t* menu_template,
                                        laufey_menu_click_fn on_click,
@@ -1267,23 +1274,72 @@ static void Backend_SetApplicationMenu(void* data, uint32_t window_id,
   if (!menu_template)
     return;
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
-  const laufey_backend_api_t* api = &loader->GetBackendApi();
-
+  // Parsed here: the template is the caller's only for this call.
+  std::vector<laufey_common::MenuEntry> entries =
+      laufey_common::ParseMenuTemplate(menu_template, &loader->GetBackendApi(),
+                                       false);
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
-  if (browser) {
-    CefPostTask(
-        TID_UI,
-        base::BindOnce(
-            [](CefRefPtr<CefBrowser> b, uint32_t wid, laufey_value_t* tmpl,
-               const laufey_backend_api_t* a, laufey_menu_click_fn fn,
-               void* d) {
-              HWND hwnd = b->GetHost()->GetWindowHandle();
-              if (hwnd) {
-                win32_menu::SetApplicationMenu(hwnd, tmpl, a, fn, d, wid);
-              }
-            },
-            browser, window_id, menu_template, api, on_click, on_click_data));
+  if (!browser)
+    return;
+  CefPostTask(
+      TID_UI,
+      base::BindOnce(
+          [](CefRefPtr<CefBrowser> b, uint32_t wid,
+             std::vector<laufey_common::MenuEntry> items,
+             laufey_menu_click_fn fn, void* d) {
+            CefRefPtr<CefBrowserView> view = CefBrowserView::GetForBrowser(b);
+            CefRefPtr<CefWindow> window = view ? view->GetWindow() : nullptr;
+            laufey_cef_menu::SetApplicationMenu(window, view, wid,
+                                                std::move(items), fn, d);
+          },
+          browser, window_id, std::move(entries), on_click, on_click_data));
+}
+
+// A context menu: Win32's TrackPopupMenu on Windows (native look and item
+// icons), a CEF Views menu on Linux (there is no GtkWindow to anchor a GTK
+// menu to).
+static void ShowCefContextMenu(RuntimeLoader* loader, uint32_t window_id, int x,
+                               int y,
+                               std::vector<laufey_common::MenuEntry> entries,
+                               laufey_menu_click_fn on_click,
+                               void* on_click_data,
+                               laufey_menu_closed_fn on_closed,
+                               void* on_closed_data) {
+  CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
+  if (!browser || entries.empty()) {
+    laufey_common::FireContextMenuClosedNow(window_id, on_closed,
+                                            on_closed_data);
+    return;
   }
+  CefPostTask(TID_UI,
+              base::BindOnce(
+                  [](CefRefPtr<CefBrowser> b, uint32_t wid, int cx, int cy,
+                     std::vector<laufey_common::MenuEntry> items,
+                     laufey_menu_click_fn fn, void* d,
+                     laufey_menu_closed_fn closed, void* closed_data) {
+#if defined(_WIN32)
+                    // (cx, cy) is in window DIP, like every CEF geometry;
+                    // the Win32 menu takes client pixels (the process is
+                    // per-monitor DPI aware).
+                    HWND hwnd = b->GetHost()->GetWindowHandle();
+                    UINT dpi = hwnd ? GetDpiForWindow(hwnd) : 0;
+                    double scale = dpi ? dpi / 96.0 : 1.0;
+                    win32_menu::ShowContextMenu(
+                        hwnd, static_cast<int>(std::lround(cx * scale)),
+                        static_cast<int>(std::lround(cy * scale)), items, fn, d,
+                        wid, closed, closed_data);
+#else
+                    CefRefPtr<CefBrowserView> view =
+                        CefBrowserView::GetForBrowser(b);
+                    CefRefPtr<CefWindow> window =
+                        view ? view->GetWindow() : nullptr;
+                    laufey_cef_menu::ShowContextMenu(window, view, wid, cx, cy,
+                                                     std::move(items), fn, d,
+                                                     closed, closed_data);
+#endif
+                  },
+                  browser, window_id, x, y, std::move(entries), on_click,
+                  on_click_data, on_closed, on_closed_data));
 }
 
 static void Backend_ShowContextMenu(void* data, uint32_t window_id, int x,
@@ -1293,26 +1349,54 @@ static void Backend_ShowContextMenu(void* data, uint32_t window_id, int x,
   if (!menu_template)
     return;
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
-  const laufey_backend_api_t* api = &loader->GetBackendApi();
-
-  CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
-  if (browser) {
-    CefPostTask(TID_UI,
-                base::BindOnce(
-                    [](CefRefPtr<CefBrowser> b, uint32_t wid, int cx, int cy,
-                       laufey_value_t* tmpl, const laufey_backend_api_t* a,
-                       laufey_menu_click_fn fn, void* d) {
-                      HWND hwnd = b->GetHost()->GetWindowHandle();
-                      if (hwnd) {
-                        win32_menu::ShowContextMenu(hwnd, cx, cy, tmpl, a, fn,
-                                                    d, wid);
-                      }
-                    },
-                    browser, window_id, x, y, menu_template, api, on_click,
-                    on_click_data));
-  }
+  std::vector<laufey_common::MenuEntry> entries =
+      laufey_common::ParseMenuTemplate(menu_template, &loader->GetBackendApi(),
+                                       false);
+#if defined(__linux__)
+  // The Linux path always consumed the template.
+  loader->GetBackendApi().value_free(menu_template);
+#endif
+  ShowCefContextMenu(loader, window_id, x, y, std::move(entries), on_click,
+                     on_click_data, nullptr, nullptr);
 }
-#elif defined(__APPLE__)
+
+static void Backend_ShowContextMenuEx(void* data, uint32_t window_id, int x,
+                                      int y, laufey_value_t* menu_template,
+                                      laufey_menu_click_fn on_click,
+                                      void* on_click_data,
+                                      laufey_menu_closed_fn on_closed,
+                                      void* on_closed_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  std::vector<laufey_common::MenuEntry> entries =
+      laufey_common::ParseMenuTemplate(menu_template, &loader->GetBackendApi(),
+                                       false);
+  if (menu_template)
+    loader->GetBackendApi().value_free(menu_template);
+  ShowCefContextMenu(loader, window_id, x, y, std::move(entries), on_click,
+                     on_click_data, on_closed, on_closed_data);
+}
+
+static bool Backend_TestTriggerMenuAccelerator(void* /*data*/,
+                                               uint32_t window_id,
+                                               const char* accelerator) {
+  bool fired = false;
+  cef_invoke_sync([&] {
+    fired = laufey_cef_menu::TestTriggerAccelerator(window_id, accelerator);
+  });
+  return fired;
+}
+
+static uint32_t Backend_MenuCapabilities(void* /*data*/) {
+  uint32_t caps = LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
+                  LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED;
+#if defined(_WIN32)
+  caps |= LAUFEY_MENU_CAP_ICONS;  // context menus (Win32)
+#endif
+  return caps;
+}
+#endif  // _WIN32 || __linux__
+
+#if defined(__APPLE__)
 // Defined in runtime_loader_mac.mm
 extern void Backend_SetApplicationMenu_Mac(void* data, uint32_t window_id,
                                            laufey_value_t* menu_template,
@@ -1322,6 +1406,12 @@ extern void Backend_ShowContextMenu_Mac(void* data, uint32_t window_id, int x,
                                         int y, laufey_value_t* menu_template,
                                         laufey_menu_click_fn on_click,
                                         void* on_click_data);
+extern void Backend_ShowContextMenuEx_Mac(void* data, uint32_t window_id, int x,
+                                          int y, laufey_value_t* menu_template,
+                                          laufey_menu_click_fn on_click,
+                                          void* on_click_data,
+                                          laufey_menu_closed_fn on_closed,
+                                          void* on_closed_data);
 extern void Backend_SetDockBadge_Mac(void* data, const char* badge_or_null);
 extern void Backend_BounceDock_Mac(void* data, int type);
 extern void Backend_SetDockMenu_Mac(void* data, laufey_value_t* menu_template,
@@ -1356,22 +1446,8 @@ extern void Backend_SetTrayIconDark_Mac(void* data, uint32_t tray_id,
                                         const void* png_bytes, size_t len);
 extern bool Backend_GetTrayIconBounds_Mac(void* data, uint32_t tray_id, int* x,
                                           int* y, int* width, int* height);
-extern uint32_t Backend_ShowNotification_Mac(
-    void* data, laufey_value_t* options, laufey_notification_event_fn on_event,
-    void* user_data);
-extern void Backend_CloseNotification_Mac(void* data, uint32_t notification_id);
-extern void Backend_QueryPermission_Mac(void* data, int kind,
-                                        laufey_permission_callback_fn cb,
-                                        void* user_data);
-extern void Backend_RequestPermission_Mac(void* data, int kind,
-                                          laufey_permission_callback_fn cb,
-                                          void* user_data);
 #elif defined(__linux__)
 // Defined in runtime_loader_linux.cc
-extern void Backend_ShowContextMenu_Linux(void* data, uint32_t window_id, int x,
-                                          int y, laufey_value_t* menu_template,
-                                          laufey_menu_click_fn on_click,
-                                          void* on_click_data);
 extern uint32_t Backend_CreateTrayIcon_Linux(void* data);
 extern void Backend_DestroyTrayIcon_Linux(void* data, uint32_t tray_id);
 extern void Backend_SetTrayIcon_Linux(void* data, uint32_t tray_id,
@@ -1390,31 +1466,67 @@ extern void Backend_SetTrayDoubleClickHandler_Linux(
     void* user_data);
 extern void Backend_SetTrayIconDark_Linux(void* data, uint32_t tray_id,
                                           const void* png_bytes, size_t len);
-extern "C" uint32_t Backend_ShowNotification_Linux(
-    void* data, laufey_value_t* options, laufey_notification_event_fn on_event,
-    void* user_data);
-extern "C" void Backend_CloseNotification_Linux(void* data,
-                                                uint32_t notification_id);
 #endif
 
-// --- Permissions / runtime authorization ---
+// --- Notifications and permissions (every platform) ---
 //
-// macOS routes to UNUserNotificationCenter (see runtime_loader_mac.mm).
-// Windows + Linux permission stubs live in backend-common
-// (laufey_common::QueryPermissionStub / RequestPermissionStub).
-#if !defined(__APPLE__)
-static void Backend_QueryPermission_Stub(void* /*data*/, int kind,
-                                         laufey_permission_callback_fn cb,
+// Thin trampolines over backend-common's laufey_notifications.h, whose
+// per-OS platform (UNUserNotificationCenter, toasts, D-Bus) does the work.
+
+static uint32_t Backend_ShowNotification(void* data, laufey_value_t* options,
+                                         laufey_notification_event_fn on_event,
                                          void* user_data) {
-  laufey_common::QueryPermissionStub(kind, cb, user_data);
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  laufey_common::NotificationOptions opts =
+      laufey_common::ParseNotificationOptions(options,
+                                              &loader->GetBackendApi());
+  return laufey_common::ShowNotification(opts, on_event, user_data);
 }
 
-static void Backend_RequestPermission_Stub(void* /*data*/, int kind,
-                                           laufey_permission_callback_fn cb,
-                                           void* user_data) {
-  laufey_common::RequestPermissionStub(kind, cb, user_data);
+static void Backend_CloseNotification(void* /*data*/,
+                                      uint32_t notification_id) {
+  laufey_common::CloseNotification(notification_id);
 }
-#endif
+
+static uint32_t Backend_NotificationCapabilities(void* /*data*/) {
+  return laufey_common::NotificationCapabilities();
+}
+
+static void Backend_SetNotificationResponseHandler(
+    void* /*data*/, laufey_notification_response_fn handler, void* user_data) {
+  laufey_common::SetNotificationResponseHandler(handler, user_data);
+}
+
+static void Backend_ListScheduledNotifications(void* /*data*/,
+                                               laufey_notification_list_fn cb,
+                                               void* user_data) {
+  laufey_common::ListScheduledNotifications(cb, user_data);
+}
+
+static void Backend_CancelNotification(void* /*data*/, const char* tag) {
+  laufey_common::CancelNotification(tag);
+}
+
+static bool Backend_TestNotificationRespond(void* /*data*/, const char* tag,
+                                            const char* action_id) {
+  return laufey_common::TestNotificationRespond(tag, action_id);
+}
+
+static void Backend_QueryPermission(void* /*data*/, int kind,
+                                    laufey_permission_callback_fn cb,
+                                    void* user_data) {
+  laufey_common::QueryNotificationPermission(kind, cb, user_data);
+}
+
+static void Backend_RequestPermission(void* /*data*/, int kind,
+                                      laufey_permission_callback_fn cb,
+                                      void* user_data) {
+  laufey_common::RequestNotificationPermission(kind, cb, user_data);
+}
+
+static bool Backend_TestDismissContextMenu(void* /*data*/) {
+  return laufey_common::DismissOpenContextMenu();
+}
 
 // --- Dock / taskbar (Windows + Linux) ---
 //
@@ -1614,25 +1726,6 @@ void Backend_SetTrayClickHandler_Win(void* /*data*/, uint32_t tray_id,
                             laufey_common::SetTrayClickHandlerWin(tid, h, d);
                           },
                           tray_id, handler, user_data));
-}
-
-// --- Notifications (Windows) ---
-//
-// Thin trampolines over backend-common/src/notifications_win.cc.
-
-static uint32_t Backend_ShowNotification_Win(
-    void* data, laufey_value_t* options, laufey_notification_event_fn on_event,
-    void* user_data) {
-  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
-  laufey_common::NotificationOptions opts =
-      laufey_common::ParseNotificationOptions(options,
-                                              &loader->GetBackendApi());
-  return laufey_common::ShowNotificationWin(opts, on_event, user_data);
-}
-
-static void Backend_CloseNotification_Win(void* /*data*/,
-                                          uint32_t notification_id) {
-  laufey_common::CloseNotificationWin(notification_id);
 }
 
 #elif defined(__linux__)
@@ -2927,24 +3020,29 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.scheme_response_write = Backend_SchemeResponseWrite;
   backend_api_.scheme_response_finish = Backend_SchemeResponseFinish;
 
-#if defined(_WIN32)
-  backend_api_.set_application_menu = Backend_SetApplicationMenu;
-  backend_api_.show_context_menu = Backend_ShowContextMenu;
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
   backend_api_.set_application_menu = Backend_SetApplicationMenu_Mac;
   backend_api_.show_context_menu = Backend_ShowContextMenu_Mac;
+  backend_api_.show_context_menu_ex = Backend_ShowContextMenuEx_Mac;
+  backend_api_.menu_capabilities = [](void*) -> uint32_t {
+    return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
+           LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
+           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS;
+  };
+  backend_api_.test_trigger_menu_accelerator =
+      [](void*, uint32_t window_id, const char* accelerator) -> bool {
+    return laufey_common::TestTriggerMenuAcceleratorMac(window_id, accelerator);
+  };
 #else
-  // Linux: in-window menu bar (set_application_menu) requires packing a
-  // GtkMenuBar above the browser, which means the top-level window must be
-  // a GtkWindow we own. CEF Views creates the native window itself, so an
-  // embedded menubar isn't reachable without reparenting CEF into a GTK
-  // host — and that path breaks on XWayland (cross-client X11 child
-  // windows aren't supported in Wayland-native ways). Context menus and
-  // tray menus still work because GtkMenu popups don't need a GtkWindow.
-  backend_api_.set_application_menu = [](void*, uint32_t, laufey_value_t*,
-                                         laufey_menu_click_fn, void*) {};
-  backend_api_.show_context_menu = Backend_ShowContextMenu_Linux;
+  // Windows and Linux: a CEF Views menu bar with window accelerators.
+  backend_api_.set_application_menu = Backend_SetApplicationMenu;
+  backend_api_.show_context_menu = Backend_ShowContextMenu;
+  backend_api_.show_context_menu_ex = Backend_ShowContextMenuEx;
+  backend_api_.menu_capabilities = Backend_MenuCapabilities;
+  backend_api_.test_trigger_menu_accelerator =
+      Backend_TestTriggerMenuAccelerator;
 #endif
+  backend_api_.test_dismiss_context_menu = Backend_TestDismissContextMenu;
 
   backend_api_.open_devtools = Backend_OpenDevTools;
   backend_api_.print_to_pdf = Backend_PrintToPdf;
@@ -3073,26 +3171,18 @@ void RuntimeLoader::InitializeBackendApi() {
   // and Tray.getBounds() reports null.
 #endif
 
-  // --- Notifications ---
-#if defined(__APPLE__)
-  backend_api_.show_notification = Backend_ShowNotification_Mac;
-  backend_api_.close_notification = Backend_CloseNotification_Mac;
-#elif defined(_WIN32)
-  backend_api_.show_notification = Backend_ShowNotification_Win;
-  backend_api_.close_notification = Backend_CloseNotification_Win;
-#elif defined(__linux__)
-  backend_api_.show_notification = Backend_ShowNotification_Linux;
-  backend_api_.close_notification = Backend_CloseNotification_Linux;
-#endif
-
-  // --- Permissions ---
-#if defined(__APPLE__)
-  backend_api_.query_permission = Backend_QueryPermission_Mac;
-  backend_api_.request_permission = Backend_RequestPermission_Mac;
-#else
-  backend_api_.query_permission = Backend_QueryPermission_Stub;
-  backend_api_.request_permission = Backend_RequestPermission_Stub;
-#endif
+  // --- Notifications and permissions (laufey_notifications.h) ---
+  backend_api_.show_notification = Backend_ShowNotification;
+  backend_api_.close_notification = Backend_CloseNotification;
+  backend_api_.query_permission = Backend_QueryPermission;
+  backend_api_.request_permission = Backend_RequestPermission;
+  backend_api_.notification_capabilities = Backend_NotificationCapabilities;
+  backend_api_.set_notification_response_handler =
+      Backend_SetNotificationResponseHandler;
+  backend_api_.list_scheduled_notifications =
+      Backend_ListScheduledNotifications;
+  backend_api_.cancel_notification = Backend_CancelNotification;
+  backend_api_.test_notification_respond = Backend_TestNotificationRespond;
 }
 
 // --- RuntimeLoader lifecycle ---

@@ -46,6 +46,8 @@ set(LAUFEY_COMMON_SRCS
   src/io.cc
   src/shortcuts.cc
   src/login_item.cc
+  src/menu_common.cc
+  src/notifications.cc
 )
 
 if(WIN32)
@@ -59,7 +61,6 @@ if(APPLE)
     src/notifications_mac.mm
     src/dialog_mac.mm
     src/clipboard_mac.mm
-    src/permissions_mac.mm
     src/keymap_mac.mm
     src/dock_mac.mm
     src/open_url_mac.mm
@@ -77,7 +78,6 @@ elseif(UNIX)
     src/notifications_linux.cc
     src/dialog_linux.cc
     src/clipboard_linux.cc
-    src/permissions_stub.cc
     src/keymap_gdk.cc
     src/menu_linux.cc
     src/tray_linux.cc
@@ -91,7 +91,6 @@ elseif(WIN32)
     src/notifications_win.cc
     src/dialog_win.cc
     src/clipboard_win.cc
-    src/permissions_stub.cc
     src/tray_win.cc
     src/passkey_win.cc
     src/window_win.cc
@@ -120,6 +119,10 @@ if(WIN32)
     dwmapi
     shcore
     uuid
+    # Toast notifications (WinRT activation) and the version resource read
+    # for the app's display name.
+    runtimeobject
+    version
   )
 elseif(APPLE)
   find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
@@ -231,7 +234,39 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_system_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_system_test COMMAND laufey_system_test)
 
+  # Menu template parsing and accelerators, the context-menu session, and
+  # the notification core over a fake platform (no OS API).
+  add_executable(laufey_menu_notifications_test
+                 tests/menu_notifications_test.cc)
+  target_link_libraries(laufey_menu_notifications_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_menu_notifications_test
+           COMMAND laufey_menu_notifications_test)
+
   if(UNIX AND NOT APPLE)
+    # The freedesktop notification client against a mock server on a
+    # private D-Bus session bus (GTestDBus; skipped without dbus-daemon).
+    add_executable(laufey_notifications_dbus_test
+                   tests/notifications_dbus_test.cc)
+    target_link_libraries(laufey_notifications_dbus_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_notifications_dbus_test
+             COMMAND laufey_notifications_dbus_test)
+    set_tests_properties(laufey_notifications_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+    # The stand-in notification server the Linux native e2e runs
+    # (scripts/native-e2e-run.sh --menus-notifications).
+    add_executable(laufey_mock_notification_server
+                   tests/mock_notification_server.cc)
+    target_link_libraries(laufey_mock_notification_server PRIVATE
+      ${LAUFEY_COMMON_GTK_LIBRARIES}
+    )
+    target_include_directories(laufey_mock_notification_server PRIVATE
+      ${LAUFEY_COMMON_GTK_INCLUDE_DIRS}
+    )
+
     # The GlobalShortcuts portal client against a mock portal on a private
     # D-Bus session bus (GTestDBus; skipped when dbus-daemon is missing).
     add_executable(laufey_shortcuts_portal_test

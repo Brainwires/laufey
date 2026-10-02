@@ -36,6 +36,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_launch_config.h"
+#include "laufey_menu.h"
 #include "laufey_system.h"
 
 namespace laufey_common {
@@ -65,8 +66,11 @@ Mode ChooseMode() {
   return Mode::kNone;
 }
 
-// The keysym for a key (X11 keysymdef names), or 0.
-uint32_t KeysymFor(const Accelerator& a) {
+}  // namespace
+
+// The keysym for a key (X11 keysymdef names), or 0. Shared with the menu
+// accelerators (laufey_menu.h).
+uint32_t AcceleratorKeysym(const Accelerator& a) {
   switch (a.kind) {
     case KeyKind::kLetter:
       return XK_a + (a.ch - 'A');
@@ -130,6 +134,8 @@ uint32_t KeysymFor(const Accelerator& a) {
   return 0;
 }
 
+namespace {
+
 // The XDG shortcuts specification's name for a key: the keysym name
 // (lower-case letters, "F5", "Page_Up", "KP_5", ...).
 std::string PortalKeyName(const Accelerator& a) {
@@ -143,7 +149,7 @@ std::string PortalKeyName(const Accelerator& a) {
     default:
       break;
   }
-  uint32_t sym = KeysymFor(a);
+  uint32_t sym = AcceleratorKeysym(a);
   // Not every keysym name is in a header we can call into without Xlib;
   // spell out the ones a shortcut can use.
   switch (sym) {
@@ -400,7 +406,7 @@ class LinuxShortcuts : public ShortcutPlatform {
 
   void X11Bind(uint32_t sid, const Accelerator& a,
                std::function<void(int)> done) {
-    uint32_t sym = KeysymFor(a);
+    uint32_t sym = AcceleratorKeysym(a);
     xcb_keycode_t kc = sym ? KeycodeFor(sym) : 0;
     if (!kc) {
       done(LAUFEY_SHORTCUT_INVALID);

@@ -8,6 +8,8 @@
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_launch_config.h"
+#include "laufey_menu.h"
+#include "laufey_notifications.h"
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
@@ -120,6 +122,8 @@ struct LinuxWindowState {
   GtkWidget* window;
   GtkWidget* vbox;      // container for menu bar + webview
   GtkWidget* menu_bar;  // per-window menu bar (nullptr = none)
+  // The menu bar's accelerators, bound on the window (nullptr = none).
+  GtkAccelGroup* accel_group = nullptr;
   WebKitWebView* webview;
   WebKitUserContentManager* content_manager;
   // GTK has no getter for the input shape region, so remember what we set.
@@ -823,15 +827,51 @@ class WebKitGTKBackend : public LaufeyBackend {
                             void* user_data) override;
   void CloseNotification(uint32_t notification_id) override;
 
-  // libnotify / notify-send have no permission model — always granted.
+  // Granted when a notification server is on the session bus; no prompt.
   void QueryPermission(int kind, laufey_permission_callback_fn cb,
                        void* user_data) override {
-    laufey_common::QueryPermissionStub(kind, cb, user_data);
+    laufey_common::QueryNotificationPermission(kind, cb, user_data);
   }
   void RequestPermission(int kind, laufey_permission_callback_fn cb,
                          void* user_data) override {
-    laufey_common::RequestPermissionStub(kind, cb, user_data);
+    laufey_common::RequestNotificationPermission(kind, cb, user_data);
   }
+
+  // Notifications and menus (API >= 41): backend-common.
+  uint32_t NotificationCapabilities() override {
+    return laufey_common::NotificationCapabilities();
+  }
+  void SetNotificationResponseHandler(laufey_notification_response_fn handler,
+                                      void* user_data) override {
+    laufey_common::SetNotificationResponseHandler(handler, user_data);
+  }
+  void ListScheduledNotifications(laufey_notification_list_fn cb,
+                                  void* user_data) override {
+    laufey_common::ListScheduledNotifications(cb, user_data);
+  }
+  void CancelNotification(const char* tag) override {
+    laufey_common::CancelNotification(tag);
+  }
+  bool TestNotificationRespond(const char* tag,
+                               const char* action_id) override {
+    return laufey_common::TestNotificationRespond(tag, action_id);
+  }
+  uint32_t MenuCapabilities() override {
+    return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
+           LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
+           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS;
+  }
+  void ShowContextMenuEx(uint32_t window_id, int x, int y,
+                         laufey_value_t* menu_template,
+                         const laufey_backend_api_t* api,
+                         laufey_menu_click_fn on_click, void* on_click_data,
+                         laufey_menu_closed_fn on_closed,
+                         void* on_closed_data) override;
+  bool TestDismissContextMenu() override {
+    return laufey_common::DismissOpenContextMenu();
+  }
+  bool TestTriggerMenuAccelerator(uint32_t window_id,
+                                  const char* accelerator) override;
 
   void HandleJsMessage(uint32_t window_id, const char* json);
 
@@ -2023,47 +2063,93 @@ void WebKitGTKBackend::SetApplicationMenu(uint32_t window_id,
                                           void* on_click_data) {
   if (!menu_template)
     return;
+  std::vector<laufey_common::MenuEntry> entries =
+      laufey_common::ParseMenuTemplate(menu_template, api, false);
   gtk_invoke_sync([&] {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (!state || !state->vbox)
       return;
 
-    // Remove old menu bar if present
+    // Remove the old menu bar and its accelerators.
     if (state->menu_bar) {
       gtk_container_remove(GTK_CONTAINER(state->vbox), state->menu_bar);
       state->menu_bar = nullptr;
     }
-
-    GtkWidget* menu_bar = laufey_common::BuildGtkMenuFromValue(
-        menu_template, api, window_id, on_click, on_click_data, true);
-    if (menu_bar) {
-      // Pack menu bar at the top (before the webview)
-      gtk_box_pack_start(GTK_BOX(state->vbox), menu_bar, FALSE, FALSE, 0);
-      gtk_box_reorder_child(GTK_BOX(state->vbox), menu_bar, 0);
-      state->menu_bar = menu_bar;
-      gtk_widget_show_all(menu_bar);
+    if (state->accel_group) {
+      gtk_window_remove_accel_group(GTK_WINDOW(state->window),
+                                    state->accel_group);
+      g_object_unref(state->accel_group);
+      state->accel_group = nullptr;
     }
+    if (entries.empty())
+      return;
+
+    // GtkWindow runs accelerators before the focused widget (the web view)
+    // sees the key, as a native menu bar's.
+    GtkAccelGroup* group = gtk_accel_group_new();
+    gtk_window_add_accel_group(GTK_WINDOW(state->window), group);
+    state->accel_group = group;
+    GtkWidget* menu_bar = laufey_common::BuildGtkMenuFromEntries(
+        entries, window_id, on_click, on_click_data, true, group);
+    // Pack menu bar at the top (before the webview)
+    gtk_box_pack_start(GTK_BOX(state->vbox), menu_bar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(state->vbox), menu_bar, 0);
+    state->menu_bar = menu_bar;
+    gtk_widget_show_all(menu_bar);
   });
 }
 
-void WebKitGTKBackend::ShowContextMenu(uint32_t window_id, int /*x*/, int /*y*/,
+void WebKitGTKBackend::ShowContextMenu(uint32_t window_id, int x, int y,
                                        laufey_value_t* menu_template,
                                        const laufey_backend_api_t* api,
                                        laufey_menu_click_fn on_click,
                                        void* on_click_data) {
   if (!menu_template)
     return;
+  ShowContextMenuEx(window_id, x, y, menu_template, api, on_click,
+                    on_click_data, nullptr, nullptr);
+}
 
-  gtk_invoke_sync([&] {
-    GtkWidget* menu = laufey_common::BuildGtkMenuFromValue(
-        menu_template, api, window_id, on_click, on_click_data, false);
-    if (!menu)
-      return;
-
-    gtk_widget_show_all(menu);
-    gtk_menu_popup_at_pointer(GTK_MENU(menu), nullptr);
+void WebKitGTKBackend::ShowContextMenuEx(uint32_t window_id, int x, int y,
+                                         laufey_value_t* menu_template,
+                                         const laufey_backend_api_t* api,
+                                         laufey_menu_click_fn on_click,
+                                         void* on_click_data,
+                                         laufey_menu_closed_fn on_closed,
+                                         void* on_closed_data) {
+  // Parsed here: the template is the caller's only for this call.
+  auto entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
+      laufey_common::ParseMenuTemplate(menu_template, api, false));
+  laufey_common::GtkRunAsync([this, window_id, x, y, entries, on_click,
+                              on_click_data, on_closed, on_closed_data] {
+    GtkWidget* anchor = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      if (state)
+        anchor = state->webview ? GTK_WIDGET(state->webview) : state->window;
+    }
+    laufey_common::ShowGtkContextMenu(anchor, x, y, *entries, window_id,
+                                      on_click, on_click_data, on_closed,
+                                      on_closed_data);
   });
+}
+
+bool WebKitGTKBackend::TestTriggerMenuAccelerator(uint32_t window_id,
+                                                  const char* accelerator) {
+  bool fired = false;
+  gtk_invoke_sync([&] {
+    GtkWidget* window = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      if (state)
+        window = state->window;
+    }
+    fired = laufey_common::TestTriggerMenuAcceleratorGtk(window, accelerator);
+  });
+  return fired;
 }
 
 // ============================================================================
@@ -2342,19 +2428,19 @@ void WebKitGTKBackend::SetTrayClickHandler(uint32_t tray_id,
 // Notifications (WebKitGTK Linux)
 // ============================================================================
 //
-// Thin trampoline over the shared notify-send implementation in
-// backend-common/src/notifications_linux.cc.
+// Thin trampolines over backend-common (laufey_notifications.h: the
+// org.freedesktop.Notifications D-Bus client).
 
 uint32_t WebKitGTKBackend::ShowNotification(
     laufey_value_t* options, const laufey_backend_api_t* api,
     laufey_notification_event_fn on_event, void* user_data) {
   laufey_common::NotificationOptions opts =
       laufey_common::ParseNotificationOptions(options, api);
-  return laufey_common::ShowNotificationLinux(opts, on_event, user_data);
+  return laufey_common::ShowNotification(opts, on_event, user_data);
 }
 
 void WebKitGTKBackend::CloseNotification(uint32_t notification_id) {
-  laufey_common::CloseNotificationLinux(notification_id);
+  laufey_common::CloseNotification(notification_id);
 }
 
 // ============================================================================
