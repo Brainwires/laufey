@@ -534,8 +534,8 @@ inline bool ThreadInMenuMode() {
   GUITHREADINFO info = {};
   info.cbSize = sizeof(info);
   return GetGUIThreadInfo(GetCurrentThreadId(), &info) &&
-         (info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE |
-                        GUI_SYSTEMMENUMODE)) != 0;
+         (info.flags &
+          (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE)) != 0;
 }
 
 // Shows `menu` and blocks until it closes (UI thread); takes ownership.
@@ -559,9 +559,9 @@ inline void TrackContextMenu(PendingContextMenu* raw) {
     EndMenu();
     menu->deferrals++;
     HWND timer_window = EndMenuWindow();
-    if (timer_window && SetTimer(timer_window,
-                                 reinterpret_cast<UINT_PTR>(menu.get()), 50,
-                                 nullptr)) {
+    if (timer_window &&
+        SetTimer(timer_window, reinterpret_cast<UINT_PTR>(menu.get()), 50,
+                 nullptr)) {
       menu.release();
       return;
     }

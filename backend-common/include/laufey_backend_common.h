@@ -353,6 +353,14 @@ void ShowContextMenuMac(void* nsview, int x, int y,
                         laufey_menu_closed_fn on_closed, void* on_closed_data,
                         uint32_t window_id);
 
+// Runs `fn` on the main thread from the main run loop, in the common modes,
+// and not as a block of the main dispatch queue. For work that runs a
+// tracking loop of its own (ShowContextMenuMac): the main queue is serial,
+// so while one of its blocks is running, none of the others does, and every
+// dispatch_sync / dispatch_async to the main queue (a backend's UI-thread
+// calls, dispatch_ui_task) would wait for the menu to close. Any thread.
+void RunFromMainRunLoopMac(std::function<void()> fn);
+
 // ---------------------------------------------------------------------------
 // Tray / status-bar icon (macOS, NSStatusItem)
 // ---------------------------------------------------------------------------
