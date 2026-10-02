@@ -86,7 +86,16 @@ pub const MIME_CHECKS: &[(&str, &str)] = &[
     "mime-doc-plain",
     "a text/plain document loads as text, not a download",
   ),
+  (
+    "frame-bridge",
+    "a same-origin frame posts to the bridge's message handler directly",
+  ),
 ];
+
+/// The label a sub-frame's forged `bodyReport` call would report under; the
+/// runtime checks it never arrives (the bridge takes calls from the main
+/// frame only).
+pub const FRAME_FORGED_LABEL: &str = "frame-forged";
 
 pub const TEXT_BODY: &str = "h\u{e9}llo, body \u{2713}\nline 2";
 
@@ -247,6 +256,18 @@ const mimeChecks = [
     return [d.contentType === 'text/html' && d.characterSet === 'windows-1252' && d.title === 'caf\u00e9',
             d.contentType + ' ' + d.characterSet + ' ' + JSON.stringify(d.title)];
   }}],
+  // A frame posting a bridge call to the native message handler itself (the
+  // `Laufey` namespace is main-frame only, the handler object is not on
+  // WebKit). The runtime checks the call never reaches the binding.
+  ['frame-bridge', async () => {{
+    const d = await frameDoc('/mime/doc-utf8');
+    const w = d.defaultView;
+    const h = w && w.webkit && w.webkit.messageHandlers && w.webkit.messageHandlers.laufey;
+    if (!h) return [true, 'the frame has no message handler'];
+    w.eval("window.webkit.messageHandlers.laufey.postMessage({{callId: 987654321, method: 'bodyReport', args: ['{forged}', true, 0, 'from a frame']}})");
+    await new Promise(r => setTimeout(r, 1000));
+    return [true, 'posted from a frame'];
+  }}],
   ['mime-doc-plain', async () => {{
     const d = await frameDoc('/mime/doc-plain');
     const text = d.body ? d.body.textContent : '';
@@ -277,6 +298,7 @@ const mimeChecks = [
     big = BIG_LEN,
     chunk = CHUNK,
     concurrent = CONCURRENT,
+    forged = FRAME_FORGED_LABEL,
   )
 }
 

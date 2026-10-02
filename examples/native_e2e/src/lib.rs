@@ -657,6 +657,16 @@ async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
     ));
     check(&format!("custom scheme: {what} ({detail})"), ok);
   }
+  // WebKitGTK's script-message-received signal names no frame, so the Linux
+  // WebView backend can't tell a frame's message apart.
+  if cfg!(target_os = "linux") {
+    na("bridge calls from a sub-frame (WebKitGTK reports no frame)");
+  } else {
+    check(
+      "a sub-frame's direct message to the bridge never reaches a binding",
+      !reports.contains_key(body_echo::FRAME_FORGED_LABEL),
+    );
+  }
   Some(win)
 }
 

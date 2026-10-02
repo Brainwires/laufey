@@ -542,10 +542,39 @@ static std::vector<std::string> DraggedFilePaths(id<NSDraggingInfo> info) {
 
 @implementation LaufeyScriptMessageHandler
 
+// Whether a message from a document with `origin` may be the web view's page
+// at `url`: the same scheme, host and port (a missing port is the scheme's
+// default, which WebKit reports as 0). A page without a host (HTML loaded
+// with no base URL is about:blank, with an opaque origin) has no origin to
+// compare, so only the main-frame check applies to it.
+static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
+  if (!origin)
+    return false;
+  if (!url || url.host.length == 0)
+    return true;
+  NSString* host = url.host;
+  NSInteger port = url.port ? url.port.integerValue : 0;
+  return [origin.protocol caseInsensitiveCompare:url.scheme] == NSOrderedSame &&
+         [origin.host caseInsensitiveCompare:host] == NSOrderedSame &&
+         origin.port == port;
+}
+
 - (void)userContentController:(WKUserContentController*)userContentController
       didReceiveScriptMessage:(WKScriptMessage*)message {
   if (![message.name isEqualToString:@"laufey"])
     return;
+
+  // WebKit exposes a script message handler to every frame (only the bridge
+  // script is injected forMainFrameOnly), so a sub-frame, cross-origin
+  // content included, could post here directly. Accept only the main frame,
+  // and only while its document is still the web view's page (not a message
+  // from a page navigated away from). Mirrors WebView2's source check and
+  // CEF's main-frame-only binding.
+  WKFrameInfo* frame = message.frameInfo;
+  if (!frame || !frame.isMainFrame ||
+      !LaufeyOriginMatchesURL(frame.securityOrigin, message.webView.URL)) {
+    return;
+  }
 
   if (![message.body isKindOfClass:[NSDictionary class]])
     return;
