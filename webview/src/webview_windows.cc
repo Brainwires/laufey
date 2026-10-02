@@ -2687,7 +2687,7 @@ void WebView2Backend::SetDockBadge(const char* badge_or_null) {
 
 uint32_t WebView2Backend::CreateTrayIcon() {
   uint32_t tray_id = laufey_common::CreateTrayIconWin();
-  // The tray's message-only window must belong to the thread that pumps
+  // The tray's hidden window must belong to the thread that pumps
   // messages (this backend's UI thread): created on the caller's thread --
   // the runtime's, which never pumps -- it received no clicks or menu
   // requests at all, which is what made a tray-only app (no visible window)

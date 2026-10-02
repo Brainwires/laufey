@@ -1699,7 +1699,7 @@ static void Backend_BounceDock_Win(void* data, int type) {
 
 // --- Tray (Windows) ---
 //
-// Shell_NotifyIcon + a hidden message-only window that receives
+// Shell_NotifyIcon + a hidden top-level window that receives
 // WM_TRAYICON (one per process). PNG → HICON via WIC.
 
 // --- Tray (Windows) ---
@@ -1709,7 +1709,7 @@ static void Backend_BounceDock_Win(void* data, int type) {
 
 uint32_t Backend_CreateTrayIcon_Win(void* /*data*/) {
   // Allocate the id synchronously; do the Shell_NotifyIcon setup on the
-  // UI thread so the message-only window is owned by the thread that
+  // UI thread so the hidden tray window is owned by the thread that
   // pumps messages for it.
   uint32_t tray_id = laufey_common::CreateTrayIconWin();
   CefPostTask(TID_UI,
