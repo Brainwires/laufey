@@ -27,6 +27,7 @@
 //! event-loop pump, PASS/FAIL + exit code) so the existing runtime loader drives
 //! it unchanged.
 
+mod auth_thread_checks;
 mod body_echo;
 mod io_checks;
 mod menu_notification_checks;
@@ -649,6 +650,8 @@ fn e2e_main() {
         menu_notification_checks::run().await;
         finish();
       }
+      // UI-thread tasks and auth sessions (API 42). Ends with quit().
+      Ok("auth-thread") => auth_thread_checks::run().await,
       Ok("shortcut-holder") => {
         // Not a battery: no OVERALL line, so its output can't be mistaken
         // for the main run's result.

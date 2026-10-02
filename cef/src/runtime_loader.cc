@@ -9,6 +9,8 @@
 #include "laufey_menu.h"
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
+#include "laufey_auth_session.h"
+#include "laufey_ui_tasks.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_single_instance.h"
 #include "laufey_system.h"
@@ -949,6 +951,87 @@ static void Backend_PasskeyRequest(void* data, uint32_t window_id,
   (void)kind;
   (void)options_json;
 #endif
+}
+
+// --- UI-thread tasks (API >= 42) ---
+//
+// The UI thread is CEF's TID_UI (the process main thread, which runs
+// CefRunMessageLoop / [NSApp run]); RuntimeLoader::Load binds it.
+
+static void Backend_DispatchUiTask(void* /*data*/, laufey_ui_task_fn task,
+                                   void* task_data) {
+  laufey_common::UiTaskDispatcher::Get().Dispatch(task, task_data);
+}
+
+static bool Backend_IsUiThread(void* /*data*/) {
+  return laufey_common::UiTaskDispatcher::Get().IsUiThread();
+}
+
+// --- Auth session (API >= 42) ---
+//
+// macOS runs ASWebAuthenticationSession (backend-common
+// auth_session_mac.mm); Windows and Linux have no OS auth session and
+// answer not_supported (RFC 8252: the embedder opens the system browser).
+
+static uint32_t Backend_AuthSessionCapabilities(void* /*data*/) {
+  return laufey_common::AuthSessionCapabilities();
+}
+
+static void Backend_AuthSessionStart(void* data, uint32_t window_id,
+                                     const char* url, const char* callback,
+                                     uint32_t flags,
+                                     laufey_auth_session_result_fn on_result,
+                                     void* user_data) {
+  // Any thread. Refusals answer here, synchronously; a started session
+  // resolves its window on TID_UI (the main thread on macOS).
+  std::shared_ptr<laufey_common::AuthSession> session =
+      laufey_common::AuthSessionBegin(laufey_common::AuthSessionCapabilities(),
+                                      url, callback, flags, on_result,
+                                      user_data);
+  if (!session)
+    return;
+#if defined(__APPLE__)
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  CefRefPtr<CefBrowser> browser =
+      window_id != 0 ? loader->GetBrowserForWindow(window_id) : nullptr;
+  if (window_id != 0 && !browser) {
+    session->Finish(LAUFEY_AUTH_SESSION_INVALID,
+                    "window " + std::to_string(window_id) + " not found");
+    return;
+  }
+  bool posted = CefPostTask(
+      TID_UI, base::BindOnce(
+                  [](CefRefPtr<CefBrowser> b,
+                     std::shared_ptr<laufey_common::AuthSession> s) {
+                    void* native = nullptr;
+                    if (b) {
+                      auto browser_view = CefBrowserView::GetForBrowser(b);
+                      auto window =
+                          browser_view ? browser_view->GetWindow() : nullptr;
+                      if (!window) {
+                        s->Finish(LAUFEY_AUTH_SESSION_INVALID,
+                                  "the window has no native handle");
+                        return;
+                      }
+                      native = NSWindowForCefHandle(window->GetWindowHandle());
+                    }
+                    // nullptr: the key / main window of the app.
+                    laufey_common::AuthSessionStartMac(s, native);
+                  },
+                  browser, session));
+  if (!posted) {
+    session->Finish(LAUFEY_AUTH_SESSION_CANCELLED, "the app is quitting");
+  }
+#else
+  // AuthSessionBegin refused it: the capabilities are 0 here.
+  (void)data;
+  (void)window_id;
+#endif
+}
+
+static bool Backend_TestCancelAuthSession(void* /*data*/) {
+  return laufey_common::AuthSessionCancelCurrent(
+      "the user cancelled the sign-in");
 }
 
 // --- CefValue <-> laufey::Value conversion (IPC boundary only) ---
@@ -2116,11 +2199,24 @@ static void Backend_CloseWindow(void* data, uint32_t window_id) {
     // prompt, not CanClose -- without the mark a registered handler would
     // re-defer this close forever).
     loader->MarkCloseAllowed(window_id);
-    CefPostTask(TID_UI, base::BindOnce(
-                            [](CefRefPtr<CefBrowser> b) {
-                              b->GetHost()->CloseBrowser(true);
-                            },
-                            browser));
+    CefPostTask(TID_UI,
+                base::BindOnce(
+                    [](CefRefPtr<CefBrowser> b, uint32_t id) {
+#if defined(__APPLE__)
+                      // An auth session / passkey sheet attached to
+                      // the window keeps it from closing: end it
+                      // first (`cancelled`), as WKWebView does.
+                      if (void* nswindow = RuntimeLoader::GetInstance()
+                                               ->GetNSWindowForLaufeyId(id)) {
+                        laufey_common::PasskeyWindowClosing(nswindow);
+                        laufey_common::AuthSessionWindowClosing(nswindow);
+                      }
+#else
+                      (void)id;
+#endif
+                      b->GetHost()->CloseBrowser(true);
+                    },
+                    browser, window_id));
   }
 }
 
@@ -3183,6 +3279,14 @@ void RuntimeLoader::InitializeBackendApi() {
       Backend_ListScheduledNotifications;
   backend_api_.cancel_notification = Backend_CancelNotification;
   backend_api_.test_notification_respond = Backend_TestNotificationRespond;
+
+  // UI-thread tasks and auth sessions (API >= 42): see docs/c-abi.md and
+  // docs/auth-session.md. The dispatcher is bound to TID_UI in Load.
+  backend_api_.dispatch_ui_task = Backend_DispatchUiTask;
+  backend_api_.is_ui_thread = Backend_IsUiThread;
+  backend_api_.auth_session_capabilities = Backend_AuthSessionCapabilities;
+  backend_api_.auth_session_start = Backend_AuthSessionStart;
+  backend_api_.test_cancel_auth_session = Backend_TestCancelAuthSession;
 }
 
 // --- RuntimeLoader lifecycle ---
@@ -3212,6 +3316,15 @@ RuntimeLoader* RuntimeLoader::GetInstance() {
 }
 
 bool RuntimeLoader::Load(const std::string& path) {
+  // Load runs on TID_UI (OnContextInitialized), or on the main thread of a
+  // headless worker, which has no loop (its host calls UiLoopEnded before
+  // starting the runtime). CefPostTask refuses once CEF has shut down.
+  laufey_common::UiTaskDispatcher::Get().Bind(
+      [](void (*task)(void*), void* task_data) {
+        return CefPostTask(
+            TID_UI, base::BindOnce([](void (*t)(void*), void* d) { t(d); },
+                                   task, task_data));
+      });
 #ifndef _WIN32
   library_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!library_handle_) {

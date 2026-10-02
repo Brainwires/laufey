@@ -67,6 +67,8 @@ class LaufeySchemeHandler : public CefResourceHandler {
   bool began_ = false;
   bool finished_ = false;
   bool cancelled_ = false;
+  // The body outgrew kMaxQueuedResponseBytes unread: the response failed.
+  bool failed_ = false;
 
   // Deferred CEF continuations. When a Read arrives with no body buffered, the
   // caller's output buffer (`pending_data_` / `pending_cap_`, valid until the

@@ -13,11 +13,11 @@
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
+#include "laufey_scheme_body_stream.h"
 #include "laufey_scheme_registry.h"
 #include "init_script.h"
 #include <webkit2/webkit2.h>
 #include <JavaScriptCore/JavaScript.h>
-#include <gio/gunixinputstream.h>
 
 #include <errno.h>
 #include <unistd.h>
@@ -2455,10 +2455,14 @@ void WebKitGTKBackend::CloseNotification(uint32_t notification_id) {
 
 namespace {
 
-// Exchange wrapping a WebKitURISchemeRequest. The response is streamed through
-// a pipe: a GInputStream over the read end is handed to WebKit (on the GTK main
-// thread), and the runtime writes the body to the write end. WebKit reads the
-// stream as bytes arrive; closing the write end signals EOF.
+// Exchange wrapping a WebKitURISchemeRequest. The response body is a
+// laufey_common::SchemeBodyWriter's stream, handed to WebKit (on the GTK main
+// thread) with the head: the runtime's writes append to it and return at
+// once, whatever WebKit has read so far, and WebKit reads it from the GTK
+// main loop. (A pipe used to sit here: its write blocked the runtime's event
+// loop whenever 64 KiB were unread.) A page that stops reading makes the
+// next write fail; a body that grows past kSchemeBodyMaxQueued unread fails
+// the response, as on WebView2.
 //
 // The request body is buffered before the exchange is created (see
 // OnAppSchemeRequest), so ReadRequestBody is a non-blocking copy, as on the
@@ -2468,11 +2472,11 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   LinuxSchemeExchange(WebKitURISchemeRequest* request,
                       std::vector<uint8_t> request_body)
       : request_(WEBKIT_URI_SCHEME_REQUEST(g_object_ref(request))),
-        request_body_(std::move(request_body)) {}
+        request_body_(std::move(request_body)),
+        body_(std::make_shared<laufey_common::SchemeBodyWriter>()) {}
 
   ~LinuxSchemeExchange() override {
-    if (write_fd_ >= 0)
-      close(write_fd_);
+    body_->End();
     if (request_)
       g_object_unref(request_);
   }
@@ -2490,57 +2494,37 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   }
 
   void Begin(int status, const char* headers, size_t headers_len) override {
-    int fds[2];
-    if (pipe(fds) != 0) {
-      failed_.store(true);
-      return;
-    }
-    read_fd_ = fds[0];
-    write_fd_ = fds[1];
     auto* d = new BeginData;
     d->request = WEBKIT_URI_SCHEME_REQUEST(g_object_ref(request_));
-    d->read_fd = read_fd_;
+    d->body = body_;
     d->status = status;
     d->headers = LaufeyParseFlatHeaders(headers, headers_len);
     g_idle_add(BeginOnMain, d);
   }
 
+  // Never blocks (see the class comment).
   intptr_t WriteResponse(const uint8_t* buf, size_t len) override {
-    if (write_fd_ < 0 || failed_.load())
-      return -1;
-    size_t off = 0;
-    while (off < len) {
-      ssize_t n = write(write_fd_, buf + off, len - off);
-      if (n < 0) {
-        if (errno == EINTR)
-          continue;
-        failed_.store(true);
-        return -1;  // EPIPE: the webview went away
-      }
-      off += static_cast<size_t>(n);
-    }
-    return static_cast<intptr_t>(len);
+    return body_->Write(buf, len);
   }
 
   void Finish() override {
-    if (write_fd_ >= 0) {
-      close(write_fd_);  // EOF for the GInputStream
-      write_fd_ = -1;
-    }
+    body_->End();  // EOF for WebKit, after what was written
     delete this;
   }
 
  private:
   struct BeginData {
     WebKitURISchemeRequest* request;
-    int read_fd;
+    // Shared: the exchange may finish before this runs.
+    std::shared_ptr<laufey_common::SchemeBodyWriter> body;
     int status;
     std::vector<std::pair<std::string, std::string>> headers;
   };
 
   static gboolean BeginOnMain(gpointer data) {
     auto* d = static_cast<BeginData*>(data);
-    GInputStream* stream = g_unix_input_stream_new(d->read_fd, TRUE);
+    // On the GTK main thread: WebKit reads the stream from this context.
+    GInputStream* stream = d->body->CreateStream();
     WebKitURISchemeResponse* resp = webkit_uri_scheme_response_new(stream, -1);
     webkit_uri_scheme_response_set_status(resp, d->status, nullptr);
     SoupMessageHeaders* hdrs =
@@ -2560,6 +2544,8 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
     webkit_uri_scheme_response_set_http_headers(resp, hdrs);
     webkit_uri_scheme_request_finish_with_response(d->request, resp);
     g_object_unref(resp);
+    // WebKit holds the stream now; when it lets go (the load ended or was
+    // cancelled) the stream closes and the next write fails.
     g_object_unref(stream);
     g_object_unref(d->request);
     delete d;
@@ -2569,9 +2555,7 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   WebKitURISchemeRequest* request_;
   std::vector<uint8_t> request_body_;
   size_t req_cursor_ = 0;
-  int read_fd_ = -1;
-  int write_fd_ = -1;
-  std::atomic<bool> failed_{false};
+  std::shared_ptr<laufey_common::SchemeBodyWriter> body_;
 };
 
 // A scheme request whose body is still being read (see OnAppSchemeRequest).

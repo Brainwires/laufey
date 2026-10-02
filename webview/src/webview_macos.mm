@@ -16,6 +16,7 @@
 #include "laufey_menu.h"
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
+#include "laufey_auth_session.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_system.h"
 #include "laufey_window.h"
@@ -158,6 +159,14 @@ class WKWebViewBackend : public LaufeyBackend {
                       const char* options_json,
                       laufey_passkey_result_fn callback,
                       void* user_data) override;
+
+  uint32_t AuthSessionCapabilities() override {
+    return laufey_common::AuthSessionCapabilities();
+  }
+  void AuthSessionStart(uint32_t window_id, const char* url,
+                        const char* callback, uint32_t flags,
+                        laufey_auth_session_result_fn on_result,
+                        void* user_data) override;
 
   uint32_t CreateTrayIcon() override;
   void DestroyTrayIcon(uint32_t tray_id) override;
@@ -1119,8 +1128,11 @@ void WKWebViewBackend::OnWindowClosedByUser(uint32_t window_id) {
   }
   // A passkey sheet anchored to the window ends with it (`cancelled`).
   // Outside the lock: the result callback may re-enter the backend.
-  if (win)
+  if (win) {
     laufey_common::PasskeyWindowClosing((__bridge const void*)win);
+    // So does an auth session sheet (`cancelled`).
+    laufey_common::AuthSessionWindowClosing((__bridge const void*)win);
+  }
 }
 
 void WKWebViewBackend::InstallGlobalMonitors() {
@@ -1635,6 +1647,7 @@ void WKWebViewBackend::CloseWindow(uint32_t window_id) {
         return;
       // See OnWindowClosedByUser.
       laufey_common::PasskeyWindowClosing((__bridge const void*)win);
+      laufey_common::AuthSessionWindowClosing((__bridge const void*)win);
       [win close];
     }
   });
@@ -1888,6 +1901,37 @@ void WKWebViewBackend::PasskeyRequest(uint32_t window_id, uint32_t kind,
       }
       // nil: the key / main window (see PasskeyStartMac).
       laufey_common::PasskeyStartMac(ceremony, (__bridge void*)win);
+    }
+  });
+}
+
+void WKWebViewBackend::AuthSessionStart(uint32_t window_id, const char* url,
+                                        const char* callback, uint32_t flags,
+                                        laufey_auth_session_result_fn on_result,
+                                        void* user_data) {
+  // Any thread. Refusals (invalid arguments, busy) answer here,
+  // synchronously; a started session moves to the main thread.
+  std::shared_ptr<laufey_common::AuthSession> session =
+      laufey_common::AuthSessionBegin(laufey_common::AuthSessionCapabilities(),
+                                      url, callback, flags, on_result,
+                                      user_data);
+  if (!session)
+    return;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* win = nil;
+      if (window_id != 0) {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id))
+          win = state->window;
+      }
+      if (window_id != 0 && !win) {
+        session->Finish(LAUFEY_AUTH_SESSION_INVALID,
+                        "window " + std::to_string(window_id) + " not found");
+        return;
+      }
+      // nil: the key / main window (see AuthSessionStartMac).
+      laufey_common::AuthSessionStartMac(session, (__bridge void*)win);
     }
   });
 }

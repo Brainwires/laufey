@@ -48,6 +48,7 @@ set(LAUFEY_COMMON_SRCS
   src/login_item.cc
   src/menu_common.cc
   src/notifications.cc
+  src/auth_session.cc
 )
 
 if(WIN32)
@@ -72,6 +73,7 @@ if(APPLE)
     src/io_mac.mm
     src/shortcuts_mac.mm
     src/login_item_mac.mm
+    src/auth_session_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -84,6 +86,7 @@ elseif(UNIX)
     src/io_linux.cc
     src/shortcuts_linux.cc
     src/login_item_linux.cc
+    src/scheme_body_stream_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -244,6 +247,18 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_menu_notifications_test
            COMMAND laufey_menu_notifications_test)
 
+  # UI-thread task dispatch (the delivery guarantee, over a fake queue) and
+  # the auth session core: argument validation, the one-session slot and
+  # the exactly-once result (no OS API).
+  add_executable(laufey_auth_main_thread_test
+                 tests/auth_main_thread_test.cc)
+  target_link_libraries(laufey_auth_main_thread_test PRIVATE
+    laufey_backend_common
+    Threads::Threads
+  )
+  add_test(NAME laufey_auth_main_thread_test
+           COMMAND laufey_auth_main_thread_test)
+
   if(UNIX AND NOT APPLE)
     # The freedesktop notification client against a mock server on a
     # private D-Bus session bus (GTestDBus; skipped without dbus-daemon).
@@ -254,6 +269,18 @@ if(LAUFEY_BUILD_TESTS)
     )
     add_test(NAME laufey_notifications_dbus_test
              COMMAND laufey_notifications_dbus_test)
+
+    # The WebKitGTK custom-scheme response body: writes never block, a
+    # pollable reader on a GMainContext, the queued-bytes cap, a reader that
+    # went away (no WebKit).
+    add_executable(laufey_scheme_body_stream_test
+                   tests/scheme_body_stream_test.cc)
+    target_link_libraries(laufey_scheme_body_stream_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_scheme_body_stream_test
+             COMMAND laufey_scheme_body_stream_test)
     set_tests_properties(laufey_notifications_dbus_test PROPERTIES
                          SKIP_RETURN_CODE 77)
     # The stand-in notification server the Linux native e2e runs

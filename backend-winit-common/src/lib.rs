@@ -8,6 +8,7 @@ pub mod notification;
 pub mod open_url;
 pub mod permission;
 pub mod tray;
+pub mod ui_tasks;
 pub mod window_api;
 
 use std::cell::RefCell;
@@ -38,7 +39,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 41;
+pub const LAUFEY_API_VERSION: u32 = 42;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -815,7 +816,31 @@ pub struct LaufeyBackendApi {
   pub test_notification_respond: Option<
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> bool,
   >,
+  // --- UI-thread tasks, auth session (API >= 42) ---
+  pub dispatch_ui_task: Option<
+    unsafe extern "C" fn(*mut c_void, Option<ui_tasks::UiTaskFn>, *mut c_void),
+  >,
+  pub is_ui_thread: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+  pub auth_session_capabilities:
+    Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub auth_session_start: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *const c_char,
+      *const c_char,
+      u32,
+      Option<AuthSessionResultFn>,
+      *mut c_void,
+    ),
+  >,
+  pub test_cancel_auth_session:
+    Option<unsafe extern "C" fn(*mut c_void) -> bool>,
 }
+
+/// `laufey_auth_session_result_fn` (API 42).
+pub type AuthSessionResultFn =
+  unsafe extern "C" fn(*mut c_void, i32, *const c_char);
 
 /// `laufey_menu_closed_fn` (API 41).
 pub type MenuClosedFn = unsafe extern "C" fn(*mut c_void, u32);
@@ -1610,6 +1635,14 @@ pub fn create_api_base() -> LaufeyBackendApi {
     list_scheduled_notifications: None,
     cancel_notification: None,
     test_notification_respond: None,
+    // API 42: UI-thread tasks are filled in by fill_common_api; Winit has
+    // no web content, so no auth session (the laufey crate reports
+    // not_supported).
+    dispatch_ui_task: None,
+    is_ui_thread: None,
+    auth_session_capabilities: None,
+    auth_session_start: None,
+    test_cancel_auth_session: None,
   }
 }
 
@@ -2876,6 +2909,36 @@ macro_rules! define_common_backend_fns {
       }
     }
 
+    unsafe extern "C" fn backend_dispatch_ui_task(
+      _data: *mut ::std::ffi::c_void,
+      task: Option<$crate::ui_tasks::UiTaskFn>,
+      task_data: *mut ::std::ffi::c_void,
+    ) {
+      let Some(task) = task else {
+        return;
+      };
+      $crate::ui_tasks::dispatch(task, task_data as usize, |run, data| {
+        match <$B as $crate::BackendAccess>::get() {
+          Some(state) => state
+            .proxy()
+            .send_event(<$B as $crate::BackendAccess>::common_event(
+              $crate::CommonEvent::UiTask {
+                task: run,
+                data: data as usize,
+              },
+            ))
+            .is_ok(),
+          None => false,
+        }
+      });
+    }
+
+    unsafe extern "C" fn backend_is_ui_thread(
+      _data: *mut ::std::ffi::c_void,
+    ) -> bool {
+      $crate::ui_tasks::is_ui_thread()
+    }
+
     unsafe extern "C" fn backend_set_keyboard_event_handler(
       _data: *mut ::std::ffi::c_void,
       handler: Option<$crate::LaufeyKeyboardEventFn>,
@@ -3699,6 +3762,8 @@ macro_rules! fill_common_api {
     $api.hide = Some(backend_hide);
     $api.focus = Some(backend_focus);
     $api.post_ui_task = Some(backend_post_ui_task);
+    $api.dispatch_ui_task = Some(backend_dispatch_ui_task);
+    $api.is_ui_thread = Some(backend_is_ui_thread);
     $api.get_window_handle = Some($crate::backend_get_window_handle);
     $api.get_display_handle = Some($crate::backend_get_display_handle);
     $api.get_window_handle_type = Some($crate::backend_get_window_handle_type);
@@ -5375,6 +5440,9 @@ static RUNTIME_THREAD: Mutex<Option<thread::JoinHandle<()>>> = Mutex::new(None);
 /// event loop has ended (`RuntimeLoader::Shutdown`). A runtime that ignores
 /// the signal is abandoned after the timeout rather than hanging the exit.
 pub fn shutdown_runtime(timeout: std::time::Duration) {
+  // UI tasks still queued can never run now: answer them, so a runtime
+  // thread waiting on one is released before we wait for it.
+  ui_tasks::close();
   if let Some(f) = RUNTIME_SHUTDOWN.get() {
     unsafe { f() };
   }
@@ -5390,6 +5458,8 @@ pub fn shutdown_runtime(timeout: std::time::Duration) {
 }
 
 pub fn load_and_start_runtime(api: LaufeyBackendApi) {
+  // This thread runs the event loop: dispatch_ui_task's UI thread.
+  ui_tasks::bind_current_thread();
   // Install `application:openURLs:` before the runtime comes up: AppKit only
   // routes a launch URL to a delegate that already responds to the selector,
   // and the runtime that registers the handler starts on the thread below.

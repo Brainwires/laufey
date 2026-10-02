@@ -36,12 +36,18 @@ pub use system::*;
 mod menus_notifications;
 pub use menus_notifications::*;
 
+mod ui_thread;
+pub use ui_thread::*;
+
+mod auth_session;
+pub use auth_session::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 41;
+pub const LAUFEY_API_VERSION: u32 = 42;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -731,6 +737,77 @@ pub fn quit() {
   let api = api();
   if let Some(f) = api.quit {
     unsafe { f(api.backend_data) };
+  }
+}
+
+/// Run `f` on the backend UI thread and block until it returns.
+///
+/// AppKit requires main-thread access (e.g. `raw-window-metal` / `NSView`),
+/// and so do Win32 windows and GTK objects for their own threads. With a
+/// backend of API 42 or newer this hops through `dispatch_ui_task` on every
+/// platform (inline when already on the UI thread); see
+/// [`try_run_on_ui_thread`], which returns an error instead of panicking,
+/// and [`spawn_on_ui_thread`], which doesn't block.
+///
+/// Without `dispatch_ui_task` it only hops on Apple platforms, through the
+/// C ABI `post_ui_task` (winit event loop / GCD main / CEF `TID_UI`), unless
+/// already on the process main thread (`pthread_main_np`) or the backend has
+/// no `post_ui_task`; elsewhere `f` runs inline. Prefer this over
+/// `dispatch_sync`, which deadlocks against a backend that owns the main run
+/// loop (winit).
+///
+/// # Panics
+///
+/// Panics if the UI task can't run: the backend's event loop has ended (the
+/// app is quitting) or ends before the task got to run. A panic in `f` is
+/// resumed on the caller's thread.
+pub fn run_on_ui_thread<F, R>(f: F) -> R
+where
+  F: FnOnce() -> R + Send + 'static,
+  R: Send + 'static,
+{
+  if api().dispatch_ui_task.is_some() {
+    return match try_run_on_ui_thread(f) {
+      Ok(value) => value,
+      Err(e) => panic!("run_on_ui_thread: {e}"),
+    };
+  }
+  #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+  {
+    f()
+  }
+
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
+  {
+    unsafe extern "C" {
+      fn pthread_main_np() -> i32;
+    }
+    // SAFETY: libSystem symbol on Apple.
+    if unsafe { pthread_main_np() != 0 } {
+      return f();
+    }
+    let api = api();
+    let Some(post) = api.post_ui_task else {
+      return f();
+    };
+
+    let (tx, rx) = std::sync::mpsc::sync_channel(0);
+    type Job = Box<dyn FnOnce() + Send>;
+    let job = Box::into_raw(Box::new(Box::new(move || {
+      let _ = tx.send(f());
+    }) as Job));
+
+    unsafe extern "C" fn trampoline(data: *mut c_void) {
+      // SAFETY: `data` is the `Box<Job>` passed to `post_ui_task`; not retained.
+      let job = unsafe { Box::from_raw(data as *mut Job) };
+      (*job)();
+    }
+
+    // SAFETY: trampoline owns and frees `job`; we block until it runs.
+    unsafe {
+      post(api.backend_data, Some(trampoline), job as *mut c_void);
+    }
+    rx.recv().expect("UI task dropped without running")
   }
 }
 
@@ -4090,12 +4167,32 @@ mod tests {
     }
   }
 
+  // Mimic real backends: deliver the task on another thread so
+  // `run_on_ui_thread` must actually wait (inline delivery would not
+  // exercise the channel rendezvous).
+  unsafe extern "C" fn fake_post_ui_task(
+    _backend_data: *mut c_void,
+    task: Option<unsafe extern "C" fn(*mut c_void)>,
+    data: *mut c_void,
+  ) {
+    let Some(task) = task else {
+      return;
+    };
+    let data = data as usize;
+    std::thread::spawn(move || {
+      // SAFETY: caller of run_on_ui_thread keeps `data` live until the
+      // rendezvous send inside the trampoline.
+      unsafe { task(data as *mut c_void) };
+    });
+  }
+
   // Install the shared fake backend. BACKEND_API is a set-once global and the
-  // pdf tests run concurrently, so every caller installs the *same* fake and
-  // the first one wins.
+  // pdf / run_on_ui_thread tests run concurrently, so every caller installs
+  // the *same* fake and the first one wins.
   fn install_pdf_fake() {
     let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
     fake.print_to_pdf = Some(fake_print_to_pdf);
+    fake.post_ui_task = Some(fake_post_ui_task);
     let _ = BACKEND_API.set(Box::leak(Box::new(fake)));
   }
 
@@ -4185,5 +4282,32 @@ mod tests {
       rx.try_recv().is_err(),
       "late completion must not invoke the callback a second time"
     );
+  }
+
+  // run_on_ui_thread returns the closure's value. On Apple the hop path is
+  // exercised from a worker (the test runner is main and would inline);
+  // elsewhere the function is a plain call.
+  #[test]
+  fn run_on_ui_thread_hops_and_returns_value() {
+    install_pdf_fake();
+
+    let run = || {
+      assert_eq!(run_on_ui_thread(|| 42u32), 42);
+      let err: Result<(), &str> = run_on_ui_thread(|| Err("surface failed"));
+      assert_eq!(err, Err("surface failed"));
+      let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+      let flag2 = flag.clone();
+      run_on_ui_thread(move || {
+        flag2.store(true, std::sync::atomic::Ordering::SeqCst);
+      });
+      assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+    };
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    std::thread::spawn(run)
+      .join()
+      .expect("run_on_ui_thread worker panicked");
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    run();
   }
 }

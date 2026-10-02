@@ -8,6 +8,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
+#include "laufey_auth_session.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 #include "scheme_handler.h"
@@ -171,7 +172,17 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
     // A passkey sheet / dialog anchored to this window ends with it
     // (`cancelled`).
 #if defined(__APPLE__)
-    laufey_common::PasskeyWindowClosing(NSWindowForCefHandle(handle));
+    // By now the content view may be detached from its NSWindow: prefer the
+    // NSWindow registered for this laufey window.
+    void* nswindow =
+        laufey_id_ > 0
+            ? RuntimeLoader::GetInstance()->GetNSWindowForLaufeyId(laufey_id_)
+            : nullptr;
+    if (!nswindow)
+      nswindow = NSWindowForCefHandle(handle);
+    laufey_common::PasskeyWindowClosing(nswindow);
+    // So does an auth session sheet.
+    laufey_common::AuthSessionWindowClosing(nswindow);
 #elif defined(_WIN32)
     laufey_common::PasskeyWindowClosing(reinterpret_cast<void*>(handle));
 #endif

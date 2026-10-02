@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 41
+#define LAUFEY_API_VERSION 42
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -577,6 +577,49 @@ typedef void (*laufey_second_instance_fn)(void* user_data,
 // passkey_request for the format and the threading.
 typedef void (*laufey_passkey_result_fn)(void* user_data,
                                          const char* result_json);
+
+// --- UI-thread tasks (API >= 42) -------------------------------------------
+//
+// A task for dispatch_ui_task. Called EXACTLY ONCE: with `ran` true on the
+// backend's UI thread, or with `ran` false (on any thread) when the backend
+// can no longer run UI tasks because its event loop has ended or is ending.
+typedef void (*laufey_ui_task_fn)(void* data, bool ran);
+
+// --- Auth session (API >= 42) ----------------------------------------------
+//
+// Outcome of auth_session_start, passed to laufey_auth_session_result_fn.
+#define LAUFEY_AUTH_SESSION_OK 0  // `value`: the callback URL
+#define LAUFEY_AUTH_SESSION_CANCELLED \
+  1  // the user closed the sheet / declined, the
+     // anchor window closed, or test_cancel_auth_session
+#define LAUFEY_AUTH_SESSION_NOT_SUPPORTED \
+  2  // no OS auth session here (Windows, Linux,
+     // Winit): use the system browser (RFC 8252)
+#define LAUFEY_AUTH_SESSION_INVALID 3  // bad url / callback / window
+#define LAUFEY_AUTH_SESSION_BUSY 4     // another session is in progress
+#define LAUFEY_AUTH_SESSION_FAILED 5   // the OS refused or failed
+
+// Capability bits returned by auth_session_capabilities.
+#define LAUFEY_AUTH_SESSION_CAP_SUPPORTED (1u << 0)  // auth_session_start works
+#define LAUFEY_AUTH_SESSION_CAP_EPHEMERAL \
+  (1u << 1)  // LAUFEY_AUTH_SESSION_EPHEMERAL is honored
+#define LAUFEY_AUTH_SESSION_CAP_HTTPS_CALLBACK \
+  (1u << 2)  // an https:// callback (macOS 14.4+; the app
+             // needs the host's associated domain)
+
+// Flags for auth_session_start.
+#define LAUFEY_AUTH_SESSION_EPHEMERAL \
+  (1u << 0)  // no shared cookies / no consent prompt
+
+// Longest url / callback auth_session_start accepts, in bytes.
+#define LAUFEY_AUTH_SESSION_MAX_URL_BYTES 8192
+
+// Result of auth_session_start: `status` is a LAUFEY_AUTH_SESSION_* outcome;
+// `value` is the callback URL for LAUFEY_AUTH_SESSION_OK and a human-readable
+// message otherwise (NUL-terminated UTF-8, never NULL, valid only for the
+// duration of the call).
+typedef void (*laufey_auth_session_result_fn)(void* user_data, int32_t status,
+                                              const char* value);
 
 // Callback fired when the user left-clicks a tray / status-bar icon.
 // (Right-click is reserved for the tray's menu.)
@@ -1909,6 +1952,69 @@ struct laufey_backend_api {
   // not implement it.
   bool (*test_notification_respond)(void* backend_data, const char* tag,
                                     const char* action_id);
+
+  // --- UI-thread tasks (API >= 42) -----------------------------------------
+  //
+  // post_ui_task with a delivery guarantee, for runtimes that hop onto the UI
+  // thread (AppKit / Win32 / GTK objects, a native extension's code) and
+  // wait for the result. `task(data, true)` runs on the UI thread, queued
+  // behind the work already posted there (never inline, even when called on
+  // the UI thread). If the backend's event loop has ended, or ends before the
+  // task ran, `task(data, false)` is called instead: synchronously when the
+  // loop has already ended, else on the thread ending it, before the backend
+  // calls laufey_runtime_shutdown. So a runtime thread waiting for a task is
+  // always released, and never blocks the backend's shutdown. Any thread. A
+  // NULL `task` is a no-op. NULL on backends older than API version 42.
+  void (*dispatch_ui_task)(void* backend_data, laufey_ui_task_fn task,
+                           void* data);
+
+  // True when the calling thread is the backend's UI thread (the thread that
+  // runs dispatch_ui_task's tasks: the process main thread on macOS and for
+  // the WebView backends, CEF's TID_UI, the Winit event loop's thread). Any
+  // thread.
+  bool (*is_ui_thread)(void* backend_data);
+
+  // --- Auth session (API >= 42) --------------------------------------------
+  //
+  // A browser sign-in the OS runs for the app and ends at a callback URL
+  // (RFC 8252 "native app" OAuth): macOS ASWebAuthenticationSession, a sheet
+  // on the app's window that shares Safari's cookies (or none, with
+  // LAUFEY_AUTH_SESSION_EPHEMERAL), with a real "cancelled" when the user
+  // closes it. Windows and Linux have no OS equivalent: RFC 8252 says to
+  // open the system browser and receive the redirect through a loopback
+  // listener or a claimed URL scheme, which the embedder does itself; there
+  // the capabilities are 0 and every request answers NOT_SUPPORTED. See
+  // docs/auth-session.md.
+
+  // LAUFEY_AUTH_SESSION_CAP_* bits for this backend on this OS. Any thread.
+  uint32_t (*auth_session_capabilities)(void* backend_data);
+
+  // Start a session at `url` (http or https, <=
+  // LAUFEY_AUTH_SESSION_MAX_URL_BYTES). `callback` is the custom scheme the
+  // sign-in ends at ("myapp", the URL "myapp:..." completes the session) or,
+  // with LAUFEY_AUTH_SESSION_CAP_HTTPS_CALLBACK, an https URL
+  // ("https://example.com/auth/done": a navigation to that host and path
+  // completes it). `window_id` anchors the sheet; 0 means the key window (or
+  // the app's first visible window). `flags` are LAUFEY_AUTH_SESSION_*
+  // flags. One session runs at a time per app: another request meanwhile
+  // answers BUSY.
+  //
+  // `on_result` is called EXACTLY ONCE, on ANY thread: synchronously before
+  // auth_session_start returns for a refusal (NOT_SUPPORTED, INVALID, BUSY);
+  // later from an OS thread or the UI thread otherwise. A session anchored
+  // to a window that closes ends CANCELLED, and so does one still running
+  // when the event loop ends. Embedders must not block in it. A NULL
+  // `on_result` makes the call a no-op. Any thread.
+  void (*auth_session_start)(void* backend_data, uint32_t window_id,
+                             const char* url, const char* callback,
+                             uint32_t flags,
+                             laufey_auth_session_result_fn on_result,
+                             void* user_data);
+
+  // Test-only. Ends the running session as the user closing its sheet
+  // would (its result is CANCELLED). Returns false when no session is
+  // running. Any thread. NULL on backends that do not implement it.
+  bool (*test_cancel_auth_session)(void* backend_data);
 };
 
 #ifdef __cplusplus

@@ -154,6 +154,18 @@ class RuntimeLoader {
     nswindow_to_laufey_id_.erase(nswindow);
   }
 
+  // The NSWindow registered for `window_id`, or nullptr. Still answers
+  // while the window is being torn down, when its content view may already
+  // be detached from it.
+  void* GetNSWindowForLaufeyId(uint32_t window_id) {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    for (const auto& [nswindow, id] : nswindow_to_laufey_id_) {
+      if (id == window_id)
+        return nswindow;
+    }
+    return nullptr;
+  }
+
   uint32_t GetLaufeyIdForNSWindow(void* nswindow) {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto it = nswindow_to_laufey_id_.find(nswindow);

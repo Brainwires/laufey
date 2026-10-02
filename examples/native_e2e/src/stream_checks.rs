@@ -8,9 +8,19 @@
 //! that sees its first chunks proves they arrived before the response ended,
 //! and the failed write proves the engine's cancellation reached the
 //! handler. See docs/custom-schemes.md ("Streaming responses").
+//!
+//! Two more scenarios check that a write never blocks the writer, as the
+//! runtime's event loop writes every response: `slow` writes a body while
+//! the UI thread is busy (a WebKitGTK pipe used to block once 64 KiB were
+//! unread), from one "event loop" thread that must still serve another
+//! request meanwhile, to a page that reads slowly; `cap` writes far more
+//! than a page that doesn't read can hold, and the response must fail at
+//! the backend's cap (64 MiB) instead of growing without bound.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use laufey::{SchemeRequest, Value, Window};
@@ -24,8 +34,18 @@ const PAGE_PREFIX: &str = "app://e2e-stream";
 /// not a multiple of any plausible chunk size.
 const BIN_LEN: usize = 6 * 1024 * 1024 + 13;
 
+/// Length of the `slow` body: far over a pipe's 64 KiB.
+const SLOW_LEN: usize = 4 * 1024 * 1024 + 7;
+/// How long the UI thread is kept busy while `slow` / `cap` write.
+const UI_BUSY_MS: u64 = 1500;
+/// Bytes `cap` tries to write: over the 64 MiB cap.
+const CAP_LEN: usize = 80 * 1024 * 1024;
+/// The backends' cap on bytes queued for a page that isn't reading.
+const CAP_BYTES: usize = 64 * 1024 * 1024;
+
 /// The scenarios the page runs; each reports once.
-const LABELS: [&str; 6] = ["fetch", "abort", "sse", "xhr", "bin", "fast"];
+const LABELS: [&str; 8] =
+  ["fetch", "abort", "sse", "xhr", "bin", "fast", "slow", "cap"];
 /// Labels whose never-ending route must see its write fail (the engine
 /// cancelled the request) once the page is done with it.
 const CANCELLED: [&str; 4] = ["fetch", "abort", "sse", "xhr"];
@@ -35,6 +55,60 @@ const CANCELLED: [&str; 4] = ["fetch", "abort", "sse", "xhr"];
 pub struct State {
   /// Never-ending routes whose write failed, by label.
   cancelled: Arc<Mutex<HashSet<String>>>,
+  /// `slow`: how long writing the whole body took (ms), and whether every
+  /// write was accepted.
+  slow_write: Arc<Mutex<Option<(u128, bool)>>>,
+  /// `cap`: bytes accepted before a write failed (None: none failed).
+  cap_write: Arc<Mutex<Option<Option<usize>>>>,
+}
+
+/// Whether this backend caps what it holds for a page that isn't reading
+/// (WKWebView hands every write to WebKit, which takes it all).
+fn backend_caps_queue() -> bool {
+  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  !(cfg!(target_os = "macos") && backend == "webview")
+}
+
+/// The single "event loop" thread `slow`, `ping` and `cap` are served from,
+/// as a runtime serves every response from its one event loop thread: if a
+/// write blocks it, nothing else is served.
+type LoopJob = Box<dyn FnOnce() + Send>;
+
+fn event_loop() -> &'static Mutex<mpsc::Sender<LoopJob>> {
+  static LOOP: OnceLock<Mutex<mpsc::Sender<LoopJob>>> = OnceLock::new();
+  LOOP.get_or_init(|| {
+    let (tx, rx) = mpsc::channel::<LoopJob>();
+    std::thread::spawn(move || {
+      for job in rx {
+        job();
+      }
+    });
+    Mutex::new(tx)
+  })
+}
+
+fn on_event_loop(job: impl FnOnce() + Send + 'static) {
+  let _ = event_loop().lock().unwrap().send(Box::new(job));
+}
+
+/// Keep the UI thread busy for `ms` (it can't read anything meanwhile).
+/// Returns once the busy task has started, or false if it never did.
+fn block_ui_thread(ms: u64) -> bool {
+  let started = Arc::new(AtomicBool::new(false));
+  let s = started.clone();
+  // Dispatched now; the future isn't needed.
+  drop(laufey::spawn_on_ui_thread(move || {
+    s.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(ms));
+  }));
+  let start = Instant::now();
+  while !started.load(Ordering::SeqCst) {
+    if start.elapsed() > Duration::from_secs(5) {
+      return false;
+    }
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  true
 }
 
 fn pattern(len: usize) -> Vec<u8> {
@@ -151,6 +225,58 @@ const scenarios = {{
     const text = await res.text();
     return [res.status === 200 && text === 'fast body', 'status ' + res.status + ' ' + JSON.stringify(text)];
   }},
+  // A big body written while the UI thread was busy arrives intact to a
+  // page that reads it slowly, and the writer's event loop serves another
+  // request in the middle of it.
+  async slow() {{
+    const res = await fetch('/slow');
+    const reader = res.body.getReader();
+    const n = {slow_len};
+    let got = 0, bad = -1, reads = 0, ping = null;
+    for (;;) {{
+      const {{ value, done }} = await reader.read();
+      if (done) break;
+      for (let i = 0; bad < 0 && i < value.length; i++) {{
+        const k = got + i;
+        if (value[i] !== ((k % 251) ^ (Math.floor(k / 251) & 255))) bad = k;
+      }}
+      got += value.length;
+      if (++reads === 1) {{
+        ping = deadline(fetch('/ping').then(r => r.text()), 8000, 'ping');
+      }}
+      await sleep(2);
+    }}
+    let pong = '';
+    try {{ pong = await ping; }} catch (e) {{ pong = 'error: ' + (e && e.message); }}
+    return [got === n && bad < 0 && pong === 'pong',
+            'length ' + got + ', ' + reads + ' reads' + (bad >= 0 ? ', first difference at ' + bad : '') +
+            ', ping ' + JSON.stringify(pong)];
+  }},
+  // A response the page doesn't read fails once the backend holds its cap,
+  // and the page's read rejects instead of the response ending short.
+  async cap() {{
+    if (!{caps}) return [true, 'N/A: this backend hands every write to the engine'];
+    let res;
+    try {{
+      res = await fetch('/cap');
+    }} catch (e) {{
+      // The cap was reached before the head reached the page (WebKitGTK
+      // reads nothing while its thread is busy): the response failed.
+      return [true, 'fetch rejected (' + (e && e.name) + ')'];
+    }}
+    const reader = res.body.getReader();
+    await sleep({busy_ms} + 2500);
+    let got = 0;
+    try {{
+      for (;;) {{
+        const {{ value, done }} = await reader.read();
+        if (done) return [false, 'ended normally after ' + got + ' bytes'];
+        got += value.length;
+      }}
+    }} catch (e) {{
+      return [got < {cap_len}, 'read rejected (' + (e && e.name) + ') after ' + got + ' bytes'];
+    }}
+  }},
 }};
 (async () => {{
   for (const [label, run] of Object.entries(scenarios)) {{
@@ -164,6 +290,10 @@ const scenarios = {{
 }})().catch(e => report('script', false, String(e && e.message)));
 </script></body></html>"#,
     bin_len = BIN_LEN,
+    slow_len = SLOW_LEN,
+    caps = backend_caps_queue(),
+    busy_ms = UI_BUSY_MS,
+    cap_len = CAP_LEN,
   )
 }
 
@@ -258,6 +388,60 @@ pub fn serve(req: SchemeRequest, state: &State) -> Option<SchemeRequest> {
       req.exchange.write(b"fast body");
       req.exchange.finish();
     }
+    "slow" => {
+      let state = state.clone();
+      on_event_loop(move || {
+        begin(&req, 200, "application/octet-stream");
+        let body = pattern(SLOW_LEN);
+        let busy = block_ui_thread(UI_BUSY_MS);
+        let start = Instant::now();
+        let mut all = busy;
+        for chunk in body.chunks(64 * 1024) {
+          if req.exchange.write(chunk) < 0 {
+            all = false;
+            break;
+          }
+        }
+        *state.slow_write.lock().unwrap() =
+          Some((start.elapsed().as_millis(), all));
+        req.exchange.finish();
+      });
+    }
+    "ping" => on_event_loop(move || {
+      begin(&req, 200, "text/plain");
+      req.exchange.write(b"pong");
+      req.exchange.finish();
+    }),
+    "cap" => {
+      let state = state.clone();
+      on_event_loop(move || {
+        begin(&req, 200, "application/octet-stream");
+        // WebKitGTK reads eagerly whenever its thread is free: keep it busy
+        // so the queue fills. The other engines stop reading for a page that
+        // doesn't read; WebView2 must not be held, since it starts streaming
+        // (and applies its cap) from a timer on the UI thread.
+        if cfg!(target_os = "linux")
+          && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
+        {
+          block_ui_thread(UI_BUSY_MS);
+        } else {
+          // Late enough that WebView2 streams it instead of buffering.
+          std::thread::sleep(Duration::from_millis(200));
+        }
+        let chunk = vec![0x5au8; 1024 * 1024];
+        let mut accepted = 0usize;
+        let mut failed_at = None;
+        while accepted < CAP_LEN {
+          if req.exchange.write(&chunk) < 0 {
+            failed_at = Some(accepted);
+            break;
+          }
+          accepted += chunk.len();
+        }
+        *state.cap_write.lock().unwrap() = Some(failed_at);
+        req.exchange.finish();
+      });
+    }
     _ => {
       begin(&req, 404, "text/plain");
       req.exchange.finish();
@@ -311,6 +495,8 @@ pub async fn run(state: &State) -> Option<Window> {
     "sse" => "EventSource receives events from a never-ending response, then closes",
     "xhr" => "XMLHttpRequest reaches LOADING with the first chunks of a never-ending response",
     "bin" => "a large binary body arrives intact",
+    "slow" => "a big body written while the UI thread is busy arrives intact to a slow reader, and another request completes meanwhile",
+    "cap" => "a response the page doesn't read fails at the backend's cap (the page's read rejects)",
     _ => "a response complete at once is unaffected",
   }
   };
@@ -321,6 +507,26 @@ pub async fn run(state: &State) -> Option<Window> {
       }
       None => check(&format!("{} (no report)", describe(label)), false),
     }
+  }
+  // The writer was never blocked: the whole `slow` body went out while the
+  // UI thread (which reads it on WebKitGTK) was busy for UI_BUSY_MS.
+  let slow = *state.slow_write.lock().unwrap();
+  check(
+    &format!(
+      "writing a 4 MiB body never blocks the writer while the UI thread is busy for {UI_BUSY_MS} ms (ms, all accepted: {slow:?})"
+    ),
+    matches!(slow, Some((ms, true)) if ms < (UI_BUSY_MS as u128) * 2 / 3),
+  );
+  if backend_caps_queue() {
+    let cap = *state.cap_write.lock().unwrap();
+    check(
+      &format!(
+        "a write fails once 64 MiB are held for a page that isn't reading (bytes accepted before the failure: {cap:?})"
+      ),
+      matches!(cap, Some(Some(n)) if (CAP_BYTES / 2..=CAP_BYTES + 1024 * 1024).contains(&n)),
+    );
+  } else {
+    na("the queued-bytes cap (WKWebView hands every write to WebKit)");
   }
   // The engine's cancellation must reach the handler: its next write fails.
   let all_cancelled = wait_for(
