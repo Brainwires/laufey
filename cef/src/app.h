@@ -181,13 +181,22 @@ bool LaufeyDevToolsReachable();
 bool LaufeyIsDevToolsCommand(int command_id);
 
 // The file paths of the external drag over a window, read from the OS's own
-// drag data: on X11 the XDND source's text/uri-list (XdndSelection). Empty
-// when no files are being dragged, or where there is no such source to ask
-// (Wayland, and macOS / Windows, which don't use this yet). For a browser of
-// the Chrome runtime style, which is what laufey creates: CEF calls
-// CefDragHandler::OnDragEnter only for Alloy-style browsers, so that hook
-// never sees the drag. UI thread; it may wait up to a second for the source.
+// drag data: on X11 the XDND source's text/uri-list (XdndSelection,
+// drag_paths_linux.cc), on Windows the OLE drag's CF_HDROP
+// (drag_paths_win.cc), on macOS the drag pasteboard (drag_paths_mac.mm).
+// Empty when no files are being dragged, or where there is no such source
+// to ask (Wayland). Needed because laufey's browsers are of the Chrome
+// runtime style, and CEF calls CefDragHandler::OnDragEnter only for
+// Alloy-style ones, so that hook never sees the drag. UI thread; on X11 it
+// may wait up to a second for the source.
 std::vector<std::string> LaufeyNativeDragFilePaths();
+
+#if defined(_WIN32)
+// Windows: wraps the drop target Chromium registered on a CEF window, so the
+// files of an OLE drag over it are recorded for LaufeyNativeDragFilePaths
+// (cef/src/drag_paths_win.cc). Once per window; UI thread.
+void LaufeyHookWindowDropTarget(HWND hwnd);
+#endif
 
 class LaufeyHandler : public CefClient,
                       public CefLifeSpanHandler,

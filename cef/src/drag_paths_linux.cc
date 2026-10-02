@@ -30,10 +30,9 @@ std::vector<std::string> LaufeyNativeDragFilePaths() {
     // The XDND source owns XdndSelection for the length of the drag and
     // answers any client's conversion request (XDND: the target asks the
     // same way once the drag enters it).
-    Window requestor = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0,
-                                           1, 1, 0, 0, 0);
-    XConvertSelection(dpy, selection, target, property, requestor,
-                      CurrentTime);
+    Window requestor =
+        XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1, 1, 0, 0, 0);
+    XConvertSelection(dpy, selection, target, property, requestor, CurrentTime);
     XFlush(dpy);
     bool answered = false;
     Atom answer = None;

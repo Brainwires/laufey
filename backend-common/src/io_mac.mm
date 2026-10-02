@@ -349,4 +349,26 @@ bool TestFileDialogRespondMac(int action, const char* path) {
   return FileDialogTestRespond(action, path, MainRunner());
 }
 
+std::vector<std::string> DragPasteboardFilePathsMac() {
+  std::vector<std::string> paths;
+  @autoreleasepool {
+    NSPasteboard* pasteboard =
+        [NSPasteboard pasteboardWithName:NSPasteboardNameDrag];
+    NSArray<NSURL*>* urls =
+        [pasteboard readObjectsForClasses:@[ [NSURL class] ]
+                                  options:@{
+                                    NSPasteboardURLReadingFileURLsOnlyKey : @YES
+                                  }];
+    for (NSURL* url in urls) {
+      if (paths.size() >= LAUFEY_MAX_DROP_PATHS)
+        break;
+      // As the WKWebView backend reports a drop: the path in UTF-8, as the
+      // URL has it (not fileSystemRepresentation's decomposed form).
+      if (url.isFileURL && url.path.length > 0)
+        paths.emplace_back(url.path.UTF8String);
+    }
+  }
+  return paths;
+}
+
 }  // namespace laufey_common

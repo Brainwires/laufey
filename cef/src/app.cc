@@ -265,6 +265,13 @@ void LaufeyHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     g_pending_laufey_ids.pop();
     loader->RegisterBrowser(laufey_id, browser);
   }
+#if defined(_WIN32)
+  // External file drops: see LaufeyNativeDragFilePaths.
+  if (auto view = CefBrowserView::GetForBrowser(browser)) {
+    if (auto window = view->GetWindow())
+      LaufeyHookWindowDropTarget(window->GetWindowHandle());
+  }
+#endif
 }
 
 bool LaufeyHandler::OnBeforePopup(
@@ -347,12 +354,6 @@ void LaufeyHandler::OnTitleChange(CefRefPtr<CefBrowser> browser,
   }
 }
 
-#if !defined(__linux__)
-std::vector<std::string> LaufeyNativeDragFilePaths() {
-  return {};
-}
-#endif
-
 bool LaufeyHandler::OnDragEnter(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefDragData> dragData,
                                 DragOperationsMask /*mask*/) {
@@ -393,8 +394,7 @@ void LaufeyHandler::OnFileDropMessage(CefRefPtr<CefBrowser> browser,
   // OnDragEnter only for Alloy-style browsers, so for laufey's (Chrome
   // style) the paths are read from the OS's drag data the first time the
   // page reports a drag with files.
-  if (it == file_drag_paths_.end() && count > 0 &&
-      phase != LAUFEY_DRAG_LEAVE) {
+  if (it == file_drag_paths_.end() && count > 0 && phase != LAUFEY_DRAG_LEAVE) {
     std::vector<std::string> native = LaufeyNativeDragFilePaths();
     if (!native.empty())
       it = file_drag_paths_.emplace(id, std::move(native)).first;

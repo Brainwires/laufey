@@ -78,6 +78,11 @@ struct DragOutRequest {
 // content view) on the main thread; hops there if needed. Takes ownership of
 // `req` and finishes it exactly once.
 void StartFileDragMac(void* nsview, DragOutRequest* req);
+
+// The local files on the drag pasteboard (NSPasteboardNameDrag): the items
+// of the drag in progress, or of the last one. At most
+// LAUFEY_MAX_DROP_PATHS. Any thread.
+std::vector<std::string> DragPasteboardFilePathsMac();
 #endif
 
 #ifdef _WIN32

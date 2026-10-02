@@ -797,6 +797,18 @@ GTK thread). Capability-probed like the rest:
   session bus's keyring to unlock, and gnome-keyring's `gcr-prompter` grabs the
   pointer and keyboard for the rest of the run, which swallows every xdotool
   event.
+- **A real drop (Windows)**: `laufey_ole_drag_source` (built with the backend's
+  tests) drags a file out of its window with `DoDragDrop` and a `CF_HDROP` data
+  object, as Explorer does; SendInput presses on it, moves into the laufey
+  window and releases. ENTER, OVER at the pointer and a DROP with the file's
+  path must reach `on_file_drop`, on WebView2 and on CEF (whose drop target
+  laufey wraps to read the paths). `native-e2e-run.sh --io` sets
+  `LAUFEY_E2E_OLE_SOURCE`. The source is started without a console window, which
+  would otherwise open on top of the drop target.
+- **macOS**: a real drag needs posting pointer events, which the CI runners'
+  processes may not (no Accessibility grant), so the CEF backend's drag
+  pasteboard reader is unit-tested instead
+  (`backend-common/tests/io_mac_test.mm`).
 - **Drag out**: a relative path and a drag with no mouse button held both fail.
   A real drag out needs a person or OS-level input injection on the drag source
   side and is not part of the battery.
