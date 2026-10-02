@@ -306,8 +306,11 @@ if [ "$platform" != macos ]; then
     key='HKCU\Software\Classes\'"$scheme"
     reg add "$key" /ve /d "URL:laufey e2e" /f >/dev/null
     reg add "$key" /v "URL Protocol" /d "" /f >/dev/null
+    # The registered form: options end at "--", the link after it is a
+    # positional argument. The launch file below makes this a packaged app,
+    # which takes its runtime from LAUFEY_RUNTIME_PATH, never a command line.
     reg add "$key\shell\open\command" /ve \
-      /d "\"$bin_native\" --runtime \"$rt_native\" \"%1\"" /f >/dev/null
+      /d "\"$bin_native\" -- \"%1\"" /f >/dev/null
     echo "== registered $scheme: $(reg query "$key\shell\open\command" /ve | tr -d '\r' | grep REG_)"
     # ShellExecute, as a browser or `start` does.
     os_open() { powershell -NoProfile -Command "Start-Process '$1'"; }
@@ -326,7 +329,7 @@ if [ "$platform" != macos ]; then
 [Desktop Entry]
 Type=Application
 Name=laufey e2e
-Exec=$bin --runtime $rt %u
+Exec=$bin -- %u
 MimeType=x-scheme-handler/$scheme;
 NoDisplay=true
 EOF2
@@ -346,8 +349,9 @@ EOF2
   echo "== [os-cold] open $url_cold through the OS"
   (
     export LAUFEY_DATA_DIR="$(native "$scratch/data-os")"
-    export LAUFEY_E2E_SI_COLD_ARGC=3 LAUFEY_E2E_SI_COLD_ARG_0=--runtime \
-      LAUFEY_E2E_SI_COLD_ARG_1="$rt_native" LAUFEY_E2E_SI_COLD_ARG_2="$url_cold" \
+    export LAUFEY_RUNTIME_PATH="$rt_native"
+    export LAUFEY_E2E_SI_COLD_ARGC=2 LAUFEY_E2E_SI_COLD_ARG_0=-- \
+      LAUFEY_E2E_SI_COLD_ARG_1="$url_cold" \
       LAUFEY_E2E_SI_HOLD_MS=500 LAUFEY_E2E_SI_RESULT_FILE="$(native "$result")"
     os_open "$url_cold"
   ) >"$scratch/logs/os-cold.log" 2>&1 &
@@ -379,15 +383,16 @@ EOF2
   # Running: the OS starts a second launch, which forwards the URL (with the
   # rest of its command line) to the running instance.
   start os-warm LAUFEY_DATA_DIR="$(native "$scratch/data-os")" \
-    LAUFEY_E2E_SI_WAIT_MS=60000 LAUFEY_E2E_SI_SECOND_ARGC=3 LAUFEY_E2E_SI_SECOND_ARG_0=--runtime \
-    LAUFEY_E2E_SI_SECOND_ARG_1="$rt_native" LAUFEY_E2E_SI_SECOND_ARG_2="$url_warm" --
+    LAUFEY_E2E_SI_WAIT_MS=60000 LAUFEY_E2E_SI_SECOND_ARGC=2 LAUFEY_E2E_SI_SECOND_ARG_0=-- \
+    LAUFEY_E2E_SI_SECOND_ARG_1="$url_warm" --
   warm_pid=$started_pid
   if wait_for os-warm '^\[e2e\] ready' 90; then
     echo "== [os-warm] open $url_warm through the OS while it runs"
     # Should the OS-started launch not forward and load the runtime itself
     # instead, its own verdict lands here (it must stay empty).
     stray="$scratch/os-warm-second.result"
-    LAUFEY_E2E_SI_RESULT_FILE="$(native "$stray")" LAUFEY_E2E_SI_WAIT_MS=1000 \
+    LAUFEY_RUNTIME_PATH="$rt_native" \
+      LAUFEY_E2E_SI_RESULT_FILE="$(native "$stray")" LAUFEY_E2E_SI_WAIT_MS=1000 \
       os_open "$url_warm" >"$scratch/logs/os-warm-open.log" 2>&1 ||
       echo "    (opener exited $?)"
     sed 's/^/    /' "$scratch/logs/os-warm-open.log" | head -20

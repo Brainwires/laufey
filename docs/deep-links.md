@@ -34,8 +34,19 @@ whatever packages the app:
 
 File types are declared in the same places: `CFBundleDocumentTypes` on macOS,
 the file's MIME type in the `.desktop` `MimeType=` (with `%f`/`%U` in `Exec=`)
-on Linux, and a ProgID with a `shell\open\command` of `"app.exe" "%1"` on
+on Linux, and a ProgID with a `shell\open\command` of `"app.exe" -- "%1"` on
 Windows.
+
+**Register Windows commands with `--` before `"%1"`** (`"app.exe" -- "%1"`, for
+URL schemes and file types alike). Windows substitutes the link for `%1` without
+escaping it, so a link that contains a `"` can close the quotes and add
+arguments of its own (the class of Electron's CVE-2018-1000006). Everything
+after `--` is a positional argument: the hosts stop reading their own options
+there, Chromium (CEF) treats it as the end of its switches, and the runtime
+should do the same. As a second line of defence, a CEF launch whose positional
+arguments include a URL drops every Chromium switch from its command line, and a
+packaged app (one with a `laufey-launch.json` or a runtime next to its
+executable) never takes `--runtime` from the command line.
 
 The OS also has to have _seen_ that metadata: macOS registers schemes through
 LaunchServices when the `.app` is installed (or after `lsregister -f`), Linux
@@ -67,10 +78,11 @@ its own arguments, and in a running app from the arguments the
 process, so it sees the backend's own process arguments: `std::env::args()` in a
 Rust runtime, `Deno.args` / `process.argv` in a JavaScript one. They are the
 arguments the OS or the launcher gave the backend executable, including any
-backend options (such as `--runtime <path>`) that were on that command line. (On
-Linux the CEF backend hands Chromium a copy of `argv`: Chromium sets the process
-title by rewriting the argument strings in place, which would otherwise garble
-what the runtime reads.)
+backend options (such as `--runtime <path>`) that were on that command line, and
+the `--` a Windows registration puts before the link; treat everything after a
+`--` as positional. (On Linux the CEF backend hands Chromium a copy of `argv`:
+Chromium sets the process title by rewriting the argument strings in place,
+which would otherwise garble what the runtime reads.)
 
 On macOS a file or URL on the command line of a directly exec'd binary is only
 in `argv`. The WebView and CEF backends also turn off AppKit's

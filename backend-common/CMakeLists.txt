@@ -40,6 +40,7 @@ set(LAUFEY_COMMON_SRCS
   src/scheme_registry.cc
   src/data_dir.cc
   src/launch_config.cc
+  src/launch_args.cc
   src/single_instance.cc
   src/passkey.cc
   src/window_state.cc
@@ -200,6 +201,15 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_launch_config_test
            COMMAND laufey_launch_config_test)
+
+  # The host's own command line: laufey's options, the "--" terminator and
+  # the deep-link switch filter.
+  add_executable(laufey_launch_args_test tests/launch_args_test.cc)
+  target_link_libraries(laufey_launch_args_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_launch_args_test
+           COMMAND laufey_launch_args_test)
 
   # Takes (and releases) real single-instance locks under per-run app ids.
   add_executable(laufey_single_instance_test tests/single_instance_test.cc)

@@ -696,7 +696,8 @@ runtime sees need real processes, so they have their own runtime,
   `argv` only;
 - Windows and Linux: a test URL scheme registered with the OS as an installer
   would (`HKCU\Software\Classes\laufey-si-test` with a `shell\open\command` of
-  `"<backend>" --runtime "<runtime>" "%1"`; a `.desktop` file with
+  `"<backend>" -- "%1"`, the runtime from `LAUFEY_RUNTIME_PATH` since the launch
+  file makes it a packaged app; a `.desktop` file with
   `x-scheme-handler/laufey-si-test` made the default with `xdg-mime`, in a
   private XDG home), and links opened through the OS (`Start-Process`,
   `xdg-open`): at a cold start the runtime sees the URL in its arguments, and
