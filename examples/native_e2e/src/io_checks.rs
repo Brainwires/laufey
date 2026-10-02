@@ -53,7 +53,7 @@ pub async fn run() {
 
   clipboard_checks(&clip).await;
   file_drop_checks(&w, &caps).await;
-  xdnd_drop_check(&w, &caps).await;
+  xdnd_drop_check(&caps).await;
   dialog_checks(&w, &caps).await;
   drag_out_checks(&w, &caps).await;
 }
@@ -256,7 +256,11 @@ async fn file_drop_checks(w: &Window, caps: &laufey::WindowCapabilities) {
 /// moved with xdotool (XTEST pointer events) and released over the window,
 /// reaches on_file_drop through the backend's own XDND handling: ENTER
 /// first, then a DROP inside the window with the file's path.
-async fn xdnd_drop_check(w: &Window, caps: &laufey::WindowCapabilities) {
+///
+/// The drop goes to a window of its own with a page loaded: CEF reports a
+/// drag through an observer it injects into the page's script context, and
+/// a window that never loaded a page (about:blank) never creates one.
+async fn xdnd_drop_check(caps: &laufey::WindowCapabilities) {
   if !cfg!(target_os = "linux") {
     return;
   }
@@ -284,10 +288,22 @@ async fn xdnd_drop_check(w: &Window, caps: &laufey::WindowCapabilities) {
   let sink = events.clone();
   laufey::on_file_drop(move |e| sink.lock().unwrap().push(e));
 
+  const TITLE: &str = "native-e2e-xdnd";
+  let loaded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+  let w = {
+    let loaded = loaded.clone();
+    Window::new(480, 360)
+      .title(TITLE)
+      .on_page_load(move |_| loaded.store(true, Ordering::SeqCst))
+      .load(&format!(
+        "data:text/html,<title>{TITLE}</title><body%20style='margin:0;height:100vh'>drop</body>"
+      ))
+  };
+  w.show();
   w.set_position(60, 60);
+  let _ = wait_for(|| loaded.load(Ordering::SeqCst), 100, 50).await;
   tokio::time::sleep(Duration::from_millis(500)).await;
-  let Some((tx, ty, tw, th)) = crate::os_view::content_rect("native-e2e-io")
-  else {
+  let Some((tx, ty, tw, th)) = crate::os_view::content_rect(TITLE) else {
     check(
       "a real XDND drop: the window system reports the window",
       false,
@@ -438,6 +454,7 @@ async fn xdnd_drop_check(w: &Window, caps: &laufey::WindowCapabilities) {
   let _ = child.wait();
   laufey::clear_file_drop_handler();
   let _ = std::fs::remove_dir_all(&dir);
+  w.close();
 }
 
 // ---------------------------------------------------------------------------
