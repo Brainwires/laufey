@@ -311,6 +311,7 @@ bool LaufeyHandler::DoClose(CefRefPtr<CefBrowser> browser) {
 void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   file_drag_paths_.erase(browser->GetIdentifier());
+  file_drag_lookup_failed_.erase(browser->GetIdentifier());
 
   for (auto it = browser_list_.begin(); it != browser_list_.end(); ++it) {
     if ((*it)->IsSame(browser)) {
@@ -399,11 +400,19 @@ void LaufeyHandler::OnFileDropMessage(CefRefPtr<CefBrowser> browser,
   // OnDragEnter only for Alloy-style browsers, so for laufey's (Chrome
   // style) the paths are read from the OS's drag data the first time the
   // page reports a drag with files.
-  if (it == file_drag_paths_.end() && count > 0 && phase != LAUFEY_DRAG_LEAVE) {
+  // Asked once per drag: a drag the OS has no paths for (no X source
+  // answers; each lookup can block this thread up to 1 s) is not asked again
+  // on every move, only once it has ended.
+  if (it == file_drag_paths_.end() && count > 0 && phase != LAUFEY_DRAG_LEAVE &&
+      !file_drag_lookup_failed_.count(id)) {
     std::vector<std::string> native = LaufeyNativeDragFilePaths();
     if (!native.empty())
       it = file_drag_paths_.emplace(id, std::move(native)).first;
+    else
+      file_drag_lookup_failed_.insert(id);
   }
+  if (phase == LAUFEY_DRAG_LEAVE || phase == LAUFEY_DRAG_DROP)
+    file_drag_lookup_failed_.erase(id);
   if (it == file_drag_paths_.end())
     return;
   uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
@@ -873,7 +882,9 @@ void LaufeyApp::OnContextInitialized() {
   if (!g_runtime_path.empty()) {
     if (!RuntimeLoader::GetInstance()->Load(g_runtime_path)) {
       std::cerr << "Failed to load runtime, exiting" << std::endl;
-      CefQuitMessageLoop();
+      // macOS runs [NSApp run], which CefQuitMessageLoop doesn't end: the
+      // process stayed up with no window. LaufeyQuitMainLoop ends either.
+      LaufeyQuitMainLoop();
       return;
     }
     // Defer Start() to the next message loop iteration. OnContextInitialized

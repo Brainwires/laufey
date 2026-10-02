@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -503,17 +505,80 @@ void TestNativeModalLoop() {
   SetNativeModalLoopHook(nullptr);
 }
 
+// The test thread plays the UI thread: the dispatcher queues tasks here and
+// PumpUi runs them.
+std::mutex g_ui_mutex;
+std::deque<std::pair<void (*)(void*), void*>> g_ui_queue;
+
+void PumpUi() {
+  for (;;) {
+    std::pair<void (*)(void*), void*> task;
+    {
+      std::lock_guard<std::mutex> lock(g_ui_mutex);
+      if (g_ui_queue.empty())
+        return;
+      task = g_ui_queue.front();
+      g_ui_queue.pop_front();
+    }
+    task.first(task.second);
+  }
+}
+
+// A platform that answers permission requests on a thread of its own, as
+// the Windows toast thread and Linux's D-Bus replies do.
+struct ThreadedPermissionPlatform : FakePlatform {
+  void QueryPermission(int, std::function<void(int)> done) override {
+    std::thread([done] { done(LAUFEY_PERMISSION_STATUS_GRANTED); }).join();
+  }
+  void RequestPermission(int, std::function<void(int)> done) override {
+    std::thread([done] { done(LAUFEY_PERMISSION_STATUS_DENIED); }).join();
+  }
+};
+
+std::thread::id g_perm_thread;
+void OnPermThread(void*, int status) {
+  g_perm = status;
+  g_perm_thread = std::this_thread::get_id();
+}
+
+// laufey.h: permission callbacks fire on the UI thread, whichever thread the
+// platform answered on.
+void TestPermissionCallbacksOnUiThread() {
+  InstallNotificationPlatform(std::make_unique<ThreadedPermissionPlatform>());
+  g_perm = -1;
+  QueryNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPermThread,
+                              nullptr);
+  EXPECT(g_perm == -1);  // queued for the UI thread, not called off it
+  PumpUi();
+  EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_GRANTED);
+  EXPECT(g_perm_thread == std::this_thread::get_id());
+  g_perm = -1;
+  RequestNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPermThread,
+                                nullptr);
+  PumpUi();
+  EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_DENIED);
+  EXPECT(g_perm_thread == std::this_thread::get_id());
+}
+
 }  // namespace
 
 int main() {
   laufey_register_value_api(&g_api);
+  // First: it checks the state before the dispatcher is bound.
+  TestNativeModalLoop();
+  // From here this thread is the UI thread; PumpUi runs what is queued.
+  UiTaskDispatcher::Get().Bind([](void (*task)(void*), void* data) {
+    std::lock_guard<std::mutex> lock(g_ui_mutex);
+    g_ui_queue.emplace_back(task, data);
+    return true;
+  });
   TestParseMenu();
   TestKeyCodes();
   TestContextMenuSession();
   TestValidate();
   TestRouting();
   TestFormats();
-  TestNativeModalLoop();
+  TestPermissionCallbacksOnUiThread();
   std::printf("menu_notifications_test: OK\n");
   return 0;
 }

@@ -2670,28 +2670,37 @@ static uint32_t Backend_WindowCapabilities(void* /*data*/) {
   if (!(wayland && *wayland))
     caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
 #endif
-  // Drag and drop and file dialogs (API >= 39). OnDragEnter has the paths
-  // from the start. macOS sheets and Windows owner windows are modal; on
-  // Linux the GTK dialog can't be made modal to Chromium's (non-GTK) window,
-  // and the GTK drag source needs an X11 display.
+  // Drag and drop and file dialogs (API >= 39). The paths of an external
+  // drop come from the OS's drag data when the drag enters (CEF calls
+  // OnDragEnter only for Alloy-style browsers; see LaufeyNativeDragFilePaths).
+  // macOS sheets and Windows owner windows are modal; on Linux the GTK dialog
+  // can't be made modal to Chromium's (non-GTK) window.
+  caps |= LAUFEY_WINDOW_CAP_FILE_DIALOGS;
+#if defined(__APPLE__)
   caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
           LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
-          LAUFEY_WINDOW_CAP_FILE_DIALOGS;
-#if defined(__APPLE__)
-  caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT |
+          LAUFEY_WINDOW_CAP_FILE_DRAG_OUT |
           LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES |
           LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
 #elif defined(_WIN32)
-  caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+  caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
+          LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
+          LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
 #else
+  // Linux: the drop's paths are read from X11's XdndSelection and the GTK
+  // drag source needs an X11 display. Under Wayland there is no X drag data
+  // to read, so a drop could never carry its paths: neither is reported.
   EnsureGtkReady();
   bool x11 = false;
   laufey_common::GtkRunSync([&] {
     GdkDisplay* display = gdk_display_get_default();
     x11 = display && strstr(G_OBJECT_TYPE_NAME(display), "X11") != nullptr;
   });
-  if (x11)
-    caps |= LAUFEY_WINDOW_CAP_FILE_DRAG_OUT;
+  if (x11) {
+    caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
+            LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
+            LAUFEY_WINDOW_CAP_FILE_DRAG_OUT;
+  }
 #endif
   return caps;
 }

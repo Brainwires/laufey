@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <list>
 #include <map>
+#include <set>
 #include <queue>
 #include <string>
 #include <vector>
@@ -331,6 +332,9 @@ class LaufeyHandler : public CefClient,
   // The file paths of the drag currently over each browser (by browser id),
   // from OnDragEnter. UI thread only.
   std::map<int, std::vector<std::string>> file_drag_paths_;
+  // Browsers whose current drag the OS had no paths for: not asked again
+  // (each lookup can block TID_UI, up to 1 s on X11) until the drag ends.
+  std::set<int> file_drag_lookup_failed_;
   // Handles a "laufey_file_drop" message from the page observer.
   void OnFileDropMessage(CefRefPtr<CefBrowser> browser,
                          CefRefPtr<CefListValue> args);

@@ -269,6 +269,7 @@ if(LAUFEY_BUILD_TESTS)
                  tests/menu_notifications_test.cc)
   target_link_libraries(laufey_menu_notifications_test PRIVATE
     laufey_backend_common
+    Threads::Threads
   )
   add_test(NAME laufey_menu_notifications_test
            COMMAND laufey_menu_notifications_test)
