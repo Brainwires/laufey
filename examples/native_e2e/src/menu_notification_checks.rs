@@ -209,11 +209,38 @@ async fn real_key_press_check(w: &Window, clicks: &Arc<Mutex<Vec<String>>>) {
   }
   #[cfg(not(windows))]
   {
-    let _ = (w, clicks);
-    na(
-      "a real accelerator key press (posting key events needs \
-        Accessibility permission on macOS; the test hook covers the \
-        dispatch elsewhere)",
+    // X11: the window gets the focus (through the window manager the run
+    // starts), then xdotool presses the keys (XTEST).
+    if crate::os_view::xdotool().is_none() {
+      let _ = (w, clicks);
+      na(
+        "a real accelerator key press (posting key events needs \
+          Accessibility permission on macOS and xdotool on X11; the test \
+          hook covers the dispatch elsewhere)",
+      );
+      return;
+    }
+    let _ = w;
+    check(
+      "the menu window takes the keyboard focus",
+      crate::os_view::x_focus("native-e2e-menus").await,
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = clicks.lock().unwrap().len();
+    check(
+      "xdotool injected Ctrl+Shift+F9",
+      crate::os_view::xdo(&["key", "--clearmodifiers", "ctrl+shift+F9"])
+        .is_some(),
+    );
+    check(
+      "a real accelerator key press fires the menu item",
+      wait_for(|| clicks.lock().unwrap().len() > before, 100, 20).await,
+    );
+    check(
+      "the real press clicks the accelerated item",
+      clicks.lock().unwrap()[before..]
+        .iter()
+        .all(|c| c == "accel-item"),
     );
   }
 }
@@ -611,8 +638,24 @@ async fn com_activation_check(
 }
 
 #[cfg(windows)]
-mod win {
+pub(crate) mod win {
   use std::ffi::c_void;
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+  }
+
+  #[repr(C)]
+  #[derive(Default)]
+  struct Point {
+    x: i32,
+    y: i32,
+  }
 
   #[repr(C)]
   #[derive(Clone, Copy)]
@@ -657,6 +700,8 @@ mod win {
     ) -> i32;
     fn IsWindowVisible(hwnd: *mut c_void) -> i32;
     fn GetWindowTextW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
+    fn GetClientRect(hwnd: *mut c_void, rect: *mut Rect) -> i32;
+    fn ClientToScreen(hwnd: *mut c_void, point: *mut Point) -> i32;
   }
 
   #[link(name = "ole32")]
@@ -746,6 +791,30 @@ mod win {
     };
     unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
     search.found
+  }
+
+  /// The client area of the window titled `title` in screen pixels (this
+  /// process is per-monitor DPI aware, so physical): (x, y, width, height).
+  pub fn client_rect(title: &str) -> Option<(i32, i32, i32, i32)> {
+    let hwnd = find_window(title);
+    if hwnd.is_null() {
+      return None;
+    }
+    let mut rect = Rect::default();
+    let mut origin = Point::default();
+    unsafe {
+      if GetClientRect(hwnd, &mut rect) == 0
+        || ClientToScreen(hwnd, &mut origin) == 0
+      {
+        return None;
+      }
+    }
+    Some((
+      origin.x,
+      origin.y,
+      rect.right - rect.left,
+      rect.bottom - rect.top,
+    ))
   }
 
   pub fn focus(hwnd: *mut c_void) -> bool {

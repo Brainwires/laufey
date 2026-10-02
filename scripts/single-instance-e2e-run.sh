@@ -13,6 +13,12 @@
 #   (c) singleInstance off: two instances run side by side (on CEF with
 #       separate data directories: one CEF profile allows one process, see
 #       docs/app-data.md; scripts/storage-e2e-run.sh covers that refusal).
+#   (f) Windows and Linux: a test URL scheme registered with the OS the way
+#       an installer does (HKCU\Software\Classes on Windows; a .desktop file
+#       with x-scheme-handler/ and xdg-mime on Linux), then a link opened
+#       through the OS (Start-Process / xdg-open): at a cold start the
+#       runtime sees the URL in its arguments, and while an instance runs
+#       the OS-started second launch forwards it to `second_instance`.
 #   (e) macOS: a file opened with the bundle through LaunchServices
 #       (`open -a <App>.app <file>`) at a cold start, then a custom-scheme URL
 #       and another file while it runs, reach `open_url` (files as file://
@@ -287,6 +293,116 @@ else
 fi
 touch "$scratch/release-side-a"
 finish side-a "$a_pid" 60
+
+# --- (f): a registered URL scheme opened through the OS (Windows, Linux) ------
+if [ "$platform" != macos ]; then
+  # Letters only: xdg-open takes a "scheme" with digits for a file name.
+  scheme=laufey-si-test
+  url_cold="$scheme://open/cold?id=7"
+  url_warm="$scheme://open/doc?id=42"
+  rt_native="$(native "$rt")"
+  bin_native="$(native "$bin")"
+  if [ "$platform" = windows ]; then
+    key='HKCU\Software\Classes\'"$scheme"
+    reg add "$key" /ve /d "URL:laufey e2e" /f >/dev/null
+    reg add "$key" /v "URL Protocol" /d "" /f >/dev/null
+    reg add "$key\shell\open\command" /ve \
+      /d "\"$bin_native\" --runtime \"$rt_native\" \"%1\"" /f >/dev/null
+    echo "== registered $scheme: $(reg query "$key\shell\open\command" /ve | tr -d '\r' | grep REG_)"
+    # ShellExecute, as a browser or `start` does.
+    os_open() { powershell -NoProfile -Command "Start-Process '$1'"; }
+    unregister() { reg delete "$key" /f >/dev/null 2>&1 || true; }
+  else
+    # A private XDG home, so the registration stays in this run. xdg-open
+    # (no desktop environment: its generic path) asks xdg-mime for the
+    # x-scheme-handler/ default and runs the entry's Exec in the foreground
+    # with the same environment. Its Exec parsing doesn't handle quotes.
+    export XDG_DATA_HOME="$scratch/xdg-data" XDG_CONFIG_HOME="$scratch/xdg-config"
+    mkdir -p "$XDG_DATA_HOME/applications" "$XDG_CONFIG_HOME"
+    case "$bin$rt" in
+      *" "*) echo "paths with spaces can't go in this test's Exec line"; exit 1 ;;
+    esac
+    cat >"$XDG_DATA_HOME/applications/$scheme.desktop" <<EOF2
+[Desktop Entry]
+Type=Application
+Name=laufey e2e
+Exec=$bin --runtime $rt %u
+MimeType=x-scheme-handler/$scheme;
+NoDisplay=true
+EOF2
+    xdg-mime default "$scheme.desktop" "x-scheme-handler/$scheme"
+    echo "== registered $scheme: $(xdg-mime query default "x-scheme-handler/$scheme")"
+    os_open() {
+      xvfb-run -a dbus-run-session -- env -u LAUFEY_SINGLE_INSTANCE xdg-open "$1"
+    }
+    unregister() { :; }
+  fi
+  printf '{ "appId": "%s", "singleInstance": true }\n' "$app_id" >"$launch_file"
+
+  # Cold start: the OS starts the app with the URL; the runtime reads it from
+  # its arguments. Its output goes to a result file (Windows doesn't hand an
+  # OS-started process our stderr).
+  result="$scratch/os-cold.result"
+  echo "== [os-cold] open $url_cold through the OS"
+  (
+    export LAUFEY_DATA_DIR="$(native "$scratch/data-os")"
+    export LAUFEY_E2E_SI_COLD_ARGC=3 LAUFEY_E2E_SI_COLD_ARG_0=--runtime \
+      LAUFEY_E2E_SI_COLD_ARG_1="$rt_native" LAUFEY_E2E_SI_COLD_ARG_2="$url_cold" \
+      LAUFEY_E2E_SI_HOLD_MS=500 LAUFEY_E2E_SI_RESULT_FILE="$(native "$result")"
+    os_open "$url_cold"
+  ) >"$scratch/logs/os-cold.log" 2>&1 &
+  os_pid=$!
+  pids+=("$os_pid")
+  for ((i = 0; i < 90 * 5; i++)); do
+    grep -q '^\[e2e\] OVERALL' "$result" 2>/dev/null && break
+    sleep 0.2
+  done
+  wait "$os_pid" 2>/dev/null || true
+  sed 's/^/    /' "$result" 2>/dev/null || true
+  if grep -q '^\[e2e\] OVERALL PASS' "$result" 2>/dev/null; then
+    pass "a link opened through the OS starts the app with the URL in its arguments"
+  else
+    fail "os-cold (see $result and $scratch/logs/os-cold.log)"
+    sed 's/^/    | /' "$scratch/logs/os-cold.log" | tail -40
+  fi
+  # Let the cold instance exit (and its lock and profile go) before the next
+  # one starts on the same data directory.
+  if [ "$platform" = windows ]; then
+    sleep 3
+  else
+    for ((i = 0; i < 50; i++)); do
+      pgrep -f "$url_cold" >/dev/null 2>&1 || break
+      sleep 0.2
+    done
+  fi
+
+  # Running: the OS starts a second launch, which forwards the URL (with the
+  # rest of its command line) to the running instance.
+  start os-warm LAUFEY_DATA_DIR="$(native "$scratch/data-os")" \
+    LAUFEY_E2E_SI_WAIT_MS=60000 LAUFEY_E2E_SI_SECOND_ARGC=3 LAUFEY_E2E_SI_SECOND_ARG_0=--runtime \
+    LAUFEY_E2E_SI_SECOND_ARG_1="$rt_native" LAUFEY_E2E_SI_SECOND_ARG_2="$url_warm" --
+  warm_pid=$started_pid
+  if wait_for os-warm '^\[e2e\] ready' 90; then
+    echo "== [os-warm] open $url_warm through the OS while it runs"
+    # Should the OS-started launch not forward and load the runtime itself
+    # instead, its own verdict lands here (it must stay empty).
+    stray="$scratch/os-warm-second.result"
+    LAUFEY_E2E_SI_RESULT_FILE="$(native "$stray")" LAUFEY_E2E_SI_WAIT_MS=1000 \
+      os_open "$url_warm" >"$scratch/logs/os-warm-open.log" 2>&1 ||
+      echo "    (opener exited $?)"
+    sed 's/^/    /' "$scratch/logs/os-warm-open.log" | head -20
+    wait_for os-warm '^\[e2e\] second_instance' 60 || true
+    if [ -f "$stray" ]; then
+      fail "the OS-started second launch ran the runtime itself:"
+      sed 's/^/    | /' "$stray"
+    fi
+  else
+    fail "os-warm never became ready"
+  fi
+  finish os-warm "$warm_pid" 60
+  rm -f "$launch_file"
+  unregister
+fi
 
 # --- (e): macOS LaunchServices ------------------------------------------------
 if [ "$platform" = macos ]; then

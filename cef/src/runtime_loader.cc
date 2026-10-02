@@ -13,6 +13,7 @@
 #include "laufey_ui_tasks.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_single_instance.h"
+#include "laufey_sync_call.h"
 #include "laufey_system.h"
 #include "laufey_window.h"
 #include "scheme_handler.h"
@@ -151,32 +152,25 @@ void ConfigureWin32WindowAsPanel(void* hwnd_ptr) {
 // Helper to run a callback synchronously on the CEF UI thread.
 // If already on the UI thread, runs immediately.
 //
-// The UI thread notifies while still holding the mutex: the waiter can return
-// (destroying mtx / cv, which live in its frame) as soon as it sees `done`,
-// so a notify after the unlock could reach a condition variable that is
-// already gone, or a new one at the same stack address in the next call. On
-// macOS that corrupted the next wait, which then never woke (the e2e hung in
-// screens()) or crashed.
+// `call` lives in this frame and Done() is the UI task's last access to it:
+// Done() notifies under the lock, since the waiter returns (destroying `call`)
+// as soon as it sees the call complete. A notify after the unlock corrupted
+// the next wait on macOS, which then never woke (the e2e hung in screens())
+// or crashed. See laufey_sync_call.h.
 template <typename F>
 static void cef_invoke_sync(F&& fn) {
   if (CefCurrentlyOn(TID_UI)) {
     fn();
     return;
   }
-  std::mutex mtx;
-  std::condition_variable cv;
-  bool done = false;
+  laufey_common::SyncCall call;
   CefPostTask(TID_UI, base::BindOnce(
-                          [](F* fn, std::mutex* mtx,
-                             std::condition_variable* cv, bool* done) {
+                          [](F* fn, laufey_common::SyncCall* call) {
                             (*fn)();
-                            std::lock_guard<std::mutex> lock(*mtx);
-                            *done = true;
-                            cv->notify_one();
+                            call->Done();
                           },
-                          &fn, &mtx, &cv, &done));
-  std::unique_lock<std::mutex> lock(mtx);
-  cv.wait(lock, [&done] { return done; });
+                          &fn, &call));
+  call.Wait();
 }
 
 // --- Backend API functions (cross-platform, using CEF Views) ---

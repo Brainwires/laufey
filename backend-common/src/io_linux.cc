@@ -12,11 +12,10 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_sync_call.h"
 
-#include <condition_variable>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -68,19 +67,14 @@ void GtkRunSync(const std::function<void()>& fn) {
     fn();
     return;
   }
-  std::mutex mtx;
-  std::condition_variable cv;
-  bool done = false;
+  // `call` lives in this frame; Done() is the task's last access to it
+  // (laufey_sync_call.h).
+  SyncCall call;
   GtkRunAsync([&] {
     fn();
-    // Notify under the lock: once `done` is seen the waiter returns and
-    // mtx / cv (its stack frame) are gone.
-    std::lock_guard<std::mutex> lock(mtx);
-    done = true;
-    cv.notify_one();
+    call.Done();
   });
-  std::unique_lock<std::mutex> lock(mtx);
-  cv.wait(lock, [&] { return done; });
+  call.Wait();
 }
 
 namespace {

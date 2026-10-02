@@ -217,6 +217,16 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_passkey_test COMMAND laufey_passkey_test)
 
+  # The rendezvous behind the synchronous UI-thread calls (laufey_sync_call.h)
+  # under load; the `tsan` CI job also runs it under ThreadSanitizer.
+  add_executable(laufey_sync_call_test tests/sync_call_test.cc)
+  target_link_libraries(laufey_sync_call_test PRIVATE
+    laufey_backend_common
+    Threads::Threads
+  )
+  add_test(NAME laufey_sync_call_test COMMAND laufey_sync_call_test)
+  set_tests_properties(laufey_sync_call_test PROPERTIES TIMEOUT 300)
+
   # Window-state bookkeeping: state diffing, size constraints, normal-bounds
   # settling, screen matching and the app-lifetime flags (no OS API).
   add_executable(laufey_window_state_test tests/window_state_test.cc)
@@ -291,6 +301,16 @@ if(LAUFEY_BUILD_TESTS)
       ${LAUFEY_COMMON_GTK_LIBRARIES}
     )
     target_include_directories(laufey_mock_notification_server PRIVATE
+      ${LAUFEY_COMMON_GTK_INCLUDE_DIRS}
+    )
+
+    # The XDND drag source the Linux native e2e drags real files out of
+    # with xdotool (scripts/native-e2e-run.sh --io).
+    add_executable(laufey_xdnd_source tests/xdnd_source.cc)
+    target_link_libraries(laufey_xdnd_source PRIVATE
+      ${LAUFEY_COMMON_GTK_LIBRARIES}
+    )
+    target_include_directories(laufey_xdnd_source PRIVATE
       ${LAUFEY_COMMON_GTK_INCLUDE_DIRS}
     )
 

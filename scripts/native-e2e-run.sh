@@ -3,17 +3,33 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
-# observer (native_e2e_driver) under a private session bus.
+# observer (native_e2e_driver) under a private session bus: it checks the
+# tray's StatusNotifierItem and dbusmenu layout from outside, fires a menu
+# Event that must reach the app, and fails unless the battery passed.
 # --scheme-body runs only the custom-scheme request-body round trip (for
 # backends where the full battery can't run in CI).
 # --lifetime runs only the app-lifetime checks (keep-alive with no window,
 # then quit() ending the event loop); they end the process, so they can't
 # share the main battery's run.
 # --window-api runs only the API 38 window checks (state, constraints,
-# screens, title bar, backdrops); handy under a real window manager.
+# screens, title bar, backdrops). On Linux it runs a window manager (openbox)
+# under Xvfb, so maximize / minimize / fullscreen must really apply: the
+# battery fails them instead of reporting N/A.
+# --hidpi runs the same checks at a device scale factor of 2: CEF with
+# --force-device-scale-factor=2, WebKitGTK with GDK_SCALE=2, and on Windows
+# whatever scale the display was set to before (LAUFEY_E2E_EXPECT_SCALE,
+# see scripts/windows-display-scale.ps1). The battery checks the reported
+# scale, that sizes and positions stay in DIPs, and the window's physical
+# size on screen.
+#
+# On Linux, --window-api, --hidpi, --io, --system and --menus-notifications
+# also hand the battery xdotool (LAUFEY_E2E_XDOTOOL) for real X input: key
+# presses for global shortcuts and menu accelerators, and an XDND drag from
+# a GTK drag source (laufey_xdnd_source, built with the backend's tests).
+# LAUFEY_E2E_WM=none turns the window manager off.
 # --io runs only the API 39 checks: drag and drop (through the test hook),
 # real file dialogs driven by the test hook, the rich clipboard.
 # --system runs only the API 40 checks: global shortcuts (including a
@@ -30,7 +46,7 @@
 # elsewhere). Ends with quit().
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off|--menus-notifications|--auth-thread]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -59,8 +75,14 @@ fi
 if [ "$mode" = "--lifetime" ]; then
   export LAUFEY_E2E_ONLY=lifetime
 fi
-if [ "$mode" = "--window-api" ]; then
+if [ "$mode" = "--window-api" ] || [ "$mode" = "--hidpi" ]; then
   export LAUFEY_E2E_ONLY=window-api
+fi
+if [ "$mode" = "--hidpi" ]; then
+  export LAUFEY_E2E_EXPECT_SCALE="${LAUFEY_E2E_EXPECT_SCALE:-2}"
+  # WebKitGTK (and GTK in the other backends) take the scale from GDK_SCALE;
+  # CEF gets --force-device-scale-factor below.
+  export GDK_SCALE="${LAUFEY_E2E_EXPECT_SCALE%%.*}"
 fi
 if [ "$mode" = "--io" ]; then
   export LAUFEY_E2E_ONLY=io
@@ -120,17 +142,59 @@ esac
 args=()
 if [ "$backend" = "cef" ]; then
   args+=(--disable-features=LocalNetworkAccessChecks)
+  # Chromium's password store would ask the private session bus's keyring
+  # to unlock: gnome-keyring then shows gcr-prompter, which grabs the
+  # pointer and keyboard for the rest of the run, so real X input (xdotool)
+  # goes to the prompt instead of the app.
+  if [ "$(uname -s)" = "Linux" ]; then
+    args+=(--password-store=basic)
+  fi
+  # On Windows the display itself is scaled (windows-display-scale.ps1).
+  if [ "$mode" = "--hidpi" ] && [ "$(uname -s)" = "Linux" ]; then
+    args+=("--force-device-scale-factor=$LAUFEY_E2E_EXPECT_SCALE")
+  fi
 fi
 echo "== native-e2e: backend=$backend bin=$bin runtime=$rt =="
 
 is_linux() { [ "$(uname -s)" = "Linux" ]; }
 
+# What runs: the backend, or (--layer1) the D-Bus observer that starts it.
+target=("$bin")
 if [ "$mode" = "--layer1" ]; then
   is_linux || { echo "--layer1 is Linux-only"; exit 2; }
   export LAUFEY_E2E_HOLD=1
   driver="$(ls target/release/native_e2e_driver 2>/dev/null | head -1 || true)"
   [ -n "$driver" ] || { echo "native_e2e_driver not built"; exit 1; }
-  exec xvfb-run -a dbus-run-session -- "$driver" "$bin" ${args[@]+"${args[@]}"}
+  target=("$PWD/$driver" "$bin")
+fi
+
+# Linux extras for the modes that drive real windows: a window manager, real
+# X input through xdotool, and the XDND drag source.
+screen="1280x1024x24"
+if is_linux; then
+  case "$mode" in
+    --window-api | --hidpi | --io | --system | --menus-notifications)
+      wm="${LAUFEY_E2E_WM:-openbox}"
+      if [ "$wm" != none ] && command -v "$wm" >/dev/null; then
+        export LAUFEY_E2E_WM="$wm"
+      else
+        unset LAUFEY_E2E_WM
+        echo "== no window manager ($wm not found); WM-dependent checks are N/A =="
+      fi
+      if command -v xdotool >/dev/null; then
+        export LAUFEY_E2E_XDOTOOL="$(command -v xdotool)"
+      fi
+      src="$(ls webview/build/backend-common/laufey_xdnd_source \
+        cef/build/backend-common/laufey_xdnd_source \
+        cef/build/laufey_xdnd_source 2>/dev/null | head -1 || true)"
+      if [ -n "$src" ]; then
+        export LAUFEY_E2E_XDND_SOURCE="$PWD/$src"
+      fi
+      ;;
+    *) unset LAUFEY_E2E_WM ;;
+  esac
+  # Room for a 2x window.
+  if [ "$mode" = "--hidpi" ]; then screen="2560x1600x24"; fi
 fi
 
 # Layer 0: stream the output (so a hang shows how far the battery got) and
@@ -145,16 +209,32 @@ fi
 # process, so a hang leaves evidence instead of only a step timeout.
 log="$(mktemp "${TMPDIR:-/tmp}/native-e2e.XXXXXX")"
 run_backend() {
-  if is_linux && [ -n "$mock" ]; then
-    # The stand-in notification server owns the name on the same private
-    # session bus before the backend starts.
-    exec xvfb-run -a dbus-run-session -- sh -c \
-      '"$LAUFEY_E2E_NOTIFY_MOCK" & for _ in 1 2 3 4 5 6 7 8 9 10; do sleep 0.2; done; exec "$@"' \
-      sh "$bin" ${args[@]+"${args[@]}"}
-  elif is_linux; then
-    exec xvfb-run -a dbus-run-session -- "$bin" ${args[@]+"${args[@]}"}
+  if is_linux; then
+    # One X server and private session bus for the run. The window manager
+    # (when wanted) manages the display before the backend starts, and the
+    # stand-in notification server owns its name on the same bus.
+    exec xvfb-run -a -s "-screen 0 $screen" dbus-run-session -- sh -c '
+      if [ -n "${LAUFEY_E2E_WM:-}" ]; then
+        "$LAUFEY_E2E_WM" >/dev/null 2>&1 &
+        i=0
+        until xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; do
+          i=$((i + 1))
+          if [ "$i" -gt 100 ]; then
+            echo "native e2e: $LAUFEY_E2E_WM did not start" >&2
+            exit 1
+          fi
+          sleep 0.1
+        done
+        echo "== window manager: $LAUFEY_E2E_WM ==" >&2
+        export LAUFEY_E2E_WM_RUNNING=1
+      fi
+      if [ -n "${LAUFEY_E2E_NOTIFY_MOCK:-}" ]; then
+        "$LAUFEY_E2E_NOTIFY_MOCK" &
+        for _ in 1 2 3 4 5 6 7 8 9 10; do sleep 0.2; done
+      fi
+      exec "$@"' sh "${target[@]}" ${args[@]+"${args[@]}"}
   else
-    exec "$bin" ${args[@]+"${args[@]}"}
+    exec "${target[@]}" ${args[@]+"${args[@]}"}
   fi
 }
 run_backend > >(tee "$log") 2>&1 &

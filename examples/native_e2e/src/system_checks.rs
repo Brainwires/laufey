@@ -156,26 +156,40 @@ async fn shortcut_checks(caps: &laufey::SystemCapabilities) {
   laufey::clear_shortcut_handler();
 }
 
-/// Windows: a real key press, injected with SendInput, arrives as WM_HOTKEY
-/// on the UI thread. (macOS needs Accessibility permission to post key
-/// events and Xvfb's XTEST isn't reachable from here, so the other OSes rely
-/// on the test hook above.)
+/// A real key press reaches the global shortcut: on Windows injected with
+/// SendInput and arriving as WM_HOTKEY on the UI thread; on X11 injected
+/// with xdotool (XTEST), which the X server matches against the shortcut's
+/// passive key grab. (macOS needs Accessibility permission to post key
+/// events, so it relies on the test hook above.)
 async fn real_press_check(pressed: &Arc<Mutex<Vec<String>>>) {
+  let before = pressed.lock().unwrap().len();
   #[cfg(windows)]
   {
-    let before = pressed.lock().unwrap().len();
     let sent = win_input::press_ctrl_alt_shift_f10();
     check("SendInput injected the key press", sent);
-    check(
-      "a real key press fires the global shortcut",
-      wait_for(|| pressed.lock().unwrap().len() > before, 100, 20).await,
-    );
   }
   #[cfg(not(windows))]
   {
-    let _ = pressed;
-    na("a real key press (needs OS input injection; Windows only)");
+    if crate::os_view::xdotool().is_none() {
+      na("a real key press (needs OS input injection: SendInput on Windows, xdotool on X11)");
+      return;
+    }
+    check(
+      "xdotool injected Ctrl+Alt+Shift+F10",
+      crate::os_view::xdo(&["key", "--clearmodifiers", "ctrl+alt+shift+F10"])
+        .is_some(),
+    );
   }
+  check(
+    "a real key press fires the global shortcut",
+    wait_for(|| pressed.lock().unwrap().len() > before, 100, 20).await,
+  );
+  check(
+    "the real press carries the canonical accelerator",
+    pressed.lock().unwrap()[before..]
+      .iter()
+      .all(|a| a == SHORTCUT),
+  );
 }
 
 /// A second process holds HELD_SHORTCUT: this one gets CONFLICT from the

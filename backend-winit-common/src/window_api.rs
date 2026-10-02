@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use winit::dpi::LogicalSize;
@@ -67,6 +67,14 @@ fn records() -> &'static Mutex<HashMap<u32, Record>> {
 static STATE_HANDLER: Mutex<Option<(LaufeyWindowStateFn, usize)>> =
   Mutex::new(None);
 static SCREENS: Mutex<Vec<LaufeyScreen>> = Mutex::new(Vec::new());
+/// Whether the event loop has read the monitors yet (`resumed`, a window
+/// created). The runtime starts before the event loop runs, so an early
+/// screens() would otherwise find the cache empty.
+static SCREENS_READ: (Mutex<bool>, Condvar) =
+  (Mutex::new(false), Condvar::new());
+
+/// How long screens() waits for the event loop's first read of the monitors.
+const FIRST_SCREENS_WAIT: Duration = Duration::from_secs(5);
 static QUIT_ON_LAST_WINDOW: AtomicBool = AtomicBool::new(true);
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
@@ -388,6 +396,21 @@ pub fn refresh_screens(
   }
   screens.sort_by_key(|s| !s.is_primary);
   *SCREENS.lock().unwrap() = screens;
+  mark_screens_read();
+}
+
+fn mark_screens_read() {
+  let (read, cv) = &SCREENS_READ;
+  *read.lock().unwrap() = true;
+  cv.notify_all();
+}
+
+/// Waits (at most `limit`) until the event loop has read the monitors once.
+fn wait_for_first_screens(limit: Duration) -> bool {
+  let (read, cv) = &SCREENS_READ;
+  let guard = read.lock().unwrap();
+  let (guard, _) = cv.wait_timeout_while(guard, limit, |read| !*read).unwrap();
+  *guard
 }
 
 /// Event-loop thread: refreshes the screens through `window` and records
@@ -416,7 +439,11 @@ pub fn refresh_window_screen(window_id: u32, window: &Window) {
   }
 }
 
+/// The cached screens. Called from the runtime's thread; until the event
+/// loop has read the monitors for the first time (just after it starts),
+/// this waits for that read instead of answering with no screens.
 pub fn screens() -> Vec<LaufeyScreen> {
+  wait_for_first_screens(FIRST_SCREENS_WAIT);
   SCREENS.lock().unwrap().clone()
 }
 
@@ -512,6 +539,26 @@ mod tests {
     set_quit_on_last_window_closed(false);
     assert!(!should_end_loop_after_last_window());
     set_quit_on_last_window_closed(true);
+  }
+
+  #[test]
+  fn screens_waits_for_the_first_read() {
+    // Before the event loop has read the monitors a caller waits (bounded)
+    // instead of getting an empty list; the read wakes it.
+    let waiter = std::thread::spawn(|| {
+      let started = Instant::now();
+      let read = wait_for_first_screens(Duration::from_secs(10));
+      (read, started.elapsed())
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    mark_screens_read();
+    let (read, waited) = waiter.join().unwrap();
+    assert!(read);
+    assert!(waited < Duration::from_secs(5));
+    // Once read, it answers at once.
+    let started = Instant::now();
+    assert!(wait_for_first_screens(Duration::from_secs(10)));
+    assert!(started.elapsed() < Duration::from_secs(1));
   }
 
   #[test]

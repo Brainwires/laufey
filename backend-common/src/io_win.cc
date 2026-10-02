@@ -13,6 +13,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_sync_call.h"
 
 #include <windows.h>
 #include <objbase.h>
@@ -24,7 +25,6 @@
 #include <wrl/client.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <thread>
 #include <map>
 #include <memory>
@@ -82,10 +82,10 @@ void WinIoInit() {
     // own message loop, so a native modal loop running there (a file dialog,
     // a drag) never stalls the engine's UI thread, whatever that thread's own
     // pump does with foreign windows.
-    std::mutex m;
-    std::condition_variable cv;
-    bool ready = false;
-    std::thread([&] {
+    // `started` lives in this frame; Done() is the thread's last access to
+    // it (laufey_sync_call.h).
+    SyncCall started;
+    std::thread([&started] {
       OleInitialize(nullptr);
       WNDCLASSEXW wc = {};
       wc.cbSize = sizeof(wc);
@@ -95,15 +95,9 @@ void WinIoInit() {
       RegisterClassExW(&wc);
       HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
                                   HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
-      {
-        // Notify under the lock: once `ready` is seen WinIoInit returns and
-        // m / cv (its stack frame) are gone.
-        std::lock_guard<std::mutex> lock(m);
-        g_io_thread = GetCurrentThreadId();
-        g_io_hwnd = hwnd;
-        ready = true;
-        cv.notify_one();
-      }
+      g_io_thread = GetCurrentThreadId();
+      g_io_hwnd = hwnd;
+      started.Done();
       if (!hwnd)
         return;
       MSG msg;
@@ -112,8 +106,7 @@ void WinIoInit() {
         DispatchMessageW(&msg);
       }
     }).detach();
-    std::unique_lock<std::mutex> lock(m);
-    cv.wait(lock, [&] { return ready; });
+    started.Wait();
   });
 }
 

@@ -93,6 +93,74 @@ jobs:
             -o "$RUNNER_TEMP/single_instance_test"
           "$RUNNER_TEMP/single_instance_test"
 
+  # backend-winit-common's unit tests (click counting, frame offsets, resize
+  # reporting, file-drop batching, window-API bookkeeping). Pure logic, no
+  # display, but several are per-OS (cfg-gated), so every desktop OS runs them.
+  test-winit-common:
+    name: cargo test (backend-winit-common) / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: test-winit-common
+          key: ${{ matrix.os }}
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+      - run: cargo test -p laufey-backend-winit-common --lib
+
+  # The cross-thread rendezvous behind the synchronous UI-thread calls
+  # (backend-common/include/laufey_sync_call.h: cef_invoke_sync,
+  # gtk_invoke_sync, GtkRunSync, WinIoInit) and the passkey ceremony's
+  # timeout thread, under ThreadSanitizer: a notify after the waiter may have
+  # destroyed its condition variable is reported as a data race on the first
+  # call it happens to, where a plain run only hangs now and then.
+  tsan:
+    name: ThreadSanitizer (backend-common)
+    runs-on: ubuntu-24.04
+    env:
+      TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v7
+      # The runner kernel randomizes mmap with 32 bits, which ThreadSanitizer's
+      # shadow memory layout doesn't support ("unexpected memory mapping").
+      - name: Allow ThreadSanitizer's memory layout
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: sync_call_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include \
+            backend-common/tests/sync_call_test.cc -o "$RUNNER_TEMP/sync_call_test"
+          "$RUNNER_TEMP/sync_call_test"
+      - name: passkey_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/passkey_test.cc backend-common/src/passkey.cc \
+            backend-common/src/single_instance.cc \
+            backend-common/src/single_instance_posix.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/passkey_test"
+          "$RUNNER_TEMP/passkey_test"
+      - name: single_instance_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/single_instance_test.cc \
+            backend-common/src/single_instance.cc \
+            backend-common/src/single_instance_posix.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/single_instance_test"
+          "$RUNNER_TEMP/single_instance_test"
+
   build-winit:
     name: winit / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -159,7 +227,7 @@ jobs:
   # Drives the *same* backend-agnostic native_e2e_runtime under each backend:
   #   Layer 0 (all): in-process readback + event-callback + clipboard + menu/
   #                  tray click round-trips (via the test_click_menu_item hook).
-  #   Layer 1 (Linux, cef): D-Bus StatusNotifier/dbusmenu observer.
+  #   Layer 1 (Linux, cef): D-Bus StatusNotifier/dbusmenu observer (run below).
   #
   # macOS exercises all three backends (both native-chrome codebases) end to
   # end. Non-macOS legs are included only where they pass reliably; the rest are
@@ -188,6 +256,9 @@ jobs:
           # The Layer-0 battery is excluded on webview/linux (see above); the
           # storage e2e and the request-body round trip run there.
           - { os: ubuntu-22.04, backend: webview, layer0_excluded: true }
+          # arm64: WebView2 on Windows on Arm, CEF on Linux arm64.
+          - { os: windows-11-arm, backend: webview }
+          - { os: ubuntu-22.04-arm, backend: cef }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -218,12 +289,16 @@ jobs:
             libx11-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0 \
             libwayland-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
 
+      # openbox: a window manager under Xvfb for the window-API and HiDPI
+      # steps; xdotool + x11-utils: real X input and window geometry;
+      # xdg-utils: the registered URL scheme opened with xdg-open.
       - name: Install dependencies (Linux, webview)
         if: runner.os == 'Linux' && matrix.backend == 'webview'
         run: |
           sudo apt-get update
           sudo apt-get install -y make cmake ninja-build pkg-config xvfb dbus-x11 \
-            libwebkit2gtk-4.1-dev libgtk-3-dev
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            openbox xdotool x11-utils xdg-utils
 
       - name: Install dependencies (Linux, cef)
         if: runner.os == 'Linux' && matrix.backend == 'cef'
@@ -234,7 +309,8 @@ jobs:
             libatk1.0-dev libatk-bridge2.0-dev libcups2-dev libdrm-dev libgtk-3-dev \
             libgbm-dev libasound2-dev libpango1.0-dev libcairo2-dev libxcomposite-dev \
             libxdamage-dev libxrandr-dev libxkbcommon-dev libdbus-1-dev libxext-dev \
-            libxfixes-dev libayatana-appindicator3-1
+            libxfixes-dev libayatana-appindicator3-1 \
+            openbox xdotool x11-utils xdg-utils
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -266,6 +342,10 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows' && matrix.backend != 'winit'
+        with:
+          # windows-11-arm: an ARM64 toolchain, so CMake links the arm64
+          # WebView2 loader (as in build-webview).
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Build backend
         if: ${{ !(runner.os == 'Windows' && matrix.backend == 'cef') }}
@@ -307,6 +387,26 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --scheme-body
+
+      # Layer 1 (Linux, cef): the D-Bus StatusNotifier/dbusmenu observer
+      # plays the desktop shell, checks the real appindicator tray from
+      # outside, fires a dbusmenu Event that must reach the app's on_click,
+      # and fails unless the whole battery passed under it.
+      - name: Layer 1 — D-Bus tray / menu observer (Linux, cef)
+        if: runner.os == 'Linux' && matrix.backend == 'cef'
+        timeout-minutes: 10
+        shell: bash
+        env:
+          LAUFEY_E2E_REQUIRE_TRAY: "1"
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --layer1
+
+      # Window state, constraints, screens, title bar and backdrops (API 38)
+      # on their own, on every leg. On Linux under a window manager
+      # (openbox): maximize / minimize / fullscreen must apply, not N/A.
+      - name: Window API — state, constraints, screens (a WM on Linux)
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --window-api
 
       # App lifetime (API 38): keep-alive with no window, then quit() ending
       # the event loop. Ends the process, so it runs on its own. Every leg,
@@ -393,6 +493,28 @@ jobs:
         shell: bash
         run: scripts/single-instance-e2e-run.sh ${{ matrix.backend }}
 
+      # HiDPI: the window-API battery at a device scale factor of 2 (Linux:
+      # CEF --force-device-scale-factor=2, WebKitGTK GDK_SCALE=2; Windows:
+      # the display's own scale, raised first). Sizes and positions must stay
+      # in DIPs, the page's devicePixelRatio and the reported scales must be
+      # the factor, and the window system must have the window at that many
+      # physical pixels. macOS runners have one 1x display and no way to add
+      # a 2x one without a person, so it runs on Linux and Windows. Last in
+      # the job: the Windows display stays scaled.
+      - name: Raise the display scale (Windows)
+        id: scale
+        if: runner.os == 'Windows' && matrix.backend != 'winit'
+        shell: pwsh
+        run: scripts/windows-display-scale.ps1 -Percent 200
+
+      - name: HiDPI
+        if: runner.os == 'Linux' || (runner.os == 'Windows' && matrix.backend != 'winit' && steps.scale.outputs.scale != '1')
+        timeout-minutes: 10
+        shell: bash
+        env:
+          LAUFEY_E2E_EXPECT_SCALE: ${{ runner.os == 'Windows' && steps.scale.outputs.scale || '2' }}
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --hidpi
+
       # A backend that crashed mid-run leaves only "exited before reporting
       # an overall result"; print the crash report it left (any e2e step).
       - name: Crash reports (macOS)
@@ -410,11 +532,6 @@ jobs:
           # whole report is too long for the log.
           ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -3 |
             while read -r f; do python3 scripts/print-crash-report.py "$f"; done
-
-      # Layer 1 (Linux D-Bus StatusNotifier/dbusmenu observer) is built above
-      # (compile-checked on real Linux) but not run here yet: the cef leg now
-      # creates a real appindicator tray (runtime lib installed above), so
-      # running the driver there is the next step once it's been proven green.
 
   build-webview:
     name: webview / ${{ matrix.target }}
