@@ -94,29 +94,14 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
     CefScheduleWindowStateRecheck(laufey_id_);
 }
 
-// The constraints are in set_window_size units (CefWindow::GetSize, the
-// whole window), while Chromium applies the delegate's minimum / maximum to
-// the client area. Subtract the frame the window has right now.
-static CefSize FrameDelta(CefRefPtr<CefView> view) {
-  CefRefPtr<CefPanel> panel = view ? view->AsPanel() : nullptr;
-  CefRefPtr<CefWindow> window = panel ? panel->AsWindow() : nullptr;
-  if (!window)
-    return CefSize();
-  CefSize size = window->GetSize();
-  CefRect client = window->GetClientAreaBoundsInScreen();
-  return CefSize((std::max)(0, size.width - client.width),
-                 (std::max)(0, size.height - client.height));
-}
-
+// The constraints are page (client) sizes, like set_window_size, which is
+// what Chromium applies the delegate's minimum / maximum to.
 CefSize LaufeyWindowDelegate::GetMinimumSize(CefRefPtr<CefView> view) {
   laufey_common::SizeConstraints c =
       laufey_common::GetSizeConstraints(laufey_id_);
   if (c.min_width == 0 && c.min_height == 0)
     return CefSize();
-  CefSize frame = FrameDelta(view);
-  return CefSize(
-      c.min_width > 0 ? (std::max)(1, c.min_width - frame.width) : 0,
-      c.min_height > 0 ? (std::max)(1, c.min_height - frame.height) : 0);
+  return CefSize(c.min_width, c.min_height);
 }
 
 CefSize LaufeyWindowDelegate::GetMaximumSize(CefRefPtr<CefView> view) {
@@ -126,10 +111,8 @@ CefSize LaufeyWindowDelegate::GetMaximumSize(CefRefPtr<CefView> view) {
   // one gets a size nothing reaches.
   if (c.max_width == 0 && c.max_height == 0)
     return CefSize();
-  CefSize frame = FrameDelta(view);
-  return CefSize(
-      c.max_width > 0 ? (std::max)(1, c.max_width - frame.width) : 1 << 24,
-      c.max_height > 0 ? (std::max)(1, c.max_height - frame.height) : 1 << 24);
+  return CefSize(c.max_width > 0 ? c.max_width : 1 << 24,
+                 c.max_height > 0 ? c.max_height : 1 << 24);
 }
 
 void LaufeyWindowDelegate::OnWindowBoundsChanged(CefRefPtr<CefWindow> window,

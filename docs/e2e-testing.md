@@ -198,8 +198,20 @@ and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a bo
 over 1 MB, and an empty body) to the scheme handler, which reads each one with
 `read_body` and echoes it. The battery checks that the handler received exactly
 the bytes sent and that the page got an identical echo
-(`examples/native_e2e/src/body_echo.rs`). `LAUFEY_E2E_ONLY=scheme-body`
-(`native-e2e-run.sh <backend> --scheme-body`) runs only this check.
+(`examples/native_e2e/src/body_echo.rs`).
+
+Responses that never end are read incrementally: a page at `app://e2e-stream/`
+reads a never-ending response with `fetch` (its first chunks, status and
+headers, then `reader.cancel()`), aborts one with an `AbortController`, reads
+Server-Sent Events with `EventSource` (a default and a named event, the event
+id, then `close()`) and a never-ending `XMLHttpRequest` to `LOADING`, and reads
+a 6 MiB binary body (over the WebView2 credit window) byte for byte. Each
+never-ending route keeps writing heartbeats until a write fails, so the battery
+also asserts that every cancellation reached the handler
+(`examples/native_e2e/src/stream_checks.rs`; see
+[Streaming responses](custom-schemes.md#streaming-responses)).
+`LAUFEY_E2E_ONLY=scheme-body` (`native-e2e-run.sh <backend> --scheme-body`) runs
+only these two checks.
 
 ### D. OS-observer introspection — _for chrome with no getter_
 

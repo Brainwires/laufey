@@ -1446,7 +1446,7 @@ struct laufey_backend_api {
   // --- Size constraints (API >= 38) ------------------------------------------
   //
   // Minimum and maximum size of the window, in the same units as
-  // set_window_size (content size in DIP on most backends; see
+  // set_window_size (content size in DIP on every backend; see
   // docs/window-management.md). 0 on an axis means "no constraint" for that
   // axis. The OS enforces them while the user resizes, and set_window_size
   // clamps to them; if the current size is outside the new range the window

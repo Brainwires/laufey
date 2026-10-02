@@ -212,14 +212,14 @@ win.set_max_size(1600, 1200);
 win.set_size_constraints(SizeConstraints { min_width: 400, min_height: 300, max_width: 0, max_height: 0 });
 ```
 
-Constraints are in the same units as `set_size` (see below); 0 on an axis means
-no limit there, and a maximum below the minimum is raised to it. The OS enforces
-them while the user resizes (`contentMinSize` / `contentMaxSize` on macOS,
-`WM_GETMINMAXINFO` on Windows, GTK geometry hints, the CEF window delegate's
-`GetMinimumSize` / `GetMaximumSize`, winit's min / max inner size), `set_size`
-clamps to them on every backend (some OS calls, such as `-setContentSize:` and
-`SetWindowPos`, ignore the limits), and a window outside a new range is resized
-into it.
+Constraints are content sizes in the same units as `set_size` (see below); 0 on
+an axis means no limit there, and a maximum below the minimum is raised to it.
+The OS enforces them while the user resizes (`contentMinSize` / `contentMaxSize`
+on macOS, `WM_GETMINMAXINFO` on Windows, GTK geometry hints, the CEF window
+delegate's `GetMinimumSize` / `GetMaximumSize`, winit's min / max inner size),
+`set_size` clamps to them on every backend (some OS calls, such as
+`-setContentSize:` and `SetWindowPos`, ignore the limits), and a window outside
+a new range is resized into it.
 
 ## Screens (API ≥ 38)
 
@@ -327,14 +327,18 @@ build), so an app can surface "unsupported" instead of pretending:
 
 "(WM)": applied by the window manager; nothing changes under a bare X server.
 
-**Units.** Sizes, constraints, positions and screen rectangles share one space
-per backend: DIP (points) everywhere except the WebView2 backend, whose
-`get_size` / `set_size` / `get_position` have always been the outer window
-rectangle in physical pixels (a per-monitor-DPI-aware process); its constraints
-and screens use the same physical pixels so they compare directly. On CEF
-(Windows and macOS) `get_size` is `CefWindow::GetSize`, the whole window
-including its frame, so the constraints are whole-window sizes there too (the
-backend converts them to the client area Chromium enforces).
+**Units.** Sizes, constraints, positions and screen rectangles are in DIP
+(density-independent pixels: points on macOS, CSS pixels at zoom 1) on every
+backend. `get_size` / `set_size` and the size constraints are the window's
+**content** area, the page (`window.innerWidth` / `innerHeight`), and
+`get_outer_size` is the whole window, frame included; `get_position` is the
+frame's top-left corner and `get_inner_position` the content's. On Windows the
+process is per-monitor DPI aware: a window's geometry is converted with the
+scale of the monitor it is on, a screen's with its own, so DIP coordinates are
+continuous within one monitor (as in winit) but not across monitors with
+different scales. WebView2 reported physical pixels and the outer window
+rectangle for `get_size` / `set_size` in earlier versions, and CEF on Windows
+and macOS the whole window; both now size the content like the other backends.
 
 ## Keeping a tray app alive; quitting (API ≥ 38)
 

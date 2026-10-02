@@ -161,9 +161,9 @@ void MacUnwatchWindowState(void* nswindow);
 // notifications instead. Removed by MacUnwatchWindowState.
 void MacObserveWindowStateChanges(void* nswindow, uint32_t window_id,
                                   void (*on_change)(uint32_t window_id));
-// Size constraints on the window FRAME (minSize / maxSize), for a backend
-// whose set_window_size units are frame sizes (CEF).
-void MacApplyFrameSizeConstraints(void* nswindow, const SizeConstraints& c);
+// Size constraints on the window's content (contentMinSize /
+// contentMaxSize), for a backend that does not set them itself (CEF).
+void MacApplyContentSizeConstraints(void* nswindow, const SizeConstraints& c);
 // Screens (any thread; hops to the main thread when needed).
 std::vector<laufey_screen_t> MacGetScreens();
 int64_t MacScreenForWindow(void* nswindow);
