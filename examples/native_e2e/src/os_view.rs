@@ -4,7 +4,7 @@
 //!
 //! - `content_rect` reads where a window's content really is, in physical
 //!   pixels, from the window system rather than from laufey: X11 through
-//!   xdotool, Windows through Win32. The HiDPI checks compare it with
+//!   xwininfo, Windows through Win32. The HiDPI checks compare it with
 //!   laufey's DIP sizes and positions.
 //! - On X11, `xdo` drives xdotool (XTEST) for real key presses and pointer
 //!   drags. scripts/native-e2e-run.sh sets LAUFEY_E2E_XDOTOOL on Linux when
@@ -88,15 +88,27 @@ pub async fn x_focus(title: &str) -> bool {
 pub fn content_rect(title: &str) -> Option<(i32, i32, i32, i32)> {
   #[cfg(target_os = "linux")]
   {
+    // xwininfo's absolute origin (XTranslateCoordinates to the root):
+    // xdotool getwindowgeometry is off by the frame for a window a
+    // reparenting window manager (openbox) has framed.
     let id = x_window(title)?;
-    let shell = xdo(&["getwindowgeometry", "--shell", &id])?;
-    let field = |name: &str| -> Option<i32> {
-      shell
+    let out = std::process::Command::new("xwininfo")
+      .args(["-id", &id])
+      .output()
+      .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = |label: &str| -> Option<i32> {
+      text
         .lines()
-        .find_map(|l| l.strip_prefix(&format!("{name}=")))
+        .find_map(|l| l.trim().strip_prefix(label))
         .and_then(|v| v.trim().parse().ok())
     };
-    Some((field("X")?, field("Y")?, field("WIDTH")?, field("HEIGHT")?))
+    Some((
+      field("Absolute upper-left X:")?,
+      field("Absolute upper-left Y:")?,
+      field("Width:")?,
+      field("Height:")?,
+    ))
   }
   #[cfg(windows)]
   {

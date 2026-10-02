@@ -260,10 +260,17 @@ mod linux {
       Proxy::new(conn, bus_name, menu_path.as_str(), "com.canonical.dbusmenu")
         .await?;
 
-    let (_revision, root): (u32, OwnedValue) = menu
-      .call("GetLayout", &(0i32, -1i32, Vec::<String>::new()))
+    // The reply is `(u (ia{sv}av))`: a revision and a bare structure, not a
+    // variant, so read the whole body dynamically.
+    let reply = menu
+      .call_method("GetLayout", &(0i32, -1i32, Vec::<String>::new()))
       .await?;
-    let root_node = parse_node(&root).expect("layout root");
+    let body = reply.body();
+    let layout: zbus::zvariant::Structure<'_> = body.deserialize()?;
+    let Some(root_node) = layout.fields().get(1).and_then(parse_node) else {
+      check("dbusmenu GetLayout returns a layout root", false, failed);
+      return Ok(());
+    };
     check("menu has children", !root_node.children.is_empty(), failed);
 
     if let Some(target) = find_by_label(&root_node, "Ping") {
@@ -329,7 +336,9 @@ mod linux {
     check("StatusNotifierItem registered on bus", true, &failed);
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    run_assertions(&conn, &bus_name, &sni_path, &failed).await?;
+    if let Err(e) = run_assertions(&conn, &bus_name, &sni_path, &failed).await {
+      check(&format!("D-Bus assertions ran ({e})"), false, &failed);
+    }
 
     if let Ok(Some(n)) =
       tokio::time::timeout(Duration::from_secs(3), notif_rx.recv()).await
