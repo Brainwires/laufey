@@ -9,6 +9,8 @@
 
 #include <laufey.h>
 
+#include "laufey_menu.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -53,9 +55,14 @@ struct NotificationOptions {
   bool silent = false;
   bool require_interaction = false;
   std::vector<NotificationAction> actions;
-  // PNG bytes; used by the Windows balloon. Ignored on other platforms
-  // until macOS gets image-attachment support.
+  // PNG bytes: the toast's app logo on Windows, the image-data hint on
+  // Linux. Not shown on macOS (the app icon is the bundle's).
   std::vector<uint8_t> icon_png;
+  // (API >= 41) Unix time in milliseconds to deliver at; 0 = now.
+  int64_t schedule_at_ms = 0;
+  // (API >= 41) Opaque, handed back in notification responses.
+  bool has_data = false;
+  std::string data;
 };
 
 // Parses a laufey_value_t dict into a plain NotificationOptions. Takes
@@ -65,38 +72,9 @@ struct NotificationOptions {
 NotificationOptions ParseNotificationOptions(laufey_value_t* options,
                                              const laufey_backend_api_t* api);
 
-#ifdef __APPLE__
-// UNUserNotificationCenter-backed (10.14+). Requires the process to run
-// inside a bundled .app with a CFBundleIdentifier; without one, delivery
-// fails and CLOSED is fired synthetically. Action buttons supported via
-// UNNotificationCategory.
-uint32_t ShowNotificationMac(const NotificationOptions& opts,
-                             laufey_notification_event_fn on_event,
-                             void* user_data);
-void CloseNotificationMac(uint32_t notification_id);
-#endif
-
-#ifdef __linux__
-// Shells out to `notify-send`. Fire-and-forget — only synthesizes
-// SHOWN (synchronously after spawn) and CLOSED (from the matching
-// CloseNotificationLinux call). Click / action events are not surfaced
-// because notify-send has no IPC channel back.
-uint32_t ShowNotificationLinux(const NotificationOptions& opts,
-                               laufey_notification_event_fn on_event,
-                               void* user_data);
-void CloseNotificationLinux(uint32_t notification_id);
-#endif
+// The notification entry points live in laufey_notifications.h.
 
 #ifdef _WIN32
-// Shell_NotifyIcon balloon notification. On Windows 10/11 the shell
-// renders the balloon as a system toast (with grouping, Action Center
-// entry, etc.). Click → CLICKED; dismiss / timeout → CLOSED. Action
-// buttons aren't supported by NIIF balloons — `opts.actions` is ignored
-// on Windows.
-uint32_t ShowNotificationWin(const NotificationOptions& opts,
-                             laufey_notification_event_fn on_event,
-                             void* user_data);
-void CloseNotificationWin(uint32_t notification_id);
 
 // ---------------------------------------------------------------------------
 // Tray / status-bar icon (Windows, Shell_NotifyIcon)
@@ -231,23 +209,8 @@ void ClipboardWriteTextLinux(const std::string& text);
 // `kind` is one of LAUFEY_PERMISSION_* from laufey.h. Results are reported via
 // the callback (status one of LAUFEY_PERMISSION_STATUS_*).
 
-#ifdef __APPLE__
-// UNUserNotificationCenter-backed for LAUFEY_PERMISSION_NOTIFICATIONS.
-// Reports UNSUPPORTED if the process isn't running inside a bundled
-// .app, or if `kind` is anything other than notifications.
-void QueryPermissionMac(int kind, laufey_permission_callback_fn cb,
-                        void* user_data);
-void RequestPermissionMac(int kind, laufey_permission_callback_fn cb,
-                          void* user_data);
-#endif
-
-// Windows + Linux stub: notify-send (Linux) and Shell_NotifyIcon balloons
-// (Windows) have no permission model, so we report GRANTED synchronously
-// for LAUFEY_PERMISSION_NOTIFICATIONS and UNSUPPORTED for anything else.
-void QueryPermissionStub(int kind, laufey_permission_callback_fn cb,
-                         void* user_data);
-void RequestPermissionStub(int kind, laufey_permission_callback_fn cb,
-                           void* user_data);
+// Notification permissions: QueryNotificationPermission /
+// RequestNotificationPermission in laufey_notifications.h.
 
 // ---------------------------------------------------------------------------
 // Keyboard event key/code mapping (W3C UI Events)
@@ -363,6 +326,33 @@ void* BuildNSMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api,
                            uint32_t window_id);
 #endif
 
+#ifdef __OBJC__
+// The same from parsed entries (laufey_menu.h): items with an accelerator
+// get it as their key equivalent.
+NSMenu* BuildNSMenuFromEntries(const std::vector<MenuEntry>& entries,
+                               laufey_menu_click_fn on_click,
+                               void* on_click_data, uint32_t window_id);
+// Records window `window_id`'s app menu (nil forgets it) for
+// TestTriggerMenuAcceleratorMac. Any thread.
+void RegisterWindowMenuMac(uint32_t window_id, NSMenu* menu);
+#endif
+
+// Backs test_trigger_menu_accelerator: a key-down NSEvent for the
+// accelerator through -[NSMenu performKeyEquivalent:] on the window's app
+// menu, the matching AppKit does for a key press. Any thread.
+bool TestTriggerMenuAcceleratorMac(uint32_t window_id, const char* accelerator);
+// Called by the menu builder's target for each item click (main thread).
+void NoteMenuItemClickedMac();
+
+// Pops a context menu up at (x, y) in `nsview` (an NSView*, top-left origin
+// as for show_context_menu) and blocks in its tracking loop until it closes;
+// `on_closed` fires (from the main queue) after it closed. Main thread.
+void ShowContextMenuMac(void* nsview, int x, int y,
+                        const std::vector<MenuEntry>& entries,
+                        laufey_menu_click_fn on_click, void* on_click_data,
+                        laufey_menu_closed_fn on_closed, void* on_closed_data,
+                        uint32_t window_id);
+
 // ---------------------------------------------------------------------------
 // Tray / status-bar icon (macOS, NSStatusItem)
 // ---------------------------------------------------------------------------
@@ -414,6 +404,29 @@ void* BuildGtkMenuFromValue(laufey_value_t* val,
                             const laufey_backend_api_t* api, uint32_t window_id,
                             laufey_menu_click_fn on_click, void* on_click_data,
                             bool is_menu_bar);
+#endif
+
+#ifdef __GTK_H__
+// The same from parsed entries. With an `accel_group` (the window's) the
+// enabled items' accelerators are bound in it; without one they are only
+// shown.
+GtkWidget* BuildGtkMenuFromEntries(const std::vector<MenuEntry>& entries,
+                                   uint32_t window_id,
+                                   laufey_menu_click_fn on_click,
+                                   void* on_click_data, bool is_menu_bar,
+                                   GtkAccelGroup* accel_group);
+// Pops a context menu up at (x, y) in `relative_to`'s coordinates (the web
+// view). Non-blocking; `on_closed` fires from an idle after the menu closed
+// (after the chosen item's click), or right away when it couldn't be shown.
+// GTK thread.
+void ShowGtkContextMenu(GtkWidget* relative_to, int x, int y,
+                        const std::vector<MenuEntry>& entries,
+                        uint32_t window_id, laufey_menu_click_fn on_click,
+                        void* on_click_data, laufey_menu_closed_fn on_closed,
+                        void* on_closed_data);
+// Backs test_trigger_menu_accelerator: gtk_accel_groups_activate on the
+// window, what GtkWindow's key-press handler runs first. GTK thread.
+bool TestTriggerMenuAcceleratorGtk(GtkWidget* window, const char* accelerator);
 #endif
 
 // ---------------------------------------------------------------------------

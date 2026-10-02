@@ -342,6 +342,27 @@ jobs:
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --devtools-off
 
+      # Menus and notifications (API 41): an app-menu accelerator through the
+      # backend's own dispatch (and a real Ctrl+Shift+F9 on Windows), the
+      # context-menu close callback, notification responses buffered until a
+      # handler registers, live action / body clicks, schedule / list /
+      # cancel round trips, a real ActionInvoked from a stand-in notification
+      # server on Linux and the toast COM activator on Windows. Every leg;
+      # Winit reports N/A. See docs/e2e-testing.md.
+      - name: Menus and notifications
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --menus-notifications
+
+      # The cold-start toast click (Windows): COM starts the app from the
+      # activator registration the step above wrote, and the click reaches
+      # the response handler as the launch.
+      - name: Notifications — cold-start click (Windows)
+        if: runner.os == 'Windows' && matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: pwsh
+        run: scripts/notification-coldstart-e2e.ps1 ${{ matrix.backend }}
+
       # Per-app web storage (LAUFEY_APP_ID / LAUFEY_DATA_DIR): persistence
       # across relaunches, isolation between apps, unchanged defaults. See
       # docs/app-data.md.

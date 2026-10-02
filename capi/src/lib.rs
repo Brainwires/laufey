@@ -33,12 +33,15 @@ pub use io::*;
 mod system;
 pub use system::*;
 
+mod menus_notifications;
+pub use menus_notifications::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 40;
+pub const LAUFEY_API_VERSION: u32 = 41;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -93,8 +96,11 @@ static TRAY_DBLCLICK_HANDLERS: OnceLock<
   Mutex<HashMap<u32, Box<dyn Fn() + Send + Sync>>>,
 > = OnceLock::new();
 static NOTIFICATION_HANDLERS: OnceLock<
-  Mutex<HashMap<u32, Arc<dyn Fn(NotificationEvent) + Send + Sync>>>,
+  Mutex<HashMap<u32, NotificationHandler>>,
 > = OnceLock::new();
+
+/// A notification's event callback: the notification id and the event.
+type NotificationHandler = Arc<dyn Fn(u32, NotificationEvent) + Send + Sync>;
 
 enum BindingHandler {
   Sync(Box<dyn Fn(JsCall) + Send + Sync>),
@@ -2920,7 +2926,7 @@ pub enum NotificationEvent {
 }
 
 /// An action button on a notification.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NotificationAction {
   pub id: String,
   pub title: String,
@@ -2939,6 +2945,8 @@ pub struct Notification {
   silent: Option<bool>,
   require_interaction: Option<bool>,
   actions: Vec<NotificationAction>,
+  schedule_at_ms: Option<i64>,
+  data: Option<String>,
 }
 
 /// Handle to a shown notification. Use [`NotificationHandle::close`] to
@@ -3027,9 +3035,45 @@ impl Notification {
     self
   }
 
+  /// Deliver the notification at `at` instead of now (API 41; see
+  /// [`notification_capabilities`]). A scheduled notification is identified
+  /// by its [`tag`](Notification::tag): give it one to cancel it
+  /// ([`cancel_notification`]) or recognize its clicks
+  /// ([`set_notification_response_handler`]); without one, `show` makes one
+  /// up. A time in the past shows it now.
+  pub fn schedule_at(self, at: std::time::SystemTime) -> Self {
+    let ms = at
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_millis() as i64)
+      .unwrap_or(0);
+    self.schedule_at_ms(ms)
+  }
+
+  /// [`Notification::schedule_at`] with a Unix time in milliseconds.
+  pub fn schedule_at_ms(mut self, unix_ms: i64) -> Self {
+    self.schedule_at_ms = if unix_ms > 0 { Some(unix_ms) } else { None };
+    self
+  }
+
+  /// Opaque data handed back with the notification's clicks (API 41), at
+  /// most [`LAUFEY_NOTIFICATION_MAX_DATA_BYTES`].
+  pub fn data(mut self, data: impl Into<String>) -> Self {
+    self.data = Some(data.into());
+    self
+  }
+
   fn to_value(&self) -> Value {
     let mut dict = HashMap::new();
     dict.insert("title".to_string(), Value::String(self.title.clone()));
+    if let Some(at) = self.schedule_at_ms {
+      dict.insert("schedule_at".to_string(), Value::Double(at as f64));
+      if self.tag.is_none() {
+        dict.insert("tag".to_string(), Value::String(generated_tag()));
+      }
+    }
+    if let Some(data) = &self.data {
+      dict.insert("data".to_string(), Value::String(data.clone()));
+    }
     if let Some(body) = &self.body {
       dict.insert("body".to_string(), Value::String(body.clone()));
     }
@@ -3065,7 +3109,7 @@ impl Notification {
   /// it programmatically. Returns a handle with id 0 if the backend
   /// doesn't support notifications.
   pub fn show(self) -> NotificationHandle {
-    self.show_with_handler::<fn(NotificationEvent)>(None)
+    self.show_with_handler(None)
   }
 
   /// Show the notification and register a callback for events
@@ -3074,13 +3118,23 @@ impl Notification {
   where
     F: Fn(NotificationEvent) + Send + Sync + 'static,
   {
-    self.show_with_handler(Some(handler))
+    self.show_with_handler(Some(Arc::new(move |_id, event| handler(event))))
   }
 
-  fn show_with_handler<F>(self, handler: Option<F>) -> NotificationHandle
+  /// [`Notification::on_event`] with the notification id passed to the
+  /// callback, so an event that arrives before `on_event_with_id` returned
+  /// (the shown event, on a backend thread) can still be attributed.
+  pub fn on_event_with_id<F>(self, handler: F) -> NotificationHandle
   where
-    F: Fn(NotificationEvent) + Send + Sync + 'static,
+    F: Fn(u32, NotificationEvent) + Send + Sync + 'static,
   {
+    self.show_with_handler(Some(Arc::new(handler)))
+  }
+
+  fn show_with_handler(
+    self,
+    handler: Option<NotificationHandler>,
+  ) -> NotificationHandle {
     let api = api();
     let Some(show_fn) = api.show_notification else {
       return NotificationHandle { id: 0 };
@@ -3097,18 +3151,35 @@ impl Notification {
     let id = unsafe { show_fn(api.backend_data, raw, cb, user_data) };
     if id != 0 {
       if let Some(h) = handler {
-        notification_handlers()
-          .lock()
-          .unwrap()
-          .insert(id, Arc::new(h));
+        // An event can arrive (on a backend thread) before the handler is
+        // in the map: the callback holds it in the pending map, under the
+        // same lock, and it is delivered here.
+        let early = {
+          let mut state = notification_handlers().lock().unwrap();
+          state.insert(id, h.clone());
+          early_notification_events().lock().unwrap().remove(&id)
+        };
+        for event in early.unwrap_or_default() {
+          let terminal = matches!(event, NotificationEvent::Closed);
+          h(id, event);
+          if terminal {
+            notification_handlers().lock().unwrap().remove(&id);
+          }
+        }
       }
     }
     NotificationHandle { id }
   }
 }
 
-fn notification_handlers(
-) -> &'static Mutex<HashMap<u32, Arc<dyn Fn(NotificationEvent) + Send + Sync>>>
+fn early_notification_events(
+) -> &'static Mutex<HashMap<u32, Vec<NotificationEvent>>> {
+  static EARLY: OnceLock<Mutex<HashMap<u32, Vec<NotificationEvent>>>> =
+    OnceLock::new();
+  EARLY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn notification_handlers() -> &'static Mutex<HashMap<u32, NotificationHandler>>
 {
   NOTIFICATION_HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -3137,14 +3208,35 @@ unsafe extern "C" fn notification_event_callback(
   };
   let is_terminal = matches!(event, NotificationEvent::Closed);
   // Clone the Arc out of the map so the handler runs without the lock
-  // held — handlers may legitimately call back into the laufey API.
-  let handler = notification_handlers()
-    .lock()
-    .unwrap()
-    .get(&notification_id)
-    .cloned();
+  // held — handlers may legitimately call back into the laufey API. An
+  // event for a notification whose `show` hasn't returned yet (so its
+  // handler isn't in the map) waits in the early-event map, decided under
+  // the handlers lock so `show_with_handler` can't miss it.
+  let handler = {
+    let handlers = notification_handlers().lock().unwrap();
+    match handlers.get(&notification_id).cloned() {
+      Some(h) => Some(h),
+      None => {
+        let mut early = early_notification_events().lock().unwrap();
+        // Bounded: ids that never get a handler (another caller's) can't
+        // grow it without limit.
+        if early.len() >= 256 && !early.contains_key(&notification_id) {
+          if let Some(&oldest) = early.keys().min() {
+            early.remove(&oldest);
+          }
+        }
+        early
+          .entry(notification_id)
+          .or_default()
+          .push(event.clone());
+        None
+      }
+    }
+  };
   if let Some(h) = handler {
-    h(event);
+    h(notification_id, event);
+  } else {
+    return;
   }
   if is_terminal {
     notification_handlers()
@@ -3158,6 +3250,7 @@ unsafe extern "C" fn notification_event_callback(
 
 pub const LAUFEY_PERMISSION_INVALID: i32 = 0;
 pub const LAUFEY_PERMISSION_NOTIFICATIONS: i32 = 1;
+pub const LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL: i32 = 2;
 
 pub const LAUFEY_PERMISSION_STATUS_GRANTED: i32 = 0;
 pub const LAUFEY_PERMISSION_STATUS_DENIED: i32 = 1;
@@ -3169,6 +3262,10 @@ pub const LAUFEY_PERMISSION_STATUS_UNSUPPORTED: i32 = 3;
 #[repr(i32)]
 pub enum PermissionKind {
   Notifications = LAUFEY_PERMISSION_NOTIFICATIONS,
+  /// (API 41) Request only: quiet ("provisional") notification
+  /// authorization, which macOS grants without a prompt; elsewhere the same
+  /// as `Notifications`.
+  NotificationsProvisional = LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL,
 }
 
 /// Result of [`request_permission`] / [`query_permission`]. Mirrors the

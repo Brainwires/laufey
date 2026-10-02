@@ -13,6 +13,8 @@
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
+#include "laufey_menu.h"
+#include "laufey_notifications.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_system.h"
@@ -184,6 +186,44 @@ class WKWebViewBackend : public LaufeyBackend {
                        void* user_data) override;
   void RequestPermission(int kind, laufey_permission_callback_fn cb,
                          void* user_data) override;
+
+  // Notifications and menus (API >= 41): backend-common.
+  uint32_t NotificationCapabilities() override {
+    return laufey_common::NotificationCapabilities();
+  }
+  void SetNotificationResponseHandler(laufey_notification_response_fn handler,
+                                      void* user_data) override {
+    laufey_common::SetNotificationResponseHandler(handler, user_data);
+  }
+  void ListScheduledNotifications(laufey_notification_list_fn cb,
+                                  void* user_data) override {
+    laufey_common::ListScheduledNotifications(cb, user_data);
+  }
+  void CancelNotification(const char* tag) override {
+    laufey_common::CancelNotification(tag);
+  }
+  bool TestNotificationRespond(const char* tag,
+                               const char* action_id) override {
+    return laufey_common::TestNotificationRespond(tag, action_id);
+  }
+  uint32_t MenuCapabilities() override {
+    return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
+           LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
+           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS;
+  }
+  void ShowContextMenuEx(uint32_t window_id, int x, int y,
+                         laufey_value_t* menu_template,
+                         const laufey_backend_api_t* api,
+                         laufey_menu_click_fn on_click, void* on_click_data,
+                         laufey_menu_closed_fn on_closed,
+                         void* on_closed_data) override;
+  bool TestDismissContextMenu() override {
+    return laufey_common::DismissOpenContextMenu();
+  }
+  bool TestTriggerMenuAccelerator(uint32_t window_id,
+                                  const char* accelerator) override {
+    return laufey_common::TestTriggerMenuAcceleratorMac(window_id, accelerator);
+  }
 
   // Drag and drop, file dialogs, rich clipboard (API >= 39).
   void SetFileDropHandler(laufey_file_drop_fn handler,
@@ -2494,25 +2534,26 @@ void WKWebViewBackend::SetApplicationMenu(uint32_t window_id,
                                           const laufey_backend_api_t* api,
                                           laufey_menu_click_fn on_click,
                                           void* on_click_data) {
+  // Parsed here: the template is the caller's only for this call.
+  auto entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
+      laufey_common::ParseMenuTemplate(menu_template, api, true));
   dispatch_async(dispatch_get_main_queue(), ^{
-    NSMenu* menubar = laufey_common::BuildNSMenuFromValue(
-        menu_template, api, on_click, on_click_data, window_id);
-    if (menubar) {
-      EnsureEditMenu(menubar);
-      // Store the menu for this window
-      {
-        std::lock_guard<std::mutex> lock(windows_mutex_);
-        auto* state = GetWindow(window_id);
-        if (state) {
-          state->menu = menubar;
-        }
-      }
-      // If this window is currently the key window, apply immediately
-      NSWindow* keyWin = [NSApp keyWindow];
-      uint32_t keyWid = LaufeyIdForNSWindow(keyWin);
-      if (keyWid == window_id) {
-        [NSApp setMainMenu:menubar];
-      }
+    NSMenu* menubar = laufey_common::BuildNSMenuFromEntries(
+        *entries, on_click, on_click_data, window_id);
+    EnsureEditMenu(menubar);
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      if (!state)
+        return;
+      state->menu = menubar;
+    }
+    laufey_common::RegisterWindowMenuMac(window_id, menubar);
+    // If this window is currently the key window, apply immediately
+    NSWindow* keyWin = [NSApp keyWindow];
+    uint32_t keyWid = LaufeyIdForNSWindow(keyWin);
+    if (keyWid == window_id) {
+      [NSApp setMainMenu:menubar];
     }
   });
 }
@@ -2522,12 +2563,20 @@ void WKWebViewBackend::ShowContextMenu(uint32_t window_id, int x, int y,
                                        const laufey_backend_api_t* api,
                                        laufey_menu_click_fn on_click,
                                        void* on_click_data) {
-  dispatch_async(dispatch_get_main_queue(), ^{
-    NSMenu* menu = laufey_common::BuildNSMenuFromValue(
-        menu_template, api, on_click, on_click_data, window_id);
-    if (!menu)
-      return;
+  ShowContextMenuEx(window_id, x, y, menu_template, api, on_click,
+                    on_click_data, nullptr, nullptr);
+}
 
+void WKWebViewBackend::ShowContextMenuEx(uint32_t window_id, int x, int y,
+                                         laufey_value_t* menu_template,
+                                         const laufey_backend_api_t* api,
+                                         laufey_menu_click_fn on_click,
+                                         void* on_click_data,
+                                         laufey_menu_closed_fn on_closed,
+                                         void* on_closed_data) {
+  auto entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
+      laufey_common::ParseMenuTemplate(menu_template, api, true));
+  dispatch_async(dispatch_get_main_queue(), ^{
     NSWindow* win = nil;
     {
       std::lock_guard<std::mutex> lock(windows_mutex_);
@@ -2535,20 +2584,10 @@ void WKWebViewBackend::ShowContextMenu(uint32_t window_id, int x, int y,
       if (state)
         win = state->window;
     }
-    if (!win)
-      return;
-
-    NSView* view = [win contentView];
-    // LAUFEY coordinates are window-relative with a top-left origin (the web
-    // convention). -popUpMenuPositioningItem:atLocation:inView: reads the
-    // location in the view's *own* coordinate system, which is top-left only
-    // when the view is flipped. The content view here is the WKWebView, and
-    // -[WKWebView isFlipped] is YES, so flipping unconditionally put the menu
-    // at (height - y) — mirrored about the window's midline. Only convert for
-    // views that really are bottom-left.
-    NSPoint loc =
-        NSMakePoint(x, [view isFlipped] ? y : [view frame].size.height - y);
-    [menu popUpMenuPositioningItem:nil atLocation:loc inView:view];
+    // The content view is the WKWebView (flipped: top-left, as the page).
+    laufey_common::ShowContextMenuMac(
+        win ? (__bridge void*)[win contentView] : nullptr, x, y, *entries,
+        on_click, on_click_data, on_closed, on_closed_data, window_id);
   });
 }
 
@@ -3042,35 +3081,25 @@ uint32_t WKWebViewBackend::ShowNotification(
     laufey_notification_event_fn on_event, void* user_data) {
   laufey_common::NotificationOptions opts =
       laufey_common::ParseNotificationOptions(options, api);
-  return laufey_common::ShowNotificationMac(opts, on_event, user_data);
+  return laufey_common::ShowNotification(opts, on_event, user_data);
 }
 
 void WKWebViewBackend::CloseNotification(uint32_t notification_id) {
-  laufey_common::CloseNotificationMac(notification_id);
+  laufey_common::CloseNotification(notification_id);
 }
 
-// --- Permissions (UNUserNotificationCenter) ---
-//
-// Mirrors cef/src/runtime_loader_mac.mm — the process posts notifications
-// via NSUserNotification today, but authorization is owned by
-// UNUserNotificationCenter (the modern API). Asking via UN here is
-// correct regardless of what posts the banner: macOS routes both APIs
-// through the same per-bundle authorization record. The webview backend
-// targets the *process*, not the WKWebView — runtime-initiated
-// notifications are app-scoped, not page-scoped.
-
-// Permissions: thin trampolines over backend-common/src/permissions_mac.mm.
-
+// Notification permissions: UNUserNotificationCenter, app-scoped (the
+// process, not the page).
 void WKWebViewBackend::QueryPermission(int kind,
                                        laufey_permission_callback_fn cb,
                                        void* user_data) {
-  laufey_common::QueryPermissionMac(kind, cb, user_data);
+  laufey_common::QueryNotificationPermission(kind, cb, user_data);
 }
 
 void WKWebViewBackend::RequestPermission(int kind,
                                          laufey_permission_callback_fn cb,
                                          void* user_data) {
-  laufey_common::RequestPermissionMac(kind, cb, user_data);
+  laufey_common::RequestNotificationPermission(kind, cb, user_data);
 }
 
 LaufeyBackend* CreateLaufeyBackend() {

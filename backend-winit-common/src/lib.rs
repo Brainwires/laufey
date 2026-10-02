@@ -38,7 +38,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 40;
+pub const LAUFEY_API_VERSION: u32 = 41;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -790,7 +790,52 @@ pub struct LaufeyBackendApi {
   pub is_devtools_open: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
   pub is_devtools_enabled:
     Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+
+  // --- Menus and notifications (API >= 41) ---
+  pub menu_capabilities: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub show_context_menu_ex: Option<ShowContextMenuExFn>,
+  pub test_dismiss_context_menu:
+    Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+  pub test_trigger_menu_accelerator:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char) -> bool>,
+  pub notification_capabilities:
+    Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub set_notification_response_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<NotificationResponseFn>,
+      *mut c_void,
+    ),
+  >,
+  pub list_scheduled_notifications: Option<
+    unsafe extern "C" fn(*mut c_void, Option<NotificationListFn>, *mut c_void),
+  >,
+  pub cancel_notification:
+    Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+  pub test_notification_respond: Option<
+    unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> bool,
+  >,
 }
+
+/// `laufey_menu_closed_fn` (API 41).
+pub type MenuClosedFn = unsafe extern "C" fn(*mut c_void, u32);
+/// `show_context_menu_ex` (API 41).
+pub type ShowContextMenuExFn = unsafe extern "C" fn(
+  *mut c_void,
+  u32,
+  c_int,
+  c_int,
+  *mut LaufeyValue,
+  Option<LaufeyMenuClickFn>,
+  *mut c_void,
+  Option<MenuClosedFn>,
+  *mut c_void,
+);
+/// `laufey_notification_response_fn` (API 41).
+pub type NotificationResponseFn =
+  unsafe extern "C" fn(*mut c_void, *const c_char);
+/// `laufey_notification_list_fn` (API 41).
+pub type NotificationListFn = unsafe extern "C" fn(*mut c_void, *const c_char);
 
 /// `laufey_shortcut_fn` (API 40).
 pub type ShortcutFn = unsafe extern "C" fn(*mut c_void, *const c_char);
@@ -1553,6 +1598,18 @@ pub fn create_api_base() -> LaufeyBackendApi {
     close_devtools: None,
     is_devtools_open: None,
     is_devtools_enabled: None,
+    // API 41: Winit has no context-menu close event, menu accelerators or
+    // notification scheduling / responses; every entry stays NULL, which the
+    // laufey crate reports as unsupported.
+    menu_capabilities: None,
+    show_context_menu_ex: None,
+    test_dismiss_context_menu: None,
+    test_trigger_menu_accelerator: None,
+    notification_capabilities: None,
+    set_notification_response_handler: None,
+    list_scheduled_notifications: None,
+    cancel_notification: None,
+    test_notification_respond: None,
   }
 }
 

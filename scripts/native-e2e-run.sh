@@ -20,9 +20,13 @@
 # conflict with a second process), launch at login (only in CI or with
 # LAUFEY_E2E_LOGIN_ITEM=1) and DevTools open / close / toggle.
 # --devtools-off runs the DevTools checks under LAUFEY_INSPECTABLE=0.
+# --menus-notifications runs only the API 41 checks: menu accelerators, the
+# context-menu close callback, notification responses, live callbacks and
+# scheduling. On Linux it starts a stand-in notification server
+# (laufey_mock_notification_server) on the run's private session bus.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--window-api|--io|--system|--devtools-off|--menus-notifications]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -65,6 +69,22 @@ fi
 if [ "$mode" = "--devtools-off" ]; then
   export LAUFEY_E2E_ONLY=devtools-off
   export LAUFEY_INSPECTABLE=0
+fi
+mock=""
+if [ "$mode" = "--menus-notifications" ]; then
+  export LAUFEY_E2E_ONLY=menus-notifications
+  # Names the Windows AppUserModelID registration and the Linux
+  # desktop-entry hint; the schedule file lives in this data directory.
+  export LAUFEY_APP_ID="${LAUFEY_APP_ID:-dev.laufey.e2e.notifications}"
+  if [ "$(uname -s)" = "Linux" ]; then
+    export LAUFEY_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/laufey-e2e-data.XXXXXX")"
+    mock="$(ls webview/build/backend-common/laufey_mock_notification_server \
+      cef/build/backend-common/laufey_mock_notification_server \
+      cef/build/laufey_mock_notification_server 2>/dev/null | head -1 || true)"
+    if [ -n "$mock" ]; then
+      export LAUFEY_E2E_NOTIFY_MOCK="$PWD/$mock"
+    fi
+  fi
 fi
 
 # Resolve the backend binary (handles macOS .app bundles).
@@ -118,7 +138,13 @@ fi
 # process, so a hang leaves evidence instead of only a step timeout.
 log="$(mktemp "${TMPDIR:-/tmp}/native-e2e.XXXXXX")"
 run_backend() {
-  if is_linux; then
+  if is_linux && [ -n "$mock" ]; then
+    # The stand-in notification server owns the name on the same private
+    # session bus before the backend starts.
+    exec xvfb-run -a dbus-run-session -- sh -c \
+      '"$LAUFEY_E2E_NOTIFY_MOCK" & for _ in 1 2 3 4 5 6 7 8 9 10; do sleep 0.2; done; exec "$@"' \
+      sh "$bin" ${args[@]+"${args[@]}"}
+  elif is_linux; then
     exec xvfb-run -a dbus-run-session -- "$bin" ${args[@]+"${args[@]}"}
   else
     exec "$bin" ${args[@]+"${args[@]}"}

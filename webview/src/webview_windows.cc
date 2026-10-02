@@ -13,6 +13,7 @@
 #include "init_script.h"
 #include "wv2_scheme_stream.h"
 #include <win32_menu.h>
+#include "laufey_notifications.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -522,15 +523,51 @@ class WebView2Backend : public LaufeyBackend {
                             void* user_data) override;
   void CloseNotification(uint32_t notification_id) override;
 
-  // Shell_NotifyIcon balloons have no permission model — always granted.
+  // Toasts: the user's notification setting for the app (no prompt).
   void QueryPermission(int kind, laufey_permission_callback_fn cb,
                        void* user_data) override {
-    laufey_common::QueryPermissionStub(kind, cb, user_data);
+    laufey_common::QueryNotificationPermission(kind, cb, user_data);
   }
   void RequestPermission(int kind, laufey_permission_callback_fn cb,
                          void* user_data) override {
-    laufey_common::RequestPermissionStub(kind, cb, user_data);
+    laufey_common::RequestNotificationPermission(kind, cb, user_data);
   }
+
+  // Notifications and menus (API >= 41): backend-common.
+  uint32_t NotificationCapabilities() override {
+    return laufey_common::NotificationCapabilities();
+  }
+  void SetNotificationResponseHandler(laufey_notification_response_fn handler,
+                                      void* user_data) override {
+    laufey_common::SetNotificationResponseHandler(handler, user_data);
+  }
+  void ListScheduledNotifications(laufey_notification_list_fn cb,
+                                  void* user_data) override {
+    laufey_common::ListScheduledNotifications(cb, user_data);
+  }
+  void CancelNotification(const char* tag) override {
+    laufey_common::CancelNotification(tag);
+  }
+  bool TestNotificationRespond(const char* tag,
+                               const char* action_id) override {
+    return laufey_common::TestNotificationRespond(tag, action_id);
+  }
+  uint32_t MenuCapabilities() override {
+    return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
+           LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
+           LAUFEY_MENU_CAP_ICONS;
+  }
+  void ShowContextMenuEx(uint32_t window_id, int x, int y,
+                         laufey_value_t* menu_template,
+                         const laufey_backend_api_t* api,
+                         laufey_menu_click_fn on_click, void* on_click_data,
+                         laufey_menu_closed_fn on_closed,
+                         void* on_closed_data) override;
+  bool TestDismissContextMenu() override {
+    return laufey_common::DismissOpenContextMenu();
+  }
+  bool TestTriggerMenuAccelerator(uint32_t window_id,
+                                  const char* accelerator) override;
 
   void HandleJsMessage(uint32_t window_id, const std::wstring& json);
   // A message from the injected file-drop observer (see
@@ -793,6 +830,7 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         laufey_wv2::CancelStreamsForWindow(wid);
       }
       WinNormalFrames().erase(hwnd);
+      win32_menu::ForgetWindow(hwnd);
       std::lock_guard<std::recursive_mutex> lock(g_hwnd_mutex);
       // A tray app can keep running with no window
       // (set_quit_on_last_window_closed(false)); quit() ends it anyway.
@@ -1143,6 +1181,29 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             GetClientRect(hwnd, &bounds);
             controller->put_Bounds(bounds);
             controller->put_IsVisible(TRUE);
+
+            // App menu accelerators while the page has the focus: its keys
+            // go to the browser process, never through Run()'s message loop,
+            // so the menu's accelerator table is matched here (API 41).
+            controller->add_AcceleratorKeyPressed(
+                Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                    [hwnd](ICoreWebView2Controller*,
+                           ICoreWebView2AcceleratorKeyPressedEventArgs* args)
+                        -> HRESULT {
+                      COREWEBVIEW2_KEY_EVENT_KIND kind;
+                      UINT key = 0;
+                      if (FAILED(args->get_KeyEventKind(&kind)) ||
+                          FAILED(args->get_VirtualKey(&key)))
+                        return S_OK;
+                      if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN &&
+                          kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+                        return S_OK;
+                      if (win32_menu::HandleAcceleratorKey(hwnd, key))
+                        args->put_Handled(TRUE);
+                      return S_OK;
+                    })
+                    .Get(),
+                nullptr);
 
             std::string initScript = BuildInitScript(
                 RuntimeLoader::GetInstance()->GetJsNamespace(),
@@ -2217,6 +2278,10 @@ void WebView2Backend::RespondToJsCall(uint32_t window_id, uint64_t call_id,
 void WebView2Backend::Run() {
   MSG msg;
   while (GetMessage(&msg, nullptr, 0, 0)) {
+    // App menu accelerators while a host window (not the page) has the
+    // focus; the page's keys arrive through AcceleratorKeyPressed.
+    if (win32_menu::TranslateWindowAccelerator(&msg))
+      continue;
     TranslateMessage(&msg);
     DispatchMessage(&msg);
   }
@@ -2264,16 +2329,23 @@ void WebView2Backend::SetApplicationMenu(uint32_t window_id,
                                          void* on_click_data) {
   if (!menu_template)
     return;
-  // SetMenu/DrawMenuBar message the window's owning (UI) thread synchronously
-  // (deadlock if called here while holding windows_mutex_ — see the
-  // window-state mutators above). Marshal SYNCHRONOUSLY because
-  // `menu_template` is caller-owned and only guaranteed to outlive this call.
+  // Parsed here: `menu_template` is caller-owned and only guaranteed to
+  // outlive this call. SetMenu/DrawMenuBar message the window's owning (UI)
+  // thread synchronously (deadlock if called here while holding
+  // windows_mutex_ — see the window-state mutators above).
+  auto entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
+      laufey_common::ParseMenuTemplate(menu_template, api, false));
   RunOnUiThreadSync([&] {
-    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
-    auto* state = GetWindow(window_id);
-    if (state && state->hwnd) {
-      win32_menu::SetApplicationMenu(state->hwnd, menu_template, api, on_click,
-                                     on_click_data, window_id);
+    HWND hwnd = nullptr;
+    {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      if (state)
+        hwnd = state->hwnd;
+    }
+    if (hwnd) {
+      win32_menu::SetApplicationMenu(hwnd, *entries, on_click, on_click_data,
+                                     window_id);
     }
   });
 }
@@ -2289,21 +2361,53 @@ void WebView2Backend::ShowContextMenu(uint32_t window_id, int x, int y,
                                       void* on_click_data) {
   if (!menu_template)
     return;
-  // TrackPopupMenu only works on the window's owning (UI) thread, and the
-  // call was already blocking (the popup runs a modal loop). Marshal
-  // SYNCHRONOUSLY: `menu_template` is caller-owned and only guaranteed to
-  // outlive this call.
-  RunOnUiThreadSync([&] {
-    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
-    auto* state = GetWindow(window_id);
-    if (state && state->hwnd) {
-      // (x, y) is in window (client) DIP; the menu takes client pixels.
-      double scale = WinWindowScale(state->hwnd);
-      win32_menu::ShowContextMenu(state->hwnd, WinToPx(x, scale),
-                                  WinToPx(y, scale), menu_template, api,
-                                  on_click, on_click_data, window_id);
+  ShowContextMenuEx(window_id, x, y, menu_template, api, on_click,
+                    on_click_data, nullptr, nullptr);
+}
+
+void WebView2Backend::ShowContextMenuEx(uint32_t window_id, int x, int y,
+                                        laufey_value_t* menu_template,
+                                        const laufey_backend_api_t* api,
+                                        laufey_menu_click_fn on_click,
+                                        void* on_click_data,
+                                        laufey_menu_closed_fn on_closed,
+                                        void* on_closed_data) {
+  // Parsed here (the template is the caller's only for this call), shown on
+  // the UI thread: TrackPopupMenu runs a modal loop there until the menu
+  // closes, which this call doesn't wait for.
+  auto entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
+      laufey_common::ParseMenuTemplate(menu_template, api, false));
+  RunOnUiThread([this, window_id, x, y, entries, on_click, on_click_data,
+                 on_closed, on_closed_data] {
+    HWND hwnd = nullptr;
+    {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      if (state)
+        hwnd = state->hwnd;
     }
+    // (x, y) is in window (client) DIP; the menu takes client pixels.
+    double scale = hwnd ? WinWindowScale(hwnd) : 1.0;
+    win32_menu::ShowContextMenu(hwnd, WinToPx(x, scale), WinToPx(y, scale),
+                                *entries, on_click, on_click_data, window_id,
+                                on_closed, on_closed_data);
   });
+}
+
+bool WebView2Backend::TestTriggerMenuAccelerator(uint32_t window_id,
+                                                 const char* accelerator) {
+  bool fired = false;
+  RunOnUiThreadSync([&] {
+    HWND hwnd = nullptr;
+    {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      if (state)
+        hwnd = state->hwnd;
+    }
+    fired = win32_menu::TestTriggerAccelerator(hwnd, accelerator);
+  });
+  return fired;
 }
 
 // ============================================================================
@@ -2645,18 +2749,18 @@ void WebView2Backend::SetTrayClickHandler(uint32_t tray_id,
 // Notifications (WebView2 Windows)
 // ============================================================================
 //
-// Thin trampoline over backend-common/src/notifications_win.cc.
+// Thin trampolines over backend-common (laufey_notifications.h: toasts).
 
 uint32_t WebView2Backend::ShowNotification(
     laufey_value_t* options, const laufey_backend_api_t* api,
     laufey_notification_event_fn on_event, void* user_data) {
   laufey_common::NotificationOptions opts =
       laufey_common::ParseNotificationOptions(options, api);
-  return laufey_common::ShowNotificationWin(opts, on_event, user_data);
+  return laufey_common::ShowNotification(opts, on_event, user_data);
 }
 
 void WebView2Backend::CloseNotification(uint32_t notification_id) {
-  laufey_common::CloseNotificationWin(notification_id);
+  laufey_common::CloseNotification(notification_id);
 }
 
 // ============================================================================

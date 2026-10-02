@@ -22,6 +22,7 @@
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
@@ -337,6 +338,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                                             &single_instance_exit)) {
     return single_instance_exit;
   }
+  // Notifications (API 41): the Windows toast activator / the Linux
+  // scheduler start before the runtime, so a click on a toast that launched
+  // the app, or a notification scheduled for while it wasn't running, is
+  // delivered.
+  laufey_common::InitNotificationsAtLaunch();
 
   CefSettings settings;
   settings.no_sandbox = true;

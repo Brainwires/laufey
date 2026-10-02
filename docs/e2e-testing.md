@@ -505,24 +505,26 @@ above only touches an in-process mutex and works from any thread.
 Rows are capability groups; each cell is per-backend. Every ✅ is additionally
 per-OS (`Linux/macOS/Windows`); WebView's web-layer cells differ by engine.
 
-| Capability                             | Technique   | CEF                         | WebView                 | Winit            | Gate                   |
-| -------------------------------------- | ----------- | --------------------------- | ----------------------- | ---------------- | ---------------------- |
-| Window geometry/state/opacity readback | A           | ✅                          | ✅                      | ✅ (Rust)        | ✅                     |
-| Window lifecycle events                | B           | ✅                          | ✅                      | ✅               | ✅                     |
-| Close handler (defer-until-close)      | B (`§8`)    | ✅ (Linux/Win nightly-only) | ✅ (Linux nightly-only) | ✅               | ✅ (macOS; see `§8`)   |
-| Clipboard round-trip                   | A           | ✅                          | ✅                      | ✅               | ✅                     |
-| Window handles / types                 | A           | ✅                          | ✅                      | ✅               | ✅                     |
-| Application / context menu             | D + B       | ✅                          | ✅                      | ✅ (`muda`)      | ✅                     |
-| Tray icon / menu / click               | D + B       | ✅                          | ✅                      | ✅ (`tray-icon`) | ✅ (win tray nightly)  |
-| Notifications payload                  | D           | ✅                          | ✅                      | probe            | Linux ✅, else nightly |
-| Dock / taskbar                         | A/D/F       | ✅                          | ✅                      | probe            | partial                |
-| Raw mouse/keyboard/wheel events        | E           | ✅                          | ✅                      | ✅               | ✅ (with hook)         |
-| Web: bindings/execute_js/navigate/load | B/C/E       | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)       |
-| Custom scheme handlers                 | C           | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)       |
-| DevTools open / close / toggle / off   | A (`§18`)   | ✅                          | ✅                      | N/A              | ✅ (`--system`)        |
-| Global shortcuts (incl. conflict)      | A/B (`§18`) | ✅                          | ✅                      | N/A              | ✅ (`--system`)        |
-| Launch at login                        | A (`§18`)   | ✅                          | ✅                      | N/A              | ✅ (`--system`, CI)    |
-| Dialogs (alert/confirm/prompt/file)    | F           | ⚠️                          | ⚠️                      | ⚠️               | nightly                |
+| Capability                             | Technique   | CEF                         | WebView                 | Winit            | Gate                         |
+| -------------------------------------- | ----------- | --------------------------- | ----------------------- | ---------------- | ---------------------------- |
+| Window geometry/state/opacity readback | A           | ✅                          | ✅                      | ✅ (Rust)        | ✅                           |
+| Window lifecycle events                | B           | ✅                          | ✅                      | ✅               | ✅                           |
+| Close handler (defer-until-close)      | B (`§8`)    | ✅ (Linux/Win nightly-only) | ✅ (Linux nightly-only) | ✅               | ✅ (macOS; see `§8`)         |
+| Clipboard round-trip                   | A           | ✅                          | ✅                      | ✅               | ✅                           |
+| Window handles / types                 | A           | ✅                          | ✅                      | ✅               | ✅                           |
+| Application / context menu             | D + B       | ✅                          | ✅                      | ✅ (`muda`)      | ✅                           |
+| Tray icon / menu / click               | D + B       | ✅                          | ✅                      | ✅ (`tray-icon`) | ✅ (win tray nightly)        |
+| Notifications payload                  | D           | ✅                          | ✅                      | probe            | Linux ✅, else nightly       |
+| Dock / taskbar                         | A/D/F       | ✅                          | ✅                      | probe            | partial                      |
+| Raw mouse/keyboard/wheel events        | E           | ✅                          | ✅                      | ✅               | ✅ (with hook)               |
+| Web: bindings/execute_js/navigate/load | B/C/E       | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)             |
+| Custom scheme handlers                 | C           | ✅                          | ✅                      | **N/A**          | ✅ (CEF/WebView)             |
+| DevTools open / close / toggle / off   | A (`§18`)   | ✅                          | ✅                      | N/A              | ✅ (`--system`)              |
+| Global shortcuts (incl. conflict)      | A/B (`§18`) | ✅                          | ✅                      | N/A              | ✅ (`--system`)              |
+| Launch at login                        | A (`§18`)   | ✅                          | ✅                      | N/A              | ✅ (`--system`, CI)          |
+| Menu accelerators / context-menu close | B (`§19`)   | ✅                          | ✅                      | N/A              | ✅ (`--menus-notifications`) |
+| Notification responses / scheduling    | A/B (`§19`) | ✅                          | ✅                      | N/A              | ✅ (`--menus-notifications`) |
+| Dialogs (alert/confirm/prompt/file)    | F           | ⚠️                          | ⚠️                      | ⚠️               | nightly                      |
 
 Net: ~90% of the C ABI is a hosted-CI PR gate across all backends; only modal /
 outward-facing surfaces are nightly.
@@ -768,3 +770,59 @@ that it says so). `--devtools-off` runs the DevTools part again under
 The portable pieces are unit-tested in `backend-common/tests/system_test.cc`
 (parsing, the registry over a fake OS side, the autostart format) and the capi
 wrappers in `capi/src/system.rs`.
+
+## 19. Menus and notifications (API 41)
+
+`scripts/native-e2e-run.sh <backend> --menus-notifications` runs `native_e2e`'s
+`menu_notification_checks` alone, on every backend (Winit reports N/A and checks
+that it says so). See [menus.md](menus.md) and
+[notifications.md](notifications.md).
+
+- **Accelerators**: an app menu with an accelerated item and a disabled one;
+  `test_trigger_menu_accelerator` fires the first through the backend's own
+  dispatch (`-[NSMenu performKeyEquivalent:]`, `TranslateAccelerator` with the
+  modifiers in the thread's keyboard state, `gtk_accel_groups_activate`, the CEF
+  window accelerator) and not the disabled one or an unbound combination. On
+  Windows a real `Ctrl+Shift+F9` injected with `SendInput` while the window has
+  the focus fires it too (N/A when the window can't take the focus).
+- **Context-menu close**: an empty menu reports its close at once; a real menu
+  is dismissed with `test_dismiss_context_menu` and its close callback fires
+  exactly once, with no click (a menu the OS refused to show closes by itself,
+  which the check accepts).
+- **Responses**: a click before any response handler is buffered, then delivered
+  with `launch: true` when the handler registers; later ones arrive directly
+  with `launch: false`.
+- **Live notifications** (where one can be posted: on macOS after the quiet,
+  "provisional" authorization macOS grants without a prompt): action and body
+  clicks through `test_notification_respond` reach the live callback, `close`
+  reports `Closed`. On Linux the step runs a stand-in notification server
+  (`laufey_mock_notification_server`, built with the backend) on the run's
+  private session bus, which answers a body containing `[[invoke:reply]]` with a
+  real `ActionInvoked`.
+- **Scheduling**: a notification two minutes out is listed with its time, title,
+  data and actions, cancelled, and gone; one two seconds out leaves the list
+  once delivered.
+- **Windows activation**: the COM activator the app registered answers a
+  `CoCreateInstance` + `INotificationActivationCallback::Activate` (what Windows
+  does for a click on a toast) and the response arrives.
+- **Windows cold start** (`scripts/notification-coldstart-e2e.ps1 <backend>`,
+  after the step above registered the app): with no copy of the app running, the
+  script points the activator's `LocalServer32` at a copy of the backend (with
+  the runtime colocated and a `laufey-launch.json` naming the same app id) and
+  clicks through COM, so Windows starts that copy with
+  `-ToastActivated -Embedding`; the runtime's cold-start mode writes the
+  response it received, and the script checks its tag, action, data and
+  `launch: true`.
+
+The portable pieces are unit-tested in
+`backend-common/tests/menu_notifications_test.cc` (template parsing and
+accelerators, the context-menu session, the notification core over a fake
+platform, the schedule file, toast arguments) and the Linux D-Bus client in
+`notifications_dbus_test.cc` against a mock server (Notify arguments, signals,
+the scheduler and its persisted re-arm); the capi parsing in
+`capi/src/menus_notifications.rs`.
+
+Under `--window-api` (and the main battery), the fullscreen check also reads
+`get_window_normal_bounds` while fullscreen: it must be the pre-fullscreen
+bounds (macOS used to report the fullscreen frame once its transition had
+settled).

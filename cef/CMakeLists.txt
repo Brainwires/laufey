@@ -207,6 +207,7 @@ elseif(OS_WINDOWS)
     src/scheme_handler.cc
     src/scheme_handler.h
     src/runtime_loader.cc
+    src/views_menu.cc
     src/runtime_loader.h
   )
 
@@ -272,6 +273,7 @@ elseif(OS_LINUX)
     src/scheme_handler.cc
     src/scheme_handler.h
     src/runtime_loader.cc
+    src/views_menu.cc
     src/runtime_loader.h
   )
 

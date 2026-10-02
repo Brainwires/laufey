@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LAUFEY_API_VERSION 40
+#define LAUFEY_API_VERSION 41
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -332,6 +332,76 @@ typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
 #define LAUFEY_LOGIN_ITEM_NOT_SUPPORTED 3  // not on this backend / OS version
 #define LAUFEY_LOGIN_ITEM_FAILED 4         // set_launch_at_login failed
 
+// --- Menus: context-menu close, accelerators (API >= 41) --------------------
+//
+// Capability bits returned by menu_capabilities.
+#define LAUFEY_MENU_CAP_APP_MENU \
+  (1u << 0)  // set_application_menu shows a menu (bar) on this backend / OS
+#define LAUFEY_MENU_CAP_ACCELERATORS \
+  (1u << 1)  // app-menu items' accelerators fire their item from the keyboard
+#define LAUFEY_MENU_CAP_CONTEXT_MENU (1u << 2)  // show_context_menu(_ex) works
+#define LAUFEY_MENU_CAP_CONTEXT_CLOSED \
+  (1u << 3)  // show_context_menu_ex reports the menu closing
+#define LAUFEY_MENU_CAP_ICONS (1u << 4)     // item "icon" is drawn
+#define LAUFEY_MENU_CAP_TOOLTIPS (1u << 5)  // item "tooltip" is shown
+
+// Fired EXACTLY ONCE when a context menu shown with show_context_menu_ex
+// closes: after the item's laufey_menu_click_fn when one was chosen, or alone
+// when it was dismissed. Fires on the backend UI thread (or, for a request
+// that never showed a menu, on the calling thread before
+// show_context_menu_ex returns).
+typedef void (*laufey_menu_closed_fn)(void* user_data, uint32_t window_id);
+
+// --- Notifications: scheduling, actions, responses (API >= 41) -------------
+//
+// Capability bits returned by notification_capabilities.
+#define LAUFEY_NOTIFICATION_CAP_SHOW \
+  (1u << 0)  // show_notification can display a notification here
+#define LAUFEY_NOTIFICATION_CAP_SCHEDULE \
+  (1u << 1)  // "schedule_at" delivers at that time, at least while running
+#define LAUFEY_NOTIFICATION_CAP_SCHEDULE_PERSISTS \
+  (1u << 2)  // the OS delivers a scheduled notification even if the app is
+             // not running then (macOS, Windows; not Linux, where laufey's
+             // own timer re-arms the schedule at the next launch)
+#define LAUFEY_NOTIFICATION_CAP_ACTIONS (1u << 3)  // action buttons are shown
+#define LAUFEY_NOTIFICATION_CAP_CLICKS \
+  (1u << 4)  // clicks (body and actions) are reported
+#define LAUFEY_NOTIFICATION_CAP_COLD_START \
+  (1u << 5)  // a click while the app is not running launches it and the
+             // response reaches set_notification_response_handler
+
+// Most responses held while no response handler is registered (a cold-start
+// click is the usual one); beyond that the oldest are dropped.
+#define LAUFEY_MAX_PENDING_NOTIFICATION_RESPONSES 16
+
+// Longest "tag" (UTF-8 bytes) and "data" accepted by show_notification; a
+// longer one makes it fail (return 0).
+#define LAUFEY_NOTIFICATION_MAX_TAG_BYTES 256
+#define LAUFEY_NOTIFICATION_MAX_DATA_BYTES 4096
+
+// A click on a notification that no live show_notification callback owns:
+// one posted by an earlier run of the app (a scheduled one, or one clicked
+// in the notification center later), or the click that launched the app.
+// `response_json` (UTF-8, valid for the duration of the call) is an object:
+//   "tag"     string   the notification's tag
+//   "action"  string   the action button's id, or null for the body
+//   "data"    string   the notification's "data", or null
+//   "launch"  bool     true when the response arrived before any handler was
+//                      registered (the click that launched the app, or one
+//                      made while it was starting), and on Windows for the
+//                      click COM started the app for, however soon a handler
+//                      was registered
+// Fires on a backend thread (not necessarily the UI thread).
+typedef void (*laufey_notification_response_fn)(void* user_data,
+                                                const char* response_json);
+
+// Result of list_scheduled_notifications: `list_json` (UTF-8, valid for the
+// duration of the call) is an array of objects, soonest first:
+//   "tag", "title", "body" strings; "at" number (Unix time, milliseconds);
+//   "data" string or null; "actions" [{"id", "title"}].
+typedef void (*laufey_notification_list_fn)(void* user_data,
+                                            const char* list_json);
+
 // One display, as reported by get_screens. Every rectangle is in the same
 // top-left-origin screen space and units as get_window_position /
 // set_window_position on this backend, so a window position can be compared
@@ -534,6 +604,12 @@ typedef void (*laufey_notification_event_fn)(void* user_data,
 // part of the wire ABI.
 #define LAUFEY_PERMISSION_INVALID 0
 #define LAUFEY_PERMISSION_NOTIFICATIONS 1
+// (API >= 41) request_permission only: ask for quiet ("provisional")
+// notification authorization, which macOS grants without a prompt; the
+// notifications go to the Notification Center without a banner or sound
+// until the user keeps them. Elsewhere the same as NOTIFICATIONS.
+// query_permission answers as for NOTIFICATIONS.
+#define LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL 2
 
 // Authorization state returned by permission callbacks.
 //   GRANTED:     the runtime may use the capability.
@@ -1028,7 +1104,20 @@ struct laufey_backend_api {
   //   "actions"             list of dicts, each {"id": string,
   //                                   "title": string} — action buttons.
   //                                   Ignored on platforms that don't
-  //                                   support them.
+  //                                   support them
+  //                                   (LAUFEY_NOTIFICATION_CAP_ACTIONS).
+  //   "schedule_at"         number  — (API >= 41) Unix time in milliseconds
+  //                                   to deliver at; a time in the past (or
+  //                                   none) shows it now. Requires a "tag",
+  //                                   which identifies it to
+  //                                   cancel_notification and
+  //                                   list_scheduled_notifications.
+  //   "data"                string  — (API >= 41) opaque, at most
+  //                                   LAUFEY_NOTIFICATION_MAX_DATA_BYTES;
+  //                                   handed back in notification responses.
+  //
+  // A "tag" (at most LAUFEY_NOTIFICATION_MAX_TAG_BYTES) also identifies the
+  // notification to the response handler and across launches.
   //
   // Ownership: the backend takes ownership of `options` (calls value_free
   // on it), matching the convention used by set_application_menu /
@@ -1736,6 +1825,90 @@ struct laufey_backend_api {
   // window's engine setting as read back from the engine; with 0, the
   // launch setting. Any thread.
   bool (*is_devtools_enabled)(void* backend_data, uint32_t window_id);
+
+  // --- Menus: context-menu close, accelerators (API >= 41) ------------------
+  //
+  // An app menu item's "accelerator" (the global-shortcut syntax:
+  // "CommandOrControl+Shift+K", see docs/menus.md) fires the item from the
+  // keyboard while its window has the focus: NSMenu key equivalents on macOS,
+  // an accelerator table on Windows (TranslateAccelerator in the message loop
+  // and WebView2's AcceleratorKeyPressed), a GtkAccelGroup on the WebKitGTK
+  // window, CEF Views accelerators on the CEF backend (Windows and Linux).
+  // A context menu shows the accelerators without binding them.
+
+  // LAUFEY_MENU_CAP_* bits for this backend on this OS. Any thread.
+  uint32_t (*menu_capabilities)(void* backend_data);
+
+  // show_context_menu, plus `on_closed` (may be NULL), which fires EXACTLY
+  // ONCE when the menu closes: see laufey_menu_closed_fn. The backend takes
+  // ownership of `menu_template` (calls value_free on it), as for
+  // show_notification. Never blocks: the menu shows on the UI thread. A NULL
+  // template, an unknown window or a backend that can't show the menu fires
+  // `on_closed` (on the calling thread or the UI thread) without a click.
+  void (*show_context_menu_ex)(void* backend_data, uint32_t window_id, int x,
+                               int y, laufey_value_t* menu_template,
+                               laufey_menu_click_fn on_click,
+                               void* on_click_data,
+                               laufey_menu_closed_fn on_closed,
+                               void* on_closed_data);
+
+  // Test-only. Closes the open context menu as Escape would (its on_closed
+  // fires, with no click). Returns false when no context menu is open. Any
+  // thread. NULL on backends that do not implement it.
+  bool (*test_dismiss_context_menu)(void* backend_data);
+
+  // Test-only. Presses `accelerator` (any spelling) in window `window_id`
+  // through the backend's own accelerator dispatch (performKeyEquivalent:,
+  // TranslateAccelerator, gtk_accel_groups_activate, the CEF window's
+  // accelerator), as a key press reaching the window would. Returns true if
+  // an app menu item fired. Any thread. NULL on backends that do not
+  // implement it.
+  bool (*test_trigger_menu_accelerator)(void* backend_data, uint32_t window_id,
+                                        const char* accelerator);
+
+  // --- Notifications: scheduling, actions, responses (API >= 41) -----------
+  //
+  // See docs/notifications.md for each platform's mechanism: macOS
+  // UNUserNotificationCenter (calendar / time-interval triggers, categories),
+  // Windows toast notifications (ScheduledToastNotification, a COM activator
+  // registered per user for the app's AppUserModelID), Linux
+  // org.freedesktop.Notifications over D-Bus (laufey's own scheduler).
+
+  // LAUFEY_NOTIFICATION_CAP_* bits for this backend on this OS (and, on
+  // Linux, whether a notification server is running). Any thread.
+  uint32_t (*notification_capabilities)(void* backend_data);
+
+  // Register the (process-wide) handler for notification responses no live
+  // show_notification callback owns; NULL clears it. Responses that arrive
+  // while none is registered are held (LAUFEY_MAX_PENDING_NOTIFICATION_
+  // RESPONSES) and delivered, in order and with "launch": true, on the
+  // registering thread when one is. Any thread.
+  void (*set_notification_response_handler)(
+      void* backend_data, laufey_notification_response_fn handler,
+      void* user_data);
+
+  // The notifications scheduled with "schedule_at" and not delivered yet.
+  // `callback` fires EXACTLY ONCE, on a backend thread or synchronously on
+  // the calling thread. Any thread.
+  void (*list_scheduled_notifications)(void* backend_data,
+                                       laufey_notification_list_fn callback,
+                                       void* user_data);
+
+  // Cancel the scheduled notification with `tag` and remove delivered ones
+  // carrying it from the notification center. A live notification's
+  // callback gets LAUFEY_NOTIFICATION_CLOSED. Any thread; the OS may finish
+  // asynchronously, but a later list_scheduled_notifications no longer
+  // includes it.
+  void (*cancel_notification)(void* backend_data, const char* tag);
+
+  // Test-only. Delivers a click on the notification `tag` (the body for a
+  // NULL `action_id`, else that action button) through the dispatch the OS
+  // response uses: the live notification's callback when this process shows
+  // it, else the response handler (or the pending buffer). Returns true if a
+  // callback or handler received it. Any thread. NULL on backends that do
+  // not implement it.
+  bool (*test_notification_respond)(void* backend_data, const char* tag,
+                                    const char* action_id);
 };
 
 #ifdef __cplusplus

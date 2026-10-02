@@ -133,6 +133,11 @@ class LaufeyWindowDelegate : public CefWindowDelegate {
   // interacted with while the previously-focused app keeps focus.
   cef_state_t AcceptsFirstMouse(CefRefPtr<CefWindow> window) override;
 
+#if defined(_WIN32) || defined(__linux__)
+  // The app menu's accelerators (API 41; views_menu.h).
+  bool OnAccelerator(CefRefPtr<CefWindow> window, int command_id) override;
+#endif
+
 #if defined(__linux__)
   // CEF Views reports activation on both X11 and Wayland. Use this instead of
   // the X11-only XI2 monitor so focus events work with either Ozone backend.

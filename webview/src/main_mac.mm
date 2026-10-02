@@ -4,6 +4,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 
@@ -300,6 +301,9 @@ int main(int argc, char* argv[]) {
     delegate.runtimePath = runtimePathArg;
 
     [NSApp setDelegate:delegate];
+    // The notification-center delegate must be in place before AppKit
+    // finishes launching, or the click that launched the app is lost.
+    laufey_common::InitNotificationsAtLaunch();
 
     // Files and URLs reach the runtime through argv (direct exec) or the
     // open-url handler (LaunchServices), never both; forwarded launches are

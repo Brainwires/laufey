@@ -1202,6 +1202,81 @@ static void Backend_RequestPermission(void* data, int kind,
   }
 }
 
+// --- Menus and notifications (API >= 41) ---
+
+static uint32_t Backend_MenuCapabilities(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->MenuCapabilities();
+  return 0;
+}
+
+static void Backend_ShowContextMenuEx(void* data, uint32_t window_id, int x,
+                                      int y, laufey_value_t* menu_template,
+                                      laufey_menu_click_fn on_click,
+                                      void* on_click_data,
+                                      laufey_menu_closed_fn on_closed,
+                                      void* on_closed_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  LaufeyBackend* backend = loader->GetBackend();
+  if (!backend || !menu_template) {
+    if (on_closed)
+      on_closed(on_closed_data, window_id);
+    return;
+  }
+  // Every backend parses the template before returning; it is ours to free.
+  backend->ShowContextMenuEx(window_id, x, y, menu_template,
+                             &loader->GetBackendApi(), on_click, on_click_data,
+                             on_closed, on_closed_data);
+  loader->GetBackendApi().value_free(menu_template);
+}
+
+static bool Backend_TestDismissContextMenu(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->TestDismissContextMenu();
+  return false;
+}
+
+static bool Backend_TestTriggerMenuAccelerator(void* data, uint32_t window_id,
+                                               const char* accelerator) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->TestTriggerMenuAccelerator(window_id, accelerator);
+  return false;
+}
+
+static uint32_t Backend_NotificationCapabilities(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->NotificationCapabilities();
+  return 0;
+}
+
+static void Backend_SetNotificationResponseHandler(
+    void* data, laufey_notification_response_fn handler, void* user_data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    backend->SetNotificationResponseHandler(handler, user_data);
+}
+
+static void Backend_ListScheduledNotifications(void* data,
+                                               laufey_notification_list_fn cb,
+                                               void* user_data) {
+  if (LaufeyBackend* backend = BackendOf(data)) {
+    backend->ListScheduledNotifications(cb, user_data);
+  } else if (cb) {
+    cb(user_data, "[]");
+  }
+}
+
+static void Backend_CancelNotification(void* data, const char* tag) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    backend->CancelNotification(tag);
+}
+
+static bool Backend_TestNotificationRespond(void* data, const char* tag,
+                                            const char* action_id) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->TestNotificationRespond(tag, action_id);
+  return false;
+}
+
 void RuntimeLoader::InitializeBackendApi() {
   memset(&backend_api_, 0, sizeof(backend_api_));
   backend_api_.version = LAUFEY_API_VERSION;
@@ -1383,6 +1458,21 @@ void RuntimeLoader::InitializeBackendApi() {
 
   backend_api_.query_permission = Backend_QueryPermission;
   backend_api_.request_permission = Backend_RequestPermission;
+
+  // Menus and notifications (API >= 41): see docs/menus.md and
+  // docs/notifications.md. iOS keeps the unsupported defaults.
+  backend_api_.menu_capabilities = Backend_MenuCapabilities;
+  backend_api_.show_context_menu_ex = Backend_ShowContextMenuEx;
+  backend_api_.test_dismiss_context_menu = Backend_TestDismissContextMenu;
+  backend_api_.test_trigger_menu_accelerator =
+      Backend_TestTriggerMenuAccelerator;
+  backend_api_.notification_capabilities = Backend_NotificationCapabilities;
+  backend_api_.set_notification_response_handler =
+      Backend_SetNotificationResponseHandler;
+  backend_api_.list_scheduled_notifications =
+      Backend_ListScheduledNotifications;
+  backend_api_.cancel_notification = Backend_CancelNotification;
+  backend_api_.test_notification_respond = Backend_TestNotificationRespond;
 }
 
 RuntimeLoader::RuntimeLoader() {

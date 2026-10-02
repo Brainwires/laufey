@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `40`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `41`) versions the contract. The `version` field
 on the API table lets a runtime detect the backend's vintage and avoid calling
 function pointers a backend predates (older backends leave new pointers `NULL`).
 
@@ -64,7 +64,11 @@ The pointers group into:
   contract as of API ≥ 31 — see below).
 - **Window handles** — `get_window_handle`, `get_display_handle`,
   `get_window_handle_type` (for GPU surface creation).
-- **Menus** — `set_application_menu`, `show_context_menu`.
+- **Menus** — `set_application_menu`, `show_context_menu`, and from API 41
+  `show_context_menu_ex` (a close callback fired exactly once; the backend takes
+  the template), `menu_capabilities`, and the `test_trigger_menu_accelerator` /
+  `test_dismiss_context_menu` hooks. App-menu accelerators fire their items on
+  every desktop backend from API 41. See [menus.md](menus.md).
 - **DevTools** — `open_devtools` and, from API 40, `close_devtools`,
   `is_devtools_open` and `is_devtools_enabled` (read back from the engine;
   `LAUFEY_INSPECTABLE=0` / `"inspectable": false` turns DevTools off for the
@@ -121,8 +125,14 @@ The pointers group into:
   [launch-at-login.md](launch-at-login.md)).
 - **Tray** — `create_tray_icon`, `destroy_tray_icon`, `set_tray_icon`(`_dark`),
   `set_tray_tooltip`, `set_tray_menu`, click handlers, `get_tray_icon_bounds`.
-- **Notifications** — `show_notification`, `close_notification`.
-- **Permissions** — `query_permission`, `request_permission`.
+- **Notifications** — `show_notification`, `close_notification`, and from API 41
+  the `"schedule_at"` and `"data"` options, `notification_capabilities`,
+  `set_notification_response_handler` (clicks no live callback owns, buffered
+  until a handler registers: the cold-start click),
+  `list_scheduled_notifications`, `cancel_notification` and the
+  `test_notification_respond` hook. See [notifications.md](notifications.md).
+- **Permissions** — `query_permission`, `request_permission`
+  (`LAUFEY_PERMISSION_NOTIFICATIONS_PROVISIONAL` from API 41).
 - **Custom URL scheme handler** (API ≥ 26) — `register_scheme_handler`,
   `scheme_request_read_body`, `scheme_response_begin`, `scheme_response_write`,
   `scheme_response_finish`.

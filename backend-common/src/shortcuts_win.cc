@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 
+#include "laufey_menu.h"
 #include "laufey_system.h"
 
 namespace laufey_common {
@@ -44,7 +45,10 @@ UINT VkForChar(char ch) {
   return 0;
 }
 
-UINT VkFor(const Accelerator& a) {
+}  // namespace
+
+// Shared with the menu accelerators (laufey_menu.h).
+unsigned AcceleratorVirtualKey(const Accelerator& a) {
   switch (a.kind) {
     case KeyKind::kLetter:
     case KeyKind::kDigit:
@@ -93,6 +97,8 @@ UINT VkFor(const Accelerator& a) {
   return 0;
 }
 
+namespace {
+
 UINT HotKeyModifiers(uint32_t mods) {
   UINT m = MOD_NOREPEAT;
   if (mods & kModCtrl)
@@ -125,7 +131,7 @@ class WinShortcuts : public ShortcutPlatform {
 
   void Bind(uint32_t sid, const Accelerator& accel,
             std::function<void(int)> done) override {
-    UINT vk = VkFor(accel);
+    UINT vk = AcceleratorVirtualKey(accel);
     UINT mods = HotKeyModifiers(accel.mods);
     run_on_ui_([this, sid, vk, mods, done = std::move(done)] {
       if (!vk) {
