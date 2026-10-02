@@ -102,6 +102,29 @@ jobs:
             backend-common/tests/external_links_test.cc \
             -o "$RUNNER_TEMP/external_links_test"
           "$RUNNER_TEMP/external_links_test"
+      # The dialog paths show page text in-process and start no program: no
+      # process-spawning or shell API in them (the Windows prompt used to
+      # interpolate the page's text into a PowerShell command line). The
+      # winit prompt's unit tests check the argv it hands osascript / zenity;
+      # this keeps the APIs from coming back.
+      - name: dialog paths call no shell or process API
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='_popen|popen\(|system\(|CreateProcess|ShellExecute|WinExec|powershell|cmd\.exe|std::process::Command'
+          files=(backend-common/src/dialog_win.cc backend-common/src/dialog_mac.mm
+                 backend-common/src/dialog_linux.cc)
+          if grep -nE "$pattern" "${files[@]}"; then
+            echo "a dialog path calls a shell / process API" >&2
+            exit 1
+          fi
+          # The winit prompt's Windows half (prompt.rs `mod win`) likewise.
+          awk '/^mod win \{/,/^}/' backend-winit-common/src/prompt.rs > "$RUNNER_TEMP/prompt_win.rs"
+          test -s "$RUNNER_TEMP/prompt_win.rs"
+          if grep -nE "$pattern" "$RUNNER_TEMP/prompt_win.rs"; then
+            echo "the winit Windows prompt calls a shell / process API" >&2
+            exit 1
+          fi
 
   # backend-winit-common's unit tests (click counting, frame offsets, resize
   # reporting, file-drop batching, window-API bookkeeping). Pure logic, no

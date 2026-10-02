@@ -123,8 +123,10 @@ void FireContextMenuClosedNow(uint32_t window_id,
 // Such a backend installs a hook, which is told when the outermost of these
 // loops starts (true) and ends (false); CEF uses it to allow its tasks to
 // run inside the loop (CefSetNestableTasksAllowed). The menu code brackets
-// its modal loop with a ScopedNativeModalLoop. UI thread only; nesting is
-// counted, so the hook sees one true / false pair per outermost loop.
+// its modal loop with a ScopedNativeModalLoop. Nesting is counted, so the
+// hook sees one true / false pair per outermost loop. Only a loop on the UI
+// thread (UiTaskDispatcher::IsUiThread) reaches the hook: a modal run on any
+// other thread holds no backend task, and the hook is a UI-thread call.
 
 using NativeModalLoopHook = void (*)(bool entering);
 void SetNativeModalLoopHook(NativeModalLoopHook hook);
@@ -135,6 +137,9 @@ class ScopedNativeModalLoop {
   ~ScopedNativeModalLoop();
   ScopedNativeModalLoop(const ScopedNativeModalLoop&) = delete;
   ScopedNativeModalLoop& operator=(const ScopedNativeModalLoop&) = delete;
+
+ private:
+  bool on_ui_thread_;
 };
 
 // --- Accelerator table (portable)

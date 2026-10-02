@@ -2253,8 +2253,14 @@ static int Backend_ShowDialog(void* /*data*/, uint32_t /*window_id*/,
   return laufey_common::ShowDialogMac(dialog_type, title_str, message_str,
                                       default_str, out_input_value);
 #elif defined(__linux__)
-  return laufey_common::ShowDialogLinux(dialog_type, title_str, message_str,
-                                        default_str, out_input_value);
+  // GTK belongs to TID_UI: run the modal there (its nested loop keeps CEF's
+  // tasks running, see ShowDialogLinux) and wait for it.
+  int result = 0;
+  cef_invoke_sync([&] {
+    result = laufey_common::ShowDialogLinux(dialog_type, title_str, message_str,
+                                            default_str, out_input_value);
+  });
+  return result;
 #elif defined(_WIN32)
   return laufey_common::ShowDialogWin(dialog_type, title_str, message_str,
                                       default_str, out_input_value);
