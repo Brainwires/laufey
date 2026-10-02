@@ -216,6 +216,19 @@ mod linux {
     None
   }
 
+  fn collect_labels(node: &MenuNode, out: &mut Vec<String>) {
+    if let Some(l) = node
+      .props
+      .get("label")
+      .and_then(|v| String::try_from(v.clone()).ok())
+    {
+      out.push(l);
+    }
+    for c in &node.children {
+      collect_labels(c, out);
+    }
+  }
+
   async fn run_assertions(
     conn: &Connection,
     bus_name: &str,
@@ -261,16 +274,31 @@ mod linux {
         .await?;
 
     // The reply is `(u (ia{sv}av))`: a revision and a bare structure, not a
-    // variant, so read the whole body dynamically.
-    let reply = menu
-      .call_method("GetLayout", &(0i32, -1i32, Vec::<String>::new()))
-      .await?;
-    let body = reply.body();
-    let layout: zbus::zvariant::Structure<'_> = body.deserialize()?;
-    let Some(root_node) = layout.fields().get(1).and_then(parse_node) else {
+    // variant, so read the whole body dynamically. The app sets its menu
+    // just after creating the tray, so ask again until "Ping" is there.
+    let mut root_node = None;
+    for _ in 0..50 {
+      let reply = menu
+        .call_method("GetLayout", &(0i32, -1i32, Vec::<String>::new()))
+        .await?;
+      let body = reply.body();
+      let layout: zbus::zvariant::Structure<'_> = body.deserialize()?;
+      root_node = layout.fields().get(1).and_then(parse_node);
+      if root_node
+        .as_ref()
+        .is_some_and(|n| find_by_label(n, "Ping").is_some())
+      {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let Some(root_node) = root_node else {
       check("dbusmenu GetLayout returns a layout root", false, failed);
       return Ok(());
     };
+    let mut labels = Vec::new();
+    collect_labels(&root_node, &mut labels);
+    eprintln!("[e2e] dbusmenu labels: {labels:?}");
     check("menu has children", !root_node.children.is_empty(), failed);
 
     if let Some(target) = find_by_label(&root_node, "Ping") {

@@ -379,14 +379,23 @@ EOF2
   # Running: the OS starts a second launch, which forwards the URL (with the
   # rest of its command line) to the running instance.
   start os-warm LAUFEY_DATA_DIR="$(native "$scratch/data-os")" \
-    LAUFEY_E2E_SI_SECOND_ARGC=3 LAUFEY_E2E_SI_SECOND_ARG_0=--runtime \
+    LAUFEY_E2E_SI_WAIT_MS=60000 LAUFEY_E2E_SI_SECOND_ARGC=3 LAUFEY_E2E_SI_SECOND_ARG_0=--runtime \
     LAUFEY_E2E_SI_SECOND_ARG_1="$rt_native" LAUFEY_E2E_SI_SECOND_ARG_2="$url_warm" --
   warm_pid=$started_pid
   if wait_for os-warm '^\[e2e\] ready' 90; then
     echo "== [os-warm] open $url_warm through the OS while it runs"
-    os_open "$url_warm" >"$scratch/logs/os-warm-open.log" 2>&1 ||
+    # Should the OS-started launch not forward and load the runtime itself
+    # instead, its own verdict lands here (it must stay empty).
+    stray="$scratch/os-warm-second.result"
+    LAUFEY_E2E_SI_RESULT_FILE="$(native "$stray")" LAUFEY_E2E_SI_WAIT_MS=1000 \
+      os_open "$url_warm" >"$scratch/logs/os-warm-open.log" 2>&1 ||
       echo "    (opener exited $?)"
     sed 's/^/    /' "$scratch/logs/os-warm-open.log" | head -20
+    wait_for os-warm '^\[e2e\] second_instance' 60 || true
+    if [ -f "$stray" ]; then
+      fail "the OS-started second launch ran the runtime itself:"
+      sed 's/^/    | /' "$stray"
+    fi
   else
     fail "os-warm never became ready"
   fi
