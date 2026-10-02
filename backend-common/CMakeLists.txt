@@ -241,6 +241,12 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_io_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_io_test COMMAND laufey_io_test)
 
+  # The native check on URLs the page asks the reserved open-external call
+  # to open (laufey_external_links.h): string fixtures only.
+  add_executable(laufey_external_links_test tests/external_links_test.cc)
+  target_link_libraries(laufey_external_links_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_external_links_test COMMAND laufey_external_links_test)
+
   # Accelerator parsing, the shortcut registry (with a fake OS side) and the
   # autostart entry format (no OS API).
   add_executable(laufey_system_test tests/system_test.cc)

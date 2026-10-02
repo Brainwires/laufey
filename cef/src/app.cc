@@ -625,7 +625,7 @@ bool LaufeyHandler::OnProcessMessageReceived(
       if (callArgs && callArgs->GetSize() > 0 &&
           callArgs->GetType(0) == VTYPE_STRING) {
         std::string url = callArgs->GetString(0).ToString();
-        if (!url.empty()) {
+        if (IsAllowedExternalLinkUrl(url)) {
           LaufeyOpenExternalURL(url);
         }
       }

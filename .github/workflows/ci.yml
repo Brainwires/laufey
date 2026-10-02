@@ -93,6 +93,16 @@ jobs:
             -o "$RUNNER_TEMP/single_instance_test"
           "$RUNNER_TEMP/single_instance_test"
 
+      # The native check on URLs the page asks the reserved open-external
+      # bridge call to open (header-only; ctest also runs it per backend).
+      - name: backend-common external_links_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/external_links_test.cc \
+            -o "$RUNNER_TEMP/external_links_test"
+          "$RUNNER_TEMP/external_links_test"
+
   # backend-winit-common's unit tests (click counting, frame offsets, resize
   # reporting, file-drop batching, window-API bookkeeping). Pure logic, no
   # display, but several are per-OS (cfg-gated), so every desktop OS runs them.
