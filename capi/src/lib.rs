@@ -593,7 +593,30 @@ pub struct SchemeRequest {
 
 /// Handle used to read the request body and stream the response back to the
 /// webview. Backed by the backend's `scheme_*` vtable functions.
-pub struct SchemeExchange(*mut ffi::laufey_scheme_exchange_t);
+pub struct SchemeExchange(*mut ffi::laufey_scheme_exchange_t, Arc<AtomicBool>);
+
+/// The cancel flag of every exchange the runtime holds, by exchange pointer:
+/// set by the backend's on_cancel, dropped when the exchange is finished
+/// (the backend never calls on_cancel once finish has returned, so a later
+/// exchange at the same address can't be marked by an earlier one's cancel).
+fn scheme_cancel_flags() -> &'static Mutex<HashMap<usize, Arc<AtomicBool>>> {
+  static FLAGS: OnceLock<Mutex<HashMap<usize, Arc<AtomicBool>>>> =
+    OnceLock::new();
+  FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+unsafe extern "C" fn scheme_cancel_trampoline(
+  _user_data: *mut c_void,
+  exchange: *mut ffi::laufey_scheme_exchange_t,
+) {
+  if let Some(flag) = scheme_cancel_flags()
+    .lock()
+    .unwrap()
+    .get(&(exchange as usize))
+  {
+    flag.store(true, Ordering::SeqCst);
+  }
+}
 
 // The exchange handle is owned and synchronized by the backend; the embedder
 // may move it across threads and share references across them (e.g. hold a
@@ -645,8 +668,30 @@ impl SchemeExchange {
     }
   }
 
+  /// Whether the webview cancelled the request (the fetch was aborted, the
+  /// document replaced, the window closed) before the response finished.
+  /// Once true, stop writing and call [`SchemeExchange::finish`]; the calls
+  /// stay safe until then. Any thread.
+  ///
+  /// Where a backend can't see a cancel (WebKitGTK before the head is sent,
+  /// a WebView2 request answered in one piece), it stays false and the next
+  /// [`SchemeExchange::write`] after the cancel returns a negative value
+  /// instead. See docs/custom-schemes.md.
+  pub fn is_cancelled(&self) -> bool {
+    self.1.load(Ordering::SeqCst)
+  }
+
   /// Complete the response and release the exchange.
   pub fn finish(self) {
+    {
+      let mut flags = scheme_cancel_flags().lock().unwrap();
+      if flags
+        .get(&(self.0 as usize))
+        .is_some_and(|f| Arc::ptr_eq(f, &self.1))
+      {
+        flags.remove(&(self.0 as usize));
+      }
+    }
     let api = api();
     if let Some(f) = api.scheme_response_finish {
       unsafe { f(api.backend_data, self.0) };
@@ -708,7 +753,14 @@ unsafe extern "C" fn scheme_request_trampoline(
     method: to_string(method),
     url: to_string(url),
     headers: unsafe { parse_flat_headers(headers, headers_len) },
-    exchange: SchemeExchange(exchange),
+    exchange: SchemeExchange(exchange, {
+      let flag = Arc::new(AtomicBool::new(false));
+      scheme_cancel_flags()
+        .lock()
+        .unwrap()
+        .insert(exchange as usize, flag.clone());
+      flag
+    }),
   };
   // Cloned out: the handler runs without the lock held.
   let handler = scheme_handler_store().lock().unwrap().clone();
@@ -770,7 +822,7 @@ where
         api.backend_data,
         c_scheme.as_ptr(),
         Some(scheme_request_trampoline),
-        None,
+        Some(scheme_cancel_trampoline),
         std::ptr::null_mut(),
       );
     }
@@ -4311,6 +4363,55 @@ mod tests {
     fake.post_ui_task = Some(fake_post_ui_task);
     nul::install(&mut fake);
     let _ = BACKEND_API.set(Box::leak(Box::new(fake)));
+  }
+
+  // on_cancel marks the exchange it names, and only that one: is_cancelled
+  // turns true for it, an exchange finished before is forgotten, and a
+  // later exchange at the same address starts uncancelled.
+  #[test]
+  fn scheme_cancel_marks_only_its_exchange() {
+    install_pdf_fake();
+    let ptr = 0x5ce0_usize as *mut ffi::laufey_scheme_exchange_t;
+    let other = 0x5ce8_usize as *mut ffi::laufey_scheme_exchange_t;
+    let held: Arc<Mutex<Vec<SchemeRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    // A store of its own would race the other tests' registrations; the
+    // trampoline reads the process-wide one, so set it directly.
+    *scheme_handler_store().lock().unwrap() = Some(Arc::new({
+      let held = held.clone();
+      move |req: SchemeRequest| held.lock().unwrap().push(req)
+    }));
+    let request = |p| unsafe {
+      scheme_request_trampoline(
+        std::ptr::null_mut(),
+        1,
+        p,
+        c"GET".as_ptr(),
+        c"app://x/".as_ptr(),
+        std::ptr::null(),
+        0,
+      )
+    };
+    request(ptr);
+    request(other);
+    let mut reqs = std::mem::take(&mut *held.lock().unwrap());
+    assert_eq!(reqs.len(), 2);
+    assert!(!reqs[0].exchange.is_cancelled());
+    unsafe { scheme_cancel_trampoline(std::ptr::null_mut(), ptr) };
+    assert!(reqs[0].exchange.is_cancelled());
+    assert!(
+      !reqs[1].exchange.is_cancelled(),
+      "another exchange was marked"
+    );
+    for r in reqs.drain(..) {
+      r.exchange.finish();
+    }
+    // Finished: the address is free, and a new exchange there is fresh.
+    unsafe { scheme_cancel_trampoline(std::ptr::null_mut(), ptr) };
+    request(ptr);
+    let again = held.lock().unwrap().pop().unwrap();
+    assert!(!again.exchange.is_cancelled());
+    again.exchange.finish();
+    *scheme_handler_store().lock().unwrap() = None;
   }
 
   // Handlers run after their slot's lock is released: one that replaces

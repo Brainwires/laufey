@@ -58,6 +58,9 @@ const CANCELLED: [&str; 4] = ["fetch", "abort", "sse", "xhr"];
 pub struct State {
   /// Never-ending routes whose write failed, by label.
   cancelled: Arc<Mutex<HashSet<String>>>,
+  /// Never-ending routes whose exchange reported the cancel
+  /// (SchemeExchange::is_cancelled, the backend's on_cancel), by label.
+  on_cancel: Arc<Mutex<HashSet<String>>>,
   /// `slow`: how long writing the whole body took (ms), and whether every
   /// write was accepted.
   slow_write: Arc<Mutex<Option<(u128, bool)>>>,
@@ -342,7 +345,18 @@ fn never_ending(
     failed = req.exchange.write(heartbeat.as_bytes()) < 0;
   }
   if failed {
-    state.cancelled.lock().unwrap().insert(label);
+    state.cancelled.lock().unwrap().insert(label.clone());
+    // The backend's on_cancel: reported by the time the write fails, or
+    // just after (it runs on the engine's thread).
+    let start = Instant::now();
+    while !req.exchange.is_cancelled()
+      && start.elapsed() < Duration::from_secs(2)
+    {
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    if req.exchange.is_cancelled() {
+      state.on_cancel.lock().unwrap().insert(label);
+    }
   }
   req.exchange.finish();
 }
@@ -569,6 +583,21 @@ pub async fn run(state: &State) -> Option<Window> {
       "cancelling a never-ending response stops the handler's writes (still writing: {missing:?})"
     ),
     all_cancelled,
+  );
+  // ... and reaches the handler as a cancel (on_cancel -> is_cancelled),
+  // not only as a failed write.
+  let seen = state.on_cancel.lock().unwrap().clone();
+  let mut unseen: Vec<&str> = CANCELLED
+    .iter()
+    .copied()
+    .filter(|l| cancelled.contains(*l) && !seen.contains(*l))
+    .collect();
+  unseen.sort();
+  check(
+    &format!(
+      "the engine's cancel reaches the handler (is_cancelled; not reported for: {unseen:?})"
+    ),
+    unseen.is_empty(),
   );
   Some(win)
 }

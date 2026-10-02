@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "laufey_scheme_cancel.h"
 #include "runtime_loader.h"
 #include "scheme_exchange.h"
 
@@ -616,7 +617,8 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
     }
   }
 
-  // Stop: the runtime's next write fails, nothing more reaches the page.
+  // Stop: the runtime's next write fails, nothing more reaches the page,
+  // and the runtime hears of it (on_cancel) unless it finished already.
   void Cancel() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -625,6 +627,22 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
       body_.shrink_to_fit();
     }
     Unregister();
+    SchemeExchangeBase* handle = handle_;
+    if (handle) {
+      gate_.Cancel([handle] {
+        RuntimeLoader::GetInstance()->DispatchSchemeCancel(handle);
+      });
+    }
+  }
+
+  // What the runtime holds for this exchange (set before the runtime sees
+  // it; valid until FinishedByRuntime).
+  void set_handle(SchemeExchangeBase* handle) {
+    handle_ = handle;
+  }
+  // The runtime finished the exchange: no on_cancel from now on.
+  void FinishedByRuntime() {
+    gate_.Finish();
   }
 
   // Cancel, telling an attached page why. Also after the overflow check in
@@ -703,6 +721,8 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
   std::vector<uint8_t> request_body_;
   size_t req_cursor_ = 0;
 
+  SchemeExchangeBase* handle_ = nullptr;
+  laufey_common::SchemeCancelGate gate_;
   std::mutex mutex_;
   Mode mode_ = Mode::kPending;
   int status_ = 200;
@@ -733,6 +753,7 @@ class ExchangeHandle : public SchemeExchangeBase {
     return x_->WriteResponse(buf, len);
   }
   void Finish() override {
+    x_->FinishedByRuntime();
     x_->Finish();
     delete this;
   }
@@ -884,8 +905,10 @@ HRESULT HandleSchemeRequest(ICoreWebView2Environment* env,
 
     std::string flat = LaufeyFlattenHeaders(headers);
     // window_id is unused by the desktop bridge (single named channel).
-    RuntimeLoader::GetInstance()->DispatchSchemeRequest(
-        0, new ExchangeHandle(exchange), method, url, flat);
+    auto* handle = new ExchangeHandle(exchange);
+    exchange->set_handle(handle);
+    RuntimeLoader::GetInstance()->DispatchSchemeRequest(0, handle, method, url,
+                                                        flat);
     return S_OK;
   } catch (...) {
     return S_OK;

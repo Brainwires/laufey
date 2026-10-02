@@ -17,6 +17,7 @@
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
 #include "laufey_auth_session.h"
+#include "laufey_scheme_cancel.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_system.h"
@@ -619,10 +620,17 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
 // Serves "app" and every scheme the embedder registered (see
 // RegisterSchemeHandler); the same handler object is installed for each.
 
+class MacSchemeExchange;
+
 // One in-flight WKURLSchemeTask: `stopped` is set when WebKit stops it
-// (-stopURLSchemeTask:), after which it must not be messaged.
+// (-stopURLSchemeTask:), after which it must not be messaged; `gate`
+// reports that stop to the runtime (on_cancel) unless it finished first.
 struct MacSchemeTaskState {
   std::atomic<bool> stopped{false};
+  laufey_common::SchemeCancelGate gate;
+  // Set on the main thread before the runtime sees it; deleted (on the main
+  // thread) only after gate.Finish().
+  MacSchemeExchange* exchange = nullptr;
 };
 
 // The in-flight tasks of every scheme handler, by task. An entry goes when
@@ -708,6 +716,8 @@ class MacSchemeExchange : public SchemeExchangeBase {
   }
 
   void Finish() override {
+    // No on_cancel from now on (and one in progress has returned).
+    state_->gate.Finish();
     id<WKURLSchemeTask> task = task_;
     std::shared_ptr<MacSchemeTaskState> state = state_;
     bool began = began_.load();
@@ -778,19 +788,30 @@ class MacSchemeExchange : public SchemeExchangeBase {
   }
   MacSchemeExchange* exchange =
       new MacSchemeExchange(task, req.HTTPBody, state);
+  state->exchange = exchange;
   RuntimeLoader::GetInstance()->DispatchSchemeRequest(self.windowId, exchange,
                                                       method, url, flat);
 }
 
 - (void)webView:(WKWebView*)webView
     stopURLSchemeTask:(id<WKURLSchemeTask>)task {
-  std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
-  auto& tasks = SchemeTasks();
-  auto it = tasks.find((__bridge void*)task);
-  if (it != tasks.end()) {
-    it->second->stopped.store(true);
+  std::shared_ptr<MacSchemeTaskState> state;
+  {
+    std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
+    auto& tasks = SchemeTasks();
+    auto it = tasks.find((__bridge void*)task);
+    if (it == tasks.end())
+      return;
+    state = it->second;
+    state->stopped.store(true);
     tasks.erase(it);
   }
+  // The page gave up on the request: tell the runtime, unless it finished.
+  // The exchange is deleted on this thread, after gate.Finish().
+  MacSchemeExchange* exchange = state->exchange;
+  state->gate.Cancel([exchange] {
+    RuntimeLoader::GetInstance()->DispatchSchemeCancel(exchange);
+  });
 }
 
 @end

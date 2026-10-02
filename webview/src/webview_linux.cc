@@ -14,6 +14,7 @@
 #include "laufey_single_instance.h"
 #include "laufey_json.h"
 #include "laufey_scheme_body_stream.h"
+#include "laufey_scheme_cancel.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_ui_tasks.h"
 #include "init_script.h"
@@ -2479,7 +2480,19 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
                       std::vector<uint8_t> request_body)
       : request_(WEBKIT_URI_SCHEME_REQUEST(g_object_ref(request))),
         request_body_(std::move(request_body)),
-        body_(std::make_shared<laufey_common::SchemeBodyWriter>()) {}
+        body_(std::make_shared<laufey_common::SchemeBodyWriter>()),
+        gate_(std::make_shared<laufey_common::SchemeCancelGate>()) {
+    // WebKit let the body stream go before it ended: the page aborted the
+    // request (or the document / window went away). WebKitGTK says nothing
+    // about a request cancelled before its head was sent, so a cancel is
+    // only seen once the head is.
+    std::shared_ptr<laufey_common::SchemeCancelGate> gate = gate_;
+    LinuxSchemeExchange* self = this;
+    body_->SetReaderGoneHandler([gate, self] {
+      gate->Cancel(
+          [self] { RuntimeLoader::GetInstance()->DispatchSchemeCancel(self); });
+    });
+  }
 
   ~LinuxSchemeExchange() override {
     body_->End();
@@ -2515,6 +2528,8 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   }
 
   void Finish() override {
+    // No on_cancel from now on (and one in progress has returned).
+    gate_->Finish();
     body_->End();  // EOF for WebKit, after what was written
     if (!began_) {
       // Finished without a head: no response, so the request fails (it was
@@ -2579,6 +2594,7 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   std::vector<uint8_t> request_body_;
   size_t req_cursor_ = 0;
   std::shared_ptr<laufey_common::SchemeBodyWriter> body_;
+  std::shared_ptr<laufey_common::SchemeCancelGate> gate_;
   // Begin and Finish come from the runtime's thread, in that order.
   bool began_ = false;
 };

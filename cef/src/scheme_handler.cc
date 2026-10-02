@@ -95,6 +95,7 @@ bool LaufeySchemeHandler::Open(CefRefPtr<CefRequest> request,
   // Hand ownership of an extra reference to the runtime. Released in
   // FinishResponse(). Keeps the handler alive while the runtime streams.
   this->AddRef();
+  dispatched_ = true;
   RuntimeLoader::GetInstance()->DispatchSchemeRequest(window_id_, this, method_,
                                                       url_, flat_headers);
   return true;
@@ -184,6 +185,12 @@ void LaufeySchemeHandler::Cancel() {
   // Wake any parked read so it reports EOF.
   if (to_continue)
     to_continue->Continue(0);
+  // Tell the runtime (on_cancel), unless it already finished the exchange.
+  // Cancel runs on the IO thread Open ran on, so `dispatched_` is settled.
+  if (dispatched_) {
+    cancel_gate_.Cancel(
+        [this] { RuntimeLoader::GetInstance()->DispatchSchemeCancel(this); });
+  }
 }
 
 intptr_t LaufeySchemeHandler::ReadRequestBody(uint8_t* buf, size_t cap) {
@@ -272,6 +279,8 @@ intptr_t LaufeySchemeHandler::WriteResponse(const uint8_t* buf, size_t len) {
 }
 
 void LaufeySchemeHandler::FinishResponse() {
+  // No on_cancel from now on (and one in progress has returned).
+  cancel_gate_.Finish();
   CefRefPtr<CefResourceReadCallback> to_continue;
   CefRefPtr<CefCallback> to_cancel;
   {

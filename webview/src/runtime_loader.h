@@ -102,6 +102,11 @@ class RuntimeLoader {
   void DispatchSchemeRequest(uint32_t window_id, SchemeExchangeBase* exchange,
                              const std::string& method, const std::string& url,
                              const std::string& flat_headers);
+  // The engine cancelled `exchange` before the runtime finished it: call the
+  // registered on_cancel, if any. Backends call it through their
+  // SchemeCancelGate (laufey_scheme_cancel.h): at most once, never after
+  // the exchange was finished.
+  void DispatchSchemeCancel(SchemeExchangeBase* exchange);
 
   void SetKeyboardEventHandler(laufey_keyboard_event_fn handler,
                                void* user_data) {

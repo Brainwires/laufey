@@ -383,6 +383,11 @@ class RuntimeLoader {
   void DispatchSchemeRequest(uint32_t window_id, void* exchange,
                              const std::string& method, const std::string& url,
                              const std::string& flat_headers);
+  // The engine cancelled `exchange` before the runtime finished it: call the
+  // registered on_cancel, if any. Backends call it through their
+  // SchemeCancelGate (laufey_scheme_cancel.h): at most once, never after
+  // the exchange was finished.
+  void DispatchSchemeCancel(void* exchange);
 
   void SetJsCallNotify(void (*notify_fn)(void*), void* notify_data) {
     std::lock_guard<std::mutex> lock(notify_mutex_);

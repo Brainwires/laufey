@@ -817,9 +817,16 @@ typedef void (*laufey_scheme_request_fn)(void* user_data, uint32_t window_id,
                                          const char* headers,
                                          size_t headers_len);
 
-// Invoked if the webview cancels the request (navigation away, window closed)
-// before the response is finished. After this fires the embedder must stop
-// writing and call scheme_response_finish to release `exchange`. Optional.
+// Invoked if the webview cancels the request (navigation away, window closed,
+// the fetch aborted) before the response is finished. After this fires the
+// embedder must stop writing and call scheme_response_finish to release
+// `exchange`. Optional. Called at most once per exchange, on a backend
+// thread, never once scheme_response_finish has returned; `exchange` stays
+// valid for the call. The embedder may call scheme_response_finish from
+// inside it, but must not block in it on a finish made on another thread.
+// Where a backend can't observe a cancel (WebKitGTK before the response head
+// is sent; WebView2 for a response it takes in one piece) it is not called,
+// and the next scheme_response_write fails instead.
 typedef void (*laufey_scheme_cancel_fn)(void* user_data,
                                         laufey_scheme_exchange_t* exchange);
 

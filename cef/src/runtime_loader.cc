@@ -3592,6 +3592,18 @@ void RuntimeLoader::SetSchemeRequestHandler(const std::string& scheme,
   }
 }
 
+void RuntimeLoader::DispatchSchemeCancel(void* exchange) {
+  laufey_scheme_cancel_fn on_cancel;
+  void* user_data;
+  {
+    std::lock_guard<std::mutex> lock(scheme_mutex_);
+    on_cancel = scheme_cancel_handler_;
+    user_data = scheme_user_data_;
+  }
+  if (on_cancel)
+    on_cancel(user_data, reinterpret_cast<laufey_scheme_exchange_t*>(exchange));
+}
+
 void RuntimeLoader::DispatchSchemeRequest(uint32_t window_id, void* exchange,
                                           const std::string& method,
                                           const std::string& url,

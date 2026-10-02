@@ -142,6 +142,16 @@ that has nothing to send for a long time learns of the cancellation only at its
 next write, so a heartbeat (an SSE comment line such as `:\n\n`) bounds how long
 a dead stream lingers.
 
+The backend also tells the handler directly: the `on_cancel` callback passed to
+`register_scheme_handler` (in the `laufey` crate,
+`SchemeExchange::is_cancelled()` turns true) fires at most once per exchange,
+never after `finish` has returned, when the engine gives up on the request: CEF
+cancels the request, WKWebView stops the scheme task, WebKitGTK lets the body
+stream go before it ended, WebView2 cancels a streamed response (the reader
+cancelled, the document gone). WebKitGTK says nothing about a request cancelled
+before its head was sent, and WebView2 nothing about a response it takes in one
+piece; there, as everywhere, the next `write` failing is the signal.
+
 A handler's `write` **never blocks**: the runtime writes from its event loop
 thread, so a write that waited for a slow page would stall the whole app. Each
 backend takes the bytes and hands them on as the engine reads:
