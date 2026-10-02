@@ -734,8 +734,12 @@ one that doesn't must refuse (setters return `false`).
 
 `--lifetime` (its own run, since it ends the process): with keep-alive on, the
 last window closes and the loop survives (no runtime shutdown), a new window
-opens, then `quit()` with a window open must end the loop, observed as the
-backend calling the runtime's shutdown.
+opens, then `quit()` with a window open, called at once from the UI thread and
+from a runtime thread, must end the loop, observed as the backend calling the
+runtime's shutdown, exactly once. The battery then returns from
+`laufey_runtime_start` instead of exiting, so the backend has to end the process
+itself; on Unix an `atexit` guard fails the run (exit 1) unless the runtime's
+start function had returned and its shutdown was called once by then.
 
 The Layer-0 battery runs it on Linux without a window manager, where nothing
 applies maximize / minimize / fullscreen (N/A). CI also runs `--window-api` on
@@ -877,6 +881,19 @@ that it says so). See [menus.md](menus.md) and
   is dismissed with `test_dismiss_context_menu` and its close callback fires
   exactly once, with no click (a menu the OS refused to show closes by itself,
   which the check accepts).
+- **The app runs while a context menu is open**: on a window whose page calls a
+  binding every 100 ms, a menu is opened (on Windows its `#32768` popup must be
+  visible); while it is open the page's timer keeps reaching the runtime (at
+  least 3 calls in 1.5 s), and a synchronous window getter and
+  `run_on_ui_thread` return within 5 s. Every leg. (CEF on Windows used to stop
+  running its tasks inside `TrackPopupMenu`'s modal loop; WKWebView showed the
+  menu from a main-queue block, which held the main queue.)
+- **Windows: a context menu driven from the keyboard**: before each menu the
+  window is brought to the front with an Alt press around `SetForegroundWindow`
+  (what an automation script does, which leaves the system menu in keyboard menu
+  mode); then Escape dismisses one menu and Down + Return chooses the first item
+  of the next, injected with `SendInput`. N/A where the window can't take the
+  foreground.
 - **Responses**: a click before any response handler is buffered, then delivered
   with `launch: true` when the handler registers; later ones arrive directly
   with `launch: false`.
@@ -939,10 +956,12 @@ settled).
   through a loopback "identity provider" that redirects to
   `laufey-e2e-auth://cb?code=…&state=s1`, resolving with exactly that URL; a
   second session meanwhile is `busy`; `test_cancel_auth_session` ends a session
-  `cancelled` (as the user closing the sheet); closing the anchor window does
-  too; and, in CI only (it puts a prompt on the screen), a cancel while the
-  consent prompt of a non-ephemeral session is up, which the OS itself never
-  reports, still ends it `cancelled`.
+  `cancelled` (as the user closing the sheet); `auth_session_cancel` (API 43)
+  does too, a second call answers `false`, and the next session completes a
+  round trip; closing the anchor window ends it as well; and, in CI only (it
+  puts a prompt on the screen), a cancel while the consent prompt of a
+  non-ephemeral session is up, which the OS itself never reports, still ends it
+  `cancelled`.
 
 The portable cores are unit-tested in
 `backend-common/tests/auth_main_thread_test.cc` (the dispatcher over a fake
