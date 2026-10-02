@@ -7,9 +7,12 @@
 // main-queue block (dispatch_sync): the main queue is serial, so while that
 // block ran the modal, no other main-queue work would run until the dialog
 // closed -- the backend's UI-thread calls and dispatch_ui_task among it.
+// The wait goes through the UI task dispatcher (laufey_ui_tasks.h): a call
+// still waiting when the loop ends returns as if cancelled.
 
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
+#include "laufey_ui_tasks.h"
 
 #import <Cocoa/Cocoa.h>
 
@@ -66,15 +69,14 @@ int ShowDialogMac(int dialog_type, const std::string& title,
     ScopedNativeModalLoop modal_loop;
     body();
   } else {
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    RunFromMainRunLoopMac([body, done] {
-      {
-        ScopedNativeModalLoop modal_loop;
-        body();
-      }
-      dispatch_semaphore_signal(done);
+    auto run = [body] {
+      ScopedNativeModalLoop modal_loop;
+      body();
+    };
+    RunOnUiThreadAndWait(run, [](void (*task)(void*), void* data) {
+      RunFromMainRunLoopMac([task, data] { task(data); });
+      return true;
     });
-    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
   }
 
   if (out_input_value && input_strdup)

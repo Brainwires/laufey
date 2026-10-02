@@ -9,6 +9,7 @@
 #include "laufey_json.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_ui_tasks.h"
 #include "laufey_window.h"
 #include "init_script.h"
 #include "wv2_scheme_stream.h"
@@ -341,7 +342,7 @@ class WebView2Backend : public LaufeyBackend {
   void SetQuitOnLastWindowClosed(bool quit) override {
     laufey_common::SetQuitOnLastWindowClosed(quit);
   }
-  void PostUiTask(void (*task)(void*), void* data) override;
+  bool PostUiTask(void (*task)(void*), void* data) override;
   void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                                 void* user_data) override {
     laufey_common::SetSecondInstanceHandler(handler, user_data);
@@ -622,8 +623,9 @@ class WebView2Backend : public LaufeyBackend {
   // Like RunOnUiThread, but blocks until the task has run. For calls whose
   // arguments only outlive the call itself (e.g. a caller-owned
   // laufey_value_t*). Callers must not hold locks that UI-thread message
-  // handlers also take.
-  void RunOnUiThreadSync(std::function<void()> task);
+  // handlers also take. False when the task did not run because the loop
+  // had ended (the caller answers with its defaults).
+  bool RunOnUiThreadSync(std::function<void()> task);
 
   std::map<uint32_t, WinWindowState> windows_;
   std::once_flag shortcuts_once_;
@@ -946,22 +948,14 @@ void WebView2Backend::RunOnUiThread(std::function<void()> task) {
   }
 }
 
-void WebView2Backend::RunOnUiThreadSync(std::function<void()> task) {
+bool WebView2Backend::RunOnUiThreadSync(std::function<void()> task) {
   if (GetCurrentThreadId() == ui_thread_id_) {
     task();
-    return;
+    return true;
   }
-  std::mutex m;
-  std::condition_variable cv;
-  bool done = false;
-  RunOnUiThread([&] {
-    task();
-    std::lock_guard<std::mutex> lock(m);
-    done = true;
-    cv.notify_one();
-  });
-  std::unique_lock<std::mutex> lock(m);
-  cv.wait(lock, [&] { return done; });
+  // Through the UI task dispatcher (the same WM_UI_TASK queue), so the wait
+  // ends with the loop instead of outliving it.
+  return laufey_common::RunOnUiThreadAndWait(task);
 }
 
 WebView2Backend::~WebView2Backend() {
@@ -2225,12 +2219,18 @@ void WebView2Backend::PasskeyRequest(uint32_t window_id, uint32_t kind,
   });
 }
 
-void WebView2Backend::PostUiTask(void (*task)(void*), void* data) {
-  // Always deliverable: the message-only dispatcher window exists from
-  // construction, so this works even before the first real window is created
-  // (the old "post to the first window" path silently dropped the task then).
-  PostMessageW(dispatcher_hwnd_, WM_UI_TASK, 0,
-               reinterpret_cast<LPARAM>(new UiTaskData{task, data}));
+bool WebView2Backend::PostUiTask(void (*task)(void*), void* data) {
+  // Deliverable from construction on: the message-only dispatcher window
+  // exists by then, so this works even before the first real window is
+  // created (the old "post to the first window" path silently dropped the
+  // task then). Fails once the window is gone or the queue is full.
+  auto* td = new UiTaskData{task, data};
+  if (!PostMessageW(dispatcher_hwnd_, WM_UI_TASK, 0,
+                    reinterpret_cast<LPARAM>(td))) {
+    delete td;
+    return false;
+  }
+  return true;
 }
 
 void WebView2Backend::InvokeJsCallback(uint32_t window_id, uint64_t callback_id,

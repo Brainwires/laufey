@@ -374,6 +374,17 @@ pending task that way on the thread that ends the loop, **before** it calls
 `laufey_runtime_shutdown`, and answers later dispatches synchronously. A
 headless worker (no loop) answers every dispatch with `ran == false`.
 
+The backends' own synchronous hops ride the same guarantee: an entry point a
+runtime thread calls that has to run on the UI thread and answer (a getter such
+as `get_window_size`, `is_visible`, `get_screens`, a clipboard read, a dialog)
+waits for the UI thread through the same dispatcher. Called after the loop has
+ended, or still waiting when it ends, such a call returns at once with its
+defaults (`0`, `false`, `NULL`, an empty list) instead of waiting forever. Once
+the loop has ended the backend calls `laufey_runtime_shutdown` and waits up to
+10 seconds for the runtime's thread to return from `laufey_runtime_start` (5 on
+Winit); a runtime still running then is abandoned and the process exits without
+it.
+
 `is_ui_thread` is true on the thread that runs those tasks: the process main
 thread on macOS (every backend) and for the WebView backends, CEF's `TID_UI`
 (the main thread), the Winit event loop's thread. Both are callable from any

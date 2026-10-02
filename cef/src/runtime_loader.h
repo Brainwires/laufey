@@ -4,6 +4,7 @@
 #define LAUFEY_RUNTIME_LOADER_H_
 
 #include <string>
+#include <chrono>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -21,6 +22,7 @@
 // (backend-common/include/laufey_value.h). CEF stores values as laufey::Value
 // and converts to/from CefValue only at the renderer<->browser IPC boundary
 // (CefValueToLaufey / LaufeyToCefValue in runtime_loader.cc).
+#include "laufey_sync_call.h"
 #include "laufey_value.h"
 
 class RuntimeLoader {
@@ -421,6 +423,10 @@ class RuntimeLoader {
   laufey_runtime_shutdown_fn shutdown_fn_ = nullptr;
 
   std::thread runtime_thread_;
+  // Signalled as the runtime thread ends (laufey_start returned).
+  laufey_common::ThreadExit runtime_exit_;
+  // How long Shutdown waits for the runtime thread before abandoning it.
+  static constexpr std::chrono::milliseconds kRuntimeShutdownTimeout{10000};
   std::atomic<bool> running_{false};
 
   std::map<uint32_t, CefRefPtr<CefBrowser>> browsers_;

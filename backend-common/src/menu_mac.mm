@@ -8,6 +8,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
+#include "laufey_ui_tasks.h"
 
 #import <AppKit/AppKit.h>
 
@@ -274,13 +275,6 @@ NSString* NSStr(const std::string& s) {
 std::map<uint32_t, NSMenu*>& WindowMenus() {
   static std::map<uint32_t, NSMenu*> menus;
   return menus;
-}
-
-void RunOnMainSync(void (^block)(void)) {
-  if ([NSThread isMainThread])
-    block();
-  else
-    dispatch_sync(dispatch_get_main_queue(), block);
 }
 
 }  // namespace

@@ -88,10 +88,11 @@ class WKWebViewIOSBackend : public LaufeyBackend {
   void Focus(uint32_t) override {}
 
   void Quit() override {}
-  void PostUiTask(void (*task)(void*), void* data) override {
+  bool PostUiTask(void (*task)(void*), void* data) override {
     dispatch_async(dispatch_get_main_queue(), ^{
       task(data);
     });
+    return true;
   }
   void Run() override {}  // UIApplicationMain already owns the run loop.
 

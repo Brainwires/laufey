@@ -12,7 +12,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
-#include "laufey_sync_call.h"
+#include "laufey_ui_tasks.h"
 
 #include <cstring>
 #include <memory>
@@ -62,19 +62,18 @@ void GtkRunAsync(std::function<void()> fn) {
       [](gpointer data) { delete static_cast<std::function<void()>*>(data); });
 }
 
-void GtkRunSync(const std::function<void()>& fn) {
+bool GtkRunSync(const std::function<void()>& fn) {
   if (OnGtkThread()) {
     fn();
-    return;
+    return true;
   }
-  // `call` lives in this frame; Done() is the task's last access to it
-  // (laufey_sync_call.h).
-  SyncCall call;
-  GtkRunAsync([&] {
-    fn();
-    call.Done();
+  // Over GtkRunAsync's transport, through the UI task dispatcher (the GTK
+  // thread is the backend's UI thread: WebKitGTK's gtk_main, CEF's TID_UI),
+  // so the wait ends with the loop instead of outliving it.
+  return RunOnUiThreadAndWait(fn, [](void (*task)(void*), void* data) {
+    GtkRunAsync([task, data] { task(data); });
+    return true;
   });
-  call.Wait();
 }
 
 namespace {

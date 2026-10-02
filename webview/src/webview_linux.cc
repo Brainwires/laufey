@@ -15,7 +15,7 @@
 #include "laufey_json.h"
 #include "laufey_scheme_body_stream.h"
 #include "laufey_scheme_registry.h"
-#include "laufey_sync_call.h"
+#include "laufey_ui_tasks.h"
 #include "init_script.h"
 #include <webkit2/webkit2.h>
 #include <JavaScriptCore/JavaScript.h>
@@ -32,30 +32,17 @@
 #include <mutex>
 #include <set>
 
-// Helper to run a callback synchronously on the GTK main thread.
-// If already on the main thread, runs immediately.
+// Runs `fn` synchronously on the GTK main thread (inline when already
+// there). Through the UI task dispatcher (laufey_ui_tasks.h), so a call never
+// outlives the loop: false when `fn` did not run because the loop had ended,
+// and the caller answers with its defaults.
 template <typename F>
-static void gtk_invoke_sync(F&& fn) {
+static bool gtk_invoke_sync(F&& fn) {
   if (g_main_context_is_owner(g_main_context_default())) {
     fn();
-    return;
+    return true;
   }
-  // `ctx` lives in this frame; Done() is the idle callback's last access to
-  // it (laufey_sync_call.h).
-  struct Ctx {
-    F* fn;
-    laufey_common::SyncCall call;
-  };
-  Ctx ctx{&fn, {}};
-  g_idle_add(
-      [](gpointer data) -> gboolean {
-        auto* c = static_cast<Ctx*>(data);
-        (*c->fn)();
-        c->call.Done();
-        return G_SOURCE_REMOVE;
-      },
-      &ctx);
-  ctx.call.Wait();
+  return laufey_common::RunOnUiThreadAndWait(fn);
 }
 
 namespace keyboard {
@@ -755,7 +742,7 @@ class WebKitGTKBackend : public LaufeyBackend {
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
   void Focus(uint32_t window_id) override;
-  void PostUiTask(void (*task)(void*), void* data) override;
+  bool PostUiTask(void (*task)(void*), void* data) override;
   void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                                 void* user_data) override {
     laufey_common::SetSecondInstanceHandler(handler, user_data);
@@ -1957,7 +1944,7 @@ void WebKitGTKBackend::Focus(uint32_t window_id) {
   });
 }
 
-void WebKitGTKBackend::PostUiTask(void (*task)(void*), void* data) {
+bool WebKitGTKBackend::PostUiTask(void (*task)(void*), void* data) {
   struct TaskData {
     void (*task)(void*);
     void* data;
@@ -1971,6 +1958,7 @@ void WebKitGTKBackend::PostUiTask(void (*task)(void*), void* data) {
         return G_SOURCE_REMOVE;
       },
       td);
+  return true;
 }
 
 void WebKitGTKBackend::InvokeJsCallback(uint32_t window_id,

@@ -519,7 +519,94 @@ static void TestAuthSessionRaces() {
   }
 }
 
+// The synchronous hop behind every getter the runtime calls (cef_invoke_sync,
+// gtk_invoke_sync, GtkRunSync, the WebView2 / macOS getters): runs on the UI
+// thread and returns true; a caller still waiting when the loop ends, or
+// calling after it ended, is released with false instead of waiting forever
+// (the runtime's shutdown waits for that caller's thread).
+static void TestRunOnUiThreadAndWait() {
+  FakeLoop loop;
+  UiTaskDispatcher d;
+  loop.Sync([&] {
+    d.Bind([&](void (*t)(void*), void* data) { return loop.Post(t, data); });
+  });
+  std::thread::id ran_on;
+  auto record = [&] { ran_on = std::this_thread::get_id(); };
+  CHECK(laufey_common::RunOnUiThreadAndWait(record, nullptr, d));
+  CHECK(ran_on == loop.id());
+
+  // Waiting behind a loop that ends: released, `fn` never runs.
+  loop.Pause();
+  std::atomic<bool> released{false};
+  std::atomic<bool> ran{false};
+  std::atomic<bool> result{true};
+  std::thread waiter([&] {
+    auto mark = [&] { ran = true; };
+    result = laufey_common::RunOnUiThreadAndWait(mark, nullptr, d);
+    released = true;
+  });
+  while (d.pending_count() == 0)
+    std::this_thread::yield();
+  CHECK(!released);
+  loop.Stop();
+  d.Close();
+  waiter.join();
+  CHECK(released && !result && !ran);
+
+  // After the loop ended: answered at once.
+  bool late = false;
+  auto set_late = [&] { late = true; };
+  CHECK(!laufey_common::RunOnUiThreadAndWait(set_late, nullptr, d));
+  CHECK(!late);
+}
+
+// The same over a caller's own transport (the macOS main queue, GLib's
+// default context): works before Bind, and a waiter is still released when
+// the loop ends.
+static void TestRunOnUiThreadAndWaitVia() {
+  FakeLoop loop;
+  UiTaskDispatcher d;  // never bound
+  auto via = [&](void (*t)(void*), void* data) { return loop.Post(t, data); };
+  std::thread::id ran_on;
+  auto record = [&] { ran_on = std::this_thread::get_id(); };
+  CHECK(laufey_common::RunOnUiThreadAndWait(record, via, d));
+  CHECK(ran_on == loop.id());
+
+  loop.Pause();
+  std::atomic<bool> result{true};
+  std::atomic<bool> ran{false};
+  std::thread waiter([&] {
+    auto mark = [&] { ran = true; };
+    result = laufey_common::RunOnUiThreadAndWait(mark, via, d);
+  });
+  while (d.pending_count() == 0)
+    std::this_thread::yield();
+  loop.Stop();
+  d.Close();
+  waiter.join();
+  CHECK(!result && !ran);
+  CHECK(!laufey_common::RunOnUiThreadAndWait(record, via, d));
+}
+
+static void TestRunOnUiThreadAndWaitRefusedPost() {
+  // CefPostTask refuses once CEF has shut down: the caller is released.
+  FakeLoop loop;
+  UiTaskDispatcher d;
+  loop.Sync([&] {
+    d.Bind([&](void (*t)(void*), void* data) { return loop.Post(t, data); });
+  });
+  loop.RefusePosts();
+  bool ran = false;
+  auto set = [&] { ran = true; };
+  CHECK(!laufey_common::RunOnUiThreadAndWait(set, nullptr, d));
+  CHECK(!ran);
+  d.Close();
+}
+
 int main() {
+  TestRunOnUiThreadAndWait();
+  TestRunOnUiThreadAndWaitRefusedPost();
+  TestRunOnUiThreadAndWaitVia();
   TestUiTasksRunOnTheUiThread();
   TestUiTasksDispatchedBeforeBind();
   TestUiTasksCancelledWhenTheLoopEnds();

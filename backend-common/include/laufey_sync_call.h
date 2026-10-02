@@ -25,6 +25,7 @@
 #ifndef LAUFEY_SYNC_CALL_H_
 #define LAUFEY_SYNC_CALL_H_
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -49,6 +50,29 @@ class SyncCall {
   void Wait() {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [this] { return done_; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool done_ = false;
+};
+
+// A thread's end, for a timed wait on it (std::thread has no timed join):
+// the thread calls Done() as its last step, the owner WaitFor()s it. Owned
+// by an object that outlives the thread (the runtime loader).
+class ThreadExit {
+ public:
+  void Done() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    done_ = true;
+    cv_.notify_all();
+  }
+
+  // True once Done() has been called; false after `timeout` without it.
+  bool WaitFor(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this] { return done_; });
   }
 
  private:

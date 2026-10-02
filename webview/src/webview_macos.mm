@@ -18,6 +18,7 @@
 #include "laufey_passkey.h"
 #include "laufey_auth_session.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_ui_tasks.h"
 #include "laufey_system.h"
 #include "laufey_window.h"
 #include "init_script.h"
@@ -98,7 +99,7 @@ class WKWebViewBackend : public LaufeyBackend {
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
   void Focus(uint32_t window_id) override;
-  void PostUiTask(void (*task)(void*), void* data) override;
+  bool PostUiTask(void (*task)(void*), void* data) override;
   void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                                 void* user_data) override {
     laufey_common::SetSecondInstanceHandler(handler, user_data);
@@ -2015,7 +2016,7 @@ void WKWebViewBackend::SetWindowSize(uint32_t window_id, int width,
 
 double WKWebViewBackend::GetWindowScaleFactor(uint32_t window_id) {
   __block double result = 1.0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2028,7 +2029,7 @@ double WKWebViewBackend::GetWindowScaleFactor(uint32_t window_id) {
 void WKWebViewBackend::GetWindowSize(uint32_t window_id, int* width,
                                      int* height) {
   __block int w = 0, h = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2049,7 +2050,7 @@ void WKWebViewBackend::GetWindowSize(uint32_t window_id, int* width,
 void WKWebViewBackend::GetWindowOuterSize(uint32_t window_id, int* width,
                                           int* height) {
   __block int w = 0, h = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2081,7 +2082,7 @@ void WKWebViewBackend::SetWindowPosition(uint32_t window_id, int x, int y) {
 void WKWebViewBackend::GetWindowInnerPosition(uint32_t window_id, int* x,
                                               int* y) {
   __block int px = 0, py = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2100,7 +2101,7 @@ void WKWebViewBackend::GetWindowInnerPosition(uint32_t window_id, int* x,
 
 void WKWebViewBackend::GetWindowPosition(uint32_t window_id, int* x, int* y) {
   __block int px = 0, py = 0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2136,7 +2137,7 @@ void WKWebViewBackend::SetResizable(uint32_t window_id, bool resizable) {
 
 bool WKWebViewBackend::IsResizable(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2161,7 +2162,7 @@ void WKWebViewBackend::SetAlwaysOnTop(uint32_t window_id, bool always_on_top) {
 
 bool WKWebViewBackend::IsAlwaysOnTop(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2189,7 +2190,7 @@ void WKWebViewBackend::SetWindowOpacity(uint32_t window_id, double opacity) {
 
 double WKWebViewBackend::GetWindowOpacity(uint32_t window_id) {
   __block double result = 1.0;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2213,7 +2214,7 @@ void WKWebViewBackend::SetClickPassthrough(uint32_t window_id, bool enabled) {
 
 bool WKWebViewBackend::IsClickPassthrough(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2241,7 +2242,7 @@ void WKWebViewBackend::SetClickPassthroughForward(uint32_t window_id,
 
 bool WKWebViewBackend::IsClickPassthroughForward(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2442,7 +2443,7 @@ void WKWebViewBackend::UpdateForwardMonitors() {
 
 bool WKWebViewBackend::IsVisible(uint32_t window_id) {
   __block bool result = false;
-  dispatch_sync(dispatch_get_main_queue(), ^{
+  laufey_common::RunOnMainSync(^{
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2515,10 +2516,11 @@ void WKWebViewBackend::Focus(uint32_t window_id) {
   });
 }
 
-void WKWebViewBackend::PostUiTask(void (*task)(void*), void* data) {
+bool WKWebViewBackend::PostUiTask(void (*task)(void*), void* data) {
   dispatch_async(dispatch_get_main_queue(), ^{
     task(data);
   });
+  return true;
 }
 
 void WKWebViewBackend::InvokeJsCallback(uint32_t window_id,
@@ -2668,13 +2670,9 @@ void WKWebViewBackend::ShowContextMenuEx(uint32_t window_id, int x, int y,
   });
 }
 
-// Runs `block` on the main thread and waits (inline when already there).
-static void RunOnMainSync(void (^block)(void)) {
-  if ([NSThread isMainThread])
-    block();
-  else
-    dispatch_sync(dispatch_get_main_queue(), block);
-}
+// Runs `block` on the main thread and waits (inline when already there; see
+// laufey_ui_tasks.h).
+using laufey_common::RunOnMainSync;
 
 // The web view's _WKInspector (private; what Safari's Develop menu drives),
 // or nil.
@@ -2848,11 +2846,7 @@ bool WKWebViewBackend::TestTriggerFileDrop(uint32_t window_id, int phase,
     delivered = laufey_common::TestTriggerFileDrop(window_id, phase, x, y,
                                                    paths, count);
   };
-  if ([NSThread isMainThread]) {
-    body();
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), body);
-  }
+  laufey_common::RunOnMainSync(body);
   return delivered;
 }
 

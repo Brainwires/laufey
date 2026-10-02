@@ -1567,8 +1567,7 @@ bool RuntimeLoader::Load(const std::string& path) {
         LaufeyBackend* backend = GetBackend();
         if (!backend)
           return false;  // a headless worker has no UI thread
-        backend->PostUiTask(task, task_data);
-        return true;
+        return backend->PostUiTask(task, task_data);
       });
 #ifndef _WIN32
   library_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -1663,6 +1662,7 @@ void RuntimeLoader::RuntimeThread() {
     std::cerr << "Runtime start returned error: " << result << std::endl;
   }
   running_ = false;
+  runtime_exit_.Done();
 }
 
 void RuntimeLoader::Shutdown() {
@@ -1671,7 +1671,17 @@ void RuntimeLoader::Shutdown() {
   }
 
   if (runtime_thread_.joinable()) {
-    runtime_thread_.join();
+    // The loop has ended (UiLoopEnded), so the runtime's synchronous UI calls
+    // already return. A runtime that still ignores the shutdown is abandoned
+    // after the timeout, as on Winit, rather than hanging the exit.
+    if (runtime_exit_.WaitFor(kRuntimeShutdownTimeout)) {
+      runtime_thread_.join();
+    } else {
+      std::cerr << "laufey: the runtime did not stop within "
+                << kRuntimeShutdownTimeout.count()
+                << " ms of shutdown; exiting without it" << std::endl;
+      runtime_thread_.detach();
+    }
   }
 }
 
