@@ -2,10 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, denext/integration]
     tags: ["v*"]
   pull_request:
     branches: [main]
+  # Nightly, so flakes and runner-image drift show up between merges.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+# Read-only by default; a job that needs more (the release) asks for it.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,11 +23,11 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
-      - uses: denoland/setup-deno@v2
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
 
@@ -50,9 +58,9 @@ jobs:
     name: cargo test (capi)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: test
       # Only the capi crate has unit-testable logic (pure conversions /
@@ -79,6 +87,17 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/launch_config_test"
           "$RUNNER_TEMP/launch_config_test"
+      # The host's command line: options stop at "--", a packaged app ignores
+      # --runtime, a deep-link launch drops its command-line switches.
+      - name: backend-common launch_args_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/launch_args_test.cc \
+            backend-common/src/launch_args.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/launch_args_test"
+          "$RUNNER_TEMP/launch_args_test"
       # backend-common's single-instance lock: framing, limits, naming, and a
       # real Unix-socket lock (stale socket, simultaneous acquire). ctest runs
       # it on every OS in build-webview.
@@ -137,9 +156,9 @@ jobs:
       matrix:
         os: [ubuntu-22.04, macos-14, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: test-winit-common
           key: ${{ matrix.os }}
@@ -162,7 +181,7 @@ jobs:
     env:
       TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The runner kernel randomizes mmap with 32 bits, which ThreadSanitizer's
       # shadow memory layout doesn't support ("unexpected memory mapping").
       - name: Allow ThreadSanitizer's memory layout
@@ -183,6 +202,30 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/passkey_test"
           "$RUNNER_TEMP/passkey_test"
+      # The UI-thread task dispatcher (Dispatch / the loop / Close racing) and
+      # the auth session's one-session slot and exactly-once result.
+      - name: auth_main_thread_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/auth_main_thread_test.cc \
+            backend-common/src/auth_session.cc \
+            -o "$RUNNER_TEMP/auth_main_thread_test"
+          "$RUNNER_TEMP/auth_main_thread_test"
+      # The WebKitGTK response body stream: a writer thread against a reader
+      # on a GMainContext.
+      - name: scheme_body_stream_test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev
+          c++ -std=c++17 -Wall -Wextra -Werror -Wno-unused-parameter -O1 -g \
+            -fsanitize=thread -pthread \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/scheme_body_stream_test.cc \
+            backend-common/src/scheme_body_stream_linux.cc \
+            $(pkg-config --cflags --libs gio-2.0) \
+            -o "$RUNNER_TEMP/scheme_body_stream_test"
+          "$RUNNER_TEMP/scheme_body_stream_test"
       - name: single_instance_test
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
@@ -210,9 +253,9 @@ jobs:
           - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: aarch64-apple-darwin, os: macos-14 }
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: winit
           # rust-cache keys on runner.os+arch only ("Linux-x64"), not the
@@ -233,7 +276,7 @@ jobs:
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: choco install make -y
+        run: choco install make --version=4.4.1 -y --no-progress
 
       - run: make winit
 
@@ -249,7 +292,7 @@ jobs:
             tar czf laufey-winit-${{ matrix.target }}.tar.gz -C staging .
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: laufey-winit-${{ matrix.target }}
           path: |
@@ -293,9 +336,9 @@ jobs:
           - { os: windows-11-arm, backend: webview }
           - { os: ubuntu-22.04-arm, backend: cef }
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: native-e2e
           key: ${{ matrix.os }}-${{ matrix.backend }}
@@ -303,7 +346,7 @@ jobs:
       # CEF fetches a large prebuilt binary distribution; cache it.
       - name: Cache CEF
         if: matrix.backend == 'cef'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/cef
           key: cef-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('Makefile') }}
@@ -353,9 +396,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          choco install make ninja -y
+          # Pinned versions (the community packages carry their downloads' checksums).
+          choco install make --version=4.4.1 -y --no-progress
+          choco install ninja --version=1.13.2 -y --no-progress
           if [ "${{ matrix.backend }}" = "webview" ]; then
-            nuget install Microsoft.Web.WebView2 -OutputDirectory packages
+            # The WebView2 SDK at a pinned version, checked against its
+            # SHA-256 before use (nuget.org's flat container; the .nupkg is a zip).
+            WV2_VERSION=1.0.4258.31
+            WV2_SHA256=56f7f4b8bf9aee4b8efefbbdd4f67d5f74ebd1b100ed0806da71bf76af481aa9
+            curl -fsSL --retry 3 -o wv2.zip "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$WV2_VERSION/microsoft.web.webview2.$WV2_VERSION.nupkg"
+            echo "$WV2_SHA256  wv2.zip" | sha256sum -c -
+            powershell -NoProfile -Command "Expand-Archive -Path wv2.zip -DestinationPath packages/Microsoft.Web.WebView2.$WV2_VERSION"
+            rm wv2.zip
           fi
 
       # Build the Rust runtime/driver BEFORE msvc-dev-cmd: cargo's own toolchain
@@ -373,7 +425,7 @@ jobs:
             cargo build --release -p native_e2e_driver
           fi
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: runner.os == 'Windows' && matrix.backend != 'winit'
         with:
           # windows-11-arm: an ARM64 toolchain, so CMake links the arm64
@@ -597,7 +649,7 @@ jobs:
           - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: aarch64-apple-darwin, os: macos-14 }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -613,10 +665,19 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          choco install make ninja -y
-          nuget install Microsoft.Web.WebView2 -OutputDirectory packages
+          # Pinned versions (the community packages carry their downloads' checksums).
+          choco install make --version=4.4.1 -y --no-progress
+          choco install ninja --version=1.13.2 -y --no-progress
+          # The WebView2 SDK at a pinned version, checked against its
+          # SHA-256 before use (nuget.org's flat container; the .nupkg is a zip).
+          WV2_VERSION=1.0.4258.31
+          WV2_SHA256=56f7f4b8bf9aee4b8efefbbdd4f67d5f74ebd1b100ed0806da71bf76af481aa9
+          curl -fsSL --retry 3 -o wv2.zip "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$WV2_VERSION/microsoft.web.webview2.$WV2_VERSION.nupkg"
+          echo "$WV2_SHA256  wv2.zip" | sha256sum -c -
+          powershell -NoProfile -Command "Expand-Archive -Path wv2.zip -DestinationPath packages/Microsoft.Web.WebView2.$WV2_VERSION"
+          rm wv2.zip
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: runner.os == 'Windows'
         with:
           # Match the MSVC toolchain to the runner arch so cl.exe targets ARM64
@@ -649,7 +710,7 @@ jobs:
             tar czf laufey-webview-${{ matrix.target }}.tar.gz -C webview/build laufey_webview
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: laufey-webview-${{ matrix.target }}
           path: |
@@ -660,9 +721,9 @@ jobs:
     name: e2e / cef / x86_64-unknown-linux-gnu (Xvfb)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: e2e-cef-linux
 
@@ -678,7 +739,7 @@ jobs:
             libxkbcommon-dev libdbus-1-dev libxext-dev libxfixes-dev
 
       - name: Cache CEF vendor
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/cef
           key: cef-ubuntu-latest-${{ runner.arch }}-${{ hashFiles('Makefile') }}
@@ -735,7 +796,7 @@ jobs:
           # CEF-on-Windows-ARM64 needs the windowsarm64 dist + arch-matched MSVC
           # setup and is tracked as a separate follow-up (issue #42).
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -754,13 +815,15 @@ jobs:
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: choco install make ninja -y
+        run: |
+          choco install make --version=4.4.1 -y --no-progress
+          choco install ninja --version=1.13.2 -y --no-progress
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: runner.os == 'Windows'
 
       - name: Cache CEF
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/cef
           key: cef-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('Makefile') }}
@@ -779,7 +842,7 @@ jobs:
             tar czf laufey-cef-${{ matrix.target }}.tar.gz -C cef/build/Release .
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: laufey-cef-${{ matrix.target }}
           path: |
@@ -788,12 +851,13 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-winit, build-webview, build-cef]
+    # Never release past a failing end-to-end or ThreadSanitizer run.
+    needs: [build-winit, build-webview, build-cef, native-e2e, tsan]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify tag matches capi crate version
         run: |
@@ -804,7 +868,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
@@ -817,7 +881,7 @@ jobs:
           sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Publish laufey crate to crates.io
         working-directory: capi
@@ -829,7 +893,7 @@ jobs:
         run: cargo publish
 
       - name: Create release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: artifacts/*
           generate_release_notes: true
