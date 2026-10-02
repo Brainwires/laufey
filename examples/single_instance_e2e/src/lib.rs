@@ -22,6 +22,9 @@
 //!       stay up until this file exists (at most 120 s), so the driver can
 //!       run another instance alongside however long that one takes to
 //!       start, then release this one.
+//!   LAUFEY_E2E_SI_RESULT_FILE
+//!       also write the PASS/FAIL lines and the OVERALL line to this file
+//!       (for a launch the OS starts, whose output the driver can't see).
 //!
 //! Emits `[e2e] PASS/FAIL <name>` lines and a final `[e2e] OVERALL
 //! PASS|FAIL`, then quits through the backend's normal path.
@@ -34,12 +37,18 @@ use std::time::{Duration, Instant};
 use laufey::Window;
 
 static FAILED: AtomicBool = AtomicBool::new(false);
+static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn report(line: String) {
+  eprintln!("{line}");
+  LINES.lock().unwrap().push(line);
+}
 
 fn check(name: &str, ok: bool) {
   if ok {
-    eprintln!("[e2e] PASS {name}");
+    report(format!("[e2e] PASS {name}"));
   } else {
-    eprintln!("[e2e] FAIL {name}");
+    report(format!("[e2e] FAIL {name}"));
     FAILED.store(true, Ordering::SeqCst);
   }
 }
@@ -74,7 +83,7 @@ fn e2e_main() {
     tokio::spawn(async { laufey::run().await });
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    eprintln!("[e2e] pid={} args={args:?}", std::process::id());
+    report(format!("[e2e] pid={} args={args:?}", std::process::id()));
     if let Some(want) = expected_args("LAUFEY_E2E_SI_COLD") {
       check(
         &format!("cold-start arguments visible to the runtime ({want:?})"),
@@ -192,8 +201,18 @@ fn e2e_main() {
     }
 
     let failed = FAILED.load(Ordering::SeqCst);
-    eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
+    report(format!(
+      "[e2e] OVERALL {}",
+      if failed { "FAIL" } else { "PASS" }
+    ));
     let _ = std::io::stderr().flush();
+    if let Some(path) = env("LAUFEY_E2E_SI_RESULT_FILE") {
+      let mut text = LINES.lock().unwrap().join("\n");
+      text.push('\n');
+      if std::fs::write(&path, text).is_err() {
+        eprintln!("[e2e] could not write {path}");
+      }
+    }
 
     win.close();
     tokio::time::sleep(Duration::from_millis(300)).await;
