@@ -8,6 +8,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
+#include "laufey_scheme_registry.h"
 #include "laufey_auth_session.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
@@ -760,6 +761,32 @@ bool LaufeyDevToolsReachable() {
   for (const char* sw : kRemoteDebuggingSwitches) {
     if (cl->HasSwitch(sw))
       return true;
+  }
+  return false;
+}
+
+bool LaufeyHandler::OnShowPermissionPrompt(
+    CefRefPtr<CefBrowser> /*browser*/, uint64_t /*prompt_id*/,
+    const CefString& requesting_origin, uint32_t requested_permissions,
+    CefRefPtr<CefPermissionPromptCallback> callback) {
+  // Chromium's Local Network Access prompt (CEF 136 named it
+  // LOCAL_NETWORK_ACCESS, CEF 145 split it into LOCAL_NETWORK and
+  // LOOPBACK_NETWORK). The CEF host has no prompt UI, so an unanswered one
+  // holds the page's request forever.
+  constexpr uint32_t kLocalNetwork = CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS |
+                                     CEF_PERMISSION_TYPE_LOCAL_NETWORK |
+                                     CEF_PERMISSION_TYPE_LOOPBACK_NETWORK;
+  switch (laufey_common::DecideLocalNetworkPrompt(
+      requesting_origin.ToString(), requested_permissions, kLocalNetwork,
+      laufey_schemes::Declared())) {
+    case laufey_common::LocalNetworkPromptDecision::kAccept:
+      callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+      return true;
+    case laufey_common::LocalNetworkPromptDecision::kDeny:
+      callback->Continue(CEF_PERMISSION_RESULT_DENY);
+      return true;
+    case laufey_common::LocalNetworkPromptDecision::kDefault:
+      break;
   }
   return false;
 }

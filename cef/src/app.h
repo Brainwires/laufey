@@ -17,6 +17,7 @@
 #include "include/cef_command_line.h"
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_jsdialog_handler.h"
+#include "include/cef_permission_handler.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 
@@ -186,7 +187,8 @@ class LaufeyHandler : public CefClient,
                       public CefDragHandler,
                       public CefJSDialogHandler,
                       public CefCommandHandler,
-                      public CefContextMenuHandler {
+                      public CefContextMenuHandler,
+                      public CefPermissionHandler {
  public:
   LaufeyHandler();
   ~LaufeyHandler() override;
@@ -214,6 +216,18 @@ class LaufeyHandler : public CefClient,
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
     return this;
   }
+  CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
+    return this;
+  }
+
+  // Local Network Access: the embedder's own origins (its declared custom
+  // schemes and "app") may reach loopback / private addresses; everyone
+  // else is denied. See LocalNetworkPromptDecision in
+  // laufey_scheme_registry.h. Other prompts keep the default handling.
+  bool OnShowPermissionPrompt(
+      CefRefPtr<CefBrowser> browser, uint64_t prompt_id,
+      const CefString& requesting_origin, uint32_t requested_permissions,
+      CefRefPtr<CefPermissionPromptCallback> callback) override;
 
   // DevTools off (API 40, LAUFEY_INSPECTABLE=0): Chrome's DevTools commands
   // (F12, Ctrl/Cmd+Shift+I / J / C, the app menu) are swallowed and the

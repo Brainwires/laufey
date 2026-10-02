@@ -188,10 +188,17 @@ WebKitGTK, whose shared web context applies late registrations to existing
 views). `N/A` on engine-less backends. The CEF host must be told the scheme up
 front (`LAUFEY_CUSTOM_SCHEMES=laufey-e2e`, set by `scripts/native-e2e-run.sh`,
 which also exports `LAUFEY_E2E_BACKEND`) because Chromium registers custom
-schemes before the runtime loads; the script also starts the CEF host with
-`--disable-features=LocalNetworkAccessChecks`, since Chromium otherwise holds
-the page's fetch to the loopback echo server for a permission prompt the host
-never shows.
+schemes before the runtime loads.
+
+Local Network Access (`lna_checks.rs`, also on its own with `--lna`) runs with
+Chromium's checks on: the custom-scheme page's cross-origin fetch and its
+WebSocket to the loopback echo server must get through (laufey grants local
+network access to the embedder's declared schemes, see
+[custom-schemes.md](custom-schemes.md)), on every engine. On CEF a page on any
+other origin must still be refused at once: the script declares a loopback port
+public (`--ip-address-space-overrides=127.0.0.1:<port>=public`, the port in
+`LAUFEY_E2E_PUBLIC_PORT`), serves a page there, and its fetch to the echo server
+must fail within five seconds instead of waiting for a prompt.
 
 Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
 and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body

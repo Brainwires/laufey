@@ -12,11 +12,15 @@
 #include <thread>
 #include <vector>
 
+using laufey_common::DecideLocalNetworkPrompt;
+using laufey_common::IsLocalNetworkTrustedOrigin;
 using laufey_common::IsValidSchemeName;
 using laufey_common::JoinForwardedSchemes;
+using laufey_common::LocalNetworkPromptDecision;
 using laufey_common::MergeForwardedSchemes;
 using laufey_common::MergeSchemeLists;
 using laufey_common::NormalizeSchemeName;
+using laufey_common::OriginScheme;
 using laufey_common::ParseSchemeList;
 using laufey_common::SchemeRegistry;
 
@@ -233,6 +237,68 @@ static void TestMergeForwardedSchemes() {
          "myapp,other");
 }
 
+static void TestOriginScheme() {
+  EXPECT(OriginScheme("myapp://app") == "myapp");
+  EXPECT(OriginScheme("MyApp://app/") == "myapp");
+  EXPECT(OriginScheme("https://example.com:8443") == "https");
+  EXPECT(OriginScheme("app://localhost/index.html?x#y") == "app");
+  EXPECT(OriginScheme("null").empty());  // an opaque origin
+  EXPECT(OriginScheme("").empty());
+  EXPECT(OriginScheme("://app").empty());
+  EXPECT(OriginScheme("my app://x").empty());
+  EXPECT(OriginScheme("data:text/html,x").empty());
+}
+
+static void TestLocalNetworkPrompt() {
+  // Bits as in CEF's cef_permission_request_types_t: LOCAL_NETWORK_ACCESS,
+  // LOCAL_NETWORK, LOOPBACK_NETWORK, and two unrelated ones.
+  const uint32_t kLna = 1u << 25, kLocal = 1u << 26, kLoopback = 1u << 27;
+  const uint32_t kMask = kLna | kLocal | kLoopback;
+  const uint32_t kCamera = 1u << 2, kNotifications = 1u << 15;
+  const std::vector<std::string> declared = MergeSchemeLists({"t3code"});
+  using D = LocalNetworkPromptDecision;
+
+  // The embedder's own origins get local network access.
+  EXPECT(DecideLocalNetworkPrompt("t3code://app", kLoopback, kMask,
+                                  declared) == D::kAccept);
+  EXPECT(DecideLocalNetworkPrompt("t3code://app/", kLna, kMask, declared) ==
+         D::kAccept);
+  EXPECT(DecideLocalNetworkPrompt("T3Code://app", kLocal | kLoopback, kMask,
+                                  declared) == D::kAccept);
+  EXPECT(DecideLocalNetworkPrompt("app://localhost", kLoopback, kMask,
+                                  declared) == D::kAccept);
+  EXPECT(IsLocalNetworkTrustedOrigin("t3code://other-host", declared));
+
+  // Everyone else is denied: remote and loopback http(s), file, data, an
+  // opaque origin, a scheme that wasn't declared at launch.
+  for (const char* origin :
+       {"https://example.com", "http://example.com", "http://127.0.0.1:8080",
+        "http://localhost:3000", "file:///tmp/x.html", "null", "",
+        "data:text/html,x", "other://app", "t3codex://app"}) {
+    EXPECT(!IsLocalNetworkTrustedOrigin(origin, declared));
+    EXPECT(DecideLocalNetworkPrompt(origin, kLoopback, kMask, declared) ==
+           D::kDeny);
+  }
+
+  // A prompt that bundles another permission is never granted through this
+  // path, not even for the app's origin.
+  EXPECT(DecideLocalNetworkPrompt("t3code://app", kLoopback | kCamera, kMask,
+                                  declared) == D::kDeny);
+
+  // Prompts without a local network bit keep the default handling,
+  // whatever the origin.
+  EXPECT(DecideLocalNetworkPrompt("t3code://app", kNotifications, kMask,
+                                  declared) == D::kDefault);
+  EXPECT(DecideLocalNetworkPrompt("https://example.com", kCamera, kMask,
+                                  declared) == D::kDefault);
+  EXPECT(DecideLocalNetworkPrompt("t3code://app", 0, kMask, declared) ==
+         D::kDefault);
+
+  // With only "app" declared, a custom scheme is not trusted.
+  EXPECT(DecideLocalNetworkPrompt("t3code://app", kLoopback, kMask,
+                                  MergeSchemeLists({})) == D::kDeny);
+}
+
 int main() {
   TestSchemeNameGrammar();
   TestRegistryDefaults();
@@ -243,6 +309,8 @@ int main() {
   TestMergeSchemeLists();
   TestJoinForwardedSchemes();
   TestMergeForwardedSchemes();
+  TestOriginScheme();
+  TestLocalNetworkPrompt();
   std::printf("scheme_registry_test: all tests passed\n");
   return 0;
 }

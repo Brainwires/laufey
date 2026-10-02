@@ -24,6 +24,7 @@
 #ifndef LAUFEY_SCHEME_REGISTRY_H_
 #define LAUFEY_SCHEME_REGISTRY_H_
 
+#include <cstdint>
 #include <mutex>
 #include <set>
 #include <string>
@@ -149,6 +150,73 @@ inline std::string MergeForwardedSchemes(
     const std::string& child_value, const std::vector<std::string>& declared) {
   return JoinForwardedSchemes(
       MergeSchemeLists({child_value, JoinForwardedSchemes(declared)}));
+}
+
+// The scheme of a serialized origin or URL ("myapp://app", "myapp://app/x"),
+// normalized, or "" when it has none (an opaque origin's "null", a malformed
+// string, a scheme outside the RFC 3986 grammar).
+inline std::string OriginScheme(const std::string& origin) {
+  size_t colon = origin.find("://");
+  if (colon == std::string::npos) {
+    return "";
+  }
+  std::string scheme = origin.substr(0, colon);
+  return IsValidSchemeName(scheme) ? NormalizeSchemeName(scheme) : "";
+}
+
+// Local Network Access (Chromium's private network protection; CEF only).
+// A page on a "public" origin may reach loopback or private addresses only
+// after a permission prompt, and a custom scheme's origin always counts as
+// public. So an app page on `myapp://app` talking to its own loopback server
+// (the runtime's WebSocket relay, a dev server) would wait forever on a
+// prompt the CEF host never shows.
+//
+// laufey answers that prompt itself. Local network access is granted only to
+// origins on one of `declared`: the embedder's own custom schemes and "app".
+// A page there is produced in-process by the embedder's scheme handler and
+// can't come from the network. Every other origin is denied, so remote
+// content keeps Chromium's protection: http(s), file, data and any scheme
+// that isn't declared. Denying the prompt, rather than leaving it
+// unanswered, makes such a request fail at once instead of hanging.
+//
+// `requested` is the prompt's permission bit set. `local_network_mask` holds
+// the bits that mean local network access (CEF's LOCAL_NETWORK_ACCESS,
+// LOCAL_NETWORK and LOOPBACK_NETWORK). A prompt that asks for none of them
+// is left to the engine's default handling. A prompt that also asks for
+// anything else is denied, even for a declared origin, so the grant never
+// widens to another permission.
+enum class LocalNetworkPromptDecision {
+  kDefault,  // not a local network prompt: default handling
+  kAccept,
+  kDeny,
+};
+
+// Whether a page on `origin` is one of the embedder's own (see above).
+inline bool IsLocalNetworkTrustedOrigin(
+    const std::string& origin, const std::vector<std::string>& declared) {
+  std::string scheme = OriginScheme(origin);
+  if (scheme.empty()) {
+    return false;
+  }
+  for (const std::string& d : declared) {
+    if (NormalizeSchemeName(d) == scheme) {
+      return true;
+    }
+  }
+  return false;
+}
+
+inline LocalNetworkPromptDecision DecideLocalNetworkPrompt(
+    const std::string& origin, uint32_t requested, uint32_t local_network_mask,
+    const std::vector<std::string>& declared) {
+  if ((requested & local_network_mask) == 0) {
+    return LocalNetworkPromptDecision::kDefault;
+  }
+  if ((requested & ~local_network_mask) == 0 &&
+      IsLocalNetworkTrustedOrigin(origin, declared)) {
+    return LocalNetworkPromptDecision::kAccept;
+  }
+  return LocalNetworkPromptDecision::kDeny;
 }
 
 // Thread-safe set of scheme names an embedder registered. "app" is always a

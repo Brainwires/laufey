@@ -30,6 +30,7 @@
 mod auth_thread_checks;
 mod body_echo;
 mod io_checks;
+mod lna_checks;
 mod menu_notification_checks;
 mod os_view;
 mod stream_checks;
@@ -298,6 +299,11 @@ fn arg_int(args: &[Value], i: usize) -> i32 {
 /// fetch to the echo server, then reports through the `schemeReport` binding.
 /// Every step is wrapped so one failure still lets the others report.
 fn scheme_page_html(echo_url: &str) -> String {
+  let ws_probe = if echo_url.is_empty() {
+    String::new()
+  } else {
+    lna_checks::ws_probe_js("websocket", &lna_checks::ws_url(echo_url))
+  };
   format!(
     r#"<!doctype html><html><head><meta charset="utf-8"><title>scheme</title></head><body>
 <script>
@@ -359,6 +365,9 @@ async function report(problem) {{
       const res = await fetch(echoUrl, {{ mode: 'cors' }});
       r.echoBody = await res.text();
     }} catch (e) {{ r.echoBody = 'error: ' + (e && e.message); }}
+    // A WebSocket to the same loopback server (lna_checks.rs), reported
+    // through schemeProbe("websocket", ...).
+    {ws_probe}
   }} else {{
     r.echoBody = 'skipped';
   }}
@@ -477,47 +486,59 @@ fn fetch_probe_js(label: &str, url: &str) -> String {
 /// A minimal loopback HTTP server that echoes the request's `Origin` header
 /// (`origin=<value>` or `origin=none`) with `Access-Control-Allow-Origin: *`,
 /// so a cross-origin fetch from the custom-scheme page proves which origin
-/// the engine sends. Returns the URL to fetch, or `None` if no socket could
-/// be bound (the check is then N/A).
+/// the engine sends, and answers `GET /ws` as a WebSocket (lna_checks.rs).
+/// Returns the URL to fetch, or `None` if no socket could be bound (the
+/// check is then N/A).
 fn start_origin_echo_server() -> Option<String> {
   let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
   let port = listener.local_addr().ok()?.port();
   std::thread::spawn(move || {
     for stream in listener.incoming() {
-      let Ok(mut stream) = stream else { continue };
-      let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-      let mut buf = Vec::new();
-      let mut chunk = [0u8; 4096];
-      // Read headers only (GET, no body).
-      while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-        match stream.read(&mut chunk) {
-          Ok(0) | Err(_) => break,
-          Ok(n) => buf.extend_from_slice(&chunk[..n]),
-        }
-      }
-      let text = String::from_utf8_lossy(&buf);
-      let origin = text
-        .lines()
-        .find_map(|l| {
-          let (name, value) = l.split_once(':')?;
-          name
-            .trim()
-            .eq_ignore_ascii_case("origin")
-            .then(|| value.trim().to_string())
-        })
-        .unwrap_or_else(|| "none".to_string());
-      let body = format!("origin={origin}");
-      let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\
-         access-control-allow-origin: *\r\ncontent-length: {}\r\n\
-         connection: close\r\n\r\n{}",
-        body.len(),
-        body
-      );
-      let _ = stream.write_all(response.as_bytes());
+      let Ok(stream) = stream else { continue };
+      // A thread per connection: an idle connection Chromium opened ahead
+      // of time must not hold up the next request.
+      std::thread::spawn(move || serve_echo_connection(stream));
     }
   });
   Some(format!("http://127.0.0.1:{port}/echo"))
+}
+
+fn serve_echo_connection(mut stream: std::net::TcpStream) {
+  let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+  let mut buf = Vec::new();
+  let mut chunk = [0u8; 4096];
+  // Read headers only (GET, no body).
+  while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+    match stream.read(&mut chunk) {
+      Ok(0) | Err(_) => break,
+      Ok(n) => buf.extend_from_slice(&chunk[..n]),
+    }
+  }
+  let text = String::from_utf8_lossy(&buf).into_owned();
+  // GET /ws: a WebSocket (lna_checks.rs).
+  if text.starts_with("GET /ws ") {
+    lna_checks::serve_ws(stream, &text);
+    return;
+  }
+  let origin = text
+    .lines()
+    .find_map(|l| {
+      let (name, value) = l.split_once(':')?;
+      name
+        .trim()
+        .eq_ignore_ascii_case("origin")
+        .then(|| value.trim().to_string())
+    })
+    .unwrap_or_else(|| "none".to_string());
+  let body = format!("origin={origin}");
+  let response = format!(
+    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\
+     access-control-allow-origin: *\r\ncontent-length: {}\r\n\
+     connection: close\r\n\r\n{}",
+    body.len(),
+    body
+  );
+  let _ = stream.write_all(response.as_bytes());
 }
 
 /// Request-body round trip over `app://` (see body_echo.rs). Opens its own
@@ -711,6 +732,12 @@ fn e2e_main() {
     // real window manager, where the rest of the battery assumes none).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("window-api") {
       window_api_checks().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=lna: only the Local Network Access checks
+    // (lna_checks.rs), on their own page.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("lna") {
+      lna_checks::run(echo_url.as_deref()).await;
       finish();
     }
     let scheme_report: Arc<Mutex<Option<SchemeReport>>> =
@@ -1561,6 +1588,28 @@ fn e2e_main() {
         );
       }
     }
+
+    // ---- Local Network Access (lna_checks.rs) -----------------------------
+    if scheme_supported {
+      let got = {
+        wait_for(
+          || scheme_probes.lock().unwrap().contains_key("websocket"),
+          100,
+          100,
+        )
+        .await;
+        scheme_probes
+          .lock()
+          .unwrap()
+          .get("websocket")
+          .cloned()
+          .unwrap_or_default()
+      };
+      lna_checks::check_app_origin_websocket(echo_url.as_deref(), &got);
+    } else {
+      na("a WebSocket to loopback (backend has no web engine)");
+    }
+    lna_checks::other_origin_blocked(echo_url.as_deref()).await;
 
     // ---- request body over the custom scheme -----------------------------
     let body_win = body_round_trip(&body_received).await;
