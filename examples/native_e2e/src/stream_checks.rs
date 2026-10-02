@@ -46,8 +46,9 @@ const CAP_BYTES: usize = 64 * 1024 * 1024;
 const CREDIT_WINDOW: usize = 4 * 1024 * 1024;
 
 /// The scenarios the page runs; each reports once.
-const LABELS: [&str; 8] =
-  ["fetch", "abort", "sse", "xhr", "bin", "fast", "slow", "cap"];
+const LABELS: [&str; 9] = [
+  "fetch", "abort", "sse", "xhr", "bin", "fast", "slow", "cap", "nohead",
+];
 /// Labels whose never-ending route must see its write fail (the engine
 /// cancelled the request) once the page is done with it.
 const CANCELLED: [&str; 4] = ["fetch", "abort", "sse", "xhr"];
@@ -254,6 +255,16 @@ const scenarios = {{
             'length ' + got + ', ' + reads + ' reads' + (bad >= 0 ? ', first difference at ' + bad : '') +
             ', ping ' + JSON.stringify(pong)];
   }},
+  // A handler that finishes without ever sending a head: there is no
+  // response, so the request fails instead of staying pending forever.
+  async nohead() {{
+    try {{
+      const res = await deadline(fetch('/nohead'), 8000, 'nohead');
+      return [false, 'resolved with status ' + res.status];
+    }} catch (e) {{
+      return [e && e.name === 'TypeError', 'rejected with ' + (e && e.name) + ': ' + (e && e.message)];
+    }}
+  }},
   // A response the page doesn't read fails once the backend holds its cap,
   // and the page's read rejects instead of the response ending short.
   async cap() {{
@@ -390,6 +401,8 @@ pub fn serve(req: SchemeRequest, state: &State) -> Option<SchemeRequest> {
       req.exchange.write(b"fast body");
       req.exchange.finish();
     }
+    // Finished without a head (scheme_response_begin never called).
+    "nohead" => req.exchange.finish(),
     "slow" => {
       let state = state.clone();
       on_event_loop(move || {
@@ -499,6 +512,7 @@ pub async fn run(state: &State) -> Option<Window> {
     "bin" => "a large binary body arrives intact",
     "slow" => "a big body written while the UI thread is busy arrives intact to a slow reader, and another request completes meanwhile",
     "cap" => "a response the page doesn't read fails at the backend's cap (the page's read rejects)",
+    "nohead" => "a response finished without a head fails the request instead of leaving it pending",
     _ => "a response complete at once is unaffected",
   }
   };

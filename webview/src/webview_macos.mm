@@ -26,6 +26,7 @@
 #include <atomic>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 
 @class LaufeyScriptMessageHandler;
@@ -618,13 +619,29 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
 // Serves "app" and every scheme the embedder registered (see
 // RegisterSchemeHandler); the same handler object is installed for each.
 
+// One in-flight WKURLSchemeTask: `stopped` is set when WebKit stops it
+// (-stopURLSchemeTask:), after which it must not be messaged.
+struct MacSchemeTaskState {
+  std::atomic<bool> stopped{false};
+};
+
+// The in-flight tasks of every scheme handler, by task. An entry goes when
+// WebKit stops the task or when its exchange finishes, whichever is first.
+static std::mutex g_scheme_tasks_mutex;
+static std::map<void*, std::shared_ptr<MacSchemeTaskState>>& SchemeTasks() {
+  static auto* tasks =
+      new std::map<void*, std::shared_ptr<MacSchemeTaskState>>();
+  return *tasks;
+}
+
 // Exchange wrapping a WKURLSchemeTask. WKURLSchemeTask methods must be invoked
-// on the main thread, so each response step hops there; a `stopped_` flag
-// (set from -stopURLSchemeTask:) prevents messaging an already-cancelled task.
+// on the main thread, so each response step hops there; the task's `stopped`
+// flag prevents messaging an already-cancelled task.
 class MacSchemeExchange : public SchemeExchangeBase {
  public:
-  MacSchemeExchange(id<WKURLSchemeTask> task, NSData* body)
-      : task_(task), body_(body) {}
+  MacSchemeExchange(id<WKURLSchemeTask> task, NSData* body,
+                    std::shared_ptr<MacSchemeTaskState> state)
+      : task_(task), body_(body), state_(std::move(state)) {}
 
   intptr_t ReadRequestBody(uint8_t* buf, size_t cap) override {
     if (cap == 0 || !body_)
@@ -641,13 +658,25 @@ class MacSchemeExchange : public SchemeExchangeBase {
   void Begin(int status, const char* headers, size_t headers_len) override {
     auto pairs = LaufeyParseFlatHeaders(headers, headers_len);
     NSMutableDictionary* hdr = [NSMutableDictionary dictionary];
-    for (const auto& [k, v] : pairs)
-      hdr[@(k.c_str())] = @(v.c_str());
+    for (const auto& [k, v] : pairs) {
+      NSString* name = [NSString stringWithUTF8String:k.c_str()];
+      NSString* value = [NSString stringWithUTF8String:v.c_str()];
+      if (!name || !value)
+        continue;  // not UTF-8
+      // A header field may repeat (Set-Cookie); NSHTTPURLResponse takes a
+      // dictionary, so join the values the way HTTP folds them, as
+      // CFNetwork does for a network response.
+      NSString* previous = hdr[name];
+      hdr[name] = previous
+                      ? [NSString stringWithFormat:@"%@, %@", previous, value]
+                      : value;
+    }
     NSURL* url = task_.request.URL;
     id<WKURLSchemeTask> task = task_;
-    std::atomic<bool>* stopped = &stopped_;
+    std::shared_ptr<MacSchemeTaskState> state = state_;
+    began_.store(true);
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (stopped->load())
+      if (state->stopped.load())
         return;
       NSHTTPURLResponse* resp =
           [[NSHTTPURLResponse alloc] initWithURL:url
@@ -662,13 +691,13 @@ class MacSchemeExchange : public SchemeExchangeBase {
   }
 
   intptr_t WriteResponse(const uint8_t* buf, size_t len) override {
-    if (stopped_.load())
+    if (state_->stopped.load())
       return -1;
     NSData* data = [NSData dataWithBytes:buf length:len];
     id<WKURLSchemeTask> task = task_;
-    std::atomic<bool>* stopped = &stopped_;
+    std::shared_ptr<MacSchemeTaskState> state = state_;
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (stopped->load())
+      if (state->stopped.load())
         return;
       @try {
         [task didReceiveData:data];
@@ -680,38 +709,51 @@ class MacSchemeExchange : public SchemeExchangeBase {
 
   void Finish() override {
     id<WKURLSchemeTask> task = task_;
-    std::atomic<bool>* stopped = &stopped_;
+    std::shared_ptr<MacSchemeTaskState> state = state_;
+    bool began = began_.load();
     MacSchemeExchange* self = this;
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (!stopped->load()) {
+      if (!state->stopped.load()) {
         @try {
-          [task didFinish];
+          if (began) {
+            [task didFinish];
+          } else {
+            // Finished without a head: no response, so the request fails
+            // (WebKit throws on didFinish before didReceiveResponse, which
+            // left the request pending forever).
+            [task
+                didFailWithError:[NSError
+                                     errorWithDomain:NSURLErrorDomain
+                                                code:NSURLErrorBadServerResponse
+                                            userInfo:nil]];
+          }
         } @catch (...) {
         }
       }
+      {
+        std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
+        auto& tasks = SchemeTasks();
+        auto it = tasks.find((__bridge void*)task);
+        if (it != tasks.end() && it->second == state)
+          tasks.erase(it);
+      }
       delete self;
     });
-  }
-
-  void MarkStopped() {
-    stopped_.store(true);
   }
 
  private:
   id<WKURLSchemeTask> task_;
   NSData* body_;
   size_t cursor_ = 0;
-  std::atomic<bool> stopped_{false};
+  std::shared_ptr<MacSchemeTaskState> state_;
+  std::atomic<bool> began_{false};
 };
 
 @interface LaufeyURLSchemeHandler : NSObject <WKURLSchemeHandler>
 @property(nonatomic, assign) uint32_t windowId;
 @end
 
-@implementation LaufeyURLSchemeHandler {
-  std::map<void*, MacSchemeExchange*> _tasks;
-  std::mutex _mutex;
-}
+@implementation LaufeyURLSchemeHandler
 
 - (void)webView:(WKWebView*)webView
     startURLSchemeTask:(id<WKURLSchemeTask>)task {
@@ -729,22 +771,25 @@ class MacSchemeExchange : public SchemeExchangeBase {
   // Note: WKURLSchemeHandler does not expose the request body for all request
   // kinds (a long-standing WebKit limitation); HTTPBody is forwarded when
   // present.
-  MacSchemeExchange* exchange = new MacSchemeExchange(task, req.HTTPBody);
+  auto state = std::make_shared<MacSchemeTaskState>();
   {
-    std::lock_guard<std::mutex> lock(_mutex);
-    _tasks[(__bridge void*)task] = exchange;
+    std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
+    SchemeTasks()[(__bridge void*)task] = state;
   }
+  MacSchemeExchange* exchange =
+      new MacSchemeExchange(task, req.HTTPBody, state);
   RuntimeLoader::GetInstance()->DispatchSchemeRequest(self.windowId, exchange,
                                                       method, url, flat);
 }
 
 - (void)webView:(WKWebView*)webView
     stopURLSchemeTask:(id<WKURLSchemeTask>)task {
-  std::lock_guard<std::mutex> lock(_mutex);
-  auto it = _tasks.find((__bridge void*)task);
-  if (it != _tasks.end()) {
-    it->second->MarkStopped();
-    _tasks.erase(it);
+  std::lock_guard<std::mutex> lock(g_scheme_tasks_mutex);
+  auto& tasks = SchemeTasks();
+  auto it = tasks.find((__bridge void*)task);
+  if (it != tasks.end()) {
+    it->second->stopped.store(true);
+    tasks.erase(it);
   }
 }
 

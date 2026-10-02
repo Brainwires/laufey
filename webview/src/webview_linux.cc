@@ -2500,6 +2500,7 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   }
 
   void Begin(int status, const char* headers, size_t headers_len) override {
+    began_ = true;
     auto* d = new BeginData;
     d->request = WEBKIT_URI_SCHEME_REQUEST(g_object_ref(request_));
     d->body = body_;
@@ -2515,6 +2516,11 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
 
   void Finish() override {
     body_->End();  // EOF for WebKit, after what was written
+    if (!began_) {
+      // Finished without a head: no response, so the request fails (it was
+      // never finished at all, which left the page's request pending).
+      g_idle_add(FailOnMain, g_object_ref(request_));
+    }
     delete this;
   }
 
@@ -2526,6 +2532,17 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
     int status;
     std::vector<std::pair<std::string, std::string>> headers;
   };
+
+  static gboolean FailOnMain(gpointer data) {
+    auto* request = static_cast<WebKitURISchemeRequest*>(data);
+    GError* error =
+        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED,
+                            "the scheme handler finished without a response");
+    webkit_uri_scheme_request_finish_error(request, error);
+    g_error_free(error);
+    g_object_unref(request);
+    return G_SOURCE_REMOVE;
+  }
 
   static gboolean BeginOnMain(gpointer data) {
     auto* d = static_cast<BeginData*>(data);
@@ -2562,6 +2579,8 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
   std::vector<uint8_t> request_body_;
   size_t req_cursor_ = 0;
   std::shared_ptr<laufey_common::SchemeBodyWriter> body_;
+  // Begin and Finish come from the runtime's thread, in that order.
+  bool began_ = false;
 };
 
 // A scheme request whose body is still being read (see OnAppSchemeRequest).

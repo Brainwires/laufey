@@ -273,13 +273,22 @@ intptr_t LaufeySchemeHandler::WriteResponse(const uint8_t* buf, size_t len) {
 
 void LaufeySchemeHandler::FinishResponse() {
   CefRefPtr<CefResourceReadCallback> to_continue;
+  CefRefPtr<CefCallback> to_cancel;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     finished_ = true;
     to_continue = read_callback_;
     read_callback_ = nullptr;
     pending_data_ = nullptr;
+    // Finished without a head: Open is still waiting for Begin, which never
+    // comes, so the request would hang. There is no response: fail it.
+    if (!began_) {
+      to_cancel = open_callback_;
+      open_callback_ = nullptr;
+    }
   }
+  if (to_cancel)
+    to_cancel->Cancel();
   // A parked read with no remaining body: report EOF.
   if (to_continue)
     to_continue->Continue(0);

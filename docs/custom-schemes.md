@@ -158,10 +158,17 @@ backend takes the bytes and hands them on as the engine reads:
 - **WebView2** streams through the page (below).
 
 The queue for a page that isn't reading is capped at **64 MiB** on WebKitGTK,
-CEF and WebView2: past that the response fails (the page's `fetch` or read
-rejects) and the handler's next `write` returns a negative value, instead of the
-body growing without bound. WKWebView hands everything to WebKit, so it has no
-cap of its own.
+CEF and WebView2 (for a response WebView2 streams through the page, below): past
+that the response fails (the page's `fetch` or read rejects) and the handler's
+next `write` returns a negative value, instead of the body growing without
+bound. WKWebView hands everything to WebKit, so it has no cap of its own. A
+response WebView2 answers in one piece is held whole until the handler finishes
+it, whether or not the page reads, so it is capped separately at **512 MiB**:
+past that the request fails.
+
+A handler that calls `finish` without ever calling `begin` gives the page no
+response: its request fails, as a network error does (the `fetch` rejects), on
+every backend.
 
 WKWebView, WebKitGTK and CEF hand each write to the page as it arrives. WebView2
 cannot: it reads a `WebResourceRequested` response stream to its end before the
@@ -181,7 +188,8 @@ streams through the page instead:
   chunks, so the page reads it incrementally; status, status text, headers,
   binary bodies and `Content-Encoding` (decoded with `DecompressionStream`)
   behave as before. A tagged response that finishes within 50 ms, and every
-  other request, is answered in one piece as before.
+  other request, is answered in one piece as before: the body is held until the
+  handler finishes (up to 512 MiB) and handed to WebView2 without another copy.
 - The page acknowledges what it reads: at most 4 MiB is in flight to a page that
   is not reading. Beyond that the backend holds up to 64 MiB, and a response
   that outgrows it fails (the page's read rejects and the handler's write

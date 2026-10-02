@@ -1288,6 +1288,8 @@ struct laufey_backend_api {
 
   // Complete the response and release `exchange`. After this returns the handle
   // is invalid. Call exactly once per exchange (including after a cancel).
+  // Finishing an exchange that never called scheme_response_begin gives the
+  // page no response: its request fails (a network error), on every backend.
   void (*scheme_response_finish)(void* backend_data,
                                  laufey_scheme_exchange_t* exchange);
 
