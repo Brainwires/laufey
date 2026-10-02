@@ -242,11 +242,12 @@ bool RunOnUiThreadAndWait(
   // `ctx` lives in this frame; Done() is the task's last access to it
   // (laufey_sync_call.h).
   struct Ctx {
+    explicit Ctx(F* f) : fn(f) {}
     F* fn;
     bool ran = false;
     SyncCall call;
   };
-  Ctx ctx{&fn};
+  Ctx ctx(&fn);
   laufey_ui_task_fn task = [](void* data, bool ran) {
     auto* c = static_cast<Ctx*>(data);
     if (ran) {
