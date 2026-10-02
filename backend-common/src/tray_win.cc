@@ -269,17 +269,30 @@ HICON DecodePngToHicon(const void* bytes, size_t len, int desired) {
   return hicon;
 }
 
+// value_list_get / value_dict_get hand out values the caller owns (laufey.h).
+struct OwnedValue {
+  const laufey_backend_api_t* api;
+  laufey_value_t* v;
+  ~OwnedValue() {
+    if (v) api->value_free(v);
+  }
+  OwnedValue(const OwnedValue&) = delete;
+  OwnedValue& operator=(const OwnedValue&) = delete;
+};
+
 HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api,
                              std::map<UINT, std::string>& cmd_to_id) {
   if (!val || !api->value_is_list(val)) return nullptr;
   HMENU menu = CreatePopupMenu();
   size_t count = api->value_list_size(val);
   for (size_t i = 0; i < count; ++i) {
-    laufey_value_t* itemVal = api->value_list_get(val, i);
+    OwnedValue item{api, api->value_list_get(val, i)};
+    laufey_value_t* itemVal = item.v;
     if (!itemVal || !api->value_is_dict(itemVal)) continue;
 
     // Separator
-    laufey_value_t* typeVal = api->value_dict_get(itemVal, "type");
+    OwnedValue type{api, api->value_dict_get(itemVal, "type")};
+    laufey_value_t* typeVal = type.v;
     if (typeVal && api->value_is_string(typeVal)) {
       size_t len = 0;
       char* typeStr = api->value_get_string(typeVal, &len);
@@ -291,7 +304,8 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
       if (typeStr) api->value_free_string(typeStr);
     }
 
-    laufey_value_t* labelVal = api->value_dict_get(itemVal, "label");
+    OwnedValue label{api, api->value_dict_get(itemVal, "label")};
+    laufey_value_t* labelVal = label.v;
     std::wstring wlabel;
     if (labelVal && api->value_is_string(labelVal)) {
       size_t len = 0;
@@ -304,14 +318,16 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
       }
     }
 
-    laufey_value_t* submenuVal = api->value_dict_get(itemVal, "submenu");
+    OwnedValue submenu{api, api->value_dict_get(itemVal, "submenu")};
+    laufey_value_t* submenuVal = submenu.v;
     if (submenuVal && api->value_is_list(submenuVal)) {
       HMENU sub = BuildWinMenuFromValue(submenuVal, api, cmd_to_id);
       AppendMenuW(menu, MF_POPUP | MF_STRING, (UINT_PTR)sub, wlabel.c_str());
       continue;
     }
 
-    laufey_value_t* idVal = api->value_dict_get(itemVal, "id");
+    OwnedValue id{api, api->value_dict_get(itemVal, "id")};
+    laufey_value_t* idVal = id.v;
     std::string item_id;
     if (idVal && api->value_is_string(idVal)) {
       size_t len = 0;
@@ -324,7 +340,8 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
 
     UINT cmd = g_next_cmd_id.fetch_add(1, std::memory_order_relaxed);
     UINT flags = MF_STRING;
-    laufey_value_t* enabledVal = api->value_dict_get(itemVal, "enabled");
+    OwnedValue enabled{api, api->value_dict_get(itemVal, "enabled")};
+    laufey_value_t* enabledVal = enabled.v;
     if (enabledVal && api->value_is_bool(enabledVal) &&
         !api->value_get_bool(enabledVal)) {
       flags |= MF_GRAYED;

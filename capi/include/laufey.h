@@ -881,8 +881,12 @@ struct laufey_backend_api {
   void (*value_free_string)(char* str);
 
   size_t (*value_list_size)(laufey_value_t* val);
+  // A new value — a copy of the item at `index` — that the caller owns and
+  // frees with value_free; NULL when there is none.
   laufey_value_t* (*value_list_get)(laufey_value_t* val, size_t index);
 
+  // A new value — a copy of the entry under `key` — that the caller owns and
+  // frees with value_free; NULL when there is none.
   laufey_value_t* (*value_dict_get)(laufey_value_t* dict, const char* key);
   bool (*value_dict_has)(laufey_value_t* dict, const char* key);
   size_t (*value_dict_size)(laufey_value_t* dict);

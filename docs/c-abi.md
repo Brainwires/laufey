@@ -171,9 +171,12 @@ JS-callback handles:
 - **Free:** `value_free`.
 
 **Ownership.** Constructors return a value the caller owns and must `value_free`
-(unless handed off). Functions that accept a template — `set_application_menu`,
-`show_context_menu`, `set_tray_menu`, `set_dock_menu`, `show_notification` —
-take ownership of the passed value and free it themselves.
+(unless handed off). So do `value_list_get` and `value_dict_get`: each returns a
+new value (a copy of the item or entry), or `NULL` when there is none, which the
+caller frees with `value_free`; the container is unchanged by that. Functions
+that accept a template — `set_application_menu`, `show_context_menu`,
+`set_tray_menu`, `set_dock_menu`, `show_notification` — take ownership of the
+passed value and free it themselves.
 
 A `_callback` value wraps a JS function passed as an argument: read its
 `value_get_callback_id`, then call it later with `invoke_js_callback(id, args)`

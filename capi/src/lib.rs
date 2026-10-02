@@ -182,6 +182,19 @@ pub enum Value {
   Binary(Vec<u8>),
 }
 
+/// Frees a value the caller owns (null is fine).
+///
+/// # Safety
+/// `val` must be null or an owned value of the backend behind `api`.
+unsafe fn free_value(api: &LaufeyBackendApi, val: *mut LaufeyValue) {
+  if val.is_null() {
+    return;
+  }
+  if let Some(free) = api.value_free {
+    free(val);
+  }
+}
+
 impl Value {
   /// # Safety
   /// `ptr` must be null or a valid pointer to a `LaufeyValue` produced by the
@@ -227,10 +240,12 @@ impl Value {
       let mut list = Vec::with_capacity(size);
       if let Some(get_item) = api.value_list_get {
         for i in 0..size {
+          // An owned copy of the item (laufey.h): converted, then freed.
           let item = get_item(ptr, i);
           if let Some(v) = Value::from_raw(item) {
             list.push(v);
           }
+          free_value(api, item);
         }
       }
       return Some(Value::List(list));
@@ -246,11 +261,13 @@ impl Value {
             if !key_ptr.is_null() {
               let key = CStr::from_ptr(key_ptr).to_string_lossy().into_owned();
               if let Some(get_val) = api.value_dict_get {
-                let c_key = CString::new(key.as_str()).unwrap();
-                let val = get_val(ptr, c_key.as_ptr());
+                // An owned copy of the entry (laufey.h): converted, then
+                // freed.
+                let val = get_val(ptr, key_ptr);
                 if let Some(v) = Value::from_raw(val) {
                   dict.insert(key, v);
                 }
+                free_value(api, val);
               }
             }
           }
