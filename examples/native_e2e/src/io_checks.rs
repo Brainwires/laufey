@@ -444,26 +444,16 @@ async fn xdnd_drop_check(caps: &laufey::WindowCapabilities) {
     eprintln!("[e2e]   xdnd source: {line}");
     drag_ended |= line == "drag-end";
   }
-  // Known bug (CEF on Linux, CEF 149): the page sees the drag (the injected
-  // observer reports every phase) but CefDragHandler::OnDragEnter is never
-  // called for it, so LaufeyHandler has no paths and drops the phases;
-  // nothing reaches on_file_drop. Reported, not hidden: this stops being
-  // N/A, and must pass, as soon as any phase arrives.
-  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
-  if backend == "cef" && drag_ended && ev.is_empty() {
-    na(
-      "a real XDND drop (known bug on CEF/Linux: OnDragEnter is never \
-        called for an external drag, so no phase reaches on_file_drop; see \
-        docs/e2e-testing.md)",
-    );
-  } else {
-    check(
-      "a real XDND drag entering the window reports ENTER",
-      entered,
-    );
-    check("moving over the window reports OVER at the pointer", over);
-    check("a real XDND drop reaches on_file_drop", dropped);
-  }
+  // CEF used to report nothing here: CEF 149 calls OnDragEnter only for
+  // Alloy-style browsers, so the paths now come from the XDND source itself
+  // (cef/src/drag_paths_linux.cc).
+  eprintln!("[e2e]   xdnd: the source saw the drag end: {drag_ended}");
+  check(
+    "a real XDND drag entering the window reports ENTER",
+    entered,
+  );
+  check("moving over the window reports OVER at the pointer", over);
+  check("a real XDND drop reaches on_file_drop", dropped);
   if dropped {
     let drop = ev.iter().find(|e| e.phase == FileDragPhase::Drop).unwrap();
     check(

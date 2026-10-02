@@ -278,6 +278,7 @@ elseif(OS_LINUX)
   )
 
   set(LAUFEY_SRCS_LINUX
+    src/drag_paths_linux.cc
     src/main_linux.cc
     src/runtime_loader_linux.cc
     ${LAUFEY_RENDERER_SRCS}

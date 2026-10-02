@@ -50,6 +50,11 @@ bool TestTriggerFileDrop(uint32_t window_id, int phase, double x, double y,
 // false for anything that is not a local file URI.
 bool FileUriToPath(const std::string& uri, std::string* path);
 
+// The local file paths a text/uri-list (RFC 2483: CRLF or LF separated,
+// "#" comment lines) names, in order, at most LAUFEY_MAX_DROP_PATHS. URIs
+// that aren't local files are skipped.
+std::vector<std::string> UriListToPaths(const std::string& list);
+
 // --- Drag out ---------------------------------------------------------------
 
 // Checks start_file_drag's arguments: 1..LAUFEY_MAX_DROP_PATHS existing

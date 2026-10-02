@@ -219,6 +219,27 @@ bool TestTriggerFileDrop(uint32_t window_id, int phase, double x, double y,
   return DispatchFileDrop(window_id, phase, x, y, copied, count);
 }
 
+std::vector<std::string> UriListToPaths(const std::string& list) {
+  std::vector<std::string> paths;
+  size_t start = 0;
+  while (start < list.size() && paths.size() < LAUFEY_MAX_DROP_PATHS) {
+    size_t end = list.find('\n', start);
+    if (end == std::string::npos)
+      end = list.size();
+    std::string line = list.substr(start, end - start);
+    start = end + 1;
+    while (!line.empty() &&
+           (line.back() == '\r' || line.back() == ' ' || line.back() == '\0'))
+      line.pop_back();
+    if (line.empty() || line[0] == '#')
+      continue;
+    std::string path;
+    if (FileUriToPath(line, &path))
+      paths.push_back(std::move(path));
+  }
+  return paths;
+}
+
 bool FileUriToPath(const std::string& uri, std::string* path) {
   static const char kScheme[] = "file://";
   if (uri.compare(0, sizeof(kScheme) - 1, kScheme) != 0)

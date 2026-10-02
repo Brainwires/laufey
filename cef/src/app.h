@@ -180,6 +180,15 @@ bool LaufeyDevToolsReachable();
 // Whether a command id is one of Chrome's DevTools / Inspect commands.
 bool LaufeyIsDevToolsCommand(int command_id);
 
+// The file paths of the external drag over a window, read from the OS's own
+// drag data: on X11 the XDND source's text/uri-list (XdndSelection). Empty
+// when no files are being dragged, or where there is no such source to ask
+// (Wayland, and macOS / Windows, which don't use this yet). For a browser of
+// the Chrome runtime style, which is what laufey creates: CEF calls
+// CefDragHandler::OnDragEnter only for Alloy-style browsers, so that hook
+// never sees the drag. UI thread; it may wait up to a second for the source.
+std::vector<std::string> LaufeyNativeDragFilePaths();
+
 class LaufeyHandler : public CefClient,
                       public CefLifeSpanHandler,
                       public CefDisplayHandler,
