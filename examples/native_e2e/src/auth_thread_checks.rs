@@ -75,6 +75,7 @@ fn os_says_ui_thread(hwnd: usize) -> bool {
 async fn ui_thread_checks() -> Option<Window> {
   let win = Window::new(320, 240).title("native-e2e-ui-thread");
   let _ = wait_for(|| win.get_size().0 != 0, 100, 50).await;
+  #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
   let mut hwnd = win.get_window_handle() as usize;
   // CEF exposes no native handle: find the top-level window by its title.
   #[cfg(target_os = "windows")]

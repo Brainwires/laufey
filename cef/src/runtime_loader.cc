@@ -2199,11 +2199,24 @@ static void Backend_CloseWindow(void* data, uint32_t window_id) {
     // prompt, not CanClose -- without the mark a registered handler would
     // re-defer this close forever).
     loader->MarkCloseAllowed(window_id);
-    CefPostTask(TID_UI, base::BindOnce(
-                            [](CefRefPtr<CefBrowser> b) {
-                              b->GetHost()->CloseBrowser(true);
-                            },
-                            browser));
+    CefPostTask(TID_UI,
+                base::BindOnce(
+                    [](CefRefPtr<CefBrowser> b, uint32_t id) {
+#if defined(__APPLE__)
+                      // An auth session / passkey sheet attached to
+                      // the window keeps it from closing: end it
+                      // first (`cancelled`), as WKWebView does.
+                      if (void* nswindow = RuntimeLoader::GetInstance()
+                                               ->GetNSWindowForLaufeyId(id)) {
+                        laufey_common::PasskeyWindowClosing(nswindow);
+                        laufey_common::AuthSessionWindowClosing(nswindow);
+                      }
+#else
+                      (void)id;
+#endif
+                      b->GetHost()->CloseBrowser(true);
+                    },
+                    browser, window_id));
   }
 }
 
