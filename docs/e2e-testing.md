@@ -563,8 +563,9 @@ outward-facing surfaces are nightly.
 
 ## 10. CI architecture
 
-`.github/workflows/ci.yml` runs on every pull request to `main` and every push
-to `main` or a `v*` tag:
+`.github/workflows/ci.yml` runs on every pull request to `main`, every push to
+`main`, `denext/integration` or a `v*` tag, nightly (so flakes and runner-image
+drift show up between merges) and on demand:
 
 - **`lint`** — `cargo fmt --check`, `cargo clippy --workspace -D warnings`,
   `clang-format` 22.1.5 over `capi`, `cef/src` and `webview/src`,
@@ -596,9 +597,9 @@ to `main` or a `v*` tag:
   the tag against the `laufey` crate version, publishes the crate and creates
   the GitHub release with the build artifacts and `SHA256SUMS`.
 
-There is no nightly workflow: what the hosted runners cannot drive (modal
-dialogs, outward-facing notification UI, the macOS / Windows Layer-1 observers
-of `§7.2`–`§7.3`) is not covered in CI.
+The nightly run is the same workflow, not a wider one: what the hosted runners
+cannot drive (modal dialogs, outward-facing notification UI, the macOS / Windows
+Layer-1 observers of `§7.2`–`§7.3`) is not covered in CI.
 
 When a run goes wrong in CI it leaves evidence: `native-e2e-run.sh` streams the
 backend's output (so a hang shows how far the battery got) and prints its exit
@@ -616,8 +617,9 @@ Landed: the capability-probing Layer-0 battery (`native_e2e`), the
 backend-launch matrix above, the Linux Layer-1 D-Bus observer
 (`native_e2e_driver`, run by `--layer1`), and CEF / WebView build jobs. Not
 landed: the macOS self-Accessibility and Windows UI Automation observers
-(`§7.2`, `§7.3`) — macOS and Windows chrome is checked in-process only — and any
-nightly job for dialogs and other modal / outward-facing surfaces.
+(`§7.2`, `§7.3`) — macOS and Windows chrome is checked in-process only — and a
+job for dialogs and other modal / outward-facing surfaces (the nightly run
+repeats the PR checks).
 
 ---
 
