@@ -770,6 +770,11 @@ GTK thread). Capability-probed like the rest:
 - **File drops**: ENTER, OVER, LEAVE, DROP and an empty DROP through
   `test_trigger_file_drop`, the dispatch the OS path uses, checked for window
   id, position and paths; no delivery after the handler is cleared.
+- **File dialog aborts**: dialogs of every kind (open with filters and
+  multi-select, save, folder; modal and app-level) cancelled through
+  `cancel_file_dialog` at delays from "at once" to two seconds after they open
+  (`LAUFEY_E2E_ABORT_ROUNDS` rounds, 12 by default). Each one settles cancelled
+  exactly once, its slot is free right after, and on Windows its window is gone.
 - **File dialogs**: real OS dialogs. One closed by `test_file_dialog_respond`
   (cancel), one by `cancel_file_dialog`, a second refused as busy while one is
   open, and three accepted with a path the hook types in (a save target, an
