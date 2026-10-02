@@ -84,6 +84,7 @@ if(OS_MAC)
   )
 
   set(LAUFEY_SRCS_MAC
+    src/drag_paths_mac.mm
     src/main_mac.mm
   )
 
@@ -212,6 +213,7 @@ elseif(OS_WINDOWS)
   )
 
   set(LAUFEY_SRCS_WIN
+    src/drag_paths_win.cc
     src/main_windows.cc
     ${LAUFEY_RENDERER_SRCS}
   )
@@ -278,6 +280,7 @@ elseif(OS_LINUX)
   )
 
   set(LAUFEY_SRCS_LINUX
+    src/drag_paths_linux.cc
     src/main_linux.cc
     src/runtime_loader_linux.cc
     ${LAUFEY_RENDERER_SRCS}

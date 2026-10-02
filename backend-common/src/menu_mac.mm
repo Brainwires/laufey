@@ -12,6 +12,7 @@
 #import <AppKit/AppKit.h>
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -420,6 +421,15 @@ bool TestTriggerMenuAcceleratorMac(uint32_t window_id,
         event && [menu performKeyEquivalent:event] && g_menu_clicks != before;
   });
   return fired;
+}
+
+void RunFromMainRunLoopMac(std::function<void()> fn) {
+  auto task = std::make_shared<std::function<void()>>(std::move(fn));
+  CFRunLoopRef main = CFRunLoopGetMain();
+  CFRunLoopPerformBlock(main, kCFRunLoopCommonModes, ^{
+    (*task)();
+  });
+  CFRunLoopWakeUp(main);
 }
 
 void ShowContextMenuMac(void* nsview, int x, int y,

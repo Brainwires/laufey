@@ -188,10 +188,17 @@ WebKitGTK, whose shared web context applies late registrations to existing
 views). `N/A` on engine-less backends. The CEF host must be told the scheme up
 front (`LAUFEY_CUSTOM_SCHEMES=laufey-e2e`, set by `scripts/native-e2e-run.sh`,
 which also exports `LAUFEY_E2E_BACKEND`) because Chromium registers custom
-schemes before the runtime loads; the script also starts the CEF host with
-`--disable-features=LocalNetworkAccessChecks`, since Chromium otherwise holds
-the page's fetch to the loopback echo server for a permission prompt the host
-never shows.
+schemes before the runtime loads.
+
+Local Network Access (`lna_checks.rs`, also on its own with `--lna`) runs with
+Chromium's checks on: the custom-scheme page's cross-origin fetch and its
+WebSocket to the loopback echo server must get through (laufey grants local
+network access to the embedder's declared schemes, see
+[custom-schemes.md](custom-schemes.md)), on every engine. On CEF a page on any
+other origin must still be refused at once: the script declares a loopback port
+public (`--ip-address-space-overrides=127.0.0.1:<port>=public`, the port in
+`LAUFEY_E2E_PUBLIC_PORT`), serves a page there, and its fetch to the echo server
+must fail within five seconds instead of waiting for a prompt.
 
 Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
 and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body
@@ -727,8 +734,12 @@ one that doesn't must refuse (setters return `false`).
 
 `--lifetime` (its own run, since it ends the process): with keep-alive on, the
 last window closes and the loop survives (no runtime shutdown), a new window
-opens, then `quit()` with a window open must end the loop, observed as the
-backend calling the runtime's shutdown.
+opens, then `quit()` with a window open, called at once from the UI thread and
+from a runtime thread, must end the loop, observed as the backend calling the
+runtime's shutdown, exactly once. The battery then returns from
+`laufey_runtime_start` instead of exiting, so the backend has to end the process
+itself; on Unix an `atexit` guard fails the run (exit 1) unless the runtime's
+start function had returned and its shutdown was called once by then.
 
 The Layer-0 battery runs it on Linux without a window manager, where nothing
 applies maximize / minimize / fullscreen (N/A). CI also runs `--window-api` on
@@ -763,6 +774,11 @@ GTK thread). Capability-probed like the rest:
 - **File drops**: ENTER, OVER, LEAVE, DROP and an empty DROP through
   `test_trigger_file_drop`, the dispatch the OS path uses, checked for window
   id, position and paths; no delivery after the handler is cleared.
+- **File dialog aborts**: dialogs of every kind (open with filters and
+  multi-select, save, folder; modal and app-level) cancelled through
+  `cancel_file_dialog` at delays from "at once" to two seconds after they open
+  (`LAUFEY_E2E_ABORT_ROUNDS` rounds, 12 by default). Each one settles cancelled
+  exactly once, its slot is free right after, and on Windows its window is gone.
 - **File dialogs**: real OS dialogs. One closed by `test_file_dialog_respond`
   (cancel), one by `cancel_file_dialog`, a second refused as busy while one is
   open, and three accepted with a path the hook types in (a save target, an
@@ -776,15 +792,27 @@ GTK thread). Capability-probed like the rest:
   manager does; xdotool presses on it, drags into the window and releases. The
   backend's own XDND handling must report ENTER, OVER at the pointer, and a DROP
   at the release point with the file's path. Needs `LAUFEY_E2E_XDOTOOL` and
-  `LAUFEY_E2E_XDND_SOURCE`, which `native-e2e-run.sh --io` sets on Linux.
-  **Known bug (CEF on Linux):** the drag reaches the page (the injected observer
-  reports every phase) but CEF 149 never calls `CefDragHandler::OnDragEnter` for
-  it, so the CEF backend has no paths and nothing reaches `on_file_drop`; the
-  battery reports that case as N/A (and fails as soon as a phase arrives without
-  the rest). The CEF runs pass `--password-store=basic`: otherwise Chromium asks
-  the session bus's keyring to unlock, and gnome-keyring's `gcr-prompter` grabs
-  the pointer and keyboard for the rest of the run, which swallows every xdotool
+  `LAUFEY_E2E_XDND_SOURCE`, which `native-e2e-run.sh --io` sets on Linux. CEF
+  calls `CefDragHandler::OnDragEnter` only for Alloy-style browsers, and
+  laufey's are Chrome style, so on X11 the CEF backend reads the paths from the
+  XDND source itself (`cef/src/drag_paths_linux.cc`, the source's
+  `text/uri-list` on `XdndSelection`) when the page first reports a drag with
+  files. The CEF runs pass `--password-store=basic`: otherwise Chromium asks the
+  session bus's keyring to unlock, and gnome-keyring's `gcr-prompter` grabs the
+  pointer and keyboard for the rest of the run, which swallows every xdotool
   event.
+- **A real drop (Windows)**: `laufey_ole_drag_source` (built with the backend's
+  tests) drags a file out of its window with `DoDragDrop` and a `CF_HDROP` data
+  object, as Explorer does; SendInput presses on it, moves into the laufey
+  window and releases. ENTER, OVER at the pointer and a DROP with the file's
+  path must reach `on_file_drop`, on WebView2 and on CEF (whose drop target
+  laufey wraps to read the paths). `native-e2e-run.sh --io` sets
+  `LAUFEY_E2E_OLE_SOURCE`. The source is started without a console window, which
+  would otherwise open on top of the drop target.
+- **macOS**: a real drag needs posting pointer events, which the CI runners'
+  processes may not (no Accessibility grant), so the CEF backend's drag
+  pasteboard reader is unit-tested instead
+  (`backend-common/tests/io_mac_test.mm`).
 - **Drag out**: a relative path and a drag with no mouse button held both fail.
   A real drag out needs a person or OS-level input injection on the drag source
   side and is not part of the battery.
@@ -853,6 +881,19 @@ that it says so). See [menus.md](menus.md) and
   is dismissed with `test_dismiss_context_menu` and its close callback fires
   exactly once, with no click (a menu the OS refused to show closes by itself,
   which the check accepts).
+- **The app runs while a context menu is open**: on a window whose page calls a
+  binding every 100 ms, a menu is opened (on Windows its `#32768` popup must be
+  visible); while it is open the page's timer keeps reaching the runtime (at
+  least 3 calls in 1.5 s), and a synchronous window getter and
+  `run_on_ui_thread` return within 5 s. Every leg. (CEF on Windows used to stop
+  running its tasks inside `TrackPopupMenu`'s modal loop; WKWebView showed the
+  menu from a main-queue block, which held the main queue.)
+- **Windows: a context menu driven from the keyboard**: before each menu the
+  window is brought to the front with an Alt press around `SetForegroundWindow`
+  (what an automation script does, which leaves the system menu in keyboard menu
+  mode); then Escape dismisses one menu and Down + Return chooses the first item
+  of the next, injected with `SendInput`. N/A where the window can't take the
+  foreground.
 - **Responses**: a click before any response handler is buffered, then delivered
   with `launch: true` when the handler registers; later ones arrive directly
   with `launch: false`.
@@ -915,10 +956,12 @@ settled).
   through a loopback "identity provider" that redirects to
   `laufey-e2e-auth://cb?code=…&state=s1`, resolving with exactly that URL; a
   second session meanwhile is `busy`; `test_cancel_auth_session` ends a session
-  `cancelled` (as the user closing the sheet); closing the anchor window does
-  too; and, in CI only (it puts a prompt on the screen), a cancel while the
-  consent prompt of a non-ephemeral session is up, which the OS itself never
-  reports, still ends it `cancelled`.
+  `cancelled` (as the user closing the sheet); `auth_session_cancel` (API 43)
+  does too, a second call answers `false`, and the next session completes a
+  round trip; closing the anchor window ends it as well; and, in CI only (it
+  puts a prompt on the screen), a cancel while the consent prompt of a
+  non-ephemeral session is up, which the OS itself never reports, still ends it
+  `cancelled`.
 
 The portable cores are unit-tested in
 `backend-common/tests/auth_main_thread_test.cc` (the dispatcher over a fake

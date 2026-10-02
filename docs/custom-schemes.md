@@ -84,14 +84,51 @@ the backend logs a warning. Each backend installs the schemes in its own way:
   `"appId"` / `"dataDir"` in the [launch file](launch-config.md)) that profile
   is `<dir>/CEF` and persists across launches (see
   [App data & web storage](app-data.md)); without one the host uses a fresh
-  temporary profile per process, so storage does not outlive it. Chromium's
-  Local Network Access checks also treat a custom-scheme page as a public
-  origin: its requests to loopback or private-network addresses wait for a
-  permission prompt that the CEF host does not show.
+  temporary profile per process, so storage does not outlive it. See
+  [Local Network Access](#local-network-access-cef) for how a declared scheme's
+  pages reach loopback servers.
 
 ```sh
 laufey --laufey-custom-schemes=myapp --runtime ./libmyapp.so
 ```
+
+## Local Network Access (CEF)
+
+Chromium's Local Network Access checks (formerly Private Network Access) hold a
+page's request to a loopback or private-network address (`127.0.0.1`, `::1`,
+`192.168.x.x`, ...) until the user grants the page a permission, unless the page
+itself was loaded from such an address. A custom-scheme page counts as a public
+origin, so without help an app page on `myapp://app` could not open its
+runtime's loopback WebSocket or call a local dev server, and the CEF host shows
+no prompt that would let anyone grant it: the request would simply hang.
+
+The CEF backend answers those prompts itself (`CefPermissionHandler`):
+
+- An origin on one of the embedder's declared schemes (`app` and every scheme in
+  `--laufey-custom-schemes` / `LAUFEY_CUSTOM_SCHEMES` / the launch file's
+  `"customSchemes"`) is granted local network access, for `fetch`, XHR and
+  WebSockets alike.
+- Every other origin is denied: `http(s)` pages (remote content, or a site the
+  app navigated to), `file:`, `data:`, opaque origins, and schemes that were
+  registered without being declared. Their requests fail at once with a network
+  error rather than waiting for a prompt, so remote content keeps Chromium's
+  protection against reaching into the user's network.
+- A prompt that asks for local network access together with any other permission
+  is denied as a whole, even for a declared origin, so the grant never extends
+  to another permission. Prompts that don't involve local network access get the
+  engine's default handling.
+
+The security model rests on who can put content on an origin. A page on a
+declared custom scheme can only come from the embedder's own scheme handler,
+in-process: no network server can produce that origin. The grant therefore
+extends to whatever the handler serves, so a handler that proxies remote content
+onto its scheme hands that content local network access too, and should not.
+Navigating a window to a remote site doesn't widen anything: that site's origin
+is not declared, so it is denied. LNA is never switched off for the process (no
+`--disable-features=LocalNetworkAccessChecks`).
+
+The WebView backends have no such checks: WKWebView, WebView2 and WebKitGTK let
+a page reach loopback servers already.
 
 ## Streaming responses
 

@@ -2620,7 +2620,11 @@ void WKWebViewBackend::ShowContextMenuEx(uint32_t window_id, int x, int y,
                                          void* on_closed_data) {
   auto entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
       laufey_common::ParseMenuTemplate(menu_template, api, true));
-  dispatch_async(dispatch_get_main_queue(), ^{
+  // Not a main-queue block: the menu's tracking loop must leave the main
+  // queue free for the UI-thread calls made while it is open.
+  laufey_common::RunFromMainRunLoopMac([this, window_id, x, y, entries,
+                                        on_click, on_click_data, on_closed,
+                                        on_closed_data] {
     NSWindow* win = nil;
     {
       std::lock_guard<std::mutex> lock(windows_mutex_);

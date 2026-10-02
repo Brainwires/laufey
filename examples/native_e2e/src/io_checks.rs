@@ -14,6 +14,14 @@
 //!   `cancel_file_dialog`, refused while another is open (busy), and accepted
 //!   with a path the hook types in (save, open a file, open a directory),
 //!   each result coming back through the dialog's own completion path.
+//! - Abort stress: dialogs of every kind (open / save / folder, modal and
+//!   app-level, with filters and multi-select) cancelled through
+//!   `cancel_file_dialog` at delays from "at once" to well after the dialog
+//!   window is up; each one settles cancelled exactly once and, on Windows,
+//!   its window is gone afterwards.
+//! - Windows: a real OLE drag of a file out of laufey_ole_drag_source
+//!   (DoDragDrop with CF_HDROP, as Explorer does), driven with SendInput
+//!   and released over the window, reaches on_file_drop the same way.
 //! - Drag out: refused without a held mouse button and for a bad path (a
 //!   real drag needs a person, or OS input injection, and is not run here).
 
@@ -54,7 +62,9 @@ pub async fn run() {
   clipboard_checks(&clip).await;
   file_drop_checks(&w, &caps).await;
   xdnd_drop_check(&caps).await;
+  ole_drop_check(&caps).await;
   dialog_checks(&w, &caps).await;
+  dialog_abort_stress(&w, &caps).await;
   drag_out_checks(&w, &caps).await;
 }
 
@@ -438,26 +448,16 @@ async fn xdnd_drop_check(caps: &laufey::WindowCapabilities) {
     eprintln!("[e2e]   xdnd source: {line}");
     drag_ended |= line == "drag-end";
   }
-  // Known bug (CEF on Linux, CEF 149): the page sees the drag (the injected
-  // observer reports every phase) but CefDragHandler::OnDragEnter is never
-  // called for it, so LaufeyHandler has no paths and drops the phases;
-  // nothing reaches on_file_drop. Reported, not hidden: this stops being
-  // N/A, and must pass, as soon as any phase arrives.
-  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
-  if backend == "cef" && drag_ended && ev.is_empty() {
-    na(
-      "a real XDND drop (known bug on CEF/Linux: OnDragEnter is never \
-        called for an external drag, so no phase reaches on_file_drop; see \
-        docs/e2e-testing.md)",
-    );
-  } else {
-    check(
-      "a real XDND drag entering the window reports ENTER",
-      entered,
-    );
-    check("moving over the window reports OVER at the pointer", over);
-    check("a real XDND drop reaches on_file_drop", dropped);
-  }
+  // CEF used to report nothing here: CEF 149 calls OnDragEnter only for
+  // Alloy-style browsers, so the paths now come from the XDND source itself
+  // (cef/src/drag_paths_linux.cc).
+  eprintln!("[e2e]   xdnd: the source saw the drag end: {drag_ended}");
+  check(
+    "a real XDND drag entering the window reports ENTER",
+    entered,
+  );
+  check("moving over the window reports OVER at the pointer", over);
+  check("a real XDND drop reaches on_file_drop", dropped);
   if dropped {
     let drop = ev.iter().find(|e| e.phase == FileDragPhase::Drop).unwrap();
     check(
@@ -486,6 +486,327 @@ async fn xdnd_drop_check(caps: &laufey::WindowCapabilities) {
   laufey::clear_file_drop_handler();
   let _ = std::fs::remove_dir_all(&dir);
   w.close();
+}
+
+/// Windows: a real OLE drag of a file out of laufey_ole_drag_source (a
+/// window whose whole area drags it as CF_HDROP with DoDragDrop, as Explorer
+/// does), driven with SendInput (real pointer input) and released over the
+/// window, reaches on_file_drop through the backend's own drop handling:
+/// ENTER first, OVER at the pointer, then a DROP with the file's path.
+async fn ole_drop_check(caps: &laufey::WindowCapabilities) {
+  if !cfg!(windows) {
+    return;
+  }
+  let source = std::env::var("LAUFEY_E2E_OLE_SOURCE").unwrap_or_default();
+  if source.is_empty() {
+    na("a real OLE drop (needs laufey_ole_drag_source)");
+    return;
+  }
+  if !caps.file_drop() {
+    na("a real OLE drop (backend has no file drops)");
+  } else {
+    #[cfg(windows)]
+    ole_drop_run(&source).await;
+  }
+}
+
+#[cfg(windows)]
+async fn ole_drop_run(source: &str) {
+  let dir =
+    std::env::temp_dir().join(format!("laufey-e2e-ole-{}", std::process::id()));
+  let file = dir.join("dropped file \u{e9}.txt");
+  if std::fs::create_dir_all(&dir).is_err()
+    || std::fs::write(&file, b"ole").is_err()
+  {
+    check("a real OLE drop: temp file", false);
+    return;
+  }
+  let path = file.to_string_lossy().into_owned();
+
+  let events: Arc<Mutex<Vec<FileDropEvent>>> = Arc::new(Mutex::new(Vec::new()));
+  let sink = events.clone();
+  laufey::on_file_drop(move |e| sink.lock().unwrap().push(e));
+
+  const TITLE: &str = "native-e2e-ole";
+  let loaded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+  let w = {
+    let loaded = loaded.clone();
+    Window::new(480, 360)
+      .title(TITLE)
+      .on_page_load(move |_| loaded.store(true, Ordering::SeqCst))
+      .load(&format!("laufey-e2e://app/titled/{TITLE}"))
+  };
+  w.show();
+  w.set_position(60, 60);
+  let _ = wait_for(|| loaded.load(Ordering::SeqCst), 100, 50).await;
+  tokio::time::sleep(Duration::from_millis(500)).await;
+  // In front of everything else (a console window, the I/O window), or
+  // the drop lands there: on top, and the foreground window if allowed.
+  w.set_always_on_top(true);
+  let hwnd = crate::menu_notification_checks::win::find_window(TITLE);
+  let focused = crate::menu_notification_checks::win::focus(hwnd);
+  tokio::time::sleep(Duration::from_millis(300)).await;
+  let Some((tx, ty, tw, th)) = crate::os_view::content_rect(TITLE) else {
+    check(
+      "a real OLE drop: the window system reports the window",
+      false,
+    );
+    laufey::clear_file_drop_handler();
+    return;
+  };
+  // The source next to the window, on the primary display.
+  let (sx0, sy0) = (tx + tw + 40, ty + 40);
+  // CREATE_NO_WINDOW: a console window of its own (a Windows Terminal tab)
+  // would open on top of the drop target.
+  let mut command = std::process::Command::new(source);
+  std::os::windows::process::CommandExt::creation_flags(
+    &mut command,
+    0x0800_0000,
+  );
+  let mut child = match command
+    .args([&sx0.to_string(), &sy0.to_string(), &path])
+    .stdout(std::process::Stdio::piped())
+    .spawn()
+  {
+    Ok(c) => c,
+    Err(e) => {
+      check(
+        &format!("a real OLE drop: start the drag source ({e})"),
+        false,
+      );
+      laufey::clear_file_drop_handler();
+      return;
+    }
+  };
+  let stdout = child.stdout.take();
+  let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel();
+  std::thread::spawn(move || {
+    use std::io::BufRead;
+    if let Some(out) = stdout {
+      for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+        let _ = line_tx.send(line);
+      }
+    }
+  });
+  let ready = tokio::time::timeout(Duration::from_secs(15), async {
+    while let Some(line) = line_rx.recv().await {
+      let f: Vec<i32> = line
+        .strip_prefix("ready ")
+        .map(|r| r.split(' ').filter_map(|v| v.parse().ok()).collect())
+        .unwrap_or_default();
+      if f.len() == 4 {
+        return Some((f[0], f[1], f[2], f[3]));
+      }
+    }
+    None
+  })
+  .await
+  .ok()
+  .flatten();
+  let Some((sx, sy, sw, sh)) = ready else {
+    check("a real OLE drop: the drag source window shows", false);
+    let _ = child.kill();
+    laufey::clear_file_drop_handler();
+    return;
+  };
+  eprintln!(
+    "[e2e]   ole: source at {sx},{sy} {sw}x{sh}, target at {tx},{ty} {tw}x{th}"
+  );
+
+  // Press on the source (DoDragDrop starts there and tracks the pointer),
+  // move in steps into the window, rest, and release over it.
+  let (fx, fy) = (sx + sw / 2, sy + sh / 2);
+  let (gx, gy) = (tx + tw / 2, ty + th / 2);
+  // Some runners show a system window above everything (the
+  // windows-11-arm image's "Microsoft account" prompt); a drop there can't
+  // reach the app, whatever the backend does.
+  if !ole_input::ours_at(gx, gy) {
+    na(&format!(
+      "a real OLE drop (another window covers the drop target: {})",
+      ole_input::window_at(gx, gy)
+    ));
+    let _ = child.kill();
+    let _ = child.wait();
+    laufey::clear_file_drop_handler();
+    let _ = std::fs::remove_dir_all(&dir);
+    w.close();
+    return;
+  }
+  let mut driven = ole_input::move_to(fx, fy);
+  tokio::time::sleep(Duration::from_millis(200)).await;
+  driven &= ole_input::button(true);
+  tokio::time::sleep(Duration::from_millis(300)).await;
+  for i in 1..=12 {
+    driven &=
+      ole_input::move_to(fx + (gx - fx) * i / 12, fy + (gy - fy) * i / 12);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+  }
+  let has = |phase: FileDragPhase| {
+    events.lock().unwrap().iter().any(|e| e.phase == phase)
+  };
+  let entered = wait_for(|| has(FileDragPhase::Enter), 60, 50).await;
+  let (rx, ry) = (gx + 20, gy + 15);
+  for (x, y) in [(gx + 7, gy + 5), (gx + 14, gy + 10), (rx, ry)] {
+    driven &= ole_input::move_to(x, y);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+  }
+  let over = wait_for(
+    || {
+      events.lock().unwrap().iter().any(|e| {
+        e.phase == FileDragPhase::Over
+          && (e.x - (rx - tx) as f64).abs() <= 2.0
+          && (e.y - (ry - ty) as f64).abs() <= 2.0
+      })
+    },
+    40,
+    50,
+  )
+  .await;
+  eprintln!(
+    "[e2e]   ole: window in front {focused}; under the release point: {}",
+    ole_input::window_at(rx, ry)
+  );
+  driven &= ole_input::button(false);
+  check("SendInput drove the drag", driven);
+  let dropped = wait_for(|| has(FileDragPhase::Drop), 100, 50).await;
+  let ev = events.lock().unwrap().clone();
+  for e in &ev {
+    eprintln!("[e2e]   ole event {e:?}");
+  }
+  tokio::time::sleep(Duration::from_millis(700)).await;
+  while let Ok(line) = line_rx.try_recv() {
+    eprintln!("[e2e]   ole source: {line}");
+  }
+  check("a real OLE drag entering the window reports ENTER", entered);
+  check("moving over the window reports OVER at the pointer", over);
+  check("a real OLE drop reaches on_file_drop", dropped);
+  if dropped {
+    let drop = ev.iter().find(|e| e.phase == FileDragPhase::Drop).unwrap();
+    check(
+      &format!(
+        "the real drop carries the window and the dragged file's path ({:?})",
+        drop.paths
+      ),
+      drop.window_id == w.id() && drop.paths == Some(vec![path.clone()]),
+    );
+  }
+  let _ = child.kill();
+  let _ = child.wait();
+  laufey::clear_file_drop_handler();
+  let _ = std::fs::remove_dir_all(&dir);
+  w.close();
+}
+
+/// Real pointer input for the OLE drop check: absolute moves and the left
+/// button, through mouse_event (one SendInput mouse INPUT).
+#[cfg(windows)]
+mod ole_input {
+  #[repr(C)]
+  struct Point {
+    x: i32,
+    y: i32,
+  }
+
+  type Hwnd = *mut std::ffi::c_void;
+
+  #[link(name = "user32")]
+  extern "system" {
+    // mouse_event: SendInput with one mouse INPUT (the keyboard helpers
+    // declare SendInput itself with their own INPUT type).
+    fn mouse_event(flags: u32, dx: u32, dy: u32, data: u32, extra: usize);
+    fn GetSystemMetrics(index: i32) -> i32;
+    fn WindowFromPoint(point: Point) -> Hwnd;
+    fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd;
+    fn GetWindowTextW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
+    fn GetClassNameW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
+    fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
+  }
+
+  /// Whether the window at (x, y) is one of this process's.
+  pub fn ours_at(x: i32, y: i32) -> bool {
+    unsafe {
+      let hwnd = WindowFromPoint(Point { x, y });
+      let mut pid = 0u32;
+      !hwnd.is_null()
+        && GetWindowThreadProcessId(GetAncestor(hwnd, 2), &mut pid) != 0
+        && pid == std::process::id()
+    }
+  }
+
+  /// The top-level window at (x, y), for the log: title, class, and
+  /// whether it is this process's.
+  pub fn window_at(x: i32, y: i32) -> String {
+    unsafe {
+      let hwnd = WindowFromPoint(Point { x, y });
+      if hwnd.is_null() {
+        return "none".into();
+      }
+      let root = GetAncestor(hwnd, 2); // GA_ROOT
+      let mut title = [0u16; 128];
+      let mut class = [0u16; 128];
+      let n = GetWindowTextW(root, title.as_mut_ptr(), 128).max(0) as usize;
+      let c = GetClassNameW(root, class.as_mut_ptr(), 128).max(0) as usize;
+      let mut pid = 0u32;
+      GetWindowThreadProcessId(root, &mut pid);
+      let owner = if pid == std::process::id() {
+        "this process".to_string()
+      } else {
+        format!("pid {pid}")
+      };
+      format!(
+        "{:?} ({}) of {owner}",
+        String::from_utf16_lossy(&title[..n]),
+        String::from_utf16_lossy(&class[..c]),
+      )
+    }
+  }
+
+  const MOUSEEVENTF_MOVE: u32 = 0x0001;
+  const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+  const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+  const MOUSEEVENTF_ABSOLUTE: u32 = 0x8000;
+  const MOUSEEVENTF_VIRTUALDESK: u32 = 0x4000;
+
+  fn send(dx: i32, dy: i32, flags: u32) -> bool {
+    unsafe { mouse_event(flags, dx as u32, dy as u32, 0, 0) };
+    true
+  }
+
+  /// Moves the pointer to (x, y) in physical virtual-screen pixels.
+  pub fn move_to(x: i32, y: i32) -> bool {
+    // SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN,
+    // SM_CYVIRTUALSCREEN: absolute input is 0..65535 over the virtual desk.
+    let (vx, vy, vw, vh) = unsafe {
+      (
+        GetSystemMetrics(76),
+        GetSystemMetrics(77),
+        GetSystemMetrics(78),
+        GetSystemMetrics(79),
+      )
+    };
+    if vw <= 1 || vh <= 1 {
+      return false;
+    }
+    let nx = ((x - vx) as i64 * 65535 / (vw - 1) as i64) as i32;
+    let ny = ((y - vy) as i64 * 65535 / (vh - 1) as i64) as i32;
+    send(
+      nx,
+      ny,
+      MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+    )
+  }
+
+  pub fn button(down: bool) -> bool {
+    send(
+      0,
+      0,
+      if down {
+        MOUSEEVENTF_LEFTDOWN
+      } else {
+        MOUSEEVENTF_LEFTUP
+      },
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +971,153 @@ async fn dialog_checks(w: &Window, caps: &laufey::WindowCapabilities) {
   );
 
   let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `cancel_file_dialog` (what an embedder's abort calls) closes a dialog of
+/// any kind whenever it arrives: before the dialog is shown, while it is
+/// being built, or long after its window is up. Each one settles cancelled
+/// exactly once (the outcome channel would report a second settle as a
+/// failure on the next dialog: the slot would be busy), and the slot is
+/// free right after. On Windows the dialog's window must also be gone.
+async fn dialog_abort_stress(w: &Window, caps: &laufey::WindowCapabilities) {
+  if !caps.file_dialogs() {
+    na("file dialog abort stress (backend has no file dialogs)");
+    return;
+  }
+  let modal_parent = if caps.file_dialog_modal() { w.id() } else { 0 };
+  // LAUFEY_E2E_ABORT_ROUNDS: more rounds when hunting a race by hand.
+  let rounds: usize = std::env::var("LAUFEY_E2E_ABORT_ROUNDS")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(12);
+  let delays_ms = [0u64, 50, 250, 700, 1500, 2000];
+  let mut settled = 0usize;
+  for i in 0..rounds {
+    let delay = delays_ms[i % delays_ms.len()];
+    let kind = i % 3; // open file(s), save, folder
+    let modal = (i / 3) % 2 == 1;
+    let title = format!("laufey e2e abort {i}");
+    let mut options = FileDialogOptions {
+      title: Some(title.clone()),
+      ..Default::default()
+    };
+    match kind {
+      0 => {
+        options.multiple = true;
+        options.filters = vec![FileFilter {
+          name: "Text".into(),
+          extensions: vec!["txt".into()],
+        }];
+      }
+      1 => {
+        options.kind = FileDialogKind::Save;
+        options.default_path = Some("e2e.txt".into());
+      }
+      _ => options.directories = true,
+    }
+    let label = format!(
+      "{} dialog ({}), aborted after {delay} ms",
+      ["open", "save", "folder"][kind],
+      if modal { "modal" } else { "app-level" }
+    );
+    let d =
+      laufey::show_file_dialog(if modal { modal_parent } else { 0 }, &options);
+    if d.id == 0 {
+      check(&format!("{label}: the dialog opens"), false);
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(delay)).await;
+    #[cfg(windows)]
+    let window_seen = delay >= 1500 && win_dialog::exists(&title);
+    let found = laufey::cancel_file_dialog(d.id);
+    let outcome =
+      tokio::time::timeout(Duration::from_secs(10), d.outcome).await;
+    let ok = matches!(outcome, Ok(FileDialogOutcome::Cancelled));
+    check(
+      &format!("{label}: settles cancelled ({found}, {outcome:?})"),
+      found && ok,
+    );
+    if !ok {
+      // A dialog that never settled holds the slot: the rest can't run.
+      break;
+    }
+    settled += 1;
+    #[cfg(windows)]
+    {
+      if delay >= 1500 {
+        eprintln!("[e2e]   {label}: its window was up: {window_seen}");
+      }
+      check(
+        &format!("{label}: its window is gone"),
+        wait_for(|| !win_dialog::exists(&title), 50, 100).await,
+      );
+    }
+    // Exactly once: the slot is free at once, so a new dialog opens (and is
+    // cancelled before it shows).
+    let next = laufey::show_file_dialog(0, &FileDialogOptions::default());
+    let freed = next.id != 0;
+    if freed {
+      laufey::cancel_file_dialog(next.id);
+    }
+    let next_outcome =
+      tokio::time::timeout(Duration::from_secs(10), next.outcome).await;
+    check(
+      &format!("{label}: settles once and frees the slot"),
+      freed && matches!(next_outcome, Ok(FileDialogOutcome::Cancelled)),
+    );
+  }
+  check(
+    &format!("every aborted dialog settled ({settled}/{rounds})"),
+    settled == rounds,
+  );
+}
+
+/// Windows: whether a visible window of this process has `title` (the file
+/// dialog's own top-level window).
+#[cfg(windows)]
+mod win_dialog {
+  use std::ffi::c_void;
+
+  #[link(name = "user32")]
+  extern "system" {
+    fn EnumWindows(
+      cb: unsafe extern "system" fn(*mut c_void, isize) -> i32,
+      lparam: isize,
+    ) -> i32;
+    fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+    fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+    fn GetWindowTextW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
+  }
+
+  pub fn exists(title: &str) -> bool {
+    struct Search {
+      pid: u32,
+      title: Vec<u16>,
+      found: bool,
+    }
+    unsafe extern "system" fn visit(hwnd: *mut c_void, lparam: isize) -> i32 {
+      let search = &mut *(lparam as *mut Search);
+      let mut pid = 0u32;
+      GetWindowThreadProcessId(hwnd, &mut pid);
+      if pid != search.pid || IsWindowVisible(hwnd) == 0 {
+        return 1;
+      }
+      let mut buf = [0u16; 256];
+      let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+      if n > 0 && buf[..n as usize] == search.title[..] {
+        search.found = true;
+        return 0;
+      }
+      1
+    }
+    let mut search = Search {
+      pid: std::process::id(),
+      title: title.encode_utf16().collect(),
+      found: false,
+    };
+    unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
+    search.found
+  }
 }
 
 fn accept_check(

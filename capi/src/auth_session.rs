@@ -242,6 +242,24 @@ fn auth_session_start_with(
   }
 }
 
+/// Cancels the running auth session (API 43): the app gave up on it (the
+/// page cancelled, a timeout). Its sheet closes and its
+/// [`auth_session_start`] future resolves
+/// [`AuthSessionErrorKind::Cancelled`], once; the next session can start.
+/// Returns false, and does nothing, when no session is running (always so
+/// where sessions are not supported) or the backend is older than API 43.
+pub fn auth_session_cancel() -> bool {
+  auth_session_cancel_with(api())
+}
+
+fn auth_session_cancel_with(api: &LaufeyBackendApi) -> bool {
+  match api.auth_session_cancel {
+    // SAFETY: a backend vtable entry, callable from any thread.
+    Some(f) => unsafe { f(api.backend_data) },
+    None => false,
+  }
+}
+
 /// Test-only. Ends the running auth session as the user closing its sheet
 /// would (it resolves [`AuthSessionErrorKind::Cancelled`]). Returns false when
 /// none is running or the backend has no hook.
@@ -315,6 +333,31 @@ mod tests {
   }
 
   fn assert_send_static<T: Send + 'static>(_: &T) {}
+
+  static CANCEL_CALLS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+  unsafe extern "C" fn fake_cancel(backend_data: *mut c_void) -> bool {
+    CANCEL_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // backend_data says whether a session is "running".
+    !backend_data.is_null()
+  }
+
+  #[test]
+  fn cancel_reaches_the_backend() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    // Older than API 43: nothing to call, nothing cancelled.
+    assert!(!auth_session_cancel_with(&fake));
+    fake.auth_session_cancel = Some(fake_cancel);
+    let before = CANCEL_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(!auth_session_cancel_with(&fake));
+    fake.backend_data = 1 as *mut c_void;
+    assert!(auth_session_cancel_with(&fake));
+    assert_eq!(
+      CANCEL_CALLS.load(std::sync::atomic::Ordering::SeqCst) - before,
+      2
+    );
+  }
 
   #[test]
   fn without_backend_support() {

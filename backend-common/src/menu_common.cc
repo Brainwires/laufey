@@ -5,6 +5,7 @@
 
 #include "laufey_menu.h"
 
+#include <atomic>
 #include <cctype>
 #include <iostream>
 #include <map>
@@ -317,6 +318,36 @@ const MenuAccelBinding* FindMenuAccelerator(
       return &b;
   }
   return nullptr;
+}
+
+namespace {
+
+std::atomic<NativeModalLoopHook> g_modal_loop_hook{nullptr};
+// Depth of the native modal loops on this thread (the UI thread), and the
+// hook told about the outermost one, which is the one told about its end.
+thread_local int g_modal_loop_depth = 0;
+thread_local NativeModalLoopHook g_modal_loop_entered = nullptr;
+
+}  // namespace
+
+void SetNativeModalLoopHook(NativeModalLoopHook hook) {
+  g_modal_loop_hook.store(hook);
+}
+
+ScopedNativeModalLoop::ScopedNativeModalLoop() {
+  if (g_modal_loop_depth++ == 0) {
+    g_modal_loop_entered = g_modal_loop_hook.load();
+    if (g_modal_loop_entered)
+      g_modal_loop_entered(true);
+  }
+}
+
+ScopedNativeModalLoop::~ScopedNativeModalLoop() {
+  if (--g_modal_loop_depth == 0 && g_modal_loop_entered) {
+    NativeModalLoopHook hook = g_modal_loop_entered;
+    g_modal_loop_entered = nullptr;
+    hook(false);
+  }
 }
 
 uint64_t BeginContextMenu(uint32_t window_id, laufey_menu_closed_fn on_closed,

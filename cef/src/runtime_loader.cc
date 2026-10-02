@@ -1028,6 +1028,13 @@ static bool Backend_TestCancelAuthSession(void* /*data*/) {
       "the user cancelled the sign-in");
 }
 
+// API >= 43: the app cancels the running session (no session runs off
+// macOS, so it answers false there).
+static bool Backend_AuthSessionCancel(void* /*data*/) {
+  return laufey_common::AuthSessionCancelCurrent(
+      "the app cancelled the sign-in");
+}
+
 // --- CefValue <-> laufey::Value conversion (IPC boundary only) ---
 //
 // Values cross the renderer<->browser process boundary as CefValue trees, but
@@ -3281,6 +3288,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.auth_session_capabilities = Backend_AuthSessionCapabilities;
   backend_api_.auth_session_start = Backend_AuthSessionStart;
   backend_api_.test_cancel_auth_session = Backend_TestCancelAuthSession;
+  backend_api_.auth_session_cancel = Backend_AuthSessionCancel;
 }
 
 // --- RuntimeLoader lifecycle ---
@@ -3319,6 +3327,18 @@ bool RuntimeLoader::Load(const std::string& path) {
             TID_UI, base::BindOnce([](void (*t)(void*), void* d) { t(d); },
                                    task, task_data));
       });
+#if defined(_WIN32)
+  // A context menu's TrackPopupMenu runs a native modal loop on TID_UI, and
+  // Chromium runs no tasks inside one unless told to: every CefPostTask (the
+  // runtime's synchronous UI-thread calls, dispatch_ui_task, the page's
+  // binding calls) would wait for the menu to close, and the runtime with
+  // them. Allow nestable tasks for the length of the loop (laufey_menu.h).
+  // The menu code is reentrancy safe for this: a task that shows another
+  // menu ends the open one first (win32_menu.h), and one that closes the
+  // window ends it too.
+  laufey_common::SetNativeModalLoopHook(
+      [](bool entering) { CefSetNestableTasksAllowed(entering); });
+#endif
 #ifndef _WIN32
   library_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!library_handle_) {

@@ -108,6 +108,35 @@ void FireContextMenuClosedNow(uint32_t window_id,
                               laufey_menu_closed_fn on_closed,
                               void* on_closed_data);
 
+// --- Native modal loops
+// ------------------------------------------------------
+//
+// A menu that runs the OS's own modal loop on the UI thread
+// (TrackPopupMenu) holds that thread until it closes. The loop still
+// dispatches the thread's window messages, but a backend whose task queue
+// doesn't run inside a nested OS loop starves while it is open: Chromium,
+// and so CEF, runs no tasks there unless told to. Everything the runtime
+// sends through that queue then waits for the menu (a binding call from the
+// page, a synchronous UI-thread call, dispatch_ui_task), and a runtime that
+// blocks on one of them stops altogether.
+//
+// Such a backend installs a hook, which is told when the outermost of these
+// loops starts (true) and ends (false); CEF uses it to allow its tasks to
+// run inside the loop (CefSetNestableTasksAllowed). The menu code brackets
+// its modal loop with a ScopedNativeModalLoop. UI thread only; nesting is
+// counted, so the hook sees one true / false pair per outermost loop.
+
+using NativeModalLoopHook = void (*)(bool entering);
+void SetNativeModalLoopHook(NativeModalLoopHook hook);
+
+class ScopedNativeModalLoop {
+ public:
+  ScopedNativeModalLoop();
+  ~ScopedNativeModalLoop();
+  ScopedNativeModalLoop(const ScopedNativeModalLoop&) = delete;
+  ScopedNativeModalLoop& operator=(const ScopedNativeModalLoop&) = delete;
+};
+
 // --- Accelerator table (portable)
 // -----------------------------------------------
 //

@@ -17,6 +17,7 @@
 #include "include/cef_command_line.h"
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_jsdialog_handler.h"
+#include "include/cef_permission_handler.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 
@@ -179,6 +180,24 @@ bool LaufeyDevToolsReachable();
 // Whether a command id is one of Chrome's DevTools / Inspect commands.
 bool LaufeyIsDevToolsCommand(int command_id);
 
+// The file paths of the external drag over a window, read from the OS's own
+// drag data: on X11 the XDND source's text/uri-list (XdndSelection,
+// drag_paths_linux.cc), on Windows the OLE drag's CF_HDROP
+// (drag_paths_win.cc), on macOS the drag pasteboard (drag_paths_mac.mm).
+// Empty when no files are being dragged, or where there is no such source
+// to ask (Wayland). Needed because laufey's browsers are of the Chrome
+// runtime style, and CEF calls CefDragHandler::OnDragEnter only for
+// Alloy-style ones, so that hook never sees the drag. UI thread; on X11 it
+// may wait up to a second for the source.
+std::vector<std::string> LaufeyNativeDragFilePaths();
+
+#if defined(_WIN32)
+// Windows: wraps the drop target Chromium registered on a CEF window, so the
+// files of an OLE drag over it are recorded for LaufeyNativeDragFilePaths
+// (cef/src/drag_paths_win.cc). Once per window; UI thread.
+void LaufeyHookWindowDropTarget(HWND hwnd);
+#endif
+
 class LaufeyHandler : public CefClient,
                       public CefLifeSpanHandler,
                       public CefDisplayHandler,
@@ -186,7 +205,8 @@ class LaufeyHandler : public CefClient,
                       public CefDragHandler,
                       public CefJSDialogHandler,
                       public CefCommandHandler,
-                      public CefContextMenuHandler {
+                      public CefContextMenuHandler,
+                      public CefPermissionHandler {
  public:
   LaufeyHandler();
   ~LaufeyHandler() override;
@@ -214,6 +234,18 @@ class LaufeyHandler : public CefClient,
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
     return this;
   }
+  CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
+    return this;
+  }
+
+  // Local Network Access: the embedder's own origins (its declared custom
+  // schemes and "app") may reach loopback / private addresses; everyone
+  // else is denied. See LocalNetworkPromptDecision in
+  // laufey_scheme_registry.h. Other prompts keep the default handling.
+  bool OnShowPermissionPrompt(
+      CefRefPtr<CefBrowser> browser, uint64_t prompt_id,
+      const CefString& requesting_origin, uint32_t requested_permissions,
+      CefRefPtr<CefPermissionPromptCallback> callback) override;
 
   // DevTools off (API 40, LAUFEY_INSPECTABLE=0): Chrome's DevTools commands
   // (F12, Ctrl/Cmd+Shift+I / J / C, the app menu) are swallowed and the

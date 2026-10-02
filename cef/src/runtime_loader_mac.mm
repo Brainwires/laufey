@@ -671,7 +671,11 @@ void Backend_ShowContextMenuEx_Mac(void* data, uint32_t window_id, int x, int y,
       laufey_common::ParseMenuTemplate(menu_template, api, true));
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   void* handle = browser ? browser->GetHost()->GetWindowHandle() : nullptr;
-  dispatch_async(dispatch_get_main_queue(), ^{
+  // Not a main-queue block: the menu's tracking loop must leave the main
+  // queue free for the work posted there while it is open.
+  laufey_common::RunFromMainRunLoopMac([handle, x, y, entries, on_click,
+                                        on_click_data, on_closed,
+                                        on_closed_data, window_id] {
     NSView* view = (__bridge NSView*)handle;
     NSWindow* win = [view window];
     // LAUFEY coordinates are window-relative with a top-left origin; the

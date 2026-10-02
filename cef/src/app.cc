@@ -8,6 +8,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_external_links.h"
 #include "laufey_passkey.h"
+#include "laufey_scheme_registry.h"
 #include "laufey_auth_session.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
@@ -264,6 +265,13 @@ void LaufeyHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     g_pending_laufey_ids.pop();
     loader->RegisterBrowser(laufey_id, browser);
   }
+#if defined(_WIN32)
+  // External file drops: see LaufeyNativeDragFilePaths.
+  if (auto view = CefBrowserView::GetForBrowser(browser)) {
+    if (auto window = view->GetWindow())
+      LaufeyHookWindowDropTarget(window->GetWindowHandle());
+  }
+#endif
 }
 
 bool LaufeyHandler::OnBeforePopup(
@@ -381,8 +389,16 @@ void LaufeyHandler::OnFileDropMessage(CefRefPtr<CefBrowser> browser,
     return;
   int id = browser->GetIdentifier();
   auto it = file_drag_paths_.find(id);
-  // Only a drag OnDragEnter saw carry files counts: the browser process is
-  // where the paths come from, the page only says where the drag is.
+  // Only a drag known to carry files counts: the browser process is where
+  // the paths come from, the page only says where the drag is. CEF calls
+  // OnDragEnter only for Alloy-style browsers, so for laufey's (Chrome
+  // style) the paths are read from the OS's drag data the first time the
+  // page reports a drag with files.
+  if (it == file_drag_paths_.end() && count > 0 && phase != LAUFEY_DRAG_LEAVE) {
+    std::vector<std::string> native = LaufeyNativeDragFilePaths();
+    if (!native.empty())
+      it = file_drag_paths_.emplace(id, std::move(native)).first;
+  }
   if (it == file_drag_paths_.end())
     return;
   uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
@@ -760,6 +776,32 @@ bool LaufeyDevToolsReachable() {
   for (const char* sw : kRemoteDebuggingSwitches) {
     if (cl->HasSwitch(sw))
       return true;
+  }
+  return false;
+}
+
+bool LaufeyHandler::OnShowPermissionPrompt(
+    CefRefPtr<CefBrowser> /*browser*/, uint64_t /*prompt_id*/,
+    const CefString& requesting_origin, uint32_t requested_permissions,
+    CefRefPtr<CefPermissionPromptCallback> callback) {
+  // Chromium's Local Network Access prompt (CEF 136 named it
+  // LOCAL_NETWORK_ACCESS, CEF 145 split it into LOCAL_NETWORK and
+  // LOOPBACK_NETWORK). The CEF host has no prompt UI, so an unanswered one
+  // holds the page's request forever.
+  constexpr uint32_t kLocalNetwork = CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS |
+                                     CEF_PERMISSION_TYPE_LOCAL_NETWORK |
+                                     CEF_PERMISSION_TYPE_LOOPBACK_NETWORK;
+  switch (laufey_common::DecideLocalNetworkPrompt(
+      requesting_origin.ToString(), requested_permissions, kLocalNetwork,
+      laufey_schemes::Declared())) {
+    case laufey_common::LocalNetworkPromptDecision::kAccept:
+      callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+      return true;
+    case laufey_common::LocalNetworkPromptDecision::kDeny:
+      callback->Continue(CEF_PERMISSION_RESULT_DENY);
+      return true;
+    case laufey_common::LocalNetworkPromptDecision::kDefault:
+      break;
   }
   return false;
 }

@@ -50,6 +50,11 @@ bool TestTriggerFileDrop(uint32_t window_id, int phase, double x, double y,
 // false for anything that is not a local file URI.
 bool FileUriToPath(const std::string& uri, std::string* path);
 
+// The local file paths a text/uri-list (RFC 2483: CRLF or LF separated,
+// "#" comment lines) names, in order, at most LAUFEY_MAX_DROP_PATHS. URIs
+// that aren't local files are skipped.
+std::vector<std::string> UriListToPaths(const std::string& list);
+
 // --- Drag out ---------------------------------------------------------------
 
 // Checks start_file_drag's arguments: 1..LAUFEY_MAX_DROP_PATHS existing
@@ -73,6 +78,11 @@ struct DragOutRequest {
 // content view) on the main thread; hops there if needed. Takes ownership of
 // `req` and finishes it exactly once.
 void StartFileDragMac(void* nsview, DragOutRequest* req);
+
+// The local files on the drag pasteboard (NSPasteboardNameDrag): the items
+// of the drag in progress, or of the last one. At most
+// LAUFEY_MAX_DROP_PATHS. Any thread.
+std::vector<std::string> DragPasteboardFilePathsMac();
 #endif
 
 #ifdef _WIN32

@@ -527,11 +527,21 @@ class WinFileDialog : public FileDialogPlatform {
   void Cancel() override {
     if (!dialog_ || shown_)
       return;
-    // Close() needs the dialog's window, and a Close() made while Show() is
-    // still setting the dialog up can be lost: retry until the window
-    // exists, and repeat while this dialog stays open.
-    if (DialogWindow())
-      dialog_->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+    // Press the dialog's Cancel button, as a person would: Show() then
+    // returns ERROR_CANCELLED through its own completion path.
+    //
+    // Not IFileDialog::Close(): a Close() made while Show() is still setting
+    // the dialog up (its window exists but isn't visible yet) is swallowed,
+    // and every later Close() on that dialog then returns S_OK and does
+    // nothing, so the dialog stayed open and the abort never settled. This
+    // is not a threading problem: Close() ran on this thread (the dialog's
+    // STA), inside Show()'s own modal loop.
+    //
+    // The button press can't be lost that way, but it needs the dialog's
+    // window: until that exists, and for as long as this dialog stays open,
+    // press it again.
+    if (HWND hwnd = DialogWindow())
+      PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
     RetryLater([this] { Cancel(); });
   }
 
@@ -570,11 +580,9 @@ class WinFileDialog : public FileDialogPlatform {
     return hwnd;
   }
 
-  // Runs `fn` on this thread in 700 ms if this dialog is still open (at
-  // most ~10 s of retries, then the action is dropped).
+  // Runs `fn` on this thread in 700 ms if this dialog is still open. No
+  // limit: a cancel must settle the dialog however long it takes to go.
   void RetryLater(std::function<void()> fn) {
-    if (++retries_ > 15)
-      return;
     uint32_t id = id_;
     WinRunOnIoThreadAfter(700, [this, id, fn = std::move(fn)] {
       if (FileDialogIsOpen(id) && !shown_)
@@ -616,7 +624,6 @@ class WinFileDialog : public FileDialogPlatform {
   FileDialogRequest req_;
   ComPtr<IFileDialog> dialog_;
   bool shown_ = false;  // Show() returned
-  int retries_ = 0;
 };
 
 }  // namespace

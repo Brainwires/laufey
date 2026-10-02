@@ -124,6 +124,32 @@ void TestFileUris() {
   EXPECT(!FileUriToPath("file:///tmp/%zz", &p));   // bad escape
 }
 
+void TestUriList() {
+#ifndef _WIN32
+  // CRLF (RFC 2483) or LF, comments and non-file URIs skipped, a trailing
+  // NUL (some X11 sources include it) ignored.
+  EXPECT((UriListToPaths("file:///a%20b.txt\r\n# comment\r\n"
+                         "https://example.com/x\r\nfile:///tmp/c\r\n") ==
+          std::vector<std::string>{"/a b.txt", "/tmp/c"}));
+  EXPECT((UriListToPaths("file:///one\nfile://localhost/two") ==
+          std::vector<std::string>{"/one", "/two"}));
+  EXPECT((UriListToPaths(std::string("file:///z\r\n\0", 11)) ==
+          std::vector<std::string>{"/z"}));
+#endif
+  EXPECT(UriListToPaths("").empty());
+  EXPECT(UriListToPaths("# only a comment\r\n").empty());
+  EXPECT(UriListToPaths("https://example.com/\r\nfile://host/x\r\n").empty());
+  // At most LAUFEY_MAX_DROP_PATHS.
+  std::string many;
+  for (int i = 0; i < LAUFEY_MAX_DROP_PATHS + 5; i++)
+#ifdef _WIN32
+    many += "file:///C:/f" + std::to_string(i) + "\r\n";
+#else
+    many += "file:///f" + std::to_string(i) + "\r\n";
+#endif
+  EXPECT(UriListToPaths(many).size() == LAUFEY_MAX_DROP_PATHS);
+}
+
 std::string TempDir() {
 #ifdef _WIN32
   char buf[MAX_PATH];
@@ -445,6 +471,7 @@ void TestObserverScript() {
 int main() {
   TestFileDrop();
   TestFileUris();
+  TestUriList();
   TestDragPaths();
   TestDialogOptions();
   TestSplitDefaultPath();

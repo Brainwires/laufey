@@ -327,6 +327,17 @@ if(LAUFEY_BUILD_TESTS)
                          SKIP_RETURN_CODE 77)
   endif()
 
+  if(WIN32)
+    # The OLE drag source the Windows native e2e drags real files out of
+    # with SendInput (scripts/native-e2e-run.sh --io).
+    add_executable(laufey_ole_drag_source tests/ole_drag_source.cc)
+    target_link_libraries(laufey_ole_drag_source PRIVATE ole32 shell32 user32)
+    if(MSVC)
+      target_link_options(laufey_ole_drag_source PRIVATE
+        /ENTRY:wmainCRTStartup)
+    endif()
+  endif()
+
   if(APPLE)
     # ASAuthorization error mapping (synthetic NSErrors, no ceremony).
     add_executable(laufey_passkey_mac_test tests/passkey_mac_test.mm)
@@ -335,5 +346,11 @@ if(LAUFEY_BUILD_TESTS)
     )
     target_compile_options(laufey_passkey_mac_test PRIVATE -fobjc-arc)
     add_test(NAME laufey_passkey_mac_test COMMAND laufey_passkey_mac_test)
+
+    # The drag pasteboard's files (the CEF backend's external drops).
+    add_executable(laufey_io_mac_test tests/io_mac_test.mm)
+    target_link_libraries(laufey_io_mac_test PRIVATE laufey_backend_common)
+    target_compile_options(laufey_io_mac_test PRIVATE -fobjc-arc)
+    add_test(NAME laufey_io_mac_test COMMAND laufey_io_mac_test)
   endif()
 endif()
