@@ -198,20 +198,42 @@ void WinSetClientSize(HWND hwnd, int width, int height, UINT extra_flags) {
 
 // The frame (physical) around the client area while the window was last in
 // the normal state, for normal bounds of a maximized / fullscreen window.
-// UI thread only.
+// Noted and forgotten on the UI thread, read from the runtime's thread
+// (get_window_normal_bounds): every access holds WinNormalFramesMutex().
 std::map<HWND, SIZE>& WinNormalFrames() {
   static std::map<HWND, SIZE> frames;
   return frames;
+}
+
+std::mutex& WinNormalFramesMutex() {
+  static std::mutex mutex;
+  return mutex;
 }
 
 void WinNoteNormalFrame(HWND hwnd) {
   RECT window_rect, client;
   if (GetWindowRect(hwnd, &window_rect) && GetClientRect(hwnd, &client) &&
       client.right > 0 && client.bottom > 0) {
+    std::lock_guard<std::mutex> lock(WinNormalFramesMutex());
     WinNormalFrames()[hwnd] = {
         (window_rect.right - window_rect.left) - client.right,
         (window_rect.bottom - window_rect.top) - client.bottom};
   }
+}
+
+void WinForgetNormalFrame(HWND hwnd) {
+  std::lock_guard<std::mutex> lock(WinNormalFramesMutex());
+  WinNormalFrames().erase(hwnd);
+}
+
+// The noted normal frame of `hwnd`, if any.
+bool WinNormalFrame(HWND hwnd, SIZE* frame) {
+  std::lock_guard<std::mutex> lock(WinNormalFramesMutex());
+  auto it = WinNormalFrames().find(hwnd);
+  if (it == WinNormalFrames().end())
+    return false;
+  *frame = it->second;
+  return true;
 }
 
 // A screen rectangle in its monitor's DIP.
@@ -843,7 +865,7 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         laufey_common::ForgetWindow(wid);
         laufey_wv2::CancelStreamsForWindow(wid);
       }
-      WinNormalFrames().erase(hwnd);
+      WinForgetNormalFrame(hwnd);
       win32_menu::ForgetWindow(hwnd);
       std::lock_guard<std::recursive_mutex> lock(g_hwnd_mutex);
       // A tray app can keep running with no window
@@ -2158,10 +2180,7 @@ bool WebView2Backend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
   // The frame's origin (get_position) and the client size inside it
   // (get_size), the frame being the one the window had while normal.
   SIZE frame;
-  auto it = WinNormalFrames().find(state->hwnd);
-  if (it != WinNormalFrames().end()) {
-    frame = it->second;
-  } else {
+  if (!WinNormalFrame(state->hwnd, &frame)) {
     RECT r = {0, 0, 0, 0};
     AdjustWindowRectExForDpi(
         &r, static_cast<DWORD>(GetWindowLongPtrW(state->hwnd, GWL_STYLE)),
