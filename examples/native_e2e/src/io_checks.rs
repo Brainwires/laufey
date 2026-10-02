@@ -617,6 +617,21 @@ async fn ole_drop_run(source: &str) {
   // move in steps into the window, rest, and release over it.
   let (fx, fy) = (sx + sw / 2, sy + sh / 2);
   let (gx, gy) = (tx + tw / 2, ty + th / 2);
+  // Some runners show a system window above everything (the
+  // windows-11-arm image's "Microsoft account" prompt); a drop there can't
+  // reach the app, whatever the backend does.
+  if !ole_input::ours_at(gx, gy) {
+    na(&format!(
+      "a real OLE drop (another window covers the drop target: {})",
+      ole_input::window_at(gx, gy)
+    ));
+    let _ = child.kill();
+    let _ = child.wait();
+    laufey::clear_file_drop_handler();
+    let _ = std::fs::remove_dir_all(&dir);
+    w.close();
+    return;
+  }
   let mut driven = ole_input::move_to(fx, fy);
   tokio::time::sleep(Duration::from_millis(200)).await;
   driven &= ole_input::button(true);
@@ -683,27 +698,9 @@ async fn ole_drop_run(source: &str) {
 }
 
 /// Real pointer input for the OLE drop check: absolute moves and the left
-/// button, through SendInput.
+/// button, through mouse_event (one SendInput mouse INPUT).
 #[cfg(windows)]
 mod ole_input {
-  #[repr(C)]
-  #[derive(Clone, Copy)]
-  struct MouseInput {
-    dx: i32,
-    dy: i32,
-    data: u32,
-    flags: u32,
-    time: u32,
-    extra: usize,
-  }
-
-  #[repr(C)]
-  #[derive(Clone, Copy)]
-  struct Input {
-    kind: u32,
-    mi: MouseInput,
-  }
-
   #[repr(C)]
   struct Point {
     x: i32,
@@ -714,13 +711,26 @@ mod ole_input {
 
   #[link(name = "user32")]
   extern "system" {
-    fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+    // mouse_event: SendInput with one mouse INPUT (the keyboard helpers
+    // declare SendInput itself with their own INPUT type).
+    fn mouse_event(flags: u32, dx: u32, dy: u32, data: u32, extra: usize);
     fn GetSystemMetrics(index: i32) -> i32;
     fn WindowFromPoint(point: Point) -> Hwnd;
     fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd;
     fn GetWindowTextW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
     fn GetClassNameW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
     fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
+  }
+
+  /// Whether the window at (x, y) is one of this process's.
+  pub fn ours_at(x: i32, y: i32) -> bool {
+    unsafe {
+      let hwnd = WindowFromPoint(Point { x, y });
+      let mut pid = 0u32;
+      !hwnd.is_null()
+        && GetWindowThreadProcessId(GetAncestor(hwnd, 2), &mut pid) != 0
+        && pid == std::process::id()
+    }
   }
 
   /// The top-level window at (x, y), for the log: title, class, and
@@ -758,18 +768,8 @@ mod ole_input {
   const MOUSEEVENTF_VIRTUALDESK: u32 = 0x4000;
 
   fn send(dx: i32, dy: i32, flags: u32) -> bool {
-    let input = Input {
-      kind: 0, // INPUT_MOUSE
-      mi: MouseInput {
-        dx,
-        dy,
-        data: 0,
-        flags,
-        time: 0,
-        extra: 0,
-      },
-    };
-    unsafe { SendInput(1, &input, std::mem::size_of::<Input>() as i32) == 1 }
+    unsafe { mouse_event(flags, dx as u32, dy as u32, 0, 0) };
+    true
   }
 
   /// Moves the pointer to (x, y) in physical virtual-screen pixels.

@@ -2615,14 +2615,14 @@ static SHUTDOWN_CALLS: std::sync::atomic::AtomicU32 =
 static RUNTIME_RETURNED: AtomicBool = AtomicBool::new(false);
 
 mod exit_guard {
-  use std::sync::atomic::Ordering;
-
   /// Unix: at process exit, FAIL unless laufey_runtime_start has returned
   /// (the backend waited for the runtime thread) and the runtime was shut
   /// down exactly once. A backend that returns from main, or calls exit(),
   /// under a running runtime fails here instead of exiting 0.
   #[cfg(unix)]
   pub fn arm() {
+    use std::sync::atomic::Ordering;
+
     extern "C" fn guard() {
       let returned = super::RUNTIME_RETURNED.load(Ordering::SeqCst);
       let calls = super::SHUTDOWN_CALLS.load(Ordering::SeqCst);

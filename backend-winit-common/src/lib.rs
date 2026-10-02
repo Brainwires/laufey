@@ -842,7 +842,9 @@ pub struct LaufeyBackendApi {
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
 /// there is never one to cancel.
-unsafe extern "C" fn auth_session_cancel_none(_backend_data: *mut c_void) -> bool {
+unsafe extern "C" fn auth_session_cancel_none(
+  _backend_data: *mut c_void,
+) -> bool {
   false
 }
 
