@@ -2293,6 +2293,28 @@ async fn hidpi_checks(w: &Window, title: &str, scale: f64) {
     sized,
   );
   check_page_size("HiDPI: the page area is the DIP size", w, want).await;
+  if page_inner_size(w).await.is_some_and(|p| p != want) {
+    // Seen once on CEF/Windows at 1.75x after the whole job (not in 72
+    // isolated early resizes): the window and its view had the new size
+    // but the page kept the old one. Leave evidence for the next time:
+    // does the page catch up, and does another resize reach it?
+    for ms in [1000u64, 3000, 6000] {
+      tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+      eprintln!(
+        "[e2e]   HiDPI diag: +{ms} ms page {:?} get_size {:?} visible {}",
+        page_inner_size(w).await,
+        w.get_size(),
+        w.get_visible()
+      );
+    }
+    w.set_size(want.0 + 1, want.1 + 1);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    eprintln!(
+      "[e2e]   HiDPI diag: after a second resize the page is {:?}",
+      page_inner_size(w).await
+    );
+    w.set_size(want.0, want.1);
+  }
 
   // Positions are DIPs too.
   w.set_position(100, 80);
