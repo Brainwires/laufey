@@ -11,7 +11,7 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::future::Future;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{api, LaufeyBackendApi};
 
@@ -102,7 +102,7 @@ pub struct FileDropEvent {
   pub count: usize,
 }
 
-type FileDropHandler = Box<dyn Fn(FileDropEvent) + Send + Sync>;
+type FileDropHandler = Arc<dyn Fn(FileDropEvent) + Send + Sync>;
 
 fn file_drop_handler() -> &'static Mutex<Option<FileDropHandler>> {
   static SLOT: OnceLock<Mutex<Option<FileDropHandler>>> = OnceLock::new();
@@ -154,7 +154,10 @@ unsafe extern "C" fn file_drop_trampoline(
     },
     count,
   };
-  if let Some(handler) = file_drop_handler().lock().unwrap().as_ref() {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = file_drop_handler().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler(event);
   }
 }
@@ -168,7 +171,7 @@ pub fn on_file_drop<F>(handler: F)
 where
   F: Fn(FileDropEvent) + Send + Sync + 'static,
 {
-  *file_drop_handler().lock().unwrap() = Some(Box::new(handler));
+  *file_drop_handler().lock().unwrap() = Some(Arc::new(handler));
   let api = api();
   if let Some(f) = api.set_file_drop_handler {
     unsafe {
@@ -711,7 +714,7 @@ fn read_clipboard_formats_with(api: &LaufeyBackendApi) -> Option<Vec<String>> {
   )
 }
 
-type ClipboardChangeHandler = Box<dyn Fn() + Send + Sync>;
+type ClipboardChangeHandler = Arc<dyn Fn() + Send + Sync>;
 
 fn clipboard_change_handler() -> &'static Mutex<Option<ClipboardChangeHandler>>
 {
@@ -721,7 +724,10 @@ fn clipboard_change_handler() -> &'static Mutex<Option<ClipboardChangeHandler>>
 }
 
 unsafe extern "C" fn clipboard_change_trampoline(_user_data: *mut c_void) {
-  if let Some(handler) = clipboard_change_handler().lock().unwrap().as_ref() {
+  // Cloned out: the handler runs without the lock held (it may replace
+  // itself).
+  let handler = clipboard_change_handler().lock().unwrap().clone();
+  if let Some(handler) = handler {
     handler();
   }
 }
@@ -733,7 +739,7 @@ pub fn on_clipboard_change<F>(handler: F)
 where
   F: Fn() + Send + Sync + 'static,
 {
-  *clipboard_change_handler().lock().unwrap() = Some(Box::new(handler));
+  *clipboard_change_handler().lock().unwrap() = Some(Arc::new(handler));
   let api = api();
   if let Some(f) = api.set_clipboard_change_handler {
     unsafe {
@@ -758,6 +764,42 @@ pub fn clear_clipboard_change_handler() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  // Handlers run after the slot's lock is released, so one that replaces
+  // itself (or calls back into the laufey API) cannot deadlock.
+  #[test]
+  fn io_handlers_run_without_the_slot_lock() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      *clipboard_change_handler().lock().unwrap() = Some(Arc::new(|| {
+        *clipboard_change_handler().lock().unwrap() = None;
+      }));
+      unsafe { clipboard_change_trampoline(std::ptr::null_mut()) };
+      *file_drop_handler().lock().unwrap() =
+        Some(Arc::new(|_: FileDropEvent| {
+          *file_drop_handler().lock().unwrap() = None;
+        }));
+      unsafe {
+        file_drop_trampoline(
+          std::ptr::null_mut(),
+          1,
+          LAUFEY_DRAG_DROP,
+          0.0,
+          0.0,
+          std::ptr::null(),
+          0,
+        );
+      }
+      let _ = tx.send(
+        clipboard_change_handler().lock().unwrap().is_none()
+          && file_drop_handler().lock().unwrap().is_none(),
+      );
+    });
+    let cleared = rx
+      .recv_timeout(std::time::Duration::from_secs(10))
+      .expect("a handler deadlocked on its own slot");
+    assert!(cleared);
+  }
 
   fn block_on<F: Future>(fut: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
