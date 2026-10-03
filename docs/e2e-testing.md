@@ -995,3 +995,35 @@ argument validation, the one-session slot, exactly-once results, races),
 its own test, `backend-common/tests/scheme_body_stream_test.cc` (writes never
 block, an asynchronous pollable reader on a GMainContext, the cap, a reader that
 went away, a synchronous reader).
+
+## 21. The first window at launch
+
+`scripts/native-e2e-run.sh <backend> --launch-visibility` runs `native_e2e`'s
+`launch_checks` alone, on every backend. On macOS another process first covers
+every screen with an ordinary window (`scripts/launch-occluder.swift`), the way
+an editor or a terminal is in front when an app is started from it. See
+[window-management.md](window-management.md#the-first-window-at-launch).
+
+- **The launch window**, created hidden and shown once its page has loaded (the
+  reveal Deno Desktop uses): `get_visible` holds, the page reads
+  `document.visibilityState` "visible" and runs a `requestAnimationFrame`
+  callback within 2 s (measured from the runtime, script round trips included),
+  and its `outerWidth` / `outerHeight` are the window's frame, not 0.
+  `document.hasFocus()` is logged, not checked: whether the system grants the
+  activation is its own decision.
+- **An unfocused window**: a second ordinary window, mostly beside the launch
+  window, left unfocused when the launch window is focused again: its page is
+  visible and draws a frame within 2 s. An engine does not throttle a visible
+  window for lacking focus (a fully covered one is occluded and rightly stops,
+  as in a browser).
+- **A non-activating panel** (`no_activate`): its page is visible and draws a
+  frame within 2 s. Known limitation, reported N/A on the WebKit engines:
+  WKWebView runs no animation frames in a non-activating `NSPanel` that has
+  never been key, though the page reads as visible, and WebKitGTK sometimes
+  doesn't either; both draw once the panel is shown with `show()` / `focus()`.
+  The same WKWebView panel in a standalone AppKit program draws, so the trigger
+  is in laufey's panel setup and is still open.
+- **A window created hidden** stays hidden through both reveals (the WebView
+  backends; CEF and Winit have no hidden-on-create and report N/A).
+
+Winit has no page and reports N/A for the page checks.

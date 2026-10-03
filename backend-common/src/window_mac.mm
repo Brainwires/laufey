@@ -702,4 +702,26 @@ bool ShouldQuitAfterLastWindowMac() {
   return QuitOnLastWindowClosed();
 }
 
+void MacRevealWindowAtLaunch(void* nswindow) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w)
+    return;
+  // Main thread only, so a plain flag is enough.
+  static bool revealed = false;
+  if (revealed) {
+    [w makeKeyAndOrderFront:nil];
+    return;
+  }
+  revealed = true;
+  if (@available(macOS 14.0, *)) {
+    [NSApp activate];
+  } else {
+    [NSApp activateIgnoringOtherApps:YES];
+  }
+  [w makeKeyAndOrderFront:nil];
+  // makeKeyAndOrderFront: orders the window front among this app's windows
+  // only; while the app is inactive that is still behind the active app.
+  [w orderFrontRegardless];
+}
+
 }  // namespace laufey_common

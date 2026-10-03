@@ -368,6 +368,7 @@ class WKWebViewBackend : public LaufeyBackend {
 
  private:
   MacWindowState* GetWindow(uint32_t window_id);
+  WKWebView* WebViewOf(uint32_t window_id);
   void RemoveWindowState(uint32_t window_id);
   void InstallGlobalMonitors();
   void RemoveGlobalMonitors();
@@ -876,6 +877,16 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
 @end
 
 @implementation LaufeyUIDelegate
+
+// The page's window.outerWidth / outerHeight and screenX / screenY. WebKit
+// asks its UI delegate for the window's frame through this informal
+// WKUIDelegatePrivate method (Safari implements it) and answers 0 for all
+// four when the delegate does not. WebKit flips the Cocoa frame itself.
+- (void)_webView:(WKWebView*)webView
+    getWindowFrameWithCompletionHandler:(void (^)(CGRect))completionHandler {
+  NSWindow* window = [webView window];
+  completionHandler(window ? NSRectToCGRect([window frame]) : CGRectZero);
+}
 
 // `target="_blank"` and `window.open()` request a new browsing context, which
 // the Navigation API interceptor never sees. WKWebView has no popup support, so
@@ -1721,7 +1732,7 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
         // Show without activating the app / stealing focus.
         [window orderFrontRegardless];
       } else {
-        [window makeKeyAndOrderFront:nil];
+        laufey_common::MacRevealWindowAtLaunch((__bridge void*)window);
       }
     }
   });
@@ -2534,7 +2545,15 @@ void WKWebViewBackend::Show(uint32_t window_id) {
       }
       if (!win)
         return;
-      [win makeKeyAndOrderFront:nil];
+      if ([win styleMask] & NSWindowStyleMaskNonactivatingPanel) {
+        // A tray / menu-bar panel never activates the app.
+        [win makeKeyAndOrderFront:nil];
+      } else {
+        // The reveal of a window created hidden (Deno Desktop shows its
+        // first window once the page has loaded): at launch it must come
+        // in front of the app the user started it from.
+        laufey_common::MacRevealWindowAtLaunch((__bridge void*)win);
+      }
       if (web)
         [win makeFirstResponder:web];
     }
@@ -2750,33 +2769,40 @@ static id InspectorOf(WKWebView* webview) {
   }
 }
 
+// The window's web view, read under the lock. Callers act on it after the
+// lock is released: opening or closing the inspector changes the key window,
+// and the key-window observers take the same lock.
+WKWebView* WKWebViewBackend::WebViewOf(uint32_t window_id) {
+  std::lock_guard<std::mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  return state ? state->webview : nil;
+}
+
 void WKWebViewBackend::OpenDevTools(uint32_t window_id) {
   if (!laufey_common::LaunchInspectable())
     return;
   dispatch_async(dispatch_get_main_queue(), ^{
-    std::lock_guard<std::mutex> lock(windows_mutex_);
-    auto* state = GetWindow(window_id);
-    if (state && state->webview) {
-      // WKWebView._inspector.show is available on macOS 13.3+
-      @try {
-        id inspector = [state->webview valueForKey:@"_inspector"];
-        if (inspector) {
-          [inspector performSelector:@selector(show)];
-        }
-      } @catch (NSException*) {
-        // Fallback: not available on this macOS version
+    WKWebView* webview = WebViewOf(window_id);
+    if (!webview)
+      return;
+    // WKWebView._inspector.show is available on macOS 13.3+
+    @try {
+      id inspector = [webview valueForKey:@"_inspector"];
+      if (inspector) {
+        [inspector performSelector:@selector(show)];
       }
+    } @catch (NSException*) {
+      // Fallback: not available on this macOS version
     }
   });
 }
 
 void WKWebViewBackend::CloseDevTools(uint32_t window_id) {
   dispatch_async(dispatch_get_main_queue(), ^{
-    std::lock_guard<std::mutex> lock(windows_mutex_);
-    auto* state = GetWindow(window_id);
-    if (!state || !state->webview)
+    WKWebView* webview = WebViewOf(window_id);
+    if (!webview)
       return;
-    id inspector = InspectorOf(state->webview);
+    id inspector = InspectorOf(webview);
     if (inspector && [inspector respondsToSelector:@selector(close)])
       [inspector performSelector:@selector(close)];
   });

@@ -179,6 +179,18 @@ void MacReapplyTrafficLightPosition(void* nswindow);
 // view or its only subview). `backdrop` is LAUFEY_BACKDROP_VIBRANCY or
 // LAUFEY_BACKDROP_NONE. Returns false for any other backdrop.
 bool MacSetVibrancy(void* nswindow, void* webview, int backdrop, int material);
+// Brings the app's first shown window to the front, once per process: the
+// app is activated and `nswindow` made key, and the window is ordered in
+// front of other apps' windows even when the system declines the activation
+// (macOS 14+ only lets an app take activation cooperatively, so one started
+// from a terminal, an IDE or a background agent can stay inactive). Without
+// that the window opens behind the active app's, and WebKit / Chromium read
+// a covered window as occluded: the page reports visibilityState "hidden"
+// and requestAnimationFrame stops. Later calls only make the window key and
+// order it front within the app, as before. Only for a window that is being
+// shown and may activate the app: never call it for a hidden or a
+// non-activating (panel) window.
+void MacRevealWindowAtLaunch(void* nswindow);
 // Whether closing the last window should end the loop on macOS:
 // ShouldEndLoopAfterLastWindow(), except that an Accessory-policy app
 // (set_dock_visible(false)) keeps running unless it is quitting.
