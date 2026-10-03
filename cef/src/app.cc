@@ -99,6 +99,16 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
   }
 
   window->Show();
+#if defined(__APPLE__)
+  // Chromium's show activates the app, which macOS 14+ may decline for an
+  // app started from a terminal or a background agent; the first window
+  // must still come in front of the active app's, or Chromium reads it as
+  // occluded and the page as hidden (no requestAnimationFrame).
+  if (!no_activate && handle) {
+    if (void* nswindow = NSWindowForCefHandle(handle))
+      laufey_common::MacRevealWindowAtLaunch(nswindow);
+  }
+#endif
   InstallNativeMouseMonitor();
   if (laufey_id_ > 0)
     CefScheduleWindowStateRecheck(laufey_id_);

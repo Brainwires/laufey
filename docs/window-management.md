@@ -339,6 +339,25 @@ continuous within one monitor (as in winit) but not across monitors with
 different scales. WebView2 reported physical pixels and the outer window
 rectangle for `get_size` / `set_size` in earlier versions, and CEF on Windows
 and macOS the whole window; both now size the content like the other backends.
+The page's `window.outerWidth` / `outerHeight` and `screenX` / `screenY` are the
+same frame as `get_outer_size` / `get_position`; WKWebView answered 0 for all
+four before laufey answered WebKit's request for the window frame.
+
+## The first window at launch
+
+An app is often started by something that stays frontmost: a terminal, an IDE's
+task runner, a CI agent. On macOS 14 and later an app only takes activation
+cooperatively, so such a launch can leave it inactive, and a window that was
+merely made key and ordered front would open behind the active app's windows.
+WebKit and Chromium read a fully covered window as occluded: the page reports
+`document.visibilityState` "hidden" and `requestAnimationFrame` stops until the
+window is uncovered. So the first window an app shows (at creation, or with
+`show()` for one created `hidden`) activates the app, becomes key and is ordered
+in front of other apps' windows even when the activation is declined. A window
+created `hidden` is never revealed by this, and a non-activating panel
+(`no_activate`) never activates the app. Later windows are made key and ordered
+front within the app, as before. A window that is covered, minimized or on a
+locked screen is still throttled by the engine, as in a browser.
 
 ## Keeping a tray app alive; quitting (API ≥ 38)
 

@@ -878,6 +878,16 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
 
 @implementation LaufeyUIDelegate
 
+// The page's window.outerWidth / outerHeight and screenX / screenY. WebKit
+// asks its UI delegate for the window's frame through this informal
+// WKUIDelegatePrivate method (Safari implements it) and answers 0 for all
+// four when the delegate does not. WebKit flips the Cocoa frame itself.
+- (void)_webView:(WKWebView*)webView
+    getWindowFrameWithCompletionHandler:(void (^)(CGRect))completionHandler {
+  NSWindow* window = [webView window];
+  completionHandler(window ? NSRectToCGRect([window frame]) : CGRectZero);
+}
+
 // `target="_blank"` and `window.open()` request a new browsing context, which
 // the Navigation API interceptor never sees. WKWebView has no popup support, so
 // route http(s) destinations to the OS browser and create no new webview.
@@ -1722,7 +1732,7 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
         // Show without activating the app / stealing focus.
         [window orderFrontRegardless];
       } else {
-        [window makeKeyAndOrderFront:nil];
+        laufey_common::MacRevealWindowAtLaunch((__bridge void*)window);
       }
     }
   });
@@ -2535,7 +2545,15 @@ void WKWebViewBackend::Show(uint32_t window_id) {
       }
       if (!win)
         return;
-      [win makeKeyAndOrderFront:nil];
+      if ([win styleMask] & NSWindowStyleMaskNonactivatingPanel) {
+        // A tray / menu-bar panel never activates the app.
+        [win makeKeyAndOrderFront:nil];
+      } else {
+        // The reveal of a window created hidden (Deno Desktop shows its
+        // first window once the page has loaded): at launch it must come
+        // in front of the app the user started it from.
+        laufey_common::MacRevealWindowAtLaunch((__bridge void*)win);
+      }
       if (web)
         [win makeFirstResponder:web];
     }
