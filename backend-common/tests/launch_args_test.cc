@@ -238,6 +238,35 @@ static void TestProcessArgs() {
   EXPECT(IsPackagedLaunch(true));
 }
 
+static void TestHeadlessWorkerLaunch() {
+  // `<exe> run <script>`: the embedder's CLI worker command (Deno Desktop's
+  // update helper), with or without flags before the script.
+  EXPECT(IsCliWorkerCommand({"run", "denext-update-helper", "apply", "42"}));
+  EXPECT(IsCliWorkerCommand({"run", "-A", "--quiet", "worker.ts"}));
+  EXPECT(IsCliWorkerCommand({"run", ""}));
+  // Not a worker: no script, flags only, another verb, or the app itself.
+  EXPECT(!IsCliWorkerCommand({}));
+  EXPECT(!IsCliWorkerCommand({"run"}));
+  EXPECT(!IsCliWorkerCommand({"run", "-A", "--quiet"}));
+  EXPECT(!IsCliWorkerCommand({"serve", "worker.ts"}));
+  EXPECT(!IsCliWorkerCommand({"--", "acme://run"}));
+  EXPECT(!IsCliWorkerCommand({"--runtime", "/rt.so", "run", "x"}));
+
+  auto env = [](std::vector<std::string> set) {
+    return [set](const char* name) {
+      return std::find(set.begin(), set.end(), name) != set.end();
+    };
+  };
+  EXPECT(IsForkedWorkerEnvironment(env({"NODE_CHANNEL_FD"})));
+  EXPECT(IsForkedWorkerEnvironment(env({"NEXT_PRIVATE_WORKER"})));
+  EXPECT(!IsForkedWorkerEnvironment(env({})));
+  // LAUFEY_SINGLE_INSTANCE has no say in it (a pinned launch file wins).
+  EXPECT(!IsForkedWorkerEnvironment(env({"LAUFEY_SINGLE_INSTANCE"})));
+
+  // The process-environment form agrees with the argument form.
+  EXPECT(IsHeadlessWorkerLaunch({"run", "denext-update-helper"}));
+}
+
 int main() {
   TestRuntimeOption();
   TestUrlArguments();
@@ -247,6 +276,7 @@ int main() {
   TestMissingPackagedRuntime();
   TestWebView2EnvironmentOverrides();
   TestProcessArgs();
+  TestHeadlessWorkerLaunch();
   if (g_failures) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

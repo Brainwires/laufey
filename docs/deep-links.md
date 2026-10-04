@@ -145,6 +145,13 @@ With it on:
   `on_second_instance` handler on the UI thread with the arguments and the
   directory, like Electron's `second-instance` event.
 
+A headless worker launch is not a launch of the app: `<exe> run <script> ...`
+(how an embedder such as Deno Desktop starts a CLI worker, e.g. its update
+helper) and a forked worker (`NODE_CHANNEL_FD` or `NEXT_PRIVATE_WORKER` set).
+Every backend checks for one first (`laufey_common::IsHeadlessWorkerLaunch`)
+and runs it headless, before the single-instance check: it is never forwarded
+to the primary and never takes the lock.
+
 Launches forwarded before the runtime registers a handler are buffered, up to
 `LAUFEY_MAX_PENDING_SECOND_INSTANCES` (16), and delivered when it does, just
 like [cold-start URLs](#cold-start-is-buffered-not-dropped).

@@ -12,7 +12,10 @@
 #       LAUFEY_SINGLE_INSTANCE=0 and LAUFEY_DATA_DIR in its environment (the
 #       file pins the app id, and with it the lock and the data directory).
 #       An invalid app id setup warns and runs unlocked; without an app id in
-#       the file, LAUFEY_SINGLE_INSTANCE=0 overrides it.
+#       the file, LAUFEY_SINGLE_INSTANCE=0 overrides it. A headless worker
+#       launch (`<exe> run <script>`, how Deno Desktop starts its update
+#       helper) while the primary runs is not forwarded: it runs the runtime
+#       headless and exits.
 #   (c) singleInstance off: two instances run side by side (on CEF with
 #       separate data directories: one CEF profile allows one process, see
 #       docs/app-data.md; scripts/storage-e2e-run.sh covers that refusal).
@@ -263,6 +266,16 @@ if wait_for primary '^\[e2e\] ready' 90; then
     pass "LAUFEY_SINGLE_INSTANCE=0 can't turn off the lock of a pinned app id (reported)"
   else
     fail "ignored LAUFEY_SINGLE_INSTANCE not reported (see $scratch/logs/second.log)"
+  fi
+  # The lock is held: a worker launch must still run (headless, no window),
+  # not be forwarded to the primary as a second instance.
+  direct worker "$cwd_dir" -- run worker-script.ts worker-arg
+  if [ "$direct_rc" = 0 ] &&
+    grep -q '^\[e2e\] headless worker args=\["run", "worker-script.ts", "worker-arg"\]' \
+      "$scratch/logs/worker.log"; then
+    pass "worker launch (run <script>) ran headless while the primary holds the lock (${direct_secs}s)"
+  else
+    fail "worker launch not run headless (exit $direct_rc; see $scratch/logs/worker.log)"
   fi
 else
   fail "primary never became ready"

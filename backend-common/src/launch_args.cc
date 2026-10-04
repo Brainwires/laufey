@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 #include "laufey_backend_common.h"
@@ -257,6 +258,33 @@ std::vector<std::string> WebView2EnvironmentOverridesToClear(
       "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER",
       "WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER",
   };
+}
+
+bool IsCliWorkerCommand(const std::vector<std::string>& args) {
+  if (args.size() < 2 || args[0] != "run")
+    return false;
+  for (size_t i = 1; i < args.size(); ++i) {
+    if (!args[i].empty() && args[i][0] == '-')
+      continue;
+    return true;
+  }
+  return false;
+}
+
+bool IsForkedWorkerEnvironment(const std::function<bool(const char*)>& is_set) {
+  return is_set("NODE_CHANNEL_FD") || is_set("NEXT_PRIVATE_WORKER");
+}
+
+bool IsHeadlessWorkerLaunch(const std::vector<std::string>& args) {
+  return IsCliWorkerCommand(args) ||
+         IsForkedWorkerEnvironment([](const char* name) {
+#ifdef _WIN32
+           char buf[2];
+           return GetEnvironmentVariableA(name, buf, sizeof(buf)) > 0;
+#else
+           return std::getenv(name) != nullptr;
+#endif
+         });
 }
 
 void SetProcessArgs(std::vector<std::string> args) {
