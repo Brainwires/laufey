@@ -145,6 +145,14 @@ With it on:
   `on_second_instance` handler on the UI thread with the arguments and the
   directory, like Electron's `second-instance` event.
 
+The runtime's own helper processes start from the app's executable too, and are
+not a launch of the app: a process whose first argument is `run` (an update
+helper, a CLI worker) or whose environment has `DENO_INTERNAL_CHILD_ENTRYPOINT`,
+`NODE_CHANNEL_FD` or `NEXT_PRIVATE_WORKER` (a forked worker) neither takes the
+lock nor is forwarded; it runs as its own process, and the runtime decides what
+it may do. A deep link can't produce such a launch: the OS passes a link as a
+URL (on Windows after `--`), never as a bare `run`.
+
 Launches forwarded before the runtime registers a handler are buffered, up to
 `LAUFEY_MAX_PENDING_SECOND_INSTANCES` (16), and delivered when it does, just
 like [cold-start URLs](#cold-start-is-buffered-not-dropped).
