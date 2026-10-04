@@ -306,9 +306,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     for (int i = 1; argv && i < argc; ++i)
       args.push_back(laufey_common::WideToUtf8(argv[i]));
     laufey_common::SetProcessArgs(args);
-    g_runtime_path = laufey_common::ResolveRuntimePath(
-                         args, {LaufeyFindColocatedRuntime()}, {})
-                         .path;
+    laufey_common::RuntimeChoice choice = laufey_common::ResolveRuntimePath(
+        args, {LaufeyFindColocatedRuntime()}, {});
+    // A packaged app without its runtime exits at once, before CEF starts.
+    if (laufey_common::IsMissingPackagedRuntime(choice)) {
+      laufey_common::ReportMissingPackagedRuntime();
+      if (argv)
+        LocalFree(argv);
+      return laufey_common::kMissingRuntimeExitCode;
+    }
+    g_runtime_path = choice.path;
   }
 
   // Check for headless / forked worker mode (skip CEF entirely)

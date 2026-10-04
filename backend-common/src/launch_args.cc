@@ -267,4 +267,11 @@ const std::vector<std::string>& ProcessArgs() {
   return ProcessArgsStorage();
 }
 
+void ReportMissingPackagedRuntime() {
+  std::fprintf(stderr,
+               "laufey: this packaged app ships no runtime library next to "
+               "its executable; exiting\n");
+  std::fflush(stderr);
+}
+
 }  // namespace laufey_common

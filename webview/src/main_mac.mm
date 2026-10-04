@@ -238,11 +238,16 @@ static std::string ResolveMacRuntimePath(int argc, char* argv[]) {
     }
   }
   bundled.push_back(LaufeyFindColocatedRuntime());
-  return laufey_common::ResolveRuntimePath(
-             std::vector<std::string>(argv + 1, argv + argc), bundled,
-             {"./libruntime.dylib", "./target/debug/libhello.dylib",
-              "./target/release/libhello.dylib"})
-      .path;
+  laufey_common::RuntimeChoice choice = laufey_common::ResolveRuntimePath(
+      std::vector<std::string>(argv + 1, argv + argc), bundled,
+      {"./libruntime.dylib", "./target/debug/libhello.dylib",
+       "./target/release/libhello.dylib"});
+  // A packaged app without its runtime exits at once, before AppKit starts.
+  if (laufey_common::IsMissingPackagedRuntime(choice)) {
+    laufey_common::ReportMissingPackagedRuntime();
+    exit(laufey_common::kMissingRuntimeExitCode);
+  }
+  return choice.path;
 }
 
 int main(int argc, char* argv[]) {

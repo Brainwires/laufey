@@ -113,14 +113,18 @@ int main(int argc, char* argv[]) {
   // the executable) loads only the one next to its executable; a development
   // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH, then the
   // working directory and system fallbacks. See laufey_launch_args.h.
-  std::string runtimePath =
+  laufey_common::RuntimeChoice runtimeChoice =
       laufey_common::ResolveRuntimePath(
           std::vector<std::string>(argv + 1, argv + argc),
           {LaufeyFindColocatedRuntime()},
           {"./libruntime.so", "./target/debug/libhello.so",
            "./target/release/libhello.so", "/usr/lib/laufey/libruntime.so",
-           "/usr/local/lib/laufey/libruntime.so"})
-          .path;
+           "/usr/local/lib/laufey/libruntime.so"});
+  if (laufey_common::IsMissingPackagedRuntime(runtimeChoice)) {
+    laufey_common::ReportMissingPackagedRuntime();
+    return laufey_common::kMissingRuntimeExitCode;
+  }
+  std::string runtimePath = runtimeChoice.path;
 
   if (runtimePath.empty()) {
     std::cerr << "No runtime library found. Set LAUFEY_RUNTIME_PATH or use "

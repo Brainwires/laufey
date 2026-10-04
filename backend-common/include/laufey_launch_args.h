@@ -108,6 +108,18 @@ RuntimeChoice ChooseRuntimePath(
     const std::vector<std::string>& development, bool has_launch_file,
     const std::function<bool(const std::string&)>& exists);
 
+// Whether the host must not start: a packaged app that ships no runtime
+// library has nothing to run (ChooseRuntimePath already warned). Every host
+// then prints why and exits with kMissingRuntimeExitCode at once, before any
+// window, dialog or web engine: a packaged app never falls back to a
+// runtime from elsewhere, and a host without one must not sit there.
+inline bool IsMissingPackagedRuntime(const RuntimeChoice& choice) {
+  return choice.packaged && choice.path.empty();
+}
+inline constexpr int kMissingRuntimeExitCode = 3;
+// Prints the one-line reason on stderr (any thread, no UI).
+void ReportMissingPackagedRuntime();
+
 // ChooseRuntimePath for this process: LAUFEY_RUNTIME_PATH from the
 // environment, this executable's launch file, the filesystem. Warnings are
 // printed on stderr.

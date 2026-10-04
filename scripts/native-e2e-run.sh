@@ -176,18 +176,49 @@ if [ "$mode" = "--bridge-origin" ]; then
   esac
   # A launch file makes the backend a packaged app, which loads only the
   # runtime next to its executable (never LAUFEY_RUNTIME_PATH): copy it there
-  # for the run.
-  case "$bin" in
-    *.exe) colocated_rt="${bin%.exe}.dll" ;;
-    */Contents/MacOS/*) colocated_rt="$bin.dylib" ;;
+  # for the run. (Git Bash finds "laufey" for "laufey.exe", so ask the OS.)
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) colocated_rt="${bin%.exe}.dll" ;;
+    Darwin) colocated_rt="$bin.dylib" ;;
     *) colocated_rt="$bin.so" ;;
   esac
   [ ! -e "$launch_file" ] || { echo "refusing to replace $launch_file"; exit 1; }
   [ ! -e "$colocated_rt" ] || { echo "refusing to replace $colocated_rt"; exit 1; }
   mkdir -p "$(dirname "$launch_file")"
   printf '{ "bridgeOrigins": ["app://e2e-bridge-ok"] }\n' >"$launch_file"
-  cp "$rt" "$colocated_rt"
   trap 'rm -f "$launch_file" "$colocated_rt"' EXIT
+  # First without the runtime: a packaged app that ships none must exit at
+  # once with status 3 and say why, not wait (a dialog, an empty window).
+  missing_log="$(mktemp "${TMPDIR:-/tmp}/native-e2e-missing.XXXXXX")"
+  missing_cmd=("$bin")
+  if [ "$(uname -s)" = Linux ]; then
+    missing_cmd=(xvfb-run -a "$bin")
+  fi
+  "${missing_cmd[@]}" >"$missing_log" 2>&1 &
+  missing_pid=$!
+  for _ in $(seq 1 200); do
+    kill -0 "$missing_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$missing_pid" 2>/dev/null; then
+    kill -9 "$missing_pid" 2>/dev/null || true
+    cat "$missing_log"
+    echo "[e2e] FAIL a packaged app without its runtime exits at once (still running after 20 s)"
+    exit 1
+  fi
+  set +e
+  wait "$missing_pid"
+  missing_status=$?
+  set -e
+  if [ "$missing_status" = 3 ] && grep -q 'ships no runtime library' "$missing_log"; then
+    echo "[e2e] PASS a packaged app without its runtime exits at once (status 3)"
+  else
+    cat "$missing_log"
+    echo "[e2e] FAIL a packaged app without its runtime exits at once (status $missing_status)"
+    exit 1
+  fi
+  rm -f "$missing_log"
+  cp "$rt" "$colocated_rt"
   echo "== launch file $launch_file: $(cat "$launch_file")"
 fi
 

@@ -77,12 +77,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
   }
   laufey_common::SetProcessArgs(args);
-  std::string runtimePath =
+  laufey_common::RuntimeChoice runtimeChoice =
       laufey_common::ResolveRuntimePath(
           args, {LaufeyFindColocatedRuntime()},
           {".\\runtime.dll", ".\\target\\debug\\hello.dll",
-           ".\\target\\release\\hello.dll"})
-          .path;
+           ".\\target\\release\\hello.dll"});
+  std::string runtimePath = runtimeChoice.path;
+  // A packaged app without its runtime exits at once (no dialog to wait on).
+  if (laufey_common::IsMissingPackagedRuntime(runtimeChoice)) {
+    laufey_common::ReportMissingPackagedRuntime();
+    CoUninitialize();
+    return laufey_common::kMissingRuntimeExitCode;
+  }
 
   if (runtimePath.empty()) {
     MessageBoxW(nullptr,

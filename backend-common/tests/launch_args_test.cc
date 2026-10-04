@@ -196,6 +196,23 @@ static void TestChooseRuntimePath() {
   EXPECT(c.path == "/app/my.so" && c.warnings.size() == 1);
 }
 
+static void TestMissingPackagedRuntime() {
+  // Only a packaged app without its runtime must not start; a development
+  // host without one keeps its own handling (CEF opens its demo window).
+  RuntimeChoice c;
+  EXPECT(!IsMissingPackagedRuntime(c));
+  c.packaged = true;
+  EXPECT(IsMissingPackagedRuntime(c));
+  c.path = "/app/my.so";
+  EXPECT(!IsMissingPackagedRuntime(c));
+  c = ChooseRuntimePath({"--runtime", "/arg.so"}, "/env.so", {"/app/my.so"},
+                        {}, true, Files({"/arg.so", "/env.so"}));
+  EXPECT(IsMissingPackagedRuntime(c));
+  c = ChooseRuntimePath({}, "/env.so", {"/app/my.so"}, {}, false, Files({}));
+  EXPECT(!IsMissingPackagedRuntime(c));
+  EXPECT(kMissingRuntimeExitCode != 0);
+}
+
 static void TestWebView2EnvironmentOverrides() {
   // A development launch, or a packaged app with DevTools on, honours them.
   EXPECT(WebView2EnvironmentOverridesToClear(false, false).empty());
@@ -227,6 +244,7 @@ int main() {
   TestSwitchNames();
   TestDeepLinkStrip();
   TestChooseRuntimePath();
+  TestMissingPackagedRuntime();
   TestWebView2EnvironmentOverrides();
   TestProcessArgs();
   if (g_failures) {

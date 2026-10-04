@@ -829,10 +829,17 @@ int main(int argc, char* argv[]) {
   // the executable) loads only the one next to its executable; a development
   // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH. See
   // laufey_launch_args.h.
-  g_runtime_path = laufey_common::ResolveRuntimePath(
-                       std::vector<std::string>(argv + 1, argv + argc),
-                       {LaufeyFindColocatedRuntime()}, {})
-                       .path;
+  {
+    laufey_common::RuntimeChoice choice = laufey_common::ResolveRuntimePath(
+        std::vector<std::string>(argv + 1, argv + argc),
+        {LaufeyFindColocatedRuntime()}, {});
+    // A packaged app without its runtime exits at once, before CEF starts.
+    if (laufey_common::IsMissingPackagedRuntime(choice)) {
+      laufey_common::ReportMissingPackagedRuntime();
+      return laufey_common::kMissingRuntimeExitCode;
+    }
+    g_runtime_path = choice.path;
+  }
 
   // Wayland app_id / X11 WM_CLASS for our windows (see LaufeyWindowDelegate::
   // GetLinuxWindowProperties). Prefer the reverse-DNS identifier the embedder
