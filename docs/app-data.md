@@ -34,8 +34,9 @@ A packaged app that is started directly (Explorer, a Start menu shortcut, the
 Dock, `exec`), with nothing to set the environment, can ship both values in its
 [launch file](launch-config.md) as `"dataDir"` and `"appId"`. The file's values
 win over the environment: an environment inherited from another app can't move
-the app into that app's profile. Without them in the file, the environment
-variables decide.
+the app into that app's profile. A file with `"appId"` and no `"dataDir"` uses
+the app id's directory, and `LAUFEY_DATA_DIR` is ignored (reported on stderr).
+Without them in the file, the environment variables decide.
 
 Missing directories are created, owner-only (`0700`) on macOS and Linux; on
 Windows they inherit the ACL of `%LOCALAPPDATA%` (or of the parent of

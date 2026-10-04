@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <utility>
 
+#include "laufey_backend_common.h"
 #include "laufey_launch_config.h"
 
 #ifdef _WIN32
@@ -181,6 +182,68 @@ bool IsPackagedLaunch(bool has_colocated_runtime) {
   if (has_colocated_runtime)
     return true;
   return FileExists(LaunchConfigPathForExecutable(ExecutablePath()));
+}
+
+RuntimeChoice ChooseRuntimePath(
+    const std::vector<std::string>& args, const std::string& env_runtime_path,
+    const std::vector<std::string>& bundled,
+    const std::vector<std::string>& development, bool has_launch_file,
+    const std::function<bool(const std::string&)>& exists) {
+  RuntimeChoice choice;
+  std::string shipped;
+  for (const std::string& path : bundled) {
+    if (!path.empty() && exists(path)) {
+      shipped = path;
+      break;
+    }
+  }
+  // `--runtime` as a development host reads it (ParseHostOptions only warns
+  // when told the app is packaged).
+  std::string requested = ParseHostOptions(args, false).runtime_path;
+  choice.packaged = has_launch_file || !shipped.empty();
+  if (choice.packaged) {
+    choice.path = shipped;
+    if (!requested.empty()) {
+      choice.warnings.push_back(
+          "--runtime is ignored by a packaged app (it loads the runtime it "
+          "ships)");
+    }
+    if (!env_runtime_path.empty()) {
+      choice.warnings.push_back(
+          "LAUFEY_RUNTIME_PATH is ignored by a packaged app (it loads the "
+          "runtime it ships)");
+    }
+    if (shipped.empty()) {
+      choice.warnings.push_back(
+          "this packaged app (it has a laufey-launch.json) has no runtime "
+          "library next to its executable");
+    }
+    return choice;
+  }
+  if (!requested.empty()) {
+    choice.path = requested;
+  } else if (!env_runtime_path.empty()) {
+    choice.path = env_runtime_path;
+  } else {
+    for (const std::string& path : development) {
+      if (!path.empty() && exists(path)) {
+        choice.path = path;
+        break;
+      }
+    }
+  }
+  return choice;
+}
+
+RuntimeChoice ResolveRuntimePath(const std::vector<std::string>& args,
+                                 const std::vector<std::string>& bundled,
+                                 const std::vector<std::string>& development) {
+  RuntimeChoice choice = ChooseRuntimePath(
+      args, GetEnvUtf8("LAUFEY_RUNTIME_PATH"), bundled, development,
+      FileExists(LaunchConfigPathForExecutable(ExecutablePath())), FileExists);
+  for (const std::string& warning : choice.warnings)
+    std::fprintf(stderr, "laufey: %s\n", warning.c_str());
+  return choice;
 }
 
 void SetProcessArgs(std::vector<std::string> args) {

@@ -97,14 +97,39 @@ them the shipped file wins:
   `LAUFEY_DATA_DIR` are ignored. Environment variables are inherited, so an app
   started by another laufey app would otherwise open that app's profile and take
   its single-instance lock.
+- A file with `appId` pins the rest of the app's identity with it. The data
+  directory is the file's `dataDir`, or else the app id's default directory;
+  `LAUFEY_DATA_DIR` is ignored even when the file has no `dataDir`. The custom
+  schemes are the file's `customSchemes` only (none without the key):
+  `LAUFEY_CUSTOM_SCHEMES` and CEF's `--laufey-custom-schemes` switch are
+  ignored. Single-instance mode is the file's `singleInstance` (off without the
+  key): `LAUFEY_SINGLE_INSTANCE` is ignored. Each ignored variable (and the
+  switch) is reported on stderr once. Otherwise a variable inherited from
+  another program, or a switch on a command line a link can add to, could move
+  the app's profile, give a scheme of its choosing a secure origin, or turn off
+  the lock that routes a second launch to the running instance.
 - `inspectable: false`: `LAUFEY_INSPECTABLE=1` cannot turn DevTools back on (it
   is reported and ignored); `LAUFEY_INSPECTABLE=0` still turns them off.
 
-The keys are resolved one at a time before they are combined. For example, a
-file with `dataDir` launched with `LAUFEY_APP_ID` set still uses the file's
-`dataDir`, because `LAUFEY_DATA_DIR` isn't set and a data dir outranks an app id
-([App data](app-data.md)). CEF's `--laufey-custom-schemes` switch is added to
-the list from `LAUFEY_CUSTOM_SCHEMES` or `customSchemes`.
+Without `appId` in the file, the keys are resolved one at a time before they are
+combined. For example, a file with `dataDir` launched with `LAUFEY_APP_ID` set
+still uses the file's `dataDir`, because a data dir outranks an app id
+([App data](app-data.md)). CEF's `--laufey-custom-schemes` switch is then added
+to the list from `LAUFEY_CUSTOM_SCHEMES` or `customSchemes`.
+
+## Runtime library
+
+A launch file also marks the app as packaged. A packaged app (one with a
+`laufey-launch.json`, or with a runtime library it ships) loads only that
+library: the one next to its executable (`<executable name>.so`, `.dll` or
+`.dylib`), or, on the macOS WebView backend,
+`Contents/Frameworks/libruntime.dylib` or `Contents/MacOS/libruntime.dylib` in
+its bundle. It ignores `--runtime` and `LAUFEY_RUNTIME_PATH` (both reported on
+stderr) and never searches the working directory or system directories such as
+`/usr/lib/laufey`. A packaged app without a shipped runtime reports that and
+loads none. Only a development host, with neither a launch file nor a shipped
+runtime, takes `--runtime <path>`, then `LAUFEY_RUNTIME_PATH`, then its
+development fallbacks.
 
 ## Validation
 
@@ -118,7 +143,8 @@ A problem with the file never stops the app. It is reported on stderr as
 - An unknown key is reported and ignored, so newer files keep working with older
   hosts.
 - `LAUFEY_SINGLE_INSTANCE` set to anything but `1`, `0`, `true` or `false` is
-  reported and ignored, and the file's value applies.
+  reported and ignored, and the file's value applies. With an `appId` in the
+  file, any value is ignored (see [Precedence](#precedence)).
 - A value of the wrong type, an empty string, a string containing NUL, or a
   value that breaks the rules above (an unsafe `appId`, a relative `dataDir`) is
   reported, and that key is ignored. It behaves as if it were absent.

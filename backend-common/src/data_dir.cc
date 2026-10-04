@@ -178,7 +178,9 @@ std::string ResolveAppDataDirFrom(const std::string& data_dir_env,
 
 const std::string& AppDataDir() {
   static const std::string dir = [] {
-    // Environment variable if set, else the launch file (laufey-launch.json).
+    // The launch file's (laufey-launch.json) dataDir / appId, else the
+    // environment; with an app id pinned by the file, LAUFEY_DATA_DIR is
+    // ignored and the app id's default directory applies (LaunchDataDirFrom).
     std::string data_dir = LaunchDataDir();
     std::string app_id = LaunchAppId();
     std::string base;

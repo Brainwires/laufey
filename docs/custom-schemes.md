@@ -74,12 +74,14 @@ the backend logs a warning. Each backend installs the schemes in its own way:
   `--laufey-custom-schemes=myapp,other` or `LAUFEY_CUSTOM_SCHEMES=myapp,other`
   (comma-separated; `app` is always declared), or ships them as
   `"customSchemes"` in the app's [launch file](launch-config.md), which also
-  works when nothing sets the environment (the app is started directly). The
-  browser process forwards the list to its child processes. A declared scheme is
-  served in every window from the moment it is registered. A scheme that is
-  registered but was not declared is still served, but Chromium treats it as a
-  non-standard scheme with an opaque origin and no secure context, and the
-  backend logs a warning. Storage on a custom-scheme origin lives in the CEF
+  works when nothing sets the environment (the app is started directly). A
+  launch file that also has an `"appId"` makes its list the only one: the switch
+  and the variable are then ignored ([Precedence](launch-config.md#precedence)).
+  The browser process forwards the list to its child processes. A declared
+  scheme is served in every window from the moment it is registered. A scheme
+  that is registered but was not declared is still served, but Chromium treats
+  it as a non-standard scheme with an opaque origin and no secure context, and
+  the backend logs a warning. Storage on a custom-scheme origin lives in the CEF
   profile: with an app data directory (`LAUFEY_APP_ID` / `LAUFEY_DATA_DIR`, or
   `"appId"` / `"dataDir"` in the [launch file](launch-config.md)) that profile
   is `<dir>/CEF` and persists across launches (see

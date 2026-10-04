@@ -212,6 +212,66 @@ static void TestPrecedence() {
   EXPECT(LaunchPinnedSettingFrom("", false, "") == "");
 }
 
+// A launch file that pins "appId" pins the app's data dir, custom schemes
+// and single-instance mode with it: the environment can't change them (it is
+// reported instead). Without a pinned app id, the environment still wins.
+static void TestPinnedAppId() {
+  std::string warning;
+  // dataDir: the file's, else (with an app id pinned) none, so the app id's
+  // default directory applies; LAUFEY_DATA_DIR is reported.
+  EXPECT(LaunchDataDirFrom(ABS "/env", true, true, ABS "/file", &warning) == ABS
+         "/file");
+  EXPECT(warning.find("LAUFEY_DATA_DIR") != std::string::npos);
+  warning.clear();
+  EXPECT(LaunchDataDirFrom(ABS "/env", true, false, "", &warning).empty());
+  EXPECT(warning.find("LAUFEY_DATA_DIR") != std::string::npos &&
+         warning.find("app id") != std::string::npos);
+  warning.clear();
+  EXPECT(LaunchDataDirFrom("", true, false, "", &warning).empty());
+  EXPECT(LaunchDataDirFrom("", true, true, ABS "/file", &warning) == ABS
+         "/file");
+  EXPECT(warning.empty());
+  // Not pinned: the file's dataDir still wins, else the environment.
+  EXPECT(LaunchDataDirFrom(ABS "/env", false, true, ABS "/file", &warning) ==
+         ABS "/file");
+  warning.clear();
+  EXPECT(LaunchDataDirFrom(ABS "/env", false, false, "", &warning) == ABS
+         "/env");
+  EXPECT(warning.empty());
+
+  // customSchemes: the file's list only (none without one).
+  EXPECT(LaunchCustomSchemesFrom("evil", true, true, "a,b", &warning) == "a,b");
+  EXPECT(warning.find("LAUFEY_CUSTOM_SCHEMES") != std::string::npos);
+  warning.clear();
+  EXPECT(LaunchCustomSchemesFrom("evil", true, false, "", &warning).empty());
+  EXPECT(!warning.empty());
+  warning.clear();
+  EXPECT(LaunchCustomSchemesFrom("", true, true, "a", &warning) == "a");
+  EXPECT(warning.empty());
+  // Not pinned: the environment wins, else the file.
+  EXPECT(LaunchCustomSchemesFrom("env", false, true, "a", &warning) == "env");
+  EXPECT(LaunchCustomSchemesFrom("", false, true, "a", &warning) == "a");
+  EXPECT(warning.empty());
+
+  // singleInstance: the file's value, else off.
+  EXPECT(LaunchSingleInstanceFrom("0", true, true, true, &warning));
+  EXPECT(warning.find("LAUFEY_SINGLE_INSTANCE") != std::string::npos);
+  warning.clear();
+  EXPECT(!LaunchSingleInstanceFrom("1", true, false, false, &warning));
+  EXPECT(!warning.empty());
+  warning.clear();
+  EXPECT(!LaunchSingleInstanceFrom("1", true, true, false, &warning));
+  warning.clear();
+  EXPECT(LaunchSingleInstanceFrom("", true, true, true, &warning));
+  EXPECT(warning.empty());
+  // Not pinned: LaunchBoolSettingFrom (the environment wins).
+  EXPECT(!LaunchSingleInstanceFrom("0", false, true, true, &warning));
+  EXPECT(LaunchSingleInstanceFrom("1", false, false, false, &warning));
+  EXPECT(warning.empty());
+  EXPECT(LaunchSingleInstanceFrom("bogus", false, true, true, &warning));
+  EXPECT(warning.find("bogus") != std::string::npos);
+}
+
 static void TestInspectable() {
   size_t w = 0;
   LaunchConfig c = Parse("{}", &w);
@@ -377,17 +437,19 @@ static void TestProcessLaunchConfig() {
   EXPECT(LaunchCustomSchemes() == "one,two");
   EXPECT(LaunchSingleInstance());
 
-  // The environment wins, key by key, except for the app id and data dir
-  // the file pins (an inherited environment can't move the app's profile).
+  // The file pins the app id, and with it the data dir, the custom schemes
+  // and single-instance mode: an inherited environment can't move the app's
+  // profile, add schemes or turn its lock off (each is reported once).
+  EXPECT(LaunchAppIdPinned());
   SetEnv("LAUFEY_APP_ID", "from.env");
   SetEnv("LAUFEY_DATA_DIR", ABS "/from/env");
   SetEnv("LAUFEY_CUSTOM_SCHEMES", "envscheme");
   EXPECT(LaunchAppId() == "dev.laufey.test");
   EXPECT(LaunchDataDir() == ABS "/from/file");
-  EXPECT(LaunchCustomSchemes() == "envscheme");
+  EXPECT(LaunchCustomSchemes() == "one,two");
   SetEnv("LAUFEY_SINGLE_INSTANCE", "0");
-  EXPECT(!LaunchSingleInstance());
-  SetEnv("LAUFEY_SINGLE_INSTANCE", "bogus");  // reported, file decides
+  EXPECT(LaunchSingleInstance());
+  SetEnv("LAUFEY_SINGLE_INSTANCE", "bogus");
   EXPECT(LaunchSingleInstance());
   SetEnv("LAUFEY_SINGLE_INSTANCE", nullptr);
   SetEnv("LAUFEY_APP_ID", nullptr);
@@ -408,6 +470,7 @@ int main() {
   TestMalformed();
   TestSchema();
   TestPrecedence();
+  TestPinnedAppId();
   TestSingleInstance();
   TestInspectable();
   TestPaths();

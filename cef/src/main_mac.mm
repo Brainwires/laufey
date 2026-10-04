@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 #include <cstring>
 #include <unistd.h>
 
@@ -11,6 +12,7 @@
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
 #include "app.h"
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
@@ -274,21 +276,8 @@ static void InstallDefaultEditMenu() {
   [NSApp setMainMenu:mainMenu];
 }
 
-static int run_headless(const char* runtimePath) {
+static int run_headless(const std::string& path) {
   RuntimeLoader* loader = RuntimeLoader::GetInstance();
-
-  std::string path;
-  if (runtimePath) {
-    path = runtimePath;
-  } else {
-    const char* envPath = getenv("LAUFEY_RUNTIME_PATH");
-    if (envPath) {
-      path = envPath;
-    }
-    if (path.empty()) {
-      path = LaufeyFindColocatedRuntime();
-    }
-  }
 
   if (path.empty()) {
     std::cerr << "No runtime library found for headless worker." << std::endl;
@@ -333,37 +322,17 @@ static bool is_forked_worker() {
 }
 
 int main(int argc, char* argv[]) {
-  NSString* runtimePathArg = nil;
-  for (int i = 1; i < argc; ++i) {
-    if (strcmp(argv[i], "--runtime") == 0 && i + 1 < argc) {
-      g_runtime_path = argv[i + 1];
-      runtimePathArg = [NSString stringWithUTF8String:argv[i + 1]];
-      break;
-    } else if (strncmp(argv[i], "--runtime=", 10) == 0) {
-      g_runtime_path = argv[i] + 10;
-      runtimePathArg = [NSString stringWithUTF8String:argv[i] + 10];
-      break;
-    }
-  }
-
-  if (g_runtime_path.empty()) {
-    const char* envPath = getenv("LAUFEY_RUNTIME_PATH");
-    if (envPath) {
-      g_runtime_path = envPath;
-      runtimePathArg = [NSString stringWithUTF8String:envPath];
-    }
-  }
-
-  if (g_runtime_path.empty()) {
-    std::string colocated = LaufeyFindColocatedRuntime();
-    if (!colocated.empty()) {
-      g_runtime_path = colocated;
-      runtimePathArg = [NSString stringWithUTF8String:colocated.c_str()];
-    }
-  }
+  // The runtime library: a packaged app (a launch file, or a runtime next to
+  // the executable) loads only the one next to its executable; a development
+  // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH. See
+  // laufey_launch_args.h.
+  g_runtime_path = laufey_common::ResolveRuntimePath(
+                       std::vector<std::string>(argv + 1, argv + argc),
+                       {LaufeyFindColocatedRuntime()}, {})
+                       .path;
 
   if (is_forked_worker() || is_cli_worker_command(argc, argv)) {
-    return run_headless(runtimePathArg ? [runtimePathArg UTF8String] : nullptr);
+    return run_headless(g_runtime_path);
   }
 
   // Single-instance mode (docs/deep-links.md): a second launch forwards its

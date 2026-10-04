@@ -5,6 +5,7 @@
 
 #include "laufey_launch_config.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -126,6 +127,21 @@ bool ReadLaunchFile(const std::string& path, std::string* text,
     return false;
   }
   return true;
+}
+
+// Reports `warning` on stderr the first time `reported` is still clear: an
+// ignored environment variable is worth one line per process, not one per
+// read.
+void ReportOnce(std::atomic<bool>* reported, const std::string& warning) {
+  if (warning.empty() || reported->exchange(true))
+    return;
+  std::cerr << "laufey: " << warning << std::endl;
+}
+
+// The warning for an environment variable a pinned app id overrides.
+std::string PinnedEnvWarning(const char* env_name) {
+  return std::string(env_name) +
+         " is ignored: the app's launch file pins its app id";
 }
 
 LaunchConfig LoadProcessLaunchConfig() {
@@ -371,10 +387,57 @@ std::string LaunchAppId() {
                                  file.app_id);
 }
 
+std::string LaunchDataDirFrom(const std::string& env_value, bool app_id_pinned,
+                              bool file_has, const std::string& file_value,
+                              std::string* warning) {
+  if (file_has || app_id_pinned) {
+    if (warning && !env_value.empty()) {
+      *warning = file_has ? std::string(
+                                "LAUFEY_DATA_DIR is ignored: the "
+                                "app's launch file sets its dataDir")
+                          : PinnedEnvWarning("LAUFEY_DATA_DIR");
+    }
+    return file_has ? file_value : std::string();
+  }
+  return env_value;
+}
+
+std::string LaunchCustomSchemesFrom(const std::string& env_value,
+                                    bool app_id_pinned, bool file_has,
+                                    const std::string& file_value,
+                                    std::string* warning) {
+  if (!app_id_pinned)
+    return LaunchSettingFrom(env_value, file_has, file_value);
+  if (warning && !env_value.empty())
+    *warning = PinnedEnvWarning("LAUFEY_CUSTOM_SCHEMES");
+  return file_has ? file_value : std::string();
+}
+
+bool LaunchSingleInstanceFrom(const std::string& env_value, bool app_id_pinned,
+                              bool file_has, bool file_value,
+                              std::string* warning) {
+  if (!app_id_pinned) {
+    return LaunchBoolSettingFrom("LAUFEY_SINGLE_INSTANCE", env_value, file_has,
+                                 file_value, warning);
+  }
+  if (warning && !env_value.empty())
+    *warning = PinnedEnvWarning("LAUFEY_SINGLE_INSTANCE");
+  return file_has && file_value;
+}
+
+bool LaunchAppIdPinned() {
+  return ProcessLaunchConfig().has_app_id;
+}
+
 std::string LaunchDataDir() {
+  static std::atomic<bool> reported{false};
   const LaunchConfig& file = ProcessLaunchConfig();
-  return LaunchPinnedSettingFrom(GetEnvUtf8("LAUFEY_DATA_DIR"),
-                                 file.has_data_dir, file.data_dir);
+  std::string warning;
+  std::string dir =
+      LaunchDataDirFrom(GetEnvUtf8("LAUFEY_DATA_DIR"), file.has_app_id,
+                        file.has_data_dir, file.data_dir, &warning);
+  ReportOnce(&reported, warning);
+  return dir;
 }
 
 bool LaunchBoolSettingFrom(const std::string& env_name,
@@ -422,17 +485,18 @@ bool LaunchInspectable() {
 }
 
 bool LaunchSingleInstance() {
+  static std::atomic<bool> reported{false};
   const LaunchConfig& file = ProcessLaunchConfig();
   std::string warning;
-  bool on = LaunchBoolSettingFrom(
-      "LAUFEY_SINGLE_INSTANCE", GetEnvUtf8("LAUFEY_SINGLE_INSTANCE"),
-      file.has_single_instance, file.single_instance, &warning);
-  if (!warning.empty())
-    std::cerr << "laufey: " << warning << std::endl;
+  bool on = LaunchSingleInstanceFrom(GetEnvUtf8("LAUFEY_SINGLE_INSTANCE"),
+                                     file.has_app_id, file.has_single_instance,
+                                     file.single_instance, &warning);
+  ReportOnce(&reported, warning);
   return on;
 }
 
 std::string LaunchCustomSchemes() {
+  static std::atomic<bool> reported{false};
   const LaunchConfig& file = ProcessLaunchConfig();
   std::string joined;
   for (const std::string& scheme : file.custom_schemes) {
@@ -440,8 +504,12 @@ std::string LaunchCustomSchemes() {
       joined.push_back(',');
     joined += scheme;
   }
-  return LaunchSettingFrom(GetEnvUtf8("LAUFEY_CUSTOM_SCHEMES"),
-                           file.has_custom_schemes, joined);
+  std::string warning;
+  std::string schemes = LaunchCustomSchemesFrom(
+      GetEnvUtf8("LAUFEY_CUSTOM_SCHEMES"), file.has_app_id,
+      file.has_custom_schemes, joined, &warning);
+  ReportOnce(&reported, warning);
+  return schemes;
 }
 
 }  // namespace laufey_common

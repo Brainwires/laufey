@@ -20,6 +20,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
@@ -813,25 +814,14 @@ int main(int argc, char* argv[]) {
     return exit_code;
   }
 
-  // Parse --runtime argument
-  for (int i = 1; i < argc; ++i) {
-    if (strcmp(argv[i], "--runtime") == 0 && i + 1 < argc) {
-      g_runtime_path = argv[++i];
-    } else if (strncmp(argv[i], "--runtime=", 10) == 0) {
-      g_runtime_path = argv[i] + 10;
-    }
-  }
-
-  if (g_runtime_path.empty()) {
-    const char* envPath = getenv("LAUFEY_RUNTIME_PATH");
-    if (envPath) {
-      g_runtime_path = envPath;
-    }
-  }
-
-  if (g_runtime_path.empty()) {
-    g_runtime_path = LaufeyFindColocatedRuntime();
-  }
+  // The runtime library: a packaged app (a launch file, or a runtime next to
+  // the executable) loads only the one next to its executable; a development
+  // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH. See
+  // laufey_launch_args.h.
+  g_runtime_path = laufey_common::ResolveRuntimePath(
+                       std::vector<std::string>(argv + 1, argv + argc),
+                       {LaufeyFindColocatedRuntime()}, {})
+                       .path;
 
   // Wayland app_id / X11 WM_CLASS for our windows (see LaufeyWindowDelegate::
   // GetLinuxWindowProperties). Prefer the reverse-DNS identifier the embedder

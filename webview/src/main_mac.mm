@@ -5,12 +5,14 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_auth_session.h"
+#include "laufey_launch_args.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 // Cmd+C/V/X/A on macOS dispatch through the main menu's performKeyEquivalent:
 // — Cocoa matches the keystroke against menu items, then sends their action
@@ -78,37 +80,10 @@ void EnsureEditMenu(NSMenu* menubar) {
   RuntimeLoader* loader = RuntimeLoader::GetInstance();
   loader->SetBackend(self.backend);
 
+  // Resolved in main() (ResolveMacRuntimePath).
   std::string runtimePath;
   if (self.runtimePath) {
     runtimePath = [self.runtimePath UTF8String];
-  } else {
-    NSBundle* bundle = [NSBundle mainBundle];
-    NSString* bundlePath = [bundle bundlePath];
-
-    NSArray* searchPaths = @[
-      [bundlePath stringByAppendingPathComponent:
-                      @"Contents/Frameworks/libruntime.dylib"],
-      [bundlePath
-          stringByAppendingPathComponent:@"Contents/MacOS/libruntime.dylib"],
-      @"./libruntime.dylib", @"./target/debug/libhello.dylib",
-      @"./target/release/libhello.dylib"
-    ];
-
-    for (NSString* path in searchPaths) {
-      if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        runtimePath = [path UTF8String];
-        break;
-      }
-    }
-
-    const char* envPath = getenv("LAUFEY_RUNTIME_PATH");
-    if (envPath) {
-      runtimePath = envPath;
-    }
-
-    if (runtimePath.empty()) {
-      runtimePath = LaufeyFindColocatedRuntime();
-    }
   }
 
   if (runtimePath.empty()) {
@@ -194,24 +169,11 @@ void EnsureEditMenu(NSMenu* menubar) {
 // Framework dev servers (e.g. Next.js Turbopack) fork child processes
 // via child_process.fork(), which re-executes this binary. We detect
 // these workers and run the Deno runtime without creating a window.
-static int run_headless(const char* runtimePath) {
+static int run_headless(const std::string& path) {
   RuntimeLoader* loader = RuntimeLoader::GetInstance();
 
   // Create a minimal backend with no visible window
   loader->SetBackend(nullptr);
-
-  std::string path;
-  if (runtimePath) {
-    path = runtimePath;
-  } else {
-    const char* envPath = getenv("LAUFEY_RUNTIME_PATH");
-    if (envPath) {
-      path = envPath;
-    }
-    if (path.empty()) {
-      path = LaufeyFindColocatedRuntime();
-    }
-  }
 
   if (path.empty()) {
     std::cerr << "No runtime library found for headless worker." << std::endl;
@@ -256,17 +218,39 @@ static bool is_forked_worker() {
          getenv("NEXT_PRIVATE_WORKER") != nullptr;
 }
 
-int main(int argc, char* argv[]) {
-  NSString* runtimePathArg = nil;
-  for (int i = 1; i < argc; ++i) {
-    if (strcmp(argv[i], "--runtime") == 0 && i + 1 < argc) {
-      runtimePathArg = [NSString stringWithUTF8String:argv[++i]];
+// The runtime library to load. A packaged app (a launch file, or a runtime
+// it ships: Contents/Frameworks/libruntime.dylib or
+// Contents/MacOS/libruntime.dylib in the bundle, or <executable>.dylib next
+// to the executable) loads only that one; a development host takes
+// --runtime (before "--"), then LAUFEY_RUNTIME_PATH, then the working
+// directory's fallbacks. See laufey_launch_args.h.
+static std::string ResolveMacRuntimePath(int argc, char* argv[]) {
+  std::vector<std::string> bundled;
+  @autoreleasepool {
+    NSString* bundlePath = [[NSBundle mainBundle] bundlePath];
+    if (bundlePath) {
+      bundled.push_back([[bundlePath
+          stringByAppendingPathComponent:
+              @"Contents/Frameworks/libruntime.dylib"] UTF8String]);
+      bundled.push_back([[bundlePath
+          stringByAppendingPathComponent:@"Contents/MacOS/libruntime.dylib"]
+          UTF8String]);
     }
   }
+  bundled.push_back(LaufeyFindColocatedRuntime());
+  return laufey_common::ResolveRuntimePath(
+             std::vector<std::string>(argv + 1, argv + argc), bundled,
+             {"./libruntime.dylib", "./target/debug/libhello.dylib",
+              "./target/release/libhello.dylib"})
+      .path;
+}
+
+int main(int argc, char* argv[]) {
+  const std::string runtimePath = ResolveMacRuntimePath(argc, argv);
 
   // Forked worker processes should not create a window.
   if (is_forked_worker() || is_cli_worker_command(argc, argv)) {
-    return run_headless(runtimePathArg ? [runtimePathArg UTF8String] : nullptr);
+    return run_headless(runtimePath);
   }
 
   // Single-instance mode (docs/deep-links.md): a second launch forwards its
@@ -306,7 +290,10 @@ int main(int argc, char* argv[]) {
     }
 
     AppDelegate* delegate = [[AppDelegate alloc] init];
-    delegate.runtimePath = runtimePathArg;
+    delegate.runtimePath =
+        runtimePath.empty()
+            ? nil
+            : [NSString stringWithUTF8String:runtimePath.c_str()];
 
     [NSApp setDelegate:delegate];
     // The notification-center delegate must be in place before AppKit

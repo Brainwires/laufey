@@ -13,9 +13,10 @@
 //    after "--" is ever read as an option: not by laufey (ParseHostOptions),
 //    not by Chromium (its command line parser has the same terminator), not
 //    by the runtime.
-//  * A packaged app ignores `--runtime`: its runtime library is the one next
-//    to the executable (or named by LAUFEY_RUNTIME_PATH), never one a command
-//    line names. IsPackagedLaunch decides.
+//  * A packaged app loads only the runtime library it ships (next to the
+//    executable, or in its macOS bundle): never one a command line
+//    (`--runtime`), the environment (LAUFEY_RUNTIME_PATH), the working
+//    directory or a system directory names. ChooseRuntimePath decides.
 //
 // For CEF there is a third: a launch with a URL positional argument (a deep
 // link) drops every Chromium switch that came from the process's own
@@ -25,6 +26,7 @@
 #ifndef LAUFEY_LAUNCH_ARGS_H_
 #define LAUFEY_LAUNCH_ARGS_H_
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -71,6 +73,47 @@ std::vector<std::string> DeepLinkSwitchesToStrip(
 // (laufey-launch.json) exists, or `has_colocated_runtime` (the backend found
 // a runtime library next to the executable).
 bool IsPackagedLaunch(bool has_colocated_runtime);
+
+// The runtime library a host loads, and why.
+struct RuntimeChoice {
+  // The library to load; "" when none was found.
+  std::string path;
+  // Whether the host runs as a packaged app (see ChooseRuntimePath).
+  bool packaged = false;
+  // What was ignored, for stderr (without the "laufey: " prefix).
+  std::vector<std::string> warnings;
+};
+
+// The pure step behind ResolveRuntimePath, exposed for tests. Reads nothing
+// from the environment or the filesystem; `exists` says whether a path names
+// a file.
+//
+//  * `args`: argv without the program (`--runtime` is read up to "--").
+//  * `env_runtime_path`: LAUFEY_RUNTIME_PATH ("" when unset).
+//  * `bundled`: where the app ships its runtime, in order: the library next
+//    to the executable (LaufeyFindColocatedRuntime), a macOS bundle's
+//    Contents/Frameworks or Contents/MacOS. Empty entries are skipped.
+//  * `development`: a development host's fallbacks, in order (paths relative
+//    to the working directory, system library directories).
+//  * `has_launch_file`: the executable has a laufey-launch.json.
+//
+// A packaged app (`has_launch_file`, or one of `bundled` exists) loads the
+// first existing `bundled` path and nothing else: `--runtime`,
+// `env_runtime_path` and `development` are ignored, the first two with a
+// warning. Otherwise (a development host) the order is `--runtime`, then
+// `env_runtime_path`, then the first existing `development` path.
+RuntimeChoice ChooseRuntimePath(
+    const std::vector<std::string>& args, const std::string& env_runtime_path,
+    const std::vector<std::string>& bundled,
+    const std::vector<std::string>& development, bool has_launch_file,
+    const std::function<bool(const std::string&)>& exists);
+
+// ChooseRuntimePath for this process: LAUFEY_RUNTIME_PATH from the
+// environment, this executable's launch file, the filesystem. Warnings are
+// printed on stderr.
+RuntimeChoice ResolveRuntimePath(const std::vector<std::string>& args,
+                                 const std::vector<std::string>& bundled,
+                                 const std::vector<std::string>& development);
 
 // The process's own arguments (argv without the program, UTF-8), recorded by
 // the host's main() before anything parses them (SetProcessArgs) and read by

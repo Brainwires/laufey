@@ -95,10 +95,12 @@ asymmetric**, and that most of the surface is _not_ actually hard:
 
 ### 3.1 Backends are not interchangeable
 
-Runtimes are backend-agnostic cdylibs; a backend loads one via
-`--runtime <path>` or `LAUFEY_RUNTIME_PATH`. That means **one test runtime can
-be driven by every backend binary**. But the backends differ in what they
-implement:
+Runtimes are backend-agnostic cdylibs; a development backend loads one via
+`--runtime <path>` or `LAUFEY_RUNTIME_PATH` (a packaged one only loads the
+runtime next to its executable;
+[Runtime library](launch-config.md#runtime-library)). That means **one test
+runtime can be driven by every backend binary**. But the backends differ in what
+they implement:
 
 | Backend | Web engine                                 | Native-chrome impl                                    | OSes      |
 | ------- | ------------------------------------------ | ----------------------------------------------------- | --------- |
@@ -683,8 +685,11 @@ profile. The driver asserts:
   executable (no `LAUFEY_*` in the environment), the file's `appId` gives a
   persistent per-app store and profile directory. On CEF the page is served over
   a custom scheme that only the file's `customSchemes` declares, and it must be
-  a secure origin. `LAUFEY_APP_ID` in the environment overrides the file, and a
-  malformed file is reported and ignored.
+  a secure origin. The file's `appId` wins over `LAUFEY_APP_ID` in the
+  environment, a `LAUFEY_DATA_DIR` in the environment is reported and ignored
+  (the pinned app id keeps its store), and a malformed file is reported and
+  ignored. While the file is in place the driver copies the runtime next to the
+  backend executable, since a packaged app loads only that one.
 
 The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, and on
 the webview/Linux leg, where the Layer-0 battery is excluded (see the status
@@ -706,8 +711,11 @@ runtime sees need real processes, so they have their own runtime,
   exits 0 within seconds without loading the runtime (on Linux it runs with no
   display at all), and the first instance receives `second_instance` with
   exactly those arguments and that directory;
-- `LAUFEY_SINGLE_INSTANCE=0` overrides the file, and single-instance mode
-  without an app id warns and runs unlocked;
+- with the app id pinned by the file, a second launch with
+  `LAUFEY_SINGLE_INSTANCE=0` and its own `LAUFEY_DATA_DIR` in its environment
+  still forwards (the variable is reported as ignored); without an app id in the
+  file, `LAUFEY_SINGLE_INSTANCE=0` overrides its `singleInstance`, and
+  single-instance mode without an app id warns and runs unlocked;
 - without single-instance mode two instances run side by side (on CEF with
   different data directories; one CEF profile admits one process, which
   `storage-e2e-run.sh` covers); the first one stays up until the driver releases
@@ -718,8 +726,8 @@ runtime sees need real processes, so they have their own runtime,
   `argv` only;
 - Windows and Linux: a test URL scheme registered with the OS as an installer
   would (`HKCU\Software\Classes\laufey-si-test` with a `shell\open\command` of
-  `"<backend>" -- "%1"`, the runtime from `LAUFEY_RUNTIME_PATH` since the launch
-  file makes it a packaged app; a `.desktop` file with
+  `"<backend>" -- "%1"`, the runtime copied next to the backend since the launch
+  file makes it a packaged app, which loads no other; a `.desktop` file with
   `x-scheme-handler/laufey-si-test` made the default with `xdg-mime`, in a
   private XDG home), and links opened through the OS (`Start-Process`,
   `xdg-open`): at a cold start the runtime sees the URL in its arguments, and
