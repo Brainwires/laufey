@@ -37,6 +37,11 @@ are finished with it. The namespace object is named `Laufey` by default; call
 handlers run on the user-interface thread. None of this is available on the
 Winit backend, which has no JavaScript engine.
 
+Strings arrive as UTF-8. A JavaScript string can hold an unpaired surrogate,
+which has no UTF-8 form; it arrives as U+FFFD, and a surrogate pair as its one
+code point (on WebView2, `execute_js` results used to be narrowed code unit by
+code unit, which garbled every non-ASCII character).
+
 ## Which documents can call
 
 Only the window's top-level document gets the namespace, and only its calls

@@ -196,6 +196,22 @@ static void TestChooseRuntimePath() {
   EXPECT(c.path == "/app/my.so" && c.warnings.size() == 1);
 }
 
+static void TestWebView2EnvironmentOverrides() {
+  // A development launch, or a packaged app with DevTools on, honours them.
+  EXPECT(WebView2EnvironmentOverridesToClear(false, false).empty());
+  EXPECT(WebView2EnvironmentOverridesToClear(false, true).empty());
+  EXPECT(WebView2EnvironmentOverridesToClear(true, true).empty());
+  // A packaged app with DevTools off clears the dangerous ones only.
+  Args clear = WebView2EnvironmentOverridesToClear(true, false);
+  EXPECT(clear.size() == 5);
+  EXPECT(Contains(clear, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
+  EXPECT(Contains(clear, "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"));
+  EXPECT(Contains(clear, "WEBVIEW2_USER_DATA_FOLDER"));
+  EXPECT(Contains(clear, "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER"));
+  EXPECT(Contains(clear, "WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER"));
+  EXPECT(!Contains(clear, "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE"));
+}
+
 static void TestProcessArgs() {
   EXPECT(ProcessArgs().empty());
   SetProcessArgs({"--", "acme://x"});
@@ -211,6 +227,7 @@ int main() {
   TestSwitchNames();
   TestDeepLinkStrip();
   TestChooseRuntimePath();
+  TestWebView2EnvironmentOverrides();
   TestProcessArgs();
   if (g_failures) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);

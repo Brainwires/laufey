@@ -49,13 +49,13 @@ lowercase; an invalid name is logged and ignored. So is a scheme the engines
 already give a meaning of their own, in any case: `http`, `https`, `ws`, `wss`,
 `ftp`, `file`, `filesystem`, `data`, `blob`, `javascript`, `about`, `chrome`,
 `chrome-extension`, `chrome-untrusted`, `devtools` and `view-source`. Taking one
-of them over would hand the handler the page's ordinary web traffic, local
-files or script URLs. This applies to `register_scheme_handler`, the
+of them over would hand the handler the page's ordinary web traffic, local files
+or script URLs. This applies to `register_scheme_handler`, the
 `--laufey-custom-schemes` switch, `LAUFEY_CUSTOM_SCHEMES` and the launch file's
 `"customSchemes"` alike. Schemes only the OS handles (`mailto`, `tel`) are not
-reserved. Engine-less backends such as
-Winit have no scheme support; `laufey::scheme_handlers_supported()` returns
-`false` there, and the application should fall back to a loopback server.
+reserved. Engine-less backends such as Winit have no scheme support;
+`laufey::scheme_handlers_supported()` returns `false` there, and the application
+should fall back to a loopback server.
 
 Register every scheme before creating the first window. The system web views
 read their scheme tables when a web view is created, so on most backends a
@@ -196,12 +196,12 @@ and WebView2. A response WebView2 answers in one piece is held whole until the
 handler finishes it, whether or not the page reads, so it is capped separately
 at **512 MiB**: past that the request fails.
 
-Request bodies (a page's `POST` / `PUT`) are read whole before the handler
-runs, so `read_body` never waits. WebKitGTK, CEF and WebView2 hold at most
-**512 MiB** of one: a larger body fails the request without reaching the handler
-(the page's `fetch` rejects with a network error) and the backend logs it.
-WKWebView hands the host a body that is already in memory (and for some request
-kinds none at all), so it has no cap of laufey's own.
+Request bodies (a page's `POST` / `PUT`) are read whole before the handler runs,
+so `read_body` never waits. WebKitGTK, CEF and WebView2 hold at most **512 MiB**
+of one: a larger body fails the request without reaching the handler (the page's
+`fetch` rejects with a network error) and the backend logs it. WKWebView hands
+the host a body that is already in memory (and for some request kinds none at
+all), so it has no cap of laufey's own.
 
 A handler that calls `finish` without ever calling `begin` gives the page no
 response: its request fails, as a network error does (the `fetch` rejects), on

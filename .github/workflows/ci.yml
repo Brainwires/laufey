@@ -130,6 +130,15 @@ jobs:
             backend-common/tests/external_links_test.cc \
             -o "$RUNNER_TEMP/external_links_test"
           "$RUNNER_TEMP/external_links_test"
+      # UTF-8 for text from a JavaScript engine (header-only; ctest also runs
+      # it per backend, with the Windows WideToUtf8 checks on Windows).
+      - name: backend-common utf8_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/utf8_test.cc \
+            -o "$RUNNER_TEMP/utf8_test"
+          "$RUNNER_TEMP/utf8_test"
       # The dialog paths show page text in-process and start no program: no
       # process-spawning or shell API in them (the Windows prompt used to
       # interpolate the page's text into a PowerShell command line). The

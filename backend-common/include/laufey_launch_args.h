@@ -115,6 +115,21 @@ RuntimeChoice ResolveRuntimePath(const std::vector<std::string>& args,
                                  const std::vector<std::string>& bundled,
                                  const std::vector<std::string>& development);
 
+// The WebView2 loader's own environment variables that a packaged app
+// (IsPackagedLaunch) with DevTools off (LaunchInspectable() false) clears
+// from its environment before it creates a WebView2 environment, because
+// WebView2 reads them itself and each one reopens what that app closed:
+// extra Chromium switches (WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, e.g. a
+// remote-debugging port), another browser binary to load
+// (WEBVIEW2_BROWSER_EXECUTABLE_FOLDER), another profile
+// (WEBVIEW2_USER_DATA_FOLDER) and a script debugger on a named pipe
+// (WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER, WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER).
+// Empty otherwise: a development launch, or an inspectable app, honours them.
+// WEBVIEW2_RELEASE_CHANNEL_PREFERENCE / WEBVIEW2_CHANNEL_SEARCH_KIND are left
+// alone: they only choose among the signed WebView2 runtimes installed.
+std::vector<std::string> WebView2EnvironmentOverridesToClear(bool packaged,
+                                                             bool inspectable);
+
 // The process's own arguments (argv without the program, UTF-8), recorded by
 // the host's main() before anything parses them (SetProcessArgs) and read by
 // the CEF command line hook (ProcessArgs). Not thread-safe to set: main()

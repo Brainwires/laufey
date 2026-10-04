@@ -246,6 +246,19 @@ RuntimeChoice ResolveRuntimePath(const std::vector<std::string>& args,
   return choice;
 }
 
+std::vector<std::string> WebView2EnvironmentOverridesToClear(
+    bool packaged, bool inspectable) {
+  if (!packaged || inspectable)
+    return {};
+  return {
+      "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+      "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+      "WEBVIEW2_USER_DATA_FOLDER",
+      "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER",
+      "WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER",
+  };
+}
+
 void SetProcessArgs(std::vector<std::string> args) {
   ProcessArgsStorage() = std::move(args);
 }

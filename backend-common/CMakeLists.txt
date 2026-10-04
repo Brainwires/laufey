@@ -270,6 +270,13 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_external_links_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_external_links_test COMMAND laufey_external_links_test)
 
+  # UTF-8 for text from a JavaScript engine: JSON \u escapes (surrogate
+  # pairs, unpaired surrogates) and, on Windows, WideToUtf8 (no OS API
+  # elsewhere).
+  add_executable(laufey_utf8_test tests/utf8_test.cc)
+  target_link_libraries(laufey_utf8_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_utf8_test COMMAND laufey_utf8_test)
+
   # Accelerator parsing, the shortcut registry (with a fake OS side) and the
   # autostart entry format (no OS API).
   add_executable(laufey_system_test tests/system_test.cc)

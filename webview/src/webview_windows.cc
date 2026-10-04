@@ -3,6 +3,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
@@ -275,6 +276,30 @@ std::wstring SchemeUtf8ToWide(const std::string& s) {
 
 // The exchange itself (buffered, or streamed through the page shim) lives in
 // wv2_scheme_stream.cc.
+
+// WebView2 reads a few environment variables of its own when an environment
+// is created: extra Chromium switches, another browser binary, another
+// profile, a script debugger. A packaged app with DevTools off clears them
+// from its process environment first, once, so whoever starts it can't reopen
+// what it closed (laufey_common::WebView2EnvironmentOverridesToClear).
+void ClearWebView2EnvironmentOverrides() {
+  static const bool done = [] {
+    const bool packaged =
+        laufey_common::IsPackagedLaunch(!LaufeyFindColocatedRuntime().empty());
+    for (const std::string& name :
+         laufey_common::WebView2EnvironmentOverridesToClear(
+             packaged, laufey_common::LaunchInspectable())) {
+      std::wstring wname = SchemeUtf8ToWide(name);
+      if (GetEnvironmentVariableW(wname.c_str(), nullptr, 0) == 0)
+        continue;  // not set
+      std::cerr << "laufey: ignoring " << name
+                << " (a packaged app with DevTools off)" << std::endl;
+      SetEnvironmentVariableW(wname.c_str(), nullptr);
+    }
+    return true;
+  }();
+  (void)done;
+}
 
 }  // namespace
 
@@ -1150,6 +1175,7 @@ void WebView2Backend::CreateEnvironmentForWindow(
   static const std::wstring user_data_folder =
       laufey_common::Utf8ToWide(laufey_common::AppDataSubdir("WebView2"));
 
+  ClearWebView2EnvironmentOverrides();
   HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
       nullptr, user_data_folder.empty() ? nullptr : user_data_folder.c_str(),
       options.Get(),
@@ -1265,27 +1291,10 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // The file-drop observer (API 39): reports file drags over the
             // page to the host, the drop with its File objects, whose native
             // paths WebView2 reveals to the host only (ICoreWebView2File).
-            // Its `send` posts with a per-process token kept in the closure.
+            // Its `send` posts with a per-process token kept in the closure,
+            // through intrinsics bound before any page script runs.
             std::string dropScript =
-                "(function () {\n"
-                "  var wv = window.chrome && window.chrome.webview;\n"
-                "  if (!wv || window.top !== window) return;\n"
-                "  var post = wv.postMessage;\n"
-                "  var postX = wv.postMessageWithAdditionalObjects;\n"
-                "  var call = Function.prototype.call;\n"
-                "  var token = '" +
-                file_drop_token_ +
-                "';\n"
-                "  (" +
-                laufey_common::BuildDomFileDropObserverScript() +
-                ")(function (p, x, y, n, files) {\n"
-                "    var m = '{\"__laufeyFileDrop\":\"' + token + "
-                "'\",\"p\":' + (p | 0) + ',\"x\":' + (+x || 0) + "
-                "',\"y\":' + (+y || 0) + ',\"n\":' + (n | 0) + '}';\n"
-                "    if (files && postX) call.call(postX, wv, m, files);\n"
-                "    else call.call(post, wv, m);\n"
-                "  });\n"
-                "})();\n";
+                laufey_common::BuildWebView2FileDropScript(file_drop_token_);
             std::wstring wDropScript(dropScript.begin(), dropScript.end());
             state->webview->AddScriptToExecuteOnDocumentCreated(
                 wDropScript.c_str(), nullptr);
@@ -1631,9 +1640,11 @@ void WebView2Backend::ExecuteJs(uint32_t window_id, const std::string& script,
                 callback(nullptr, nullptr, callback_data);
                 return S_OK;
               }
-              // WebView2 returns the result as a JSON string
-              std::wstring wresult(resultJson);
-              std::string result(wresult.begin(), wresult.end());
+              // WebView2 returns the result as JSON in UTF-16. Convert it
+              // properly (a surrogate pair is one code point, an unpaired
+              // surrogate U+FFFD); it used to be narrowed code unit by code
+              // unit, which garbled every non-ASCII character.
+              std::string result = laufey_common::WideToUtf8(resultJson);
               auto val = json::ParseJson(result);
               if (!val)
                 val = laufey::Value::Null();

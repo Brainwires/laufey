@@ -3,6 +3,7 @@
 #ifndef LAUFEY_JSON_H_
 #define LAUFEY_JSON_H_
 
+#include "laufey_utf8.h"
 #include "webview_value.h"
 
 #include <climits>
