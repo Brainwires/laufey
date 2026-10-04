@@ -1370,7 +1370,8 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                       if (uriRaw) {
                         std::string url = laufey_common::WideToUtf8(uriRaw);
                         CoTaskMemFree(uriRaw);
-                        switch (DecideLaufeyPopup(url, userInitiated != FALSE)) {
+                        switch (
+                            DecideLaufeyPopup(url, userInitiated != FALSE)) {
                           case LaufeyPopupDecision::kOpenInBrowser:
                             OpenExternalURL(url);
                             break;

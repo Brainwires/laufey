@@ -247,14 +247,15 @@ std::string MakePrivateTempDir(const std::string& parent,
     const char* tmpdir = getenv("TMPDIR");
     base = tmpdir && IsAbsolutePath(tmpdir) ? tmpdir : "/tmp";
   }
-  std::string templ = JoinPath(StripTrailingSeparators(base), prefix + "XXXXXX");
+  std::string templ =
+      JoinPath(StripTrailingSeparators(base), prefix + "XXXXXX");
   std::vector<char> buf(templ.begin(), templ.end());
   buf.push_back('\0');
   // mkdtemp creates the directory 0700 with a name nobody could predict, and
   // fails rather than reuse anything already there.
   if (!mkdtemp(buf.data())) {
-    std::cerr << "laufey: could not create a private directory under \""
-              << base << "\": " << strerror(errno) << std::endl;
+    std::cerr << "laufey: could not create a private directory under \"" << base
+              << "\": " << strerror(errno) << std::endl;
     return std::string();
   }
   return std::string(buf.data());

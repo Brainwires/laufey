@@ -97,10 +97,10 @@ inline bool IsSchemeNameGrammar(const std::string& scheme) {
 // view-source). Schemes only the OS handles (mailto, tel, ...) stay allowed.
 inline bool IsReservedSchemeName(const std::string& scheme) {
   static const char* const kReserved[] = {
-      "about",       "blob",           "chrome", "chrome-extension",
-      "chrome-untrusted", "data",      "devtools", "file",
-      "filesystem",  "ftp",            "http",   "https",
-      "javascript",  "view-source",    "ws",     "wss",
+      "about", "blob",     "chrome",     "chrome-extension", "chrome-untrusted",
+      "data",  "devtools", "file",       "filesystem",       "ftp",
+      "http",  "https",    "javascript", "view-source",      "ws",
+      "wss",
   };
   const std::string normalized = NormalizeSchemeName(scheme);
   for (const char* reserved : kReserved) {
