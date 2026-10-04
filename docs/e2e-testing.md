@@ -871,10 +871,11 @@ that it says so). `--devtools-off` runs the DevTools part again under
 
 - **Global shortcuts** (see [global-shortcuts.md](global-shortcuts.md)): a real
   OS registration answered with the canonical form, listed, another spelling
-  refused as `ALREADY_REGISTERED`, `INVALID` for a modifier-less key and an
-  unknown key, a press through `test_trigger_shortcut` reaching the handler with
-  the canonical form, and a real key press: on Windows injected with `SendInput`
-  and arriving as `WM_HOTKEY`, on X11 injected with xdotool (XTEST) and matched
+  refused as `ALREADY_REGISTERED`, `INVALID` for a modifier-less printable key,
+  a navigation key alone or with Shift (`Escape`, `Shift+Up`) and an unknown
+  key, a press through `test_trigger_shortcut` reaching the handler with the
+  canonical form, and a real key press: on Windows injected with `SendInput` and
+  arriving as `WM_HOTKEY`, on X11 injected with xdotool (XTEST) and matched
   against the shortcut's key grab. Then the **conflict**: the battery starts a
   second copy of the backend (`LAUFEY_E2E_ONLY=shortcut-holder`, its own data
   directory) that registers a shortcut and reports through a file; this process
