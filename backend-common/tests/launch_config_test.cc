@@ -54,7 +54,8 @@ static LaunchConfig Parse(const std::string& text, size_t* warning_count) {
 static bool IsEmpty(const LaunchConfig& c) {
   return !c.has_app_id && !c.has_data_dir && !c.has_custom_schemes &&
          !c.has_single_instance && !c.single_instance && c.app_id.empty() &&
-         c.data_dir.empty() && c.custom_schemes.empty();
+         c.data_dir.empty() && c.custom_schemes.empty() &&
+         !c.has_passkey_rp_ids && c.passkey_rp_ids.empty();
 }
 
 static void TestValid() {
@@ -352,6 +353,45 @@ static void TestSingleInstance() {
   EXPECT(!warning.empty());
 }
 
+static void TestPasskeyRpIds() {
+  size_t w = 0;
+  LaunchConfig c = Parse("{}", &w);
+  EXPECT(w == 0 && !c.has_passkey_rp_ids && c.passkey_rp_ids.empty());
+  c = Parse("{\"passkeyRpIds\": [\"example.com\", \"Clerk.Example.COM\"]}", &w);
+  EXPECT(w == 0 && c.has_passkey_rp_ids);
+  // Entries are lowercased (RP IDs are domain names).
+  EXPECT(c.passkey_rp_ids.size() == 2 && c.passkey_rp_ids[0] == "example.com" &&
+         c.passkey_rp_ids[1] == "clerk.example.com");
+  // An empty list is valid: the app may use no relying party.
+  c = Parse("{\"passkeyRpIds\": []}", &w);
+  EXPECT(w == 0 && c.has_passkey_rp_ids && c.passkey_rp_ids.empty());
+  // Bad entries are skipped one by one: not a string, empty, a scheme, a
+  // port, a path, an IP address, a bad label; the rest are kept.
+  c = Parse(
+      "{\"passkeyRpIds\": [\"good.example\", 1, \"\", "
+      "\"https://example.com\", \"example.com:443\", \"example.com/x\", "
+      "\"192.168.0.1\", \"-bad.example\", \"a..b\", null, "
+      "\"also-good.example\"]}",
+      &w);
+  EXPECT(w == 9 && c.has_passkey_rp_ids);
+  EXPECT(c.passkey_rp_ids.size() == 2 &&
+         c.passkey_rp_ids[0] == "good.example" &&
+         c.passkey_rp_ids[1] == "also-good.example");
+  // Only an array counts; a wrong type leaves the key unset (no pin).
+  const char* wrong[] = {"{\"passkeyRpIds\": \"example.com\"}",
+                         "{\"passkeyRpIds\": {}}", "{\"passkeyRpIds\": null}"};
+  for (const char* text : wrong) {
+    c = Parse(text, &w);
+    EXPECT(w == 1 && !c.has_passkey_rp_ids && c.passkey_rp_ids.empty());
+  }
+  // The last duplicate wins.
+  c = Parse(
+      "{\"passkeyRpIds\": [\"a.example\"], \"passkeyRpIds\": [\"b.example\"]}",
+      &w);
+  EXPECT(w == 1 && c.passkey_rp_ids.size() == 1 &&
+         c.passkey_rp_ids[0] == "b.example");
+}
+
 static void TestPaths() {
   EXPECT(MacBundleResourcesDir("/Applications/My App.app/Contents/MacOS/My") ==
          "/Applications/My App.app/Contents/Resources");
@@ -473,6 +513,7 @@ int main() {
   TestPinnedAppId();
   TestSingleInstance();
   TestInspectable();
+  TestPasskeyRpIds();
   TestPaths();
   TestProcessLaunchConfig();
   if (g_failures) {

@@ -16,6 +16,7 @@
 #include "json_reader.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_backend_common.h"
+#include "laufey_passkey_rp_id.h"
 #include "laufey_scheme_registry.h"
 
 #ifdef _WIN32
@@ -48,7 +49,8 @@ using json::TypeName;
 //
 // Values are validated with the same rules as their environment variables:
 // IsSafeAppId (appId), IsAbsolutePath (dataDir) and IsValidSchemeName
-// (customSchemes entries).
+// (customSchemes entries). passkeyRpIds entries (no environment variable)
+// follow the passkey options parser's IsValidPasskeyRpId, after lowercasing.
 
 void Warn(std::vector<std::string>* warnings, const std::string& message) {
   if (warnings)
@@ -274,6 +276,32 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
           continue;
         }
         config.bridge_origins.push_back(item.string);
+      }
+    } else if (key == "passkeyRpIds") {
+      config.has_passkey_rp_ids = false;
+      config.passkey_rp_ids.clear();
+      if (value.type != JsonValue::Type::kArray) {
+        Warn(warnings, std::string("\"passkeyRpIds\" must be an array of "
+                                   "strings, not ") +
+                           TypeName(value.type) + "; ignoring it");
+        continue;
+      }
+      config.has_passkey_rp_ids = true;
+      for (const JsonValue& item : value.array) {
+        if (!CheckString("passkeyRpIds[]", item, warnings))
+          continue;
+        std::string rp_id = item.string;
+        for (char& c : rp_id) {
+          if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (!IsValidPasskeyRpId(rp_id)) {
+          Warn(warnings, "\"passkeyRpIds\" entry \"" + item.string +
+                             "\" is not a valid RP ID (a domain name, without "
+                             "a scheme, port or path); ignoring it");
+          continue;
+        }
+        config.passkey_rp_ids.push_back(rp_id);
       }
     } else {
       Warn(warnings, "unknown key \"" + key + "\"; ignoring it");

@@ -30,11 +30,13 @@ The directory comes from the running executable's real path
   "dataDir": "/absolute/path",
   "singleInstance": true,
   "inspectable": false,
-  "bridgeOrigins": ["myapp://app"]
+  "bridgeOrigins": ["myapp://app"],
+  "passkeyRpIds": ["example.com"]
 }
 ```
 
-Every key is optional, and each key stands in for one environment variable:
+Every key is optional, and each key but `passkeyRpIds` and `bridgeOrigins`
+stands in for one environment variable:
 
 | Key              | Environment variable     | Value                                                             |
 | ---------------- | ------------------------ | ----------------------------------------------------------------- |
@@ -44,6 +46,7 @@ Every key is optional, and each key stands in for one environment variable:
 | `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `inspectable`    | `LAUFEY_INSPECTABLE`     | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `bridgeOrigins`  | none (file only)         | array of origins, `<scheme>://*` or `*` (see below)               |
+| `passkeyRpIds`   | none (file only)         | array of RP IDs: domain names, no scheme, port or path            |
 
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
@@ -68,6 +71,14 @@ what its variable does:
   no remote debugging, and `open_devtools` does nothing
   ([DevTools](devtools.md)). Release builds of an app usually ship it `false`.
   The WebView and CEF backends read it.
+- `passkeyRpIds` lists the relying parties the app's native
+  [passkey](passkeys.md) ceremonies may name. With the key, a request whose RP
+  ID (`rp.id` for a registration, `rpId` for an authentication) is not in the
+  list is refused with `invalid_rp` before any OS UI shows; names match without
+  regard to case, and an empty list refuses every request. Without the key any
+  RP ID goes to the OS, as before. It has no environment variable: only the
+  installed app decides. The macOS and Windows backends (WebView and CEF) read
+  it.
 
 - `bridgeOrigins` (API 44) pins the documents the JavaScript bridge serves
   ([JavaScript interop](javascript-interop.md#which-documents-can-call)). Each
@@ -148,8 +159,10 @@ A problem with the file never stops the app. It is reported on stderr as
 - A value of the wrong type, an empty string, a string containing NUL, or a
   value that breaks the rules above (an unsafe `appId`, a relative `dataDir`) is
   reported, and that key is ignored. It behaves as if it were absent.
-- An invalid entry in `customSchemes` is reported and skipped. The other entries
-  are kept.
+- An invalid entry in `customSchemes` or `passkeyRpIds` is reported and skipped.
+  The other entries are kept. A `passkeyRpIds` entry is lowercased first, then
+  held to the passkey parser's RP ID rule (a domain name in LDH labels, not an
+  IP address).
 - If a key appears more than once, the last one wins, and this is reported.
 
 ## Trust

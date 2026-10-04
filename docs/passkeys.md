@@ -104,6 +104,22 @@ The backend parses them strictly before anything reaches the OS:
 A missing or malformed RP ID is `invalid_rp`; any other problem is `unknown`
 with a message naming the member (never its value).
 
+### Pinning the relying parties
+
+An app can list the RP IDs it uses in its [launch file](launch-config.md):
+
+```json
+{ "appId": "com.example.app", "passkeyRpIds": ["example.com"] }
+```
+
+With `passkeyRpIds` present, a request whose RP ID is not in the list (compared
+without regard to case) is refused with `invalid_rp` before it takes the
+one-ceremony slot or shows any OS UI; an empty list refuses every request.
+Without the key every RP ID that passes the parser goes to the OS, as before.
+The key has no environment variable: the list ships with the installed app and
+nothing at run time can widen it. Ship it on Windows in particular, where the OS
+does not tie RP IDs to the app.
+
 ### Result
 
 ```json
@@ -134,7 +150,7 @@ An authentication's `response` holds `clientDataJSON`, `authenticatorData`,
 | `code`          | Meaning                                                         |
 | --------------- | --------------------------------------------------------------- |
 | `cancelled`     | The user dismissed the OS UI, or the anchor window closed.      |
-| `invalid_rp`    | The RP ID is malformed, or the OS won't let this app use it.    |
+| `invalid_rp`    | The RP ID is malformed, not in `passkeyRpIds`, or OS-refused.   |
 | `not_supported` | No platform API (Linux, Winit, macOS < 12, Windows < 1903).     |
 | `timeout`       | The options' `timeout` passed.                                  |
 | `unknown`       | Anything else: invalid options, busy, an OS error (its message) |
@@ -266,8 +282,9 @@ WebAuthn where the origin allows it). The Winit backend leaves both pointers
   to the app at all, so a page that can reach it could ask for an assertion for
   any site.
 - On macOS the OS enforces the RP ↔ app association (entitlement + AASA); on
-  Windows it doesn't. Check the RP ID against the ones the app expects before
-  calling.
+  Windows it doesn't. List the app's RP IDs in `passkeyRpIds`
+  ([above](#pinning-the-relying-parties)) so the backend refuses any other, and
+  check the RP ID against the ones the app expects before calling.
 - Nothing in this path logs: challenges, user handles and credentials never
   reach stderr, and error messages name members, not their values.
 - One ceremony at a time keeps a second request from hijacking the OS UI the
@@ -277,12 +294,12 @@ WebAuthn where the origin allows it). The Winit backend leaves both pointers
 
 `backend-common/tests/passkey_test.cc` (ctest `laufey_passkey_test`) covers the
 parser against byte-for-byte output of `@clerk/electron`'s serializers,
-base64url / UTF-8 / RP ID rules, the envelopes, and the ceremony lifecycle (one
-at a time, exactly-once delivery, timeout, abort, window close, concurrent
-requests). `passkey_mac_test.mm` covers the macOS error mapping. The native e2e
-battery checks the capabilities per OS, that Linux answers `not_supported`, and
-that macOS / Windows refuse malformed options and answer a real OS request
-exactly once.
+base64url / UTF-8 / RP ID rules, the `passkeyRpIds` pin, the envelopes, and the
+ceremony lifecycle (one at a time, exactly-once delivery, timeout, abort, window
+close, concurrent requests). `passkey_mac_test.mm` covers the macOS error
+mapping. The native e2e battery checks the capabilities per OS, that Linux
+answers `not_supported`, and that macOS / Windows refuse malformed options and
+answer a real OS request exactly once.
 
 A real ceremony needs a person at the machine (and on macOS a signed, associated
 build): run one against a test RP from a build of the app with the entitlement,

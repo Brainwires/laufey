@@ -36,6 +36,8 @@
 #include <string>
 #include <vector>
 
+#include "laufey_passkey_rp_id.h"
+
 // Must live outside any namespace (see laufey_backend_common.h).
 #if defined(__APPLE__) && defined(__OBJC__)
 @class NSError;
@@ -138,12 +140,7 @@ bool ParsePasskeyRequestOptions(const std::string& json,
                                 PasskeyRequestOptions* out,
                                 PasskeyError* error);
 
-// A WebAuthn RP ID this layer passes to the OS: a lowercase ASCII domain
-// name (LDH labels of 1..63 characters, at most 253 characters, no leading /
-// trailing dot or hyphen) that is not an IPv4 address. Internationalized
-// names must be given in their A-label (punycode) form. The OS still decides
-// whether the app may use it (macOS: the associated domain).
-bool IsValidPasskeyRpId(const std::string& rp_id);
+// IsValidPasskeyRpId (the RP ID rule) is in laufey_passkey_rp_id.h.
 
 // base64url without padding. Decoding accepts up to two trailing '=' and
 // rejects any other character, a length of 1 mod 4, and non-zero trailing
@@ -259,14 +256,29 @@ class PasskeyCeremony : public std::enable_shared_from_this<PasskeyCeremony> {
 };
 
 // Validate a request and take the app-wide slot. On any failure (NULL or
-// oversized options, not UTF-8, unknown kind, malformed options, another
-// request in progress) the error envelope is delivered through `callback`
+// oversized options, not UTF-8, unknown kind, malformed options, an RP ID
+// the launch file's "passkeyRpIds" doesn't list, another request in
+// progress) the error envelope is delivered through `callback`
 // synchronously, on the calling thread, and nullptr is returned. A NULL
 // `callback` makes the call a no-op (returns nullptr).
 std::shared_ptr<PasskeyCeremony> PasskeyBegin(uint32_t kind,
                                               const char* options_json,
                                               laufey_passkey_result_fn callback,
                                               void* user_data);
+
+// Whether `rp_id` is one of `allowed` (the launch file's "passkeyRpIds"),
+// ignoring ASCII case.
+bool IsPasskeyRpIdAllowed(const std::string& rp_id,
+                          const std::vector<std::string>& allowed);
+
+// PasskeyBegin with the app's relying parties given, for tests: with
+// `allowed_rp_ids` non-null, a ceremony whose RP ID (rp.id / rpId) is not in
+// it is refused with invalid_rp before it takes the slot or reaches the OS;
+// null allows any. PasskeyBegin passes the launch file's "passkeyRpIds" when
+// the file has the key (ProcessLaunchConfig), else null.
+std::shared_ptr<PasskeyCeremony> PasskeyBeginWithRpIds(
+    uint32_t kind, const char* options_json, laufey_passkey_result_fn callback,
+    void* user_data, const std::vector<std::string>* allowed_rp_ids);
 
 // Deliver an error envelope without a ceremony (e.g. not_supported on a
 // platform without a passkey API). No-op for a NULL callback.

@@ -20,7 +20,8 @@
 //     "customSchemes": ["myapp"],
 //     "dataDir": "/absolute/path",
 //     "singleInstance": true,
-//     "inspectable": false }
+//     "inspectable": false,
+//     "passkeyRpIds": ["example.com"] }
 //
 // Every key is optional. Each key stands in for its environment variable: an
 // environment variable that is set (non-empty) wins over the file, key by
@@ -67,6 +68,11 @@ struct LaunchConfig {
   // entries ("*", "<scheme>://*" or an origin); see laufey_bridge_origin.h.
   bool has_bridge_origins = false;
   std::vector<std::string> bridge_origins;
+  // The relying parties native passkey ceremonies may name (lowercased), from
+  // "passkeyRpIds"; it has no environment variable. With the key, a ceremony
+  // for any other RP ID is refused (an empty list refuses every one).
+  bool has_passkey_rp_ids = false;
+  std::vector<std::string> passkey_rp_ids;
 };
 
 // Parses and validates the text of a launch file. Reads nothing from the
@@ -74,7 +80,9 @@ struct LaunchConfig {
 // object) yields an empty config; an unknown key or an invalid value is
 // skipped. Values are held to the same rules as the environment variables:
 // IsSafeAppId for "appId", IsAbsolutePath for "dataDir", IsValidSchemeName
-// for each "customSchemes" entry. Appends a message to `warnings` (if
+// for each "customSchemes" entry; each "passkeyRpIds" entry is lowercased and
+// must pass IsValidPasskeyRpId (laufey_passkey_rp_id.h). An invalid list
+// entry is skipped, the rest kept. Appends a message to `warnings` (if
 // non-null) for each problem.
 LaunchConfig ParseLaunchConfig(const std::string& text,
                                std::vector<std::string>* warnings);

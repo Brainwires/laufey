@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "json_reader.h"
+#include "laufey_launch_config.h"
 #include "laufey_single_instance.h"  // IsValidUtf8, SanitizeUtf8
 
 namespace laufey_common {
@@ -434,38 +435,6 @@ bool Base64UrlDecode(const std::string& in, std::vector<uint8_t>* out) {
   return true;
 }
 
-bool IsValidPasskeyRpId(const std::string& rp_id) {
-  if (rp_id.empty() || rp_id.size() > 253)
-    return false;
-  size_t label_start = 0;
-  bool last_label_numeric = true;
-  for (size_t i = 0; i <= rp_id.size(); ++i) {
-    if (i == rp_id.size() || rp_id[i] == '.') {
-      size_t len = i - label_start;
-      if (len == 0 || len > 63)
-        return false;
-      if (rp_id[label_start] == '-' || rp_id[i - 1] == '-')
-        return false;
-      last_label_numeric = true;
-      for (size_t k = label_start; k < i; ++k) {
-        if (rp_id[k] < '0' || rp_id[k] > '9') {
-          last_label_numeric = false;
-          break;
-        }
-      }
-      label_start = i + 1;
-      continue;
-    }
-    char c = rp_id[i];
-    bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
-    if (!ok)
-      return false;
-  }
-  // An all-numeric top label means an IPv4 address (or a bare number), which
-  // is not a domain.
-  return !last_label_numeric;
-}
-
 bool ParsePasskeyCreationOptions(const std::string& text,
                                  PasskeyCreationOptions* out,
                                  PasskeyError* error) {
@@ -793,10 +762,36 @@ void PasskeyReportNotSupported(laufey_passkey_result_fn callback,
                      "Native passkeys are not supported on this platform.");
 }
 
+bool IsPasskeyRpIdAllowed(const std::string& rp_id,
+                          const std::vector<std::string>& allowed) {
+  auto lower = [](char c) {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+  };
+  for (const std::string& candidate : allowed) {
+    if (candidate.size() != rp_id.size())
+      continue;
+    bool same = true;
+    for (size_t i = 0; same && i < rp_id.size(); ++i)
+      same = lower(candidate[i]) == lower(rp_id[i]);
+    if (same)
+      return true;
+  }
+  return false;
+}
+
 std::shared_ptr<PasskeyCeremony> PasskeyBegin(uint32_t kind,
                                               const char* options_json,
                                               laufey_passkey_result_fn callback,
                                               void* user_data) {
+  const LaunchConfig& launch = ProcessLaunchConfig();
+  return PasskeyBeginWithRpIds(
+      kind, options_json, callback, user_data,
+      launch.has_passkey_rp_ids ? &launch.passkey_rp_ids : nullptr);
+}
+
+std::shared_ptr<PasskeyCeremony> PasskeyBeginWithRpIds(
+    uint32_t kind, const char* options_json, laufey_passkey_result_fn callback,
+    void* user_data, const std::vector<std::string>* allowed_rp_ids) {
   if (!callback)
     return nullptr;
   if (kind != LAUFEY_PASSKEY_CREATE && kind != LAUFEY_PASSKEY_GET) {
@@ -832,6 +827,20 @@ std::shared_ptr<PasskeyCeremony> PasskeyBegin(uint32_t kind,
     // quiet. (ReleaseSlot is a no-op for a ceremony that doesn't hold it.)
     ceremony->Finish(PasskeyErrorEnvelope(error.code, error.message));
     return nullptr;
+  }
+  // The launch file pins the relying parties the app may use: on Windows
+  // nothing else ties an RP ID to the app, so without this any code that can
+  // reach passkey_request could ask for any site's credential.
+  if (allowed_rp_ids) {
+    const std::string& rp_id = ceremony->is_create()
+                                   ? ceremony->creation().rp_id
+                                   : ceremony->request().rp_id;
+    if (!IsPasskeyRpIdAllowed(rp_id, *allowed_rp_ids)) {
+      ceremony->Finish(PasskeyErrorEnvelope(
+          kPasskeyInvalidRp,
+          "the RP ID is not one of the app's passkeyRpIds (launch file)"));
+      return nullptr;
+    }
   }
 
   {
