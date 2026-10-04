@@ -241,16 +241,37 @@ std::string CanonicalAccelerator(const Accelerator& a) {
 }
 
 bool IsAllowedGlobalShortcut(const Accelerator& a) {
-  // Keys used while typing: printable ones, the whole numpad, and the
-  // editing keys (Enter, Tab, Backspace, Delete). A global shortcut on one of
-  // them alone would see (and swallow) what the user types in other apps.
-  bool typing =
-      a.kind == KeyKind::kLetter || a.kind == KeyKind::kDigit ||
-      a.kind == KeyKind::kPunct || a.kind == KeyKind::kNumpad ||
-      (a.kind == KeyKind::kNamed &&
-       (a.named == NamedKey::kSpace || a.named == NamedKey::kEnter ||
-        a.named == NamedKey::kTab || a.named == NamedKey::kBackspace ||
-        a.named == NamedKey::kDelete));
+  // Keys used while typing: printable ones, the whole numpad, the editing
+  // keys (Enter, Tab, Backspace, Delete, Insert) and the navigation keys
+  // (the arrows, Home, End, PageUp, PageDown, Escape). A global shortcut on
+  // one of them alone (or with Shift, which selects text) would see (and
+  // swallow) what the user types and how they move in other apps. There is no
+  // way to ask for one anyway: the C ABI has no such option.
+  bool typing = a.kind == KeyKind::kLetter || a.kind == KeyKind::kDigit ||
+                a.kind == KeyKind::kPunct || a.kind == KeyKind::kNumpad;
+  if (a.kind == KeyKind::kNamed) {
+    switch (a.named) {
+      case NamedKey::kSpace:
+      case NamedKey::kEnter:
+      case NamedKey::kTab:
+      case NamedKey::kBackspace:
+      case NamedKey::kDelete:
+      case NamedKey::kInsert:
+      case NamedKey::kEscape:
+      case NamedKey::kUp:
+      case NamedKey::kDown:
+      case NamedKey::kLeft:
+      case NamedKey::kRight:
+      case NamedKey::kHome:
+      case NamedKey::kEnd:
+      case NamedKey::kPageUp:
+      case NamedKey::kPageDown:
+        typing = true;
+        break;
+      default:
+        break;
+    }
+  }
   if (!typing)
     return true;
   return (a.mods & ~kModShift) != 0;

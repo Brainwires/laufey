@@ -108,6 +108,12 @@ async fn shortcut_checks(caps: &laufey::SystemCapabilities) {
     laufey::register_shortcut("K").await == Err(ShortcutError::Invalid),
   );
   check(
+    "a navigation key without a modifier is INVALID",
+    laufey::register_shortcut("Escape").await == Err(ShortcutError::Invalid)
+      && laufey::register_shortcut("Shift+Up").await
+        == Err(ShortcutError::Invalid),
+  );
+  check(
     "an unknown key is INVALID",
     laufey::register_shortcut("Ctrl+Nope").await == Err(ShortcutError::Invalid),
   );

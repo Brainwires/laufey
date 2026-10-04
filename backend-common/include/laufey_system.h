@@ -108,9 +108,10 @@ bool ParseAccelerator(const std::string& text, bool for_mac, Accelerator* out,
 std::string CanonicalAccelerator(const Accelerator& accel);
 
 // Whether a parsed accelerator may be a global shortcut: a key used while
-// typing (a letter, digit, punctuation, Space, any numpad key, Enter, Tab,
-// Backspace, Delete) needs a modifier other than Shift, so a shortcut can't
-// swallow (or observe) ordinary typing in other apps.
+// typing or moving around (a letter, digit, punctuation, Space, any numpad
+// key, Enter, Tab, Backspace, Delete, Insert, Escape, an arrow, Home, End,
+// PageUp, PageDown) needs a modifier other than Shift, so a shortcut can't
+// swallow (or observe) ordinary typing and navigation in other apps.
 bool IsAllowedGlobalShortcut(const Accelerator& accel);
 
 // --- Global shortcuts ----------------------------------------------------------
