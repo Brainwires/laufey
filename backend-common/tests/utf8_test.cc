@@ -99,7 +99,8 @@ static void TestJsonEscapes() {
 #ifdef _WIN32
 static void TestWideToUtf8() {
   using laufey_common::WideToUtf8;
-  EXPECT(WideToUtf8(L"\"café\"") == "\"caf\xC3\xA9\"");
+  const wchar_t cafe[] = {L'"', L'c', L'a', L'f', 0x00E9, L'"', 0};
+  EXPECT(WideToUtf8(cafe) == "\"caf\xC3\xA9\"");
   const wchar_t pair[] = {0xD83D, 0xDE00, 0};
   EXPECT(WideToUtf8(pair) == "\xF0\x9F\x98\x80");
   const wchar_t lone_high[] = {L'a', 0xD800, L'b', 0};
