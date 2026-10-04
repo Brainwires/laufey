@@ -38,6 +38,16 @@ if(NOT PLATFORM_IOS)
   enable_testing()
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../backend-common
                    ${CMAKE_BINARY_DIR}/backend-common)
+
+  # The bridge's JSON parser (src/laufey_json.h) against hostile input.
+  if(LAUFEY_BUILD_TESTS)
+    add_executable(laufey_json_test tests/laufey_json_test.cc)
+    target_include_directories(laufey_json_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(laufey_json_test PRIVATE laufey_backend_common)
+    target_compile_features(laufey_json_test PRIVATE cxx_std_17)
+    add_test(NAME laufey_json_test COMMAND laufey_json_test)
+  endif()
 endif()
 
 set(LAUFEY_SRCS_COMMON

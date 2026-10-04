@@ -1613,6 +1613,8 @@ void WebView2Backend::ExecuteJs(uint32_t window_id, const std::string& script,
               std::wstring wresult(resultJson);
               std::string result(wresult.begin(), wresult.end());
               auto val = json::ParseJson(result);
+              if (!val)
+                val = laufey::Value::Null();
               laufey_value laufey(val);
               callback(&laufey, nullptr, callback_data);
               return S_OK;

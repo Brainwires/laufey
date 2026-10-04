@@ -1354,6 +1354,8 @@ static void on_execute_js_finished(GObject* source, GAsyncResult* result,
       gchar* json = jsc_value_to_json(value, 0);
       if (json) {
         auto val = json::ParseJson(json);
+        if (!val)
+          val = laufey::Value::Null();
         laufey_value laufey(val);
         cb_data->callback(&laufey, nullptr, cb_data->user_data);
         g_free(json);
