@@ -375,3 +375,31 @@ first and ends the loop when the last one is gone (macOS stops `[NSApp run]`,
 which `CefQuitMessageLoop` did not); WebView2 posts the quit to its UI thread
 (it used to post it to the calling thread's queue); Winit now calls the
 runtime's shutdown once its loop has ended, like the other backends.
+
+## External links and popups
+
+A web-engine backend never opens a second web view for the page. A link to
+another origin and a request for a new window (`window.open()`,
+`<a target="_blank">`) open in the user's browser instead, under these rules:
+
+- Only an absolute `http:` or `https:` URL with a host goes to the browser.
+  Every other destination (`file:`, a custom scheme, `javascript:`,
+  `about:blank`) is dropped.
+- Only a request a user action started does. A page script that calls
+  `window.open()` from a timer, on load or in a loop, or clicks a link with
+  `element.click()`, opens nothing; the backend logs
+  `laufey: not opening <url> in the browser: the page asked without a user gesture`.
+  Each engine reports the gesture its own way: CEF's `OnBeforePopup`
+  `user_gesture`, WebView2's `IsUserInitiated`, WebKitGTK's
+  `webkit_navigation_action_is_user_gesture`. WKWebView has no public flag, so
+  the macOS backend turns `javaScriptCanOpenWindowsAutomatically` off (macOS
+  defaults it on) and WebKit's popup blocker drops a request without a gesture
+  before it reaches the backend.
+- A same-window navigation to another origin is redirected only when it is
+  user-initiated (the Navigation API's `userInitiated`) or, on WKWebView, which
+  lacks that API, a trusted click on a link.
+
+A script can also call the reserved `__laufeyOpenExternal(url)` method of the
+bridge namespace directly, without a gesture. The backend applies the URL rule
+to that call (so it can only ever open an `http(s)` page in the browser) but
+cannot see a gesture there, since the call is an ordinary bridge message.

@@ -946,13 +946,18 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
 // `target="_blank"` and `window.open()` request a new browsing context, which
 // the Navigation API interceptor never sees. WKWebView has no popup support, so
 // route http(s) destinations to the OS browser and create no new webview.
+// WKNavigationAction says nothing public about a user gesture, but with
+// javaScriptCanOpenWindowsAutomatically off (set on every configuration)
+// WebKit's popup blocker calls this only for a request a user action started
+// (laufey_external_links.h).
 - (WKWebView*)webView:(WKWebView*)webView
     createWebViewWithConfiguration:(WKWebViewConfiguration*)configuration
                forNavigationAction:(WKNavigationAction*)navigationAction
                     windowFeatures:(WKWindowFeatures*)windowFeatures {
   NSURL* url = navigationAction.request.URL;
-  if (url && ([url.scheme isEqualToString:@"http"] ||
-              [url.scheme isEqualToString:@"https"])) {
+  NSString* absolute = url.absoluteString;
+  if (absolute && DecideLaufeyPopup(absolute.UTF8String, true) ==
+                      LaufeyPopupDecision::kOpenInBrowser) {
     [[NSWorkspace sharedWorkspace] openURL:url];
   }
   return nil;
@@ -1604,6 +1609,10 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       if (WKWebsiteDataStore* store = LaufeyWebsiteDataStore()) {
         config.websiteDataStore = store;
       }
+      // window.open() without a user gesture is blocked by WebKit (the
+      // default on macOS lets a page open windows at will), so the
+      // createWebView hook only sees requests a user action started.
+      config.preferences.javaScriptCanOpenWindowsAutomatically = NO;
       [config.userContentController addScriptMessageHandler:handler
                                                        name:@"laufey"];
 

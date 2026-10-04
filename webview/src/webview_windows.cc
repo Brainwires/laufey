@@ -1345,21 +1345,35 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // `target="_blank"` / `window.open()` request a new window, which
             // the Navigation API interceptor never sees. WebView2 would spawn a
             // popup webview; instead route http(s) destinations to the OS
-            // browser and mark the request handled so no popup is created.
+            // browser when a user action started the request
+            // (laufey_external_links.h), and mark the request handled so no
+            // popup is created.
             state->webview->add_NewWindowRequested(
                 Callback<ICoreWebView2NewWindowRequestedEventHandler>(
-                    [](ICoreWebView2* sender,
-                       ICoreWebView2NewWindowRequestedEventArgs* args)
+                    [this](ICoreWebView2* sender,
+                           ICoreWebView2NewWindowRequestedEventArgs* args)
                         -> HRESULT {
                       LPWSTR uriRaw = nullptr;
                       args->get_Uri(&uriRaw);
+                      BOOL userInitiated = FALSE;
+                      if (FAILED(args->get_IsUserInitiated(&userInitiated)))
+                        userInitiated = FALSE;
                       if (uriRaw) {
-                        if (wcsncmp(uriRaw, L"http://", 7) == 0 ||
-                            wcsncmp(uriRaw, L"https://", 8) == 0) {
-                          ShellExecuteW(nullptr, L"open", uriRaw, nullptr,
-                                        nullptr, SW_SHOWNORMAL);
-                        }
+                        std::string url = laufey_common::WideToUtf8(uriRaw);
                         CoTaskMemFree(uriRaw);
+                        switch (DecideLaufeyPopup(url, userInitiated != FALSE)) {
+                          case LaufeyPopupDecision::kOpenInBrowser:
+                            OpenExternalURL(url);
+                            break;
+                          case LaufeyPopupDecision::kBlockedNoGesture:
+                            std::cerr << "laufey: not opening " << url
+                                      << " in the browser: the page asked "
+                                         "without a user gesture"
+                                      << std::endl;
+                            break;
+                          case LaufeyPopupDecision::kIgnored:
+                            break;
+                        }
                       }
                       args->put_Handled(TRUE);
                       return S_OK;

@@ -550,15 +550,31 @@ static void on_load_changed(WebKitWebView* /*webview*/,
 // Fired when the page requests a new webview (`target="_blank"` or
 // `window.open()`). These never reach the Navigation API interceptor, so route
 // http(s) destinations to the OS browser and create no new webview.
+// `target="_blank"` / `window.open()`: no popup web view; an http(s)
+// destination opens in the OS browser when a user action started the request
+// (laufey_external_links.h). WebKitGTK's own popup blocker
+// (javascript-can-open-windows-automatically, off by default) already drops
+// most requests without one; the gesture check here covers the rest.
 static WebKitWebView* on_create(WebKitWebView* /*webview*/,
                                 WebKitNavigationAction* navigation_action,
                                 gpointer /*user_data*/) {
   WebKitURIRequest* req =
       webkit_navigation_action_get_request(navigation_action);
   const char* uri = req ? webkit_uri_request_get_uri(req) : nullptr;
-  if (uri &&
-      (g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://"))) {
-    g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
+  if (!uri)
+    return nullptr;
+  bool gesture = webkit_navigation_action_is_user_gesture(navigation_action);
+  switch (DecideLaufeyPopup(uri, gesture)) {
+    case LaufeyPopupDecision::kOpenInBrowser:
+      g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
+      break;
+    case LaufeyPopupDecision::kBlockedNoGesture:
+      std::cerr << "laufey: not opening " << uri
+                << " in the browser: the page asked without a user gesture"
+                << std::endl;
+      break;
+    case LaufeyPopupDecision::kIgnored:
+      break;
   }
   return nullptr;
 }
