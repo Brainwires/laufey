@@ -249,9 +249,12 @@ while IFS= read -r line; do second_expect+=("$line"); done \
 write_launch_file "$(printf '{ "appId": "%s", "dataDir": "%s", "singleInstance": true }' \
   "$app_id" "$(json_path "$scratch/data-primary")")"
 
+# The primary stays up until released (after the worker launch below), so
+# that launch meets a held lock.
 start primary \
   "${cold_expect[@]}" "${second_expect[@]}" \
-  LAUFEY_E2E_SI_SECOND_CWD="$cwd_native" -- "${cold_args[@]}"
+  LAUFEY_E2E_SI_SECOND_CWD="$cwd_native" \
+  LAUFEY_E2E_SI_HOLD_FILE="$(native "$scratch/release-primary")" -- "${cold_args[@]}"
 primary_pid=$started_pid
 if wait_for primary '^\[e2e\] ready' 90; then
   direct second "$cwd_dir" LAUFEY_SINGLE_INSTANCE=0 \
@@ -270,7 +273,9 @@ if wait_for primary '^\[e2e\] ready' 90; then
   # The lock is held: a worker launch must still run (headless, no window),
   # not be forwarded to the primary as a second instance.
   direct worker "$cwd_dir" -- run worker-script.ts worker-arg
-  if [ "$direct_rc" = 0 ] &&
+  if ! kill -0 "$primary_pid" 2>/dev/null; then
+    fail "the primary exited before the worker launch finished"
+  elif [ "$direct_rc" = 0 ] &&
     grep -q '^\[e2e\] headless worker args=\["run", "worker-script.ts", "worker-arg"\]' \
       "$scratch/logs/worker.log"; then
     pass "worker launch (run <script>) ran headless while the primary holds the lock (${direct_secs}s)"
@@ -280,6 +285,7 @@ if wait_for primary '^\[e2e\] ready' 90; then
 else
   fail "primary never became ready"
 fi
+touch "$scratch/release-primary"
 finish primary "$primary_pid" 60
 
 # Without an app id in the file, LAUFEY_SINGLE_INSTANCE=0 wins over its
