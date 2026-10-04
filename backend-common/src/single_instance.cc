@@ -301,8 +301,27 @@ std::string SingleInstancePipeName(const std::string& app_id,
 // --- Startup
 // -------------------------------------------------------------------
 
+bool IsRuntimeHelperLaunch(
+    const std::vector<std::string>& args,
+    const std::function<std::string(const char*)>& env) {
+  if (!args.empty() && args[0] == "run")
+    return true;
+  for (const char* name : {"DENO_INTERNAL_CHILD_ENTRYPOINT", "NODE_CHANNEL_FD",
+                           "NEXT_PRIVATE_WORKER"}) {
+    if (!env(name).empty())
+      return true;
+  }
+  return false;
+}
+
 bool SingleInstanceStartup(int argc, char** argv, int* exit_code) {
   if (!LaunchSingleInstance())
+    return true;
+  // The runtime's own helpers (an update helper, a forked worker) start from
+  // the app's executable: they are not a second launch of the app, so they
+  // neither take the lock nor get forwarded (and exit) here.
+  if (IsRuntimeHelperLaunch(CurrentProcessInvocation(argc, argv).args,
+                            [](const char* name) { return GetEnvUtf8(name); }))
     return true;
   std::string app_id = LaunchAppId();
   if (app_id.empty() || !IsSafeAppId(app_id)) {
