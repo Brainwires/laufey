@@ -653,24 +653,6 @@ static int run_headless(const std::string& runtimePath) {
   return 0;
 }
 
-static bool is_forked_worker() {
-  return getenv("NODE_CHANNEL_FD") != nullptr ||
-         getenv("NEXT_PRIVATE_WORKER") != nullptr;
-}
-
-static bool is_cli_worker_command(int argc, char* argv[]) {
-  if (argc < 3 || strcmp(argv[1], "run") != 0) {
-    return false;
-  }
-  for (int i = 2; i < argc; ++i) {
-    if (argv[i][0] == '-') {
-      continue;
-    }
-    return true;
-  }
-  return false;
-}
-
 // Combined app that handles both browser and renderer processes (single-exe
 // model)
 class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
@@ -855,7 +837,8 @@ int main(int argc, char* argv[]) {
   }
 
   // Check for headless / forked worker mode (skip CEF entirely)
-  if (is_forked_worker() || is_cli_worker_command(argc, argv)) {
+  if (laufey_common::IsHeadlessWorkerLaunch(
+          std::vector<std::string>(argv + 1, argv + argc))) {
     return run_headless(g_runtime_path);
   }
 

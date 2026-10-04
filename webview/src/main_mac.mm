@@ -198,26 +198,6 @@ static int run_headless(const std::string& path) {
   return 0;
 }
 
-static bool is_cli_worker_command(int argc, char* argv[]) {
-  if (argc < 3 || strcmp(argv[1], "run") != 0) {
-    return false;
-  }
-
-  for (int i = 2; i < argc; ++i) {
-    if (argv[i][0] == '-') {
-      continue;
-    }
-    return true;
-  }
-
-  return false;
-}
-
-static bool is_forked_worker() {
-  return getenv("NODE_CHANNEL_FD") != nullptr ||
-         getenv("NEXT_PRIVATE_WORKER") != nullptr;
-}
-
 // The runtime library to load. A packaged app (a launch file, or a runtime
 // it ships: Contents/Frameworks/libruntime.dylib or
 // Contents/MacOS/libruntime.dylib in the bundle, or <executable>.dylib next
@@ -254,7 +234,8 @@ int main(int argc, char* argv[]) {
   const std::string runtimePath = ResolveMacRuntimePath(argc, argv);
 
   // Forked worker processes should not create a window.
-  if (is_forked_worker() || is_cli_worker_command(argc, argv)) {
+  if (laufey_common::IsHeadlessWorkerLaunch(
+          std::vector<std::string>(argv + 1, argv + argc))) {
     return run_headless(runtimePath);
   }
 
