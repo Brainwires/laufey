@@ -16,6 +16,7 @@
 #else
 #include <errno.h>
 #include <pwd.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cstdlib>
@@ -237,6 +238,28 @@ bool EnsureDirectory(const std::string& path) {
   }
   return true;
 }
+
+#ifndef _WIN32
+std::string MakePrivateTempDir(const std::string& parent,
+                               const std::string& prefix) {
+  std::string base = parent;
+  if (base.empty()) {
+    const char* tmpdir = getenv("TMPDIR");
+    base = tmpdir && IsAbsolutePath(tmpdir) ? tmpdir : "/tmp";
+  }
+  std::string templ = JoinPath(StripTrailingSeparators(base), prefix + "XXXXXX");
+  std::vector<char> buf(templ.begin(), templ.end());
+  buf.push_back('\0');
+  // mkdtemp creates the directory 0700 with a name nobody could predict, and
+  // fails rather than reuse anything already there.
+  if (!mkdtemp(buf.data())) {
+    std::cerr << "laufey: could not create a private directory under \""
+              << base << "\": " << strerror(errno) << std::endl;
+    return std::string();
+  }
+  return std::string(buf.data());
+}
+#endif
 
 std::string AppDataSubdir(const char* name) {
   const std::string& dir = AppDataDir();

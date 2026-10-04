@@ -44,10 +44,12 @@ arguments of its own (the class of Electron's CVE-2018-1000006). Everything
 after `--` is a positional argument: the hosts stop reading their own options
 there, Chromium (CEF) treats it as the end of its switches, and the runtime
 should do the same. As a second line of defence, a CEF launch whose positional
-arguments include a URL drops every Chromium switch from its command line, and a
-packaged app (one with a `laufey-launch.json` or a runtime next to its
-executable) loads only the runtime it ships, never one named by `--runtime` or
-`LAUFEY_RUNTIME_PATH` ([Runtime library](launch-config.md#runtime-library)).
+arguments include a URL drops every Chromium switch from its command line (on
+Windows and Linux, the two that receive links in `argv`; the browser process
+logs each one it drops), and a packaged app (one with a `laufey-launch.json` or
+a runtime next to its executable) loads only the runtime it ships, never one
+named by `--runtime` or `LAUFEY_RUNTIME_PATH`
+([Runtime library](launch-config.md#runtime-library)).
 
 The OS also has to have _seen_ that metadata: macOS registers schemes through
 LaunchServices when the `.app` is installed (or after `lsregister -f`), Linux

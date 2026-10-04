@@ -177,6 +177,45 @@ static void TestEnsureDirectory() {
   rmdir(JoinPath(root, "app.id").c_str());
   rmdir(root);
 }
+
+// The CEF Linux profile without an app data dir (main_linux.cc): a fresh
+// 0700 directory with an unpredictable name, never a fixed or reused path.
+static void TestPrivateTempDir() {
+  char tmpl[] = "/tmp/laufey_private_dir_test_XXXXXX";
+  char* root = mkdtemp(tmpl);
+  EXPECT(root != nullptr);
+  if (!root)
+    return;
+  std::string a = MakePrivateTempDir(root, "laufey_cef_");
+  std::string b = MakePrivateTempDir(std::string(root) + "/", "laufey_cef_");
+  EXPECT(!a.empty() && !b.empty() && a != b);
+  const std::string prefix = JoinPath(root, "laufey_cef_");
+  EXPECT(a.compare(0, prefix.size(), prefix) == 0);
+  EXPECT(a.size() == prefix.size() + 6);  // the random suffix
+  EXPECT(b.compare(0, prefix.size(), prefix) == 0);
+  struct stat st;
+  EXPECT(stat(a.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+  EXPECT((st.st_mode & 0777) == 0700);
+  EXPECT(st.st_uid == getuid());
+  // A parent that doesn't exist (or isn't writable) gives "", not a path.
+  EXPECT(MakePrivateTempDir(std::string(root) + "/missing", "x_").empty());
+  // "" means $TMPDIR (when absolute), else /tmp.
+  const char* old_tmpdir = getenv("TMPDIR");
+  std::string saved = old_tmpdir ? old_tmpdir : "";
+  setenv("TMPDIR", root, 1);
+  std::string c = MakePrivateTempDir("", "laufey_cef_");
+  EXPECT(c.compare(0, prefix.size(), prefix) == 0);
+  setenv("TMPDIR", "relative", 1);
+  std::string d = MakePrivateTempDir("", "laufey_private_dir_test_");
+  EXPECT(d.compare(0, 5, "/tmp/") == 0);
+  if (old_tmpdir)
+    setenv("TMPDIR", saved.c_str(), 1);
+  else
+    unsetenv("TMPDIR");
+  for (const std::string& dir : {a, b, c, d})
+    rmdir(dir.c_str());
+  rmdir(root);
+}
 #endif
 
 int main() {
@@ -187,6 +226,7 @@ int main() {
   TestJoinPath();
 #ifndef _WIN32
   TestEnsureDirectory();
+  TestPrivateTempDir();
 #endif
   if (g_failures) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);

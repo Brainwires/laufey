@@ -532,6 +532,16 @@ std::string JoinPath(const std::string& base, const std::string& child);
 // is (now) a directory.
 bool EnsureDirectory(const std::string& path);
 
+#ifndef _WIN32
+// A new, empty, owner-only (0700) directory under `parent` named
+// `<prefix>XXXXXX` with a random suffix (mkdtemp), or "" with a warning when
+// it can't be created. Never an existing or predictable path, so another user
+// of a shared `parent` (/tmp) can't plant or read the contents. `parent` ""
+// means $TMPDIR if it is absolute, else /tmp.
+std::string MakePrivateTempDir(const std::string& parent,
+                               const std::string& prefix);
+#endif
+
 // ---------------------------------------------------------------------------
 // Test hooks (API >= 30)
 // ---------------------------------------------------------------------------

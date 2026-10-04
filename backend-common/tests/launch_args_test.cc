@@ -116,6 +116,17 @@ static void TestDeepLinkStrip() {
   strip = DeepLinkSwitchesToStrip({"--keep", "--drop", "acme://x"}, {"keep"});
   EXPECT(strip.size() == 1);
   EXPECT(Contains(strip, "drop"));
+  // The Linux form (a .desktop entry's `Exec=app %u`, which the CEF Linux
+  // host now records too): switches a launcher put next to the link are
+  // dropped; the link itself, one argument even with spaces, is no switch.
+  strip = DeepLinkSwitchesToStrip(
+      {"--renderer-cmd-prefix=gdb --args", "--no-sandbox",
+       "acme://open?q=a --remote-debugging-port=9222"},
+      {});
+  EXPECT(strip.size() == 2);
+  EXPECT(Contains(strip, "renderer-cmd-prefix"));
+  EXPECT(Contains(strip, "no-sandbox"));
+  EXPECT(!Contains(strip, "remote-debugging-port"));
 }
 
 // A fake filesystem for ChooseRuntimePath: the paths in `files` exist.
