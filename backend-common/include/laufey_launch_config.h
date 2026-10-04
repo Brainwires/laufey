@@ -59,6 +59,10 @@ struct LaunchConfig {
   bool single_instance = false;
   bool has_inspectable = false;
   bool inspectable = true;
+  // "bridgeOrigins" (API 44): the documents the JS bridge serves, as kept
+  // entries ("*", "<scheme>://*" or an origin); see laufey_bridge_origin.h.
+  bool has_bridge_origins = false;
+  std::vector<std::string> bridge_origins;
 };
 
 // Parses and validates the text of a launch file. Reads nothing from the

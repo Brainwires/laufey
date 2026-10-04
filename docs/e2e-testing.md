@@ -200,6 +200,20 @@ public (`--ip-address-space-overrides=127.0.0.1:<port>=public`, the port in
 `LAUFEY_E2E_PUBLIC_PORT`), serves a page there, and its fetch to the echo server
 must fail within five seconds instead of waiting for a prompt.
 
+The bridge (API 44) is held to the calling document. Every call of the
+request-body page must carry its origin (`call.origin == "app://e2e-body"`); a
+same-origin sub-frame that posts to the engine's message handler directly (an
+object and a JSON string, with no, an empty and a guessed WebKitGTK token) must
+never reach the binding; and the main frame posting malformed messages (wrong
+types, NaN / negative / huge ids, a lone surrogate, a `Date` argument,
+unparseable JSON) must neither crash the app nor stop the bridge.
+`--bridge-origin` (`bridge_origin_checks.rs`) writes a `laufey-launch.json` next
+to the backend pinning `"bridgeOrigins": ["app://e2e-bridge-ok"]`: a window on
+that origin must get the bridge with its origin on every call, and a window on
+`app://e2e-bridge-no` must get no `Laufey` namespace and see a call it posts to
+the engine's channel itself refused. The script removes the file when the run
+ends.
+
 Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
 and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body
 over 1 MB, an empty body, bodies of 256 KiB − 1, 256 KiB, 256 KiB + 1 and 512

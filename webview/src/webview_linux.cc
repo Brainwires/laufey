@@ -12,6 +12,7 @@
 #include "laufey_notifications.h"
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_json.h"
 #include "laufey_scheme_body_stream.h"
 #include "laufey_scheme_cancel.h"
@@ -1286,7 +1287,8 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
         "__laufeyHandler.postMessage.bind(__laufeyHandler);\n"
         "  const __laufeyStringify = JSON.stringify;\n"
         "  const __laufeyToken = '" +
-            bridge_token + "';\n");
+            bridge_token + "';\n",
+        RuntimeLoader::GetInstance()->BridgeGuardJs());
     // Inject the bridge into the top frame only. Cross-origin/sub frames must
     // not inherit it; otherwise embedded content could invoke bindings running
     // with the host process's permissions. Matches the macOS/iOS
@@ -2110,11 +2112,17 @@ void WebKitGTKBackend::HandleJsMessage(uint32_t window_id,
 
   // Only the window's top-frame bridge script knows its token (see
   // NewBridgeToken); a sub-frame posting to the handler directly does not.
+  // The token proves the top frame; its origin is the web view's document's.
   std::string expected;
+  std::string origin = laufey_common::kOpaqueOrigin;
   {
     std::lock_guard<std::mutex> lock(windows_mutex_);
-    if (auto* state = GetWindow(window_id))
+    if (auto* state = GetWindow(window_id)) {
       expected = state->bridge_token;
+      const gchar* uri = webkit_web_view_get_uri(state->webview);
+      if (uri)
+        origin = laufey_common::OriginOfUrl(uri);
+    }
   }
   auto tokenIt = dict.find("token");
   if (expected.empty() || tokenIt == dict.end() ||
@@ -2151,7 +2159,8 @@ void WebKitGTKBackend::HandleJsMessage(uint32_t window_id,
   laufey::ValuePtr args =
       (argsIt != dict.end()) ? argsIt->second : laufey::Value::List();
 
-  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args);
+  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args,
+                                         origin);
 }
 
 // ============================================================================

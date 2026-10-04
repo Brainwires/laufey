@@ -6,6 +6,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_json.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
@@ -593,7 +594,8 @@ class WebView2Backend : public LaufeyBackend {
   bool TestTriggerMenuAccelerator(uint32_t window_id,
                                   const char* accelerator) override;
 
-  void HandleJsMessage(uint32_t window_id, const std::wstring& json);
+  void HandleJsMessage(uint32_t window_id, const std::wstring& json,
+                       const std::string& origin);
   // A message from the injected file-drop observer (see
   // BuildFileDropScript): true if `message` was one (handled or refused),
   // false if it is for the JS bridge.
@@ -1254,7 +1256,8 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                 "            callId: callId,\n"
                 "            method: path.join('.'),\n"
                 "            args: processedArgs\n"
-                "          }));");
+                "          }));",
+                "", RuntimeLoader::GetInstance()->BridgeGuardJs());
             std::wstring wInitScript(initScript.begin(), initScript.end());
             state->webview->AddScriptToExecuteOnDocumentCreated(
                 wInitScript.c_str(), nullptr);
@@ -1306,6 +1309,11 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                       sender->get_Source(&topSource);
                       bool from_main_frame = msgSource && topSource &&
                                              wcscmp(msgSource, topSource) == 0;
+                      // API 44: the calling document's origin.
+                      std::string origin = msgSource
+                                               ? laufey_common::OriginOfUrl(
+                                                     WideToUtf8(msgSource))
+                                               : laufey_common::kOpaqueOrigin;
                       if (msgSource) {
                         CoTaskMemFree(msgSource);
                       }
@@ -1324,7 +1332,7 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                         if (!laufey_wv2::HandleStreamMessage(wid, messageRaw,
                                                              source) &&
                             !HandleFileDropMessage(wid, messageRaw, args))
-                          HandleJsMessage(wid, messageRaw);
+                          HandleJsMessage(wid, messageRaw, origin);
                         if (source)
                           CoTaskMemFree(source);
                         CoTaskMemFree(messageRaw);
@@ -2337,7 +2345,8 @@ void WebView2Backend::Run() {
 }
 
 void WebView2Backend::HandleJsMessage(uint32_t window_id,
-                                      const std::wstring& json) {
+                                      const std::wstring& json,
+                                      const std::string& origin) {
   std::string jsonStr = WideToUtf8(json);
   laufey::ValuePtr msg = json::ParseJson(jsonStr);
   if (!msg || !msg->IsDict())
@@ -2373,7 +2382,8 @@ void WebView2Backend::HandleJsMessage(uint32_t window_id,
   laufey::ValuePtr args =
       (argsIt != dict.end()) ? argsIt->second : laufey::Value::List();
 
-  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args);
+  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args,
+                                         origin);
 }
 
 // ============================================================================

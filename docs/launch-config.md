@@ -29,7 +29,8 @@ The directory comes from the running executable's real path
   "customSchemes": ["myapp"],
   "dataDir": "/absolute/path",
   "singleInstance": true,
-  "inspectable": false
+  "inspectable": false,
+  "bridgeOrigins": ["myapp://app"]
 }
 ```
 
@@ -42,6 +43,7 @@ Every key is optional, and each key stands in for one environment variable:
 | `dataDir`        | `LAUFEY_DATA_DIR`        | absolute path                                                     |
 | `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `inspectable`    | `LAUFEY_INSPECTABLE`     | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
+| `bridgeOrigins`  | none (file only)         | array of origins, `<scheme>://*` or `*` (see below)               |
 
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
@@ -66,6 +68,20 @@ what its variable does:
   no remote debugging, and `open_devtools` does nothing
   ([DevTools](devtools.md)). Release builds of an app usually ship it `false`.
   The WebView and CEF backends read it.
+
+- `bridgeOrigins` (API 44) pins the documents the JavaScript bridge serves
+  ([JavaScript interop](javascript-interop.md#which-documents-can-call)). Each
+  entry is an origin (`"myapp://app"`, `"https://example.com:8443"`; nothing
+  after the host and port but an optional `/`), `"<scheme>://*"` (every origin
+  of that scheme), or `"*"` (every origin: no pin). A document on any other
+  origin gets no bridge namespace, and the backend rejects a call from one
+  before it reaches the runtime. Without the key, a file with `customSchemes`
+  pins the bridge to those schemes (`"<scheme>://*"` each); a file with neither,
+  or no file, leaves every origin free to call. There is no environment
+  variable: only the installed app can set it. An invalid entry is reported and
+  skipped, but the key still pins: an empty list (or one with no valid entry)
+  gives the bridge to no document. The WebView and CEF backends read it (CEF's
+  renderers too).
 
 ## Precedence
 

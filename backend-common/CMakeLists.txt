@@ -202,6 +202,11 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_js_calls_test COMMAND laufey_js_calls_test)
 
+  # The calling document's origin and the launch file's bridge pin.
+  add_executable(laufey_bridge_origin_test tests/bridge_origin_test.cc)
+  target_link_libraries(laufey_bridge_origin_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_bridge_origin_test COMMAND laufey_bridge_origin_test)
+
   # Writes (and removes) a laufey-launch.json next to the test binary.
   add_executable(laufey_launch_config_test tests/launch_config_test.cc)
   target_link_libraries(laufey_launch_config_test PRIVATE

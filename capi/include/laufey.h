@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 43
+#define LAUFEY_API_VERSION 44
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -459,6 +459,18 @@ typedef struct laufey_value laufey_value_t;
 typedef void (*laufey_js_call_fn)(void* user_data, uint32_t window_id,
                                   uint64_t call_id, const char* method_path,
                                   laufey_value_t* args);
+
+// A JS call with the calling document's origin (API >= 44; see
+// set_js_call_handler_ex). `origin` is the HTML serialization of the
+// security origin of the document that made the call: lowercase
+// "scheme://host", plus ":port" when the port isn't the scheme's default
+// ("myapp://app", "http://127.0.0.1:5173"), or "null" for an opaque origin
+// (about:blank, data:, file:). Never NULL; valid only during the call. Calls
+// come only from a window's top-level document. `call_id` is issued by the
+// backend (unique in the process), not taken from the page.
+typedef void (*laufey_js_call_ex_fn)(void* user_data, uint32_t window_id,
+                                     uint64_t call_id, const char* method_path,
+                                     laufey_value_t* args, const char* origin);
 
 // Callback for execute_js results. Pass NULL to execute_js for fire-and-forget.
 typedef void (*laufey_js_result_fn)(laufey_value_t* result,
@@ -2046,6 +2058,22 @@ struct laufey_backend_api {
   // which is always the case where sessions are not supported (Windows,
   // Linux, Winit). Any thread. NULL on backends older than API version 43.
   bool (*auth_session_cancel)(void* backend_data);
+
+  // --- JS calls with their origin (API >= 44) ------------------------------
+  //
+  // Like set_js_call_handler, and the handler also receives the calling
+  // document's origin (see laufey_js_call_ex_fn). There is one handler slot:
+  // while an ex handler is set it receives every call and the plain handler
+  // none; setting a NULL ex handler gives the slot back to the plain one.
+  //
+  // A packaged app pins the origins its bridge serves in laufey-launch.json
+  // ("bridgeOrigins", by default its "customSchemes"; docs/launch-config.md):
+  // a document on any other origin gets no bridge namespace, and a call from
+  // one is rejected by the backend without reaching either handler. NULL on
+  // backends older than API version 44; never called on Winit (no web
+  // engine).
+  void (*set_js_call_handler_ex)(void* backend_data,
+                                 laufey_js_call_ex_fn handler, void* user_data);
 };
 
 #ifdef __cplusplus

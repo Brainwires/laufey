@@ -11,6 +11,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_single_instance.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
@@ -358,7 +359,8 @@ class WKWebViewBackend : public LaufeyBackend {
   void SetQuitOnLastWindowClosed(bool quit) override;
 
   void HandleJsMessage(uint32_t window_id, uint64_t call_id,
-                       const std::string& method, laufey::ValuePtr args);
+                       const std::string& method, laufey::ValuePtr args,
+                       const std::string& origin);
 
   // Called from the window delegate's windowWillClose: when AppKit closes
   // the NSWindow directly (windowShouldClose: returned YES because no
@@ -563,6 +565,18 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
          origin.port == port;
 }
 
+// The HTML serialization of a frame's security origin (API 44: handed to the
+// runtime with every call). WebKit reports a scheme's default port as 0.
+static std::string LaufeyOriginString(WKSecurityOrigin* origin) {
+  if (!origin)
+    return laufey_common::kOpaqueOrigin;
+  const char* scheme = origin.protocol.UTF8String;
+  const char* host = origin.host.UTF8String;
+  return laufey_common::SerializeOrigin(
+      scheme ? scheme : "", host ? host : "",
+      origin.port > 0 ? static_cast<int>(origin.port) : -1);
+}
+
 - (void)userContentController:(WKUserContentController*)userContentController
       didReceiveScriptMessage:(WKScriptMessage*)message {
   if (![message.name isEqualToString:@"laufey"])
@@ -640,7 +654,8 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
   }
 
   if (self.backend) {
-    self.backend->HandleJsMessage(self.windowId, call_id, methodStr, args);
+    self.backend->HandleJsMessage(self.windowId, call_id, methodStr, args,
+                                  LaufeyOriginString(frame.securityOrigin));
   }
 }
 
@@ -1616,7 +1631,8 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                           "            callId: callId,\n"
                           "            method: path.join('.'),\n"
                           "            args: processedArgs\n"
-                          "          });");
+                          "          });",
+                          "", RuntimeLoader::GetInstance()->BridgeGuardJs());
       WKUserScript* script = [[WKUserScript alloc]
             initWithSource:[NSString stringWithUTF8String:initScript.c_str()]
              injectionTime:WKUserScriptInjectionTimeAtDocumentStart
@@ -2712,8 +2728,10 @@ void WKWebViewBackend::Run() {
 
 void WKWebViewBackend::HandleJsMessage(uint32_t window_id, uint64_t call_id,
                                        const std::string& method,
-                                       laufey::ValuePtr args) {
-  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args);
+                                       laufey::ValuePtr args,
+                                       const std::string& origin) {
+  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args,
+                                         origin);
 }
 
 // --- Application Menu / Context Menu ---

@@ -15,6 +15,7 @@
 #include <string>
 
 #include "init_script.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_json.h"
 #include "runtime_loader.h"
 
@@ -191,8 +192,10 @@ class WKWebViewIOSBackend : public LaufeyBackend {
 
   // Called from the script-message handler on the main thread.
   void HandleJsMessage(uint32_t window_id, uint64_t call_id,
-                       const std::string& method, laufey::ValuePtr args) {
-    RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args);
+                       const std::string& method, laufey::ValuePtr args,
+                       const std::string& origin) {
+    RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args,
+                                           origin);
   }
 
   IOSWindowState* GetWindow(uint32_t window_id) {
@@ -218,6 +221,10 @@ class WKWebViewIOSBackend : public LaufeyBackend {
 - (void)userContentController:(WKUserContentController*)ucc
       didReceiveScriptMessage:(WKScriptMessage*)message {
   if (![message.name isEqualToString:@"laufey"])
+    return;
+  // The handler is visible to every frame; the bridge is the main frame's.
+  WKFrameInfo* frame = message.frameInfo;
+  if (!frame || !frame.isMainFrame)
     return;
   if (![message.body isKindOfClass:[NSDictionary class]])
     return;
@@ -265,7 +272,14 @@ class WKWebViewIOSBackend : public LaufeyBackend {
     args = parsed;
   }
   if (self.backend) {
-    self.backend->HandleJsMessage(self.windowId, call_id, methodStr, args);
+    WKSecurityOrigin* o = frame.securityOrigin;
+    const char* scheme = o.protocol.UTF8String;
+    const char* host = o.host.UTF8String;
+    self.backend->HandleJsMessage(
+        self.windowId, call_id, methodStr, args,
+        laufey_common::SerializeOrigin(
+            scheme ? scheme : "", host ? host : "",
+            o.port > 0 ? static_cast<int>(o.port) : -1));
   }
 }
 @end
@@ -290,7 +304,8 @@ void WKWebViewIOSBackend::CreateWindowEx(uint32_t window_id, int width,
                           "            callId: callId,\n"
                           "            method: path.join('.'),\n"
                           "            args: processedArgs\n"
-                          "          });");
+                          "          });",
+                          "", RuntimeLoader::GetInstance()->BridgeGuardJs());
       WKUserScript* script = [[WKUserScript alloc]
             initWithSource:[NSString stringWithUTF8String:initScript.c_str()]
              injectionTime:WKUserScriptInjectionTimeAtDocumentStart

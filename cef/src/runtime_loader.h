@@ -200,8 +200,11 @@ class RuntimeLoader {
 
   // `page_call_id` is the number the page's bridge gave the call; the runtime
   // sees a backend-issued id instead.
+  // `origin` is the serialized origin of the calling document (a call from one
+  // the launch file's bridge pin refuses is answered with an error at once).
   void OnJsCall(uint32_t window_id, uint64_t page_call_id,
-                const std::string& method_path, CefRefPtr<CefListValue> args);
+                const std::string& method_path, CefRefPtr<CefListValue> args,
+                const std::string& origin);
 
   void PollPendingJsCalls();
 
@@ -209,6 +212,14 @@ class RuntimeLoader {
     std::lock_guard<std::mutex> lock(handler_mutex_);
     js_call_handler_ = handler;
     js_call_user_data_ = user_data;
+  }
+
+  // API 44: the handler that also receives the calling document's origin.
+  // While set, it takes every call (see laufey.h).
+  void SetJsCallHandlerEx(laufey_js_call_ex_fn handler, void* user_data) {
+    std::lock_guard<std::mutex> lock(handler_mutex_);
+    js_call_handler_ex_ = handler;
+    js_call_user_data_ex_ = user_data;
   }
 
   void SetKeyboardEventHandler(laufey_keyboard_event_fn handler,
@@ -449,6 +460,8 @@ class RuntimeLoader {
 
   laufey_js_call_fn js_call_handler_ = nullptr;
   void* js_call_user_data_ = nullptr;
+  laufey_js_call_ex_fn js_call_handler_ex_ = nullptr;
+  void* js_call_user_data_ex_ = nullptr;
   std::mutex handler_mutex_;
 
   laufey_keyboard_event_fn keyboard_handler_ = nullptr;
@@ -514,6 +527,7 @@ class RuntimeLoader {
     uint64_t call_id;
     std::string method_path;
     CefRefPtr<CefListValue> args;
+    std::string origin;
   };
   std::queue<PendingJsCall> pending_js_calls_;
   std::mutex pending_mutex_;

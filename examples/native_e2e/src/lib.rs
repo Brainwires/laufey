@@ -29,6 +29,7 @@
 
 mod auth_thread_checks;
 mod body_echo;
+mod bridge_origin_checks;
 mod close_checks;
 mod io_checks;
 mod launch_checks;
@@ -582,10 +583,14 @@ async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
     return None;
   }
   let reports: body_echo::Reports = Arc::new(Mutex::new(HashMap::new()));
+  // The origin every call carried (API 44): the page's, app://e2e-body.
+  let origins: Arc<Mutex<std::collections::HashSet<String>>> =
+    Arc::new(Mutex::new(std::collections::HashSet::new()));
   let win = Window::new(320, 240)
     .title("native-e2e-body")
     .bind("bodyReport", {
       let reports = reports.clone();
+      let origins = origins.clone();
       move |call| {
         let a = &call.args;
         let len = match a.get(2) {
@@ -597,6 +602,7 @@ async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
           .lock()
           .unwrap()
           .insert(arg_string(a, 0), (arg_bool(a, 1), len, arg_string(a, 3)));
+        origins.lock().unwrap().insert(call.origin.clone());
         call.resolve(Value::Bool(true));
       }
     })
@@ -665,6 +671,13 @@ async fn body_round_trip(received: &body_echo::Received) -> Option<Window> {
     "a sub-frame's direct message to the bridge never reaches a binding",
     !reports.contains_key(body_echo::FRAME_FORGED_LABEL),
   );
+  let origins = origins.lock().unwrap().clone();
+  check(
+    &format!(
+      "every bridge call carries the calling document's origin ({origins:?})"
+    ),
+    origins.len() == 1 && origins.contains("app://e2e-body"),
+  );
   Some(win)
 }
 
@@ -702,6 +715,9 @@ fn e2e_main() {
         let (echo, seen, received, streams) =
           (echo.clone(), seen.clone(), received.clone(), streams.clone());
         move |req: SchemeRequest| {
+          let Some(req) = bridge_origin_checks::serve(req) else {
+            return;
+          };
           let Some(req) = body_echo::serve(req, &received) else {
             return;
           };
@@ -723,6 +739,12 @@ fn e2e_main() {
       // ride along where the full battery can't run.
       passkey_checks(body_win.as_ref().map(|w| w.id()).unwrap_or(0)).await;
       let _ = &body_win;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=bridge-origin: the launch file's bridge pin (API 44);
+    // native-e2e-run.sh --bridge-origin writes the file.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("bridge-origin") {
+      bridge_origin_checks::run().await;
       finish();
     }
     // LAUFEY_E2E_ONLY=lifetime: keep-alive with no window, then quit()

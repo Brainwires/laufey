@@ -4,6 +4,7 @@
 #include "custom_schemes.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_io.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
@@ -671,7 +672,11 @@ bool LaufeyHandler::OnProcessMessageReceived(
     }
 
     uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
-    RuntimeLoader::GetInstance()->OnJsCall(wid, call_id, method_path, callArgs);
+    // API 44: the calling document's origin, from the browser's view of the
+    // frame (not from the renderer's message).
+    RuntimeLoader::GetInstance()->OnJsCall(
+        wid, call_id, method_path, callArgs,
+        laufey_common::OriginOfUrl(frame->GetURL().ToString()));
     return true;
   }
 

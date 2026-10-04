@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "json_reader.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_backend_common.h"
 #include "laufey_scheme_registry.h"
 
@@ -233,6 +234,31 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
       }
       config.has_inspectable = true;
       config.inspectable = value.boolean;
+    } else if (key == "bridgeOrigins") {
+      config.has_bridge_origins = false;
+      config.bridge_origins.clear();
+      if (value.type != JsonValue::Type::kArray) {
+        Warn(warnings, std::string("\"bridgeOrigins\" must be an array of "
+                                   "strings, not ") +
+                           TypeName(value.type) + "; ignoring it");
+        continue;
+      }
+      // The key restricts the bridge even if every entry is invalid: an app
+      // that pins its origins never falls back to serving every origin.
+      config.has_bridge_origins = true;
+      for (const JsonValue& item : value.array) {
+        if (!CheckString("bridgeOrigins[]", item, warnings))
+          continue;
+        std::string origin, scheme;
+        bool any = false;
+        if (!ParseBridgeOriginEntry(item.string, &origin, &scheme, &any)) {
+          Warn(warnings, "\"bridgeOrigins\" entry \"" + item.string +
+                             "\" is not \"*\", \"<scheme>://*\" or an "
+                             "origin (scheme://host[:port]); ignoring it");
+          continue;
+        }
+        config.bridge_origins.push_back(item.string);
+      }
     } else {
       Warn(warnings, "unknown key \"" + key + "\"; ignoring it");
     }

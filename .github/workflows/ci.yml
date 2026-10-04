@@ -87,6 +87,15 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/launch_config_test"
           "$RUNNER_TEMP/launch_config_test"
+      # The origin a bridge call carries and the launch file's bridge pin.
+      - name: backend-common bridge_origin_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/bridge_origin_test.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/bridge_origin_test"
+          "$RUNNER_TEMP/bridge_origin_test"
       # The host's command line: options stop at "--", a packaged app ignores
       # --runtime, a deep-link launch drops its command-line switches.
       - name: backend-common launch_args_test
@@ -488,6 +497,14 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --lna
+
+      # API 44: a launch file pinning "bridgeOrigins" gives the bridge to the
+      # pinned origin only; calls carry the calling document's origin.
+      - name: Bridge origin pin (launch file)
+        if: matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --bridge-origin
 
       # Layer 1 (Linux, cef): the D-Bus StatusNotifier/dbusmenu observer
       # plays the desktop shell, checks the real appindicator tray from

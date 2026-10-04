@@ -49,3 +49,12 @@ script sends a per-window random token that the backend checks.
 
 `call.call_id` is issued by the backend, not taken from the page: two windows'
 pages never collide, and an answer goes back to exactly the call that asked.
+
+A window's document can navigate anywhere, so every call carries the origin of
+the document that made it (API 44): `call.origin` is `"myapp://app"`,
+`"http://127.0.0.1:5173"`, or `"null"` for an opaque origin. Check it in a
+binding that the page's origin should be trusted with. A packaged app can also
+pin its bridge to its own origins in its launch file (`"bridgeOrigins"`, by
+default its `"customSchemes"`; see [Launch configuration](launch-config.md)):
+documents on other origins then get no namespace, and their calls never reach
+your handlers.
