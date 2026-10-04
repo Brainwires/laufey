@@ -11,6 +11,9 @@
 // a write appends and returns at once, WebKit reads through
 // GPollableInputStream (no thread is ever parked on it), and the writer is
 // told when to stop:
+//   - the reader is behind: while kSchemeResponseHighWater bytes or more wait,
+//     a write takes nothing and returns 0, and the writer retries
+//     (backpressure, API 44);
 //   - the page stopped reading (WebKit closed / dropped the stream, e.g. the
 //     fetch was aborted or the document replaced): the next write fails;
 //   - more than kSchemeBodyMaxQueued bytes are waiting for a reader: the
@@ -24,6 +27,8 @@
 #define LAUFEY_SCHEME_BODY_STREAM_H_
 
 #include <gio/gio.h>
+
+#include "laufey_scheme_cancel.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -41,7 +46,8 @@ class SchemeBodyQueue;
 // The writer's end. Thread-safe; Write / End / Fail never block.
 class SchemeBodyWriter {
  public:
-  explicit SchemeBodyWriter(size_t max_queued = kSchemeBodyMaxQueued);
+  explicit SchemeBodyWriter(size_t max_queued = kSchemeBodyMaxQueued,
+                            size_t high_water = kSchemeResponseHighWater);
   ~SchemeBodyWriter();  // Ends the body (EOF) if not ended / failed yet.
   SchemeBodyWriter(const SchemeBodyWriter&) = delete;
   SchemeBodyWriter& operator=(const SchemeBodyWriter&) = delete;
@@ -51,8 +57,10 @@ class SchemeBodyWriter {
   // thread): readers there are woken when data arrives.
   GInputStream* CreateStream();
 
-  // Append `len` bytes. Returns `len`, or -1 if the reader is gone or the
-  // body failed (now or earlier, e.g. it grew past the cap).
+  // Append `len` bytes. Returns `len`; 0 (nothing taken) while `high_water`
+  // bytes or more wait for the reader, so the writer retries later
+  // (backpressure, API 44); or -1 if the reader is gone or the body failed
+  // (now or earlier, e.g. a single write took it past the cap).
   intptr_t Write(const uint8_t* data, size_t len);
   // End of body: the reader sees EOF after what was written.
   void End();

@@ -280,6 +280,13 @@ embedded browser over an in-memory byte channel instead of a TCP loopback.
    WebView backend built against an older WebKitGTK forwards every request with
    an empty body.
 
+`scheme_response_write` never blocks. It returns `len` when it took the bytes
+and, from API 44, **0** when it took none because the page is behind: the
+backend already holds its high-water mark (4 MiB) of the response. The runtime
+then waits (a few milliseconds, or until `on_cancel`) and writes the same bytes
+again; a write is taken whole whenever less than the mark is waiting, never in
+part. See [custom-schemes.md](custom-schemes.md) for each backend.
+
 If the webview cancels (navigation away, window closed) before the response
 finishes, `scheme_response_write` / `scheme_request_read_body` return negative;
 the runtime should stop and call `scheme_response_finish`. A backend without a

@@ -135,6 +135,8 @@ void LaufeySchemeHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
 // Bytes held for a page that isn't reading before the response fails
 // (Chromium stops calling Read while the renderer doesn't consume). The cap
 // of the WebView2 and WebKitGTK backends; the runtime's write never blocks.
+// Backpressure keeps the queue near kSchemeResponseHighWater, so only a
+// single write larger than this reaches it.
 constexpr size_t kMaxQueuedResponseBytes = 64 * 1024 * 1024;
 // net::ERR_FAILED: what a failed read reports to Chromium.
 constexpr int kNetErrFailed = -2;
@@ -247,6 +249,10 @@ intptr_t LaufeySchemeHandler::WriteResponse(const uint8_t* buf, size_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (cancelled_ || failed_)
       return -1;
+    // Backpressure (API 44): the page is this far behind; take nothing and
+    // let the runtime write the same bytes again later.
+    if (response_body_.size() >= laufey_common::kSchemeResponseHighWater)
+      return 0;
     if (response_body_.size() + len > kMaxQueuedResponseBytes) {
       // The page isn't reading: fail the response (its read rejects)
       // instead of holding an unbounded body.

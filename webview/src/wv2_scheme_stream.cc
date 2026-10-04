@@ -424,6 +424,13 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
       std::lock_guard<std::mutex> lock(mutex_);
       if (cancelled_)
         return -1;
+      // Backpressure (API 44), while the body streams to the page: it hasn't
+      // taken this much yet, so take nothing; the runtime writes the same
+      // bytes again later. A response WebView2 takes in one piece (pending)
+      // is never throttled: nothing reads it before it ends.
+      if (mode_ == Mode::kPush &&
+          body_.size() >= laufey_common::kSchemeResponseHighWater)
+        return 0;
       if (mode_ == Mode::kPending && body_.size() + len > kMaxBuffered) {
         overflow_pending = true;
         cancelled_ = true;

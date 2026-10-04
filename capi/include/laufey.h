@@ -1298,9 +1298,14 @@ struct laufey_backend_api {
                                 const char* headers, size_t headers_len);
 
   // Append `len` bytes to the response body. May be called repeatedly after
-  // scheme_response_begin. Returns the bytes accepted, or -1 if the consumer
-  // has gone away (the embedder should then stop and call
-  // scheme_response_finish).
+  // scheme_response_begin. Never blocks. Returns `len` (all accepted), or -1
+  // if the consumer has gone away (the embedder should then stop and call
+  // scheme_response_finish). From API 44 it may also return 0: NOTHING was
+  // accepted, because the page is behind and the backend already holds its
+  // high-water mark (4 MiB) of this response; the embedder waits (a few ms,
+  // or until on_cancel) and writes the same bytes again. A write is accepted
+  // whole whenever less than the mark is waiting, whatever its size; never
+  // in part. A response WebView2 takes in one piece is never throttled.
   intptr_t (*scheme_response_write)(void* backend_data,
                                     laufey_scheme_exchange_t* exchange,
                                     const uint8_t* buf, size_t len);

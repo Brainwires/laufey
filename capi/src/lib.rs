@@ -700,9 +700,11 @@ impl SchemeExchange {
     }
   }
 
-  /// Append response body bytes. Returns bytes accepted, or a negative value
-  /// if the webview has gone away (the embedder should then stop and drop
-  /// the exchange via `finish`).
+  /// Append response body bytes. Never blocks. Returns `buf.len()` (all
+  /// taken); `0` when nothing was taken because the page is behind (the
+  /// backend holds its high-water mark, 4 MiB): wait a moment and write the
+  /// same bytes again (API 44 backpressure); or a negative value if the
+  /// webview has gone away (stop, and drop the exchange via `finish`).
   pub fn write(&self, buf: &[u8]) -> isize {
     let api = api();
     match api.scheme_response_write {

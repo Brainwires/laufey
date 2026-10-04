@@ -674,6 +674,9 @@ class MacSchemeExchange;
 struct MacSchemeTaskState {
   std::atomic<bool> stopped{false};
   laufey_common::SchemeCancelGate gate;
+  // Response bytes handed to the main queue and not yet given to WebKit
+  // (backpressure, API 44).
+  std::atomic<size_t> pending_bytes{0};
   // Set on the main thread before the runtime sees it; deleted (on the main
   // thread) only after gate.Finish().
   MacSchemeExchange* exchange = nullptr;
@@ -747,10 +750,17 @@ class MacSchemeExchange : public SchemeExchangeBase {
   intptr_t WriteResponse(const uint8_t* buf, size_t len) override {
     if (state_->stopped.load())
       return -1;
+    // Backpressure (API 44): every write is a copy queued for the main
+    // thread, which hands it to WebKit. While the main thread is this far
+    // behind, take nothing; the runtime writes the same bytes again later.
+    if (state_->pending_bytes.load() >= laufey_common::kSchemeResponseHighWater)
+      return 0;
     NSData* data = [NSData dataWithBytes:buf length:len];
     id<WKURLSchemeTask> task = task_;
     std::shared_ptr<MacSchemeTaskState> state = state_;
+    state->pending_bytes.fetch_add(len);
     dispatch_async(dispatch_get_main_queue(), ^{
+      state->pending_bytes.fetch_sub(len);
       if (state->stopped.load())
         return;
       @try {

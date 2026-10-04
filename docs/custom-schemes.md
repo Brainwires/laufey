@@ -167,14 +167,24 @@ backend takes the bytes and hands them on as the engine reads:
   page doesn't consume).
 - **WebView2** streams through the page (below).
 
-The queue for a page that isn't reading is capped at **64 MiB** on WebKitGTK,
-CEF and WebView2 (for a response WebView2 streams through the page, below): past
-that the response fails (the page's `fetch` or read rejects) and the handler's
-next `write` returns a negative value, instead of the body growing without
-bound. WKWebView hands everything to WebKit, so it has no cap of its own. A
-response WebView2 answers in one piece is held whole until the handler finishes
-it, whether or not the page reads, so it is capped separately at **512 MiB**:
-past that the request fails.
+**Backpressure (API 44).** Not blocking doesn't mean taking everything: once **4
+MiB** of a response wait for a page that isn't reading
+(`kSchemeResponseHighWater`), a `write` takes nothing and returns **0**. The
+handler waits (a few milliseconds, or until the next turn of its event loop) and
+writes the same bytes again; a negative value still means the page is gone. A
+write is taken whole whenever less than the mark is waiting, whatever its size,
+and never in part. WebKitGTK, CEF and WebView2 (for a response it streams
+through the page, below) count what their queue holds for the engine; WKWebView
+counts what is queued for the main thread and not yet handed to WebKit, which
+then takes all of it (WebKit has no backpressure of its own for a scheme task).
+A response WebView2 answers in one piece is never throttled, since nothing reads
+it before it ends.
+
+A single write that would take the queue past **64 MiB** fails the response (the
+page's `fetch` or read rejects) and returns a negative value, on WebKitGTK, CEF
+and WebView2. A response WebView2 answers in one piece is held whole until the
+handler finishes it, whether or not the page reads, so it is capped separately
+at **512 MiB**: past that the request fails.
 
 A handler that calls `finish` without ever calling `begin` gives the page no
 response: its request fails, as a network error does (the `fetch` rejects), on
@@ -201,9 +211,9 @@ streams through the page instead:
   other request, is answered in one piece as before: the body is held until the
   handler finishes (up to 512 MiB) and handed to WebView2 without another copy.
 - The page acknowledges what it reads: at most 4 MiB is in flight to a page that
-  is not reading. Beyond that the backend holds up to 64 MiB, and a response
-  that outgrows it fails (the page's read rejects and the handler's write
-  returns a negative value); the handler's `write` itself never blocks.
+  is not reading. Beyond that the backend holds up to the 4 MiB high-water mark
+  and then answers `write` with 0 until the page reads (backpressure, above);
+  the handler's `write` itself never blocks.
 - Only a same-origin document may receive a body: the backend checks the origin
   of the document that asks for it against the request URL.
 
