@@ -45,7 +45,15 @@ sees each `write` as it happens (see
 [Streaming responses](#streaming-responses), which WebView2 supports only for
 `fetch`, `EventSource` and XHR). Scheme names follow RFC 3986 (a letter, then
 letters, digits, `+`, `-`, or `.`), are case-insensitive, and are stored in
-lowercase; an invalid name is logged and ignored. Engine-less backends such as
+lowercase; an invalid name is logged and ignored. So is a scheme the engines
+already give a meaning of their own, in any case: `http`, `https`, `ws`, `wss`,
+`ftp`, `file`, `filesystem`, `data`, `blob`, `javascript`, `about`, `chrome`,
+`chrome-extension`, `chrome-untrusted`, `devtools` and `view-source`. Taking one
+of them over would hand the handler the page's ordinary web traffic, local
+files or script URLs. This applies to `register_scheme_handler`, the
+`--laufey-custom-schemes` switch, `LAUFEY_CUSTOM_SCHEMES` and the launch file's
+`"customSchemes"` alike. Schemes only the OS handles (`mailto`, `tel`) are not
+reserved. Engine-less backends such as
 Winit have no scheme support; `laufey::scheme_handlers_supported()` returns
 `false` there, and the application should fall back to a loopback server.
 
@@ -55,8 +63,8 @@ scheme registered afterwards is not served by a window that already exists, and
 the backend logs a warning. Each backend installs the schemes in its own way:
 
 - **WebView (macOS)** installs one `WKURLSchemeHandler` per scheme on the
-  `WKWebViewConfiguration` of each new window. Schemes that WebKit handles
-  itself (`http`, `https`, `file`, and so on) are skipped with a warning.
+  `WKWebViewConfiguration` of each new window. Any other scheme WebKit handles
+  itself (beyond the reserved list above) is skipped with a warning.
 - **WebView (Linux)** registers each scheme on WebKitGTK's default web context
   and marks it secure and CORS-enabled in the context's security manager. The
   web context is shared, so WebKitGTK also applies a late registration to
@@ -187,6 +195,13 @@ page's `fetch` or read rejects) and returns a negative value, on WebKitGTK, CEF
 and WebView2. A response WebView2 answers in one piece is held whole until the
 handler finishes it, whether or not the page reads, so it is capped separately
 at **512 MiB**: past that the request fails.
+
+Request bodies (a page's `POST` / `PUT`) are read whole before the handler
+runs, so `read_body` never waits. WebKitGTK, CEF and WebView2 hold at most
+**512 MiB** of one: a larger body fails the request without reaching the handler
+(the page's `fetch` rejects with a network error) and the backend logs it.
+WKWebView hands the host a body that is already in memory (and for some request
+kinds none at all), so it has no cap of laufey's own.
 
 A handler that calls `finish` without ever calling `begin` gives the page no
 response: its request fails, as a network error does (the `fetch` rejects), on

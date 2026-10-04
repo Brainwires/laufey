@@ -185,6 +185,12 @@ static void TestSchema() {
   EXPECT(c.custom_schemes.size() == 2 && c.custom_schemes[0] == "good" &&
          c.custom_schemes[1] == "Also-Good+1.x");
 
+  // A reserved scheme (http, file, javascript, ...) is skipped too.
+  c = Parse("{\"customSchemes\": [\"https\", \"myapp\", \"JavaScript\"]}",
+            &w);
+  EXPECT(w == 2 && c.custom_schemes.size() == 1 &&
+         c.custom_schemes[0] == "myapp");
+
   // Duplicate keys: reported, the last one wins.
   c = Parse("{\"appId\": \"first\", \"appId\": \"second\"}", &w);
   EXPECT(w == 1 && c.app_id == "second");

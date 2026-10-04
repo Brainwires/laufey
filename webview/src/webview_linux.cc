@@ -2771,6 +2771,24 @@ void OnSchemeRequestBodyChunk(GObject* source, GAsyncResult* result,
     DispatchPendingSchemeRequest(pending);
     return;
   }
+  if (!laufey_common::RequestBodyFits(pending->body.size(), size)) {
+    // Past the cap the request fails (the page's fetch rejects) without
+    // reaching the runtime, rather than the whole body being held.
+    std::cerr << "laufey: the request body of " << pending->method << " "
+              << pending->uri << " is larger than "
+              << (laufey_common::kMaxRequestBodyBytes >> 20)
+              << " MiB; failing the request" << std::endl;
+    GError* too_large =
+        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE,
+                            "the request body is too large");
+    webkit_uri_scheme_request_finish_error(pending->request, too_large);
+    g_error_free(too_large);
+    g_bytes_unref(chunk);
+    g_object_unref(pending->request);
+    delete pending;
+    g_object_unref(body);
+    return;
+  }
   pending->body.insert(pending->body.end(), bytes, bytes + size);
   g_bytes_unref(chunk);
   ReadSchemeRequestBodyChunk(body, pending);

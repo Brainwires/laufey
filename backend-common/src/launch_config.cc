@@ -227,7 +227,8 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
           continue;
         if (!IsValidSchemeName(item.string)) {
           Warn(warnings, "\"customSchemes\" entry \"" + item.string +
-                             "\" is not a valid URL scheme name; ignoring it");
+                             "\" is not a valid URL scheme name (or is "
+                             "reserved); ignoring it");
           continue;
         }
         config.custom_schemes.push_back(item.string);

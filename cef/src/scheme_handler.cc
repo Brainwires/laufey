@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 
 #include "include/cef_request.h"
 #include "include/cef_response.h"
+#include "laufey_scheme_registry.h"
 #include "runtime_loader.h"
 
 namespace {
@@ -74,6 +76,8 @@ bool LaufeySchemeHandler::Open(CefRefPtr<CefRequest> request,
 
   // Buffer the request body up front. CEF makes the full POST data available
   // here, so the runtime's ReadRequestBody pulls become non-blocking copies.
+  // A body past kMaxRequestBodyBytes cancels the request before it reaches
+  // the runtime (the page sees a network error) instead of being held whole.
   CefRefPtr<CefPostData> post_data = request->GetPostData();
   if (post_data) {
     CefPostData::ElementVector elements;
@@ -82,6 +86,16 @@ bool LaufeySchemeHandler::Open(CefRefPtr<CefRequest> request,
       size_t count = element->GetBytesCount();
       if (count == 0)
         continue;
+      if (!laufey_common::RequestBodyFits(request_body_.size(), count)) {
+        std::cerr << "laufey: the request body of " << method_ << " " << url_
+                  << " is larger than "
+                  << (laufey_common::kMaxRequestBodyBytes >> 20)
+                  << " MiB; failing the request" << std::endl;
+        request_body_.clear();
+        request_body_.shrink_to_fit();
+        handle_request = true;
+        return false;  // cancel now: the page's request fails
+      }
       size_t offset = request_body_.size();
       request_body_.resize(offset + count);
       element->GetBytes(count, request_body_.data() + offset);

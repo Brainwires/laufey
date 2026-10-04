@@ -159,10 +159,11 @@ A problem with the file never stops the app. It is reported on stderr as
 - A value of the wrong type, an empty string, a string containing NUL, or a
   value that breaks the rules above (an unsafe `appId`, a relative `dataDir`) is
   reported, and that key is ignored. It behaves as if it were absent.
-- An invalid entry in `customSchemes` or `passkeyRpIds` is reported and skipped.
-  The other entries are kept. A `passkeyRpIds` entry is lowercased first, then
-  held to the passkey parser's RP ID rule (a domain name in LDH labels, not an
-  IP address).
+- An invalid entry in `customSchemes` (including a reserved scheme such as
+  `https` or `file`, see [Custom URL schemes](custom-schemes.md)) or in
+  `passkeyRpIds` is reported and skipped. The other entries are kept. A
+  `passkeyRpIds` entry is lowercased first, then held to the passkey parser's RP
+  ID rule (a domain name in LDH labels, not an IP address).
 - If a key appears more than once, the last one wins, and this is reported.
 
 ## Trust
