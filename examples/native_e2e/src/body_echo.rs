@@ -90,6 +90,10 @@ pub const MIME_CHECKS: &[(&str, &str)] = &[
     "frame-bridge",
     "a same-origin frame posts to the bridge's message handler directly",
   ),
+  (
+    "bridge-malformed",
+    "malformed messages posted to the bridge's handler neither crash the app nor stop the bridge; a call whose arguments JSON can't hold is answered with an error",
+  ),
 ];
 
 /// The label a sub-frame's forged `bodyReport` call would report under; the
@@ -272,6 +276,47 @@ const mimeChecks = [
       + "m.token = ''; h.postMessage(JSON.stringify(m)); m.token = '0'.repeat(32); h.postMessage(JSON.stringify(m));");
     await new Promise(r => setTimeout(r, 1000));
     return [true, 'posted from a frame'];
+  }}],
+  // The main frame posting malformed messages to the native handler itself:
+  // wrong types, a NaN or negative id, a lone surrogate, arguments JSON can't
+  // hold (a Date). The app must survive them (the next real call works),
+  // and on WKWebView the Date call is answered with an error rather than left
+  // pending (WebKitGTK takes JSON strings, so it never sees the objects).
+  ['bridge-malformed', async () => {{
+    const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.laufey;
+    if (!h) return [true, 'no WebKit message handler'];
+    const answered = new Map();
+    const respond = window.__laufeyRespond;
+    window.__laufeyRespond = function(id, result, error) {{
+      answered.set(id, error);
+      return respond.apply(this, arguments);
+    }};
+    try {{
+      for (const m of [
+        null, 5, 'x', [], {{}}, {{callId: 'x', method: 'bodyReport'}},
+        {{callId: 1, method: 5}}, {{callId: NaN, method: 'bodyReport'}},
+        {{callId: -1, method: 'bodyReport', args: []}},
+        {{callId: 1e300, method: 'bodyReport', args: []}},
+        {{callId: 3, method: '\ud800', args: []}},
+        {{callId: 4, method: 'bodyReport', args: 'not a list'}},
+        {{callId: 987654322, method: 'bodyReport', args: [new Date()]}},
+        '{{"callId":', '[x', '[-', '['.repeat(100000),
+      ]) {{
+        try {{ h.postMessage(m); }} catch (e) {{}}
+      }}
+      await new Promise(r => setTimeout(r, 1000));
+      const alive = await Promise.race([
+        Laufey.bodyReport('bridge-malformed-alive', true, 0, '').then(() => true),
+        new Promise(r => setTimeout(() => r(false), 10000)),
+      ]);
+      const wk = navigator.userAgent.includes('Macintosh');
+      const dateAnswered = answered.has(987654322) && !!answered.get(987654322);
+      return [alive && (!wk || dateAnswered),
+              'next call ' + (alive ? 'answered' : 'timed out') +
+              (wk ? ', Date call ' + (dateAnswered ? 'rejected' : 'not answered') : '')];
+    }} finally {{
+      window.__laufeyRespond = respond;
+    }}
   }}],
   ['mime-doc-plain', async () => {{
     const d = await frameDoc('/mime/doc-plain');

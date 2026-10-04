@@ -221,26 +221,48 @@ class WKWebViewIOSBackend : public LaufeyBackend {
     return;
   if (![message.body isKindOfClass:[NSDictionary class]])
     return;
+  // Every type is checked: a message from a page is never a reason to crash
+  // (the same checks as the macOS backend).
   NSDictionary* body = (NSDictionary*)message.body;
-  NSNumber* callIdNum = body[@"callId"];
-  NSString* method = body[@"method"];
+  id callIdObj = body[@"callId"];
+  id methodObj = body[@"method"];
   id argsJson = body[@"args"];
-  if (!callIdNum || !method)
+  if (![callIdObj isKindOfClass:[NSNumber class]] ||
+      ![methodObj isKindOfClass:[NSString class]])
     return;
-
-  uint64_t call_id = [callIdNum unsignedLongLongValue];
-  std::string methodStr = [method UTF8String];
+  double callIdDouble = [(NSNumber*)callIdObj doubleValue];
+  if (!(callIdDouble >= 0 && callIdDouble <= 9007199254740992.0) ||
+      callIdDouble != static_cast<double>(static_cast<uint64_t>(callIdDouble)))
+    return;
+  uint64_t call_id = static_cast<uint64_t>(callIdDouble);
+  const char* methodUtf8 = [(NSString*)methodObj UTF8String];
+  if (!methodUtf8)
+    return;
+  std::string methodStr = methodUtf8;
 
   laufey::ValuePtr args = laufey::Value::List();
-  if ([argsJson isKindOfClass:[NSArray class]]) {
-    NSData* jsonData = [NSJSONSerialization dataWithJSONObject:argsJson
-                                                       options:0
-                                                         error:nil];
-    if (jsonData) {
-      NSString* jsonStr = [[NSString alloc] initWithData:jsonData
-                                                encoding:NSUTF8StringEncoding];
-      args = json::ParseJson([jsonStr UTF8String]);
+  if (argsJson && argsJson != [NSNull null]) {
+    laufey::ValuePtr parsed;
+    if ([argsJson isKindOfClass:[NSArray class]] &&
+        [NSJSONSerialization isValidJSONObject:argsJson]) {
+      NSData* jsonData = [NSJSONSerialization dataWithJSONObject:argsJson
+                                                         options:0
+                                                           error:nil];
+      if (jsonData) {
+        std::string json(static_cast<const char*>(jsonData.bytes),
+                         jsonData.length);
+        parsed = json::ParseJson(json);
+      }
     }
+    if (!parsed || !parsed->IsList()) {
+      if (self.backend)
+        self.backend->RespondToJsCall(
+            self.windowId, call_id, nullptr,
+            laufey::Value::String(
+                "laufey: the call's arguments can't be passed to the app"));
+      return;
+    }
+    args = parsed;
   }
   if (self.backend) {
     self.backend->HandleJsMessage(self.windowId, call_id, methodStr, args);

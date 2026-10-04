@@ -583,30 +583,60 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
   if (![message.body isKindOfClass:[NSDictionary class]])
     return;
 
+  // The body is whatever the page posted (structured-cloned into Foundation
+  // objects), so check every type before using it: a message from a page is
+  // never a reason to crash.
   NSDictionary* body = (NSDictionary*)message.body;
 
-  NSNumber* callIdNum = body[@"callId"];
-  NSString* method = body[@"method"];
+  id callIdObj = body[@"callId"];
+  id methodObj = body[@"method"];
   id argsJson = body[@"args"];
 
-  if (!callIdNum || !method)
+  if (![callIdObj isKindOfClass:[NSNumber class]] ||
+      ![methodObj isKindOfClass:[NSString class]])
     return;
-
-  uint64_t call_id = [callIdNum unsignedLongLongValue];
-  std::string methodStr = [method UTF8String];
+  // The page's own number for the call, echoed back with the answer. A number
+  // the bridge script can't have made (negative, fractional, past 2^53, NaN)
+  // is not a call.
+  double callIdDouble = [(NSNumber*)callIdObj doubleValue];
+  if (!(callIdDouble >= 0 && callIdDouble <= 9007199254740992.0) ||
+      callIdDouble != static_cast<double>(static_cast<uint64_t>(callIdDouble)))
+    return;
+  uint64_t call_id = static_cast<uint64_t>(callIdDouble);
+  // UTF8String is NULL for a string that isn't valid UTF-16 (a lone
+  // surrogate).
+  const char* methodUtf8 = [(NSString*)methodObj UTF8String];
+  if (!methodUtf8)
+    return;
+  std::string methodStr = methodUtf8;
 
   laufey::ValuePtr args = laufey::Value::List();
-  if ([argsJson isKindOfClass:[NSArray class]]) {
-    NSArray* argsArray = (NSArray*)argsJson;
-    NSError* error = nil;
-    NSData* jsonData = [NSJSONSerialization dataWithJSONObject:argsArray
-                                                       options:0
-                                                         error:&error];
-    if (jsonData) {
-      NSString* jsonStr = [[NSString alloc] initWithData:jsonData
-                                                encoding:NSUTF8StringEncoding];
-      args = json::ParseJson([jsonStr UTF8String]);
+  if (argsJson && argsJson != [NSNull null]) {
+    laufey::ValuePtr parsed;
+    // dataWithJSONObject: throws for an object JSON can't hold (a Date, a
+    // non-finite number), so ask first.
+    if ([argsJson isKindOfClass:[NSArray class]] &&
+        [NSJSONSerialization isValidJSONObject:argsJson]) {
+      NSData* jsonData = [NSJSONSerialization dataWithJSONObject:argsJson
+                                                         options:0
+                                                           error:nil];
+      if (jsonData) {
+        std::string json(static_cast<const char*>(jsonData.bytes),
+                         jsonData.length);
+        parsed = json::ParseJson(json);
+      }
     }
+    if (!parsed || !parsed->IsList()) {
+      // A call the runtime can't be handed: answer it, so the page's promise
+      // doesn't wait forever.
+      if (self.backend)
+        self.backend->RespondToJsCall(
+            self.windowId, call_id, nullptr,
+            laufey::Value::String(
+                "laufey: the call's arguments can't be passed to the app"));
+      return;
+    }
+    args = parsed;
   }
 
   if (self.backend) {
@@ -1916,7 +1946,9 @@ void WKWebViewBackend::ExecuteJs(uint32_t window_id, const std::string& script,
                  callback(&laufey, nullptr, callback_data);
                }
              } else if ([result isKindOfClass:[NSString class]]) {
-               auto val = laufey::Value::String([(NSString*)result UTF8String]);
+               // NULL for a string that isn't valid UTF-16.
+               const char* utf8 = [(NSString*)result UTF8String];
+               auto val = laufey::Value::String(utf8 ? utf8 : "");
                laufey_value laufey(val);
                callback(&laufey, nullptr, callback_data);
              } else {
