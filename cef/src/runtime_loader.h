@@ -22,6 +22,7 @@
 // (backend-common/include/laufey_value.h). CEF stores values as laufey::Value
 // and converts to/from CefValue only at the renderer<->browser IPC boundary
 // (CefValueToLaufey / LaufeyToCefValue in runtime_loader.cc).
+#include "laufey_js_calls.h"
 #include "laufey_sync_call.h"
 #include "laufey_value.h"
 
@@ -117,20 +118,11 @@ class RuntimeLoader {
     return !browsers_.empty();
   }
 
-  void StoreCallWindow(uint64_t call_id, uint32_t window_id) {
-    std::lock_guard<std::mutex> lock(windows_mutex_);
-    call_to_window_[call_id] = window_id;
-  }
-
-  uint32_t ConsumeCallWindow(uint64_t call_id) {
-    std::lock_guard<std::mutex> lock(windows_mutex_);
-    auto it = call_to_window_.find(call_id);
-    if (it != call_to_window_.end()) {
-      uint32_t wid = it->second;
-      call_to_window_.erase(it);
-      return wid;
-    }
-    return 0;
+  // A bridge call travels to the runtime under a backend-issued id, not the
+  // page's own number (laufey_js_calls.h). Returns where the answer goes;
+  // false for an id the backend never issued or already answered.
+  bool TakeJsCall(uint64_t call_id, laufey_common::JsCallRoute* route) {
+    return js_calls_.Take(call_id, route);
   }
 
   // Records that the embedder explicitly set this window's title via the C
@@ -206,8 +198,13 @@ class RuntimeLoader {
     }
   }
 
-  void OnJsCall(uint32_t window_id, uint64_t call_id,
-                const std::string& method_path, CefRefPtr<CefListValue> args);
+  // `page_call_id` is the number the page's bridge gave the call; the runtime
+  // sees a backend-issued id instead.
+  // `origin` is the serialized origin of the calling document (a call from one
+  // the launch file's bridge pin refuses is answered with an error at once).
+  void OnJsCall(uint32_t window_id, uint64_t page_call_id,
+                const std::string& method_path, CefRefPtr<CefListValue> args,
+                const std::string& origin);
 
   void PollPendingJsCalls();
 
@@ -215,6 +212,14 @@ class RuntimeLoader {
     std::lock_guard<std::mutex> lock(handler_mutex_);
     js_call_handler_ = handler;
     js_call_user_data_ = user_data;
+  }
+
+  // API 44: the handler that also receives the calling document's origin.
+  // While set, it takes every call (see laufey.h).
+  void SetJsCallHandlerEx(laufey_js_call_ex_fn handler, void* user_data) {
+    std::lock_guard<std::mutex> lock(handler_mutex_);
+    js_call_handler_ex_ = handler;
+    js_call_user_data_ex_ = user_data;
   }
 
   void SetKeyboardEventHandler(laufey_keyboard_event_fn handler,
@@ -440,8 +445,8 @@ class RuntimeLoader {
   std::set<uint32_t> close_allowed_;
   std::map<int, uint32_t>
       browser_id_to_laufey_id_;  // CefBrowser::GetIdentifier() -> laufey_id
-  std::map<uint64_t, uint32_t>
-      call_to_window_;  // call_id -> window_id for JsCallRespond
+  // Bridge calls in flight, by the id the runtime sees.
+  laufey_common::JsCallTable js_calls_;
   std::map<void*, uint32_t> nswindow_to_laufey_id_;
   std::map<void*, uint32_t> native_handle_to_laufey_id_;
   // Windows whose title was explicitly set by the embedder; their titles are
@@ -455,6 +460,8 @@ class RuntimeLoader {
 
   laufey_js_call_fn js_call_handler_ = nullptr;
   void* js_call_user_data_ = nullptr;
+  laufey_js_call_ex_fn js_call_handler_ex_ = nullptr;
+  void* js_call_user_data_ex_ = nullptr;
   std::mutex handler_mutex_;
 
   laufey_keyboard_event_fn keyboard_handler_ = nullptr;
@@ -520,6 +527,7 @@ class RuntimeLoader {
     uint64_t call_id;
     std::string method_path;
     CefRefPtr<CefListValue> args;
+    std::string origin;
   };
   std::queue<PendingJsCall> pending_js_calls_;
   std::mutex pending_mutex_;

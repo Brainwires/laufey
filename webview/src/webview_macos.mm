@@ -11,6 +11,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_single_instance.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
@@ -358,7 +359,8 @@ class WKWebViewBackend : public LaufeyBackend {
   void SetQuitOnLastWindowClosed(bool quit) override;
 
   void HandleJsMessage(uint32_t window_id, uint64_t call_id,
-                       const std::string& method, laufey::ValuePtr args);
+                       const std::string& method, laufey::ValuePtr args,
+                       const std::string& origin);
 
   // Called from the window delegate's windowWillClose: when AppKit closes
   // the NSWindow directly (windowShouldClose: returned YES because no
@@ -563,6 +565,18 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
          origin.port == port;
 }
 
+// The HTML serialization of a frame's security origin (API 44: handed to the
+// runtime with every call). WebKit reports a scheme's default port as 0.
+static std::string LaufeyOriginString(WKSecurityOrigin* origin) {
+  if (!origin)
+    return laufey_common::kOpaqueOrigin;
+  const char* scheme = origin.protocol.UTF8String;
+  const char* host = origin.host.UTF8String;
+  return laufey_common::SerializeOrigin(
+      scheme ? scheme : "", host ? host : "",
+      origin.port > 0 ? static_cast<int>(origin.port) : -1);
+}
+
 - (void)userContentController:(WKUserContentController*)userContentController
       didReceiveScriptMessage:(WKScriptMessage*)message {
   if (![message.name isEqualToString:@"laufey"])
@@ -583,34 +597,65 @@ static bool LaufeyOriginMatchesURL(WKSecurityOrigin* origin, NSURL* url) {
   if (![message.body isKindOfClass:[NSDictionary class]])
     return;
 
+  // The body is whatever the page posted (structured-cloned into Foundation
+  // objects), so check every type before using it: a message from a page is
+  // never a reason to crash.
   NSDictionary* body = (NSDictionary*)message.body;
 
-  NSNumber* callIdNum = body[@"callId"];
-  NSString* method = body[@"method"];
+  id callIdObj = body[@"callId"];
+  id methodObj = body[@"method"];
   id argsJson = body[@"args"];
 
-  if (!callIdNum || !method)
+  if (![callIdObj isKindOfClass:[NSNumber class]] ||
+      ![methodObj isKindOfClass:[NSString class]])
     return;
-
-  uint64_t call_id = [callIdNum unsignedLongLongValue];
-  std::string methodStr = [method UTF8String];
+  // The page's own number for the call, echoed back with the answer. A number
+  // the bridge script can't have made (negative, fractional, past 2^53, NaN)
+  // is not a call.
+  double callIdDouble = [(NSNumber*)callIdObj doubleValue];
+  if (!(callIdDouble >= 0 && callIdDouble <= 9007199254740992.0) ||
+      callIdDouble != static_cast<double>(static_cast<uint64_t>(callIdDouble)))
+    return;
+  uint64_t call_id = static_cast<uint64_t>(callIdDouble);
+  // UTF8String is NULL for a string that isn't valid UTF-16 (a lone
+  // surrogate).
+  const char* methodUtf8 = [(NSString*)methodObj UTF8String];
+  if (!methodUtf8)
+    return;
+  std::string methodStr = methodUtf8;
 
   laufey::ValuePtr args = laufey::Value::List();
-  if ([argsJson isKindOfClass:[NSArray class]]) {
-    NSArray* argsArray = (NSArray*)argsJson;
-    NSError* error = nil;
-    NSData* jsonData = [NSJSONSerialization dataWithJSONObject:argsArray
-                                                       options:0
-                                                         error:&error];
-    if (jsonData) {
-      NSString* jsonStr = [[NSString alloc] initWithData:jsonData
-                                                encoding:NSUTF8StringEncoding];
-      args = json::ParseJson([jsonStr UTF8String]);
+  if (argsJson && argsJson != [NSNull null]) {
+    laufey::ValuePtr parsed;
+    // dataWithJSONObject: throws for an object JSON can't hold (a Date, a
+    // non-finite number), so ask first.
+    if ([argsJson isKindOfClass:[NSArray class]] &&
+        [NSJSONSerialization isValidJSONObject:argsJson]) {
+      NSData* jsonData = [NSJSONSerialization dataWithJSONObject:argsJson
+                                                         options:0
+                                                           error:nil];
+      if (jsonData) {
+        std::string json(static_cast<const char*>(jsonData.bytes),
+                         jsonData.length);
+        parsed = json::ParseJson(json);
+      }
     }
+    if (!parsed || !parsed->IsList()) {
+      // A call the runtime can't be handed: answer it, so the page's promise
+      // doesn't wait forever.
+      if (self.backend)
+        self.backend->RespondToJsCall(
+            self.windowId, call_id, nullptr,
+            laufey::Value::String(
+                "laufey: the call's arguments can't be passed to the app"));
+      return;
+    }
+    args = parsed;
   }
 
   if (self.backend) {
-    self.backend->HandleJsMessage(self.windowId, call_id, methodStr, args);
+    self.backend->HandleJsMessage(self.windowId, call_id, methodStr, args,
+                                  LaufeyOriginString(frame.securityOrigin));
   }
 }
 
@@ -629,6 +674,9 @@ class MacSchemeExchange;
 struct MacSchemeTaskState {
   std::atomic<bool> stopped{false};
   laufey_common::SchemeCancelGate gate;
+  // Response bytes handed to the main queue and not yet given to WebKit
+  // (backpressure, API 44).
+  std::atomic<size_t> pending_bytes{0};
   // Set on the main thread before the runtime sees it; deleted (on the main
   // thread) only after gate.Finish().
   MacSchemeExchange* exchange = nullptr;
@@ -702,10 +750,17 @@ class MacSchemeExchange : public SchemeExchangeBase {
   intptr_t WriteResponse(const uint8_t* buf, size_t len) override {
     if (state_->stopped.load())
       return -1;
+    // Backpressure (API 44): every write is a copy queued for the main
+    // thread, which hands it to WebKit. While the main thread is this far
+    // behind, take nothing; the runtime writes the same bytes again later.
+    if (state_->pending_bytes.load() >= laufey_common::kSchemeResponseHighWater)
+      return 0;
     NSData* data = [NSData dataWithBytes:buf length:len];
     id<WKURLSchemeTask> task = task_;
     std::shared_ptr<MacSchemeTaskState> state = state_;
+    state->pending_bytes.fetch_add(len);
     dispatch_async(dispatch_get_main_queue(), ^{
+      state->pending_bytes.fetch_sub(len);
       if (state->stopped.load())
         return;
       @try {
@@ -891,13 +946,18 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
 // `target="_blank"` and `window.open()` request a new browsing context, which
 // the Navigation API interceptor never sees. WKWebView has no popup support, so
 // route http(s) destinations to the OS browser and create no new webview.
+// WKNavigationAction says nothing public about a user gesture, but with
+// javaScriptCanOpenWindowsAutomatically off (set on every configuration)
+// WebKit's popup blocker calls this only for a request a user action started
+// (laufey_external_links.h).
 - (WKWebView*)webView:(WKWebView*)webView
     createWebViewWithConfiguration:(WKWebViewConfiguration*)configuration
                forNavigationAction:(WKNavigationAction*)navigationAction
                     windowFeatures:(WKWindowFeatures*)windowFeatures {
   NSURL* url = navigationAction.request.URL;
-  if (url && ([url.scheme isEqualToString:@"http"] ||
-              [url.scheme isEqualToString:@"https"])) {
+  NSString* absolute = url.absoluteString;
+  if (absolute && DecideLaufeyPopup(absolute.UTF8String, true) ==
+                      LaufeyPopupDecision::kOpenInBrowser) {
     [[NSWorkspace sharedWorkspace] openURL:url];
   }
   return nil;
@@ -1549,6 +1609,10 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       if (WKWebsiteDataStore* store = LaufeyWebsiteDataStore()) {
         config.websiteDataStore = store;
       }
+      // window.open() without a user gesture is blocked by WebKit (the
+      // default on macOS lets a page open windows at will), so the
+      // createWebView hook only sees requests a user action started.
+      config.preferences.javaScriptCanOpenWindowsAutomatically = NO;
       [config.userContentController addScriptMessageHandler:handler
                                                        name:@"laufey"];
 
@@ -1586,7 +1650,8 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                           "            callId: callId,\n"
                           "            method: path.join('.'),\n"
                           "            args: processedArgs\n"
-                          "          });");
+                          "          });",
+                          "", RuntimeLoader::GetInstance()->BridgeGuardJs());
       WKUserScript* script = [[WKUserScript alloc]
             initWithSource:[NSString stringWithUTF8String:initScript.c_str()]
              injectionTime:WKUserScriptInjectionTimeAtDocumentStart
@@ -1916,7 +1981,9 @@ void WKWebViewBackend::ExecuteJs(uint32_t window_id, const std::string& script,
                  callback(&laufey, nullptr, callback_data);
                }
              } else if ([result isKindOfClass:[NSString class]]) {
-               auto val = laufey::Value::String([(NSString*)result UTF8String]);
+               // NULL for a string that isn't valid UTF-16.
+               const char* utf8 = [(NSString*)result UTF8String];
+               auto val = laufey::Value::String(utf8 ? utf8 : "");
                laufey_value laufey(val);
                callback(&laufey, nullptr, callback_data);
              } else {
@@ -2680,8 +2747,10 @@ void WKWebViewBackend::Run() {
 
 void WKWebViewBackend::HandleJsMessage(uint32_t window_id, uint64_t call_id,
                                        const std::string& method,
-                                       laufey::ValuePtr args) {
-  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args);
+                                       laufey::ValuePtr args,
+                                       const std::string& origin) {
+  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args,
+                                         origin);
 }
 
 // --- Application Menu / Context Menu ---

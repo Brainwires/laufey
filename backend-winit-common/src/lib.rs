@@ -43,7 +43,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 43;
+pub const LAUFEY_API_VERSION: u32 = 44;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -74,6 +74,15 @@ pub type LaufeyJsCallFn = unsafe extern "C" fn(
   u64,              // call_id
   *const c_char,    // method_path
   *mut LaufeyValue, // args
+);
+/// A JS call with the calling document's origin (API 44).
+pub type LaufeyJsCallExFn = unsafe extern "C" fn(
+  *mut c_void,      // user_data
+  u32,              // window_id
+  u64,              // call_id
+  *const c_char,    // method_path
+  *mut LaufeyValue, // args
+  *const c_char,    // origin
 );
 pub type LaufeyJsResultFn =
   unsafe extern "C" fn(*mut LaufeyValue, *mut LaufeyValue, *mut c_void);
@@ -842,6 +851,9 @@ pub struct LaufeyBackendApi {
     Option<unsafe extern "C" fn(*mut c_void) -> bool>,
   // --- Auth session cancel (API >= 43) ---
   pub auth_session_cancel: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+  // --- JS calls with their origin (API >= 44) ---
+  pub set_js_call_handler_ex:
+    Option<unsafe extern "C" fn(*mut c_void, LaufeyJsCallExFn, *mut c_void)>,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1474,6 +1486,17 @@ pub unsafe extern "C" fn set_js_call_handler(
   _user_data: *mut c_void,
 ) {
 }
+/// `set_js_call_handler_ex` (API 44): Winit has no web engine, so no JS
+/// call ever arrives; the handler is accepted and never called.
+///
+/// # Safety
+/// Caller must pass valid pointers as defined by the LAUFEY C API contract.
+pub unsafe extern "C" fn set_js_call_handler_ex(
+  _data: *mut c_void,
+  _handler: LaufeyJsCallExFn,
+  _user_data: *mut c_void,
+) {
+}
 /// # Safety
 /// Caller must pass valid pointers as defined by the LAUFEY C API contract.
 pub unsafe extern "C" fn js_call_respond(
@@ -1715,6 +1738,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     test_cancel_auth_session: None,
     // API 43: no session can run, so cancelling one answers false.
     auth_session_cancel: Some(auth_session_cancel_none),
+    // API 44: no web engine, so no call ever arrives.
+    set_js_call_handler_ex: Some(set_js_call_handler_ex),
   }
 }
 

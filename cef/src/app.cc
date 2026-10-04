@@ -4,6 +4,7 @@
 #include "custom_schemes.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_io.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
@@ -299,10 +300,20 @@ bool LaufeyHandler::OnBeforePopup(
   CEF_REQUIRE_UI_THREAD();
   // `target="_blank"` / `window.open()` aren't seen by the page's Navigation
   // API listener. Cancel the popup and route http(s) destinations to the OS
-  // browser; return true to prevent the new browser from being created.
+  // browser, only when a user action started it (laufey_external_links.h);
+  // return true to prevent the new browser from being created.
   std::string url = target_url.ToString();
-  if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
-    LaufeyOpenExternalURL(url);
+  switch (DecideLaufeyPopup(url, user_gesture)) {
+    case LaufeyPopupDecision::kOpenInBrowser:
+      LaufeyOpenExternalURL(url);
+      break;
+    case LaufeyPopupDecision::kBlockedNoGesture:
+      std::cerr << "laufey: not opening " << url
+                << " in the browser: the page asked without a user gesture"
+                << std::endl;
+      break;
+    case LaufeyPopupDecision::kIgnored:
+      break;
   }
   return true;
 }
@@ -671,7 +682,11 @@ bool LaufeyHandler::OnProcessMessageReceived(
     }
 
     uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
-    RuntimeLoader::GetInstance()->OnJsCall(wid, call_id, method_path, callArgs);
+    // API 44: the calling document's origin, from the browser's view of the
+    // frame (not from the renderer's message).
+    RuntimeLoader::GetInstance()->OnJsCall(
+        wid, call_id, method_path, callArgs,
+        laufey_common::OriginOfUrl(frame->GetURL().ToString()));
     return true;
   }
 

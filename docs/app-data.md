@@ -34,8 +34,9 @@ A packaged app that is started directly (Explorer, a Start menu shortcut, the
 Dock, `exec`), with nothing to set the environment, can ship both values in its
 [launch file](launch-config.md) as `"dataDir"` and `"appId"`. The file's values
 win over the environment: an environment inherited from another app can't move
-the app into that app's profile. Without them in the file, the environment
-variables decide.
+the app into that app's profile. A file with `"appId"` and no `"dataDir"` uses
+the app id's directory, and `LAUFEY_DATA_DIR` is ignored (reported on stderr).
+Without them in the file, the environment variables decide.
 
 Missing directories are created, owner-only (`0700`) on macOS and Linux; on
 Windows they inherit the ACL of `%LOCALAPPDATA%` (or of the parent of
@@ -93,8 +94,12 @@ single-instance mode.
 
 With neither variable set, nothing changes from earlier releases:
 
-- **CEF** uses a fresh temporary profile per process (`laufey_cef_<pid>` in the
-  temp directory), so nothing persists across launches.
+- **CEF** uses a fresh temporary profile per process, so nothing persists across
+  launches: `laufey_cef_<pid>` in the per-user temp directory on macOS and
+  Windows. On Linux, where `/tmp` is shared by every user, it is a new
+  owner-only (`0700`) directory with a random name (`laufey_cef_XXXXXX`, made by
+  `mkdtemp`) under `$TMPDIR` or `/tmp`, so another user can't create or read it;
+  if that fails, CEF keeps the profile in memory.
 - **WebView2** uses its default user data folder, `<exe name>.WebView2` next to
   the executable.
 - **WKWebView** uses the default data store, keyed by the host bundle id, so

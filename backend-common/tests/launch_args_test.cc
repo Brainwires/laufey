@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -115,6 +116,117 @@ static void TestDeepLinkStrip() {
   strip = DeepLinkSwitchesToStrip({"--keep", "--drop", "acme://x"}, {"keep"});
   EXPECT(strip.size() == 1);
   EXPECT(Contains(strip, "drop"));
+  // The Linux form (a .desktop entry's `Exec=app %u`, which the CEF Linux
+  // host now records too): switches a launcher put next to the link are
+  // dropped; the link itself, one argument even with spaces, is no switch.
+  strip = DeepLinkSwitchesToStrip(
+      {"--renderer-cmd-prefix=gdb --args", "--no-sandbox",
+       "acme://open?q=a --remote-debugging-port=9222"},
+      {});
+  EXPECT(strip.size() == 2);
+  EXPECT(Contains(strip, "renderer-cmd-prefix"));
+  EXPECT(Contains(strip, "no-sandbox"));
+  EXPECT(!Contains(strip, "remote-debugging-port"));
+}
+
+// A fake filesystem for ChooseRuntimePath: the paths in `files` exist.
+static std::function<bool(const std::string&)> Files(Args files) {
+  return [files](const std::string& path) { return Contains(files, path); };
+}
+
+static void TestChooseRuntimePath() {
+  const Args bundled = {"/app/my.so"};
+  const Args dev = {"./libruntime.so", "/usr/lib/laufey/libruntime.so"};
+
+  // Development host: --runtime, then LAUFEY_RUNTIME_PATH, then the
+  // fallbacks in order (the first that exists); nothing is reported.
+  RuntimeChoice c = ChooseRuntimePath({"--runtime", "/arg.so"}, "/env.so",
+                                      bundled, dev, false, Files({}));
+  EXPECT(!c.packaged && c.path == "/arg.so" && c.warnings.empty());
+  c = ChooseRuntimePath({"--runtime=/arg.so"}, "", bundled, dev, false,
+                        Files({}));
+  EXPECT(c.path == "/arg.so");
+  c = ChooseRuntimePath({}, "/env.so", bundled, dev, false, Files({}));
+  EXPECT(!c.packaged && c.path == "/env.so" && c.warnings.empty());
+  c = ChooseRuntimePath({}, "", bundled, dev, false,
+                        Files({"/usr/lib/laufey/libruntime.so"}));
+  EXPECT(!c.packaged && c.path == "/usr/lib/laufey/libruntime.so");
+  c = ChooseRuntimePath({}, "", bundled, dev, false,
+                        Files({"./libruntime.so",
+                               "/usr/lib/laufey/"
+                               "libruntime.so"}));
+  EXPECT(c.path == "./libruntime.so");
+  c = ChooseRuntimePath({}, "", bundled, dev, false, Files({}));
+  EXPECT(!c.packaged && c.path.empty() && c.warnings.empty());
+  // A `--runtime` after "--" is a positional argument, not an option.
+  c = ChooseRuntimePath({"--", "--runtime", "/arg.so"}, "", bundled, dev, false,
+                        Files({}));
+  EXPECT(c.path.empty());
+
+  // A runtime the app ships makes it packaged: that one is loaded, and the
+  // command line, the environment and the fallbacks are ignored (the first
+  // two reported).
+  c = ChooseRuntimePath({"--runtime", "/arg.so"}, "/env.so", bundled, dev,
+                        false, Files({"/app/my.so", "./libruntime.so"}));
+  EXPECT(c.packaged && c.path == "/app/my.so");
+  EXPECT(c.warnings.size() == 2);
+  EXPECT(c.warnings.size() == 2 &&
+         c.warnings[0].find("--runtime") != std::string::npos &&
+         c.warnings[1].find("LAUFEY_RUNTIME_PATH") != std::string::npos);
+  c = ChooseRuntimePath({}, "", bundled, dev, false, Files({"/app/my.so"}));
+  EXPECT(c.packaged && c.path == "/app/my.so" && c.warnings.empty());
+  // The first shipped location that exists; empty entries are skipped.
+  c = ChooseRuntimePath(
+      {}, "", {"", "/app/Frameworks/libruntime.dylib", "/app/MacOS/x.dylib"},
+      dev, false, Files({"/app/MacOS/x.dylib"}));
+  EXPECT(c.packaged && c.path == "/app/MacOS/x.dylib");
+
+  // A launch file makes it packaged too: without a shipped runtime there is
+  // nothing to load (reported), however the host was started.
+  c = ChooseRuntimePath({"--runtime=/arg.so"}, "/env.so", bundled, dev, true,
+                        Files({"./libruntime.so", "/arg.so", "/env.so"}));
+  EXPECT(c.packaged && c.path.empty());
+  EXPECT(c.warnings.size() == 3);
+  c = ChooseRuntimePath({}, "", bundled, dev, true,
+                        Files({"/app/my.so", "./libruntime.so"}));
+  EXPECT(c.packaged && c.path == "/app/my.so" && c.warnings.empty());
+  // Only the environment set: one warning.
+  c = ChooseRuntimePath({}, "/env.so", bundled, dev, true,
+                        Files({"/app/my.so"}));
+  EXPECT(c.path == "/app/my.so" && c.warnings.size() == 1);
+}
+
+static void TestMissingPackagedRuntime() {
+  // Only a packaged app without its runtime must not start; a development
+  // host without one keeps its own handling (CEF opens its demo window).
+  RuntimeChoice c;
+  EXPECT(!IsMissingPackagedRuntime(c));
+  c.packaged = true;
+  EXPECT(IsMissingPackagedRuntime(c));
+  c.path = "/app/my.so";
+  EXPECT(!IsMissingPackagedRuntime(c));
+  c = ChooseRuntimePath({"--runtime", "/arg.so"}, "/env.so", {"/app/my.so"},
+                        {}, true, Files({"/arg.so", "/env.so"}));
+  EXPECT(IsMissingPackagedRuntime(c));
+  c = ChooseRuntimePath({}, "/env.so", {"/app/my.so"}, {}, false, Files({}));
+  EXPECT(!IsMissingPackagedRuntime(c));
+  EXPECT(kMissingRuntimeExitCode != 0);
+}
+
+static void TestWebView2EnvironmentOverrides() {
+  // A development launch, or a packaged app with DevTools on, honours them.
+  EXPECT(WebView2EnvironmentOverridesToClear(false, false).empty());
+  EXPECT(WebView2EnvironmentOverridesToClear(false, true).empty());
+  EXPECT(WebView2EnvironmentOverridesToClear(true, true).empty());
+  // A packaged app with DevTools off clears the dangerous ones only.
+  Args clear = WebView2EnvironmentOverridesToClear(true, false);
+  EXPECT(clear.size() == 5);
+  EXPECT(Contains(clear, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
+  EXPECT(Contains(clear, "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"));
+  EXPECT(Contains(clear, "WEBVIEW2_USER_DATA_FOLDER"));
+  EXPECT(Contains(clear, "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER"));
+  EXPECT(Contains(clear, "WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER"));
+  EXPECT(!Contains(clear, "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE"));
 }
 
 static void TestProcessArgs() {
@@ -131,6 +243,9 @@ int main() {
   TestUrlArguments();
   TestSwitchNames();
   TestDeepLinkStrip();
+  TestChooseRuntimePath();
+  TestMissingPackagedRuntime();
+  TestWebView2EnvironmentOverrides();
   TestProcessArgs();
   if (g_failures) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);

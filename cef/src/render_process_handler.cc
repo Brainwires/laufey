@@ -2,6 +2,7 @@
 
 #include "render_process_handler.h"
 
+#include "laufey_bridge_origin.h"
 #include "laufey_external_links.h"
 #include "laufey_file_drop_observer.h"
 
@@ -207,6 +208,14 @@ void LaufeyRenderProcessHandler::OnContextCreated(
   // bindings that run with the host process's permissions. Mirrors the
   // macOS/iOS WebView backends, which inject with forMainFrameOnly:YES.
   if (!frame || !frame->IsMain()) {
+    return;
+  }
+  // A packaged app's launch file pins the origins its bridge serves (API 44):
+  // a top-level document on any other origin (the window navigated away)
+  // gets no namespace. The browser process refuses its calls as well.
+  if (!laufey_common::BridgeOriginAllowed(
+          laufey_common::ProcessBridgeOriginPolicy(),
+          laufey_common::OriginOfUrl(frame->GetURL().ToString()))) {
     return;
   }
 

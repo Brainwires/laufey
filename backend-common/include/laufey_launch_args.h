@@ -13,9 +13,10 @@
 //    after "--" is ever read as an option: not by laufey (ParseHostOptions),
 //    not by Chromium (its command line parser has the same terminator), not
 //    by the runtime.
-//  * A packaged app ignores `--runtime`: its runtime library is the one next
-//    to the executable (or named by LAUFEY_RUNTIME_PATH), never one a command
-//    line names. IsPackagedLaunch decides.
+//  * A packaged app loads only the runtime library it ships (next to the
+//    executable, or in its macOS bundle): never one a command line
+//    (`--runtime`), the environment (LAUFEY_RUNTIME_PATH), the working
+//    directory or a system directory names. ChooseRuntimePath decides.
 //
 // For CEF there is a third: a launch with a URL positional argument (a deep
 // link) drops every Chromium switch that came from the process's own
@@ -25,6 +26,7 @@
 #ifndef LAUFEY_LAUNCH_ARGS_H_
 #define LAUFEY_LAUNCH_ARGS_H_
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -71,6 +73,74 @@ std::vector<std::string> DeepLinkSwitchesToStrip(
 // (laufey-launch.json) exists, or `has_colocated_runtime` (the backend found
 // a runtime library next to the executable).
 bool IsPackagedLaunch(bool has_colocated_runtime);
+
+// The runtime library a host loads, and why.
+struct RuntimeChoice {
+  // The library to load; "" when none was found.
+  std::string path;
+  // Whether the host runs as a packaged app (see ChooseRuntimePath).
+  bool packaged = false;
+  // What was ignored, for stderr (without the "laufey: " prefix).
+  std::vector<std::string> warnings;
+};
+
+// The pure step behind ResolveRuntimePath, exposed for tests. Reads nothing
+// from the environment or the filesystem; `exists` says whether a path names
+// a file.
+//
+//  * `args`: argv without the program (`--runtime` is read up to "--").
+//  * `env_runtime_path`: LAUFEY_RUNTIME_PATH ("" when unset).
+//  * `bundled`: where the app ships its runtime, in order: the library next
+//    to the executable (LaufeyFindColocatedRuntime), a macOS bundle's
+//    Contents/Frameworks or Contents/MacOS. Empty entries are skipped.
+//  * `development`: a development host's fallbacks, in order (paths relative
+//    to the working directory, system library directories).
+//  * `has_launch_file`: the executable has a laufey-launch.json.
+//
+// A packaged app (`has_launch_file`, or one of `bundled` exists) loads the
+// first existing `bundled` path and nothing else: `--runtime`,
+// `env_runtime_path` and `development` are ignored, the first two with a
+// warning. Otherwise (a development host) the order is `--runtime`, then
+// `env_runtime_path`, then the first existing `development` path.
+RuntimeChoice ChooseRuntimePath(
+    const std::vector<std::string>& args, const std::string& env_runtime_path,
+    const std::vector<std::string>& bundled,
+    const std::vector<std::string>& development, bool has_launch_file,
+    const std::function<bool(const std::string&)>& exists);
+
+// Whether the host must not start: a packaged app that ships no runtime
+// library has nothing to run (ChooseRuntimePath already warned). Every host
+// then prints why and exits with kMissingRuntimeExitCode at once, before any
+// window, dialog or web engine: a packaged app never falls back to a
+// runtime from elsewhere, and a host without one must not sit there.
+inline bool IsMissingPackagedRuntime(const RuntimeChoice& choice) {
+  return choice.packaged && choice.path.empty();
+}
+inline constexpr int kMissingRuntimeExitCode = 3;
+// Prints the one-line reason on stderr (any thread, no UI).
+void ReportMissingPackagedRuntime();
+
+// ChooseRuntimePath for this process: LAUFEY_RUNTIME_PATH from the
+// environment, this executable's launch file, the filesystem. Warnings are
+// printed on stderr.
+RuntimeChoice ResolveRuntimePath(const std::vector<std::string>& args,
+                                 const std::vector<std::string>& bundled,
+                                 const std::vector<std::string>& development);
+
+// The WebView2 loader's own environment variables that a packaged app
+// (IsPackagedLaunch) with DevTools off (LaunchInspectable() false) clears
+// from its environment before it creates a WebView2 environment, because
+// WebView2 reads them itself and each one reopens what that app closed:
+// extra Chromium switches (WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, e.g. a
+// remote-debugging port), another browser binary to load
+// (WEBVIEW2_BROWSER_EXECUTABLE_FOLDER), another profile
+// (WEBVIEW2_USER_DATA_FOLDER) and a script debugger on a named pipe
+// (WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER, WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER).
+// Empty otherwise: a development launch, or an inspectable app, honours them.
+// WEBVIEW2_RELEASE_CHANNEL_PREFERENCE / WEBVIEW2_CHANNEL_SEARCH_KIND are left
+// alone: they only choose among the signed WebView2 runtimes installed.
+std::vector<std::string> WebView2EnvironmentOverridesToClear(bool packaged,
+                                                             bool inspectable);
 
 // The process's own arguments (argv without the program, UTF-8), recorded by
 // the host's main() before anything parses them (SetProcessArgs) and read by

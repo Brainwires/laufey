@@ -47,7 +47,7 @@ pub use auth_session::*;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 43;
+pub const LAUFEY_API_VERSION: u32 = 44;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -424,9 +424,19 @@ const NUL_IN_RESULT: &str =
 
 pub struct JsCall {
   pub window_id: u32,
+  /// Issued by the backend (unique in the process), not the page's number.
   pub call_id: u64,
   pub method: String,
   pub args: Vec<Value>,
+  /// The serialized origin of the document that made the call (API 44):
+  /// lowercase `scheme://host`, plus `:port` when it isn't the scheme's
+  /// default (`"myapp://app"`, `"http://127.0.0.1:5173"`), or `"null"` for an
+  /// opaque origin. Calls come only from a window's top-level document, and a
+  /// packaged app's backend has already refused documents outside the
+  /// launch file's `bridgeOrigins`; check it here too before doing anything
+  /// the page's origin shouldn't be trusted with. Empty only on a backend
+  /// that reports no origin.
+  pub origin: String,
 }
 
 impl JsCall {
@@ -464,12 +474,35 @@ impl JsCall {
 }
 
 unsafe extern "C" fn js_call_handler(
-  _user_data: *mut c_void,
+  user_data: *mut c_void,
   window_id: u32,
   call_id: u64,
   method_path: *const c_char,
   args: *mut LaufeyValue,
 ) {
+  js_call_handler_ex(
+    user_data,
+    window_id,
+    call_id,
+    method_path,
+    args,
+    std::ptr::null(),
+  );
+}
+
+unsafe extern "C" fn js_call_handler_ex(
+  _user_data: *mut c_void,
+  window_id: u32,
+  call_id: u64,
+  method_path: *const c_char,
+  args: *mut LaufeyValue,
+  origin: *const c_char,
+) {
+  let origin = if origin.is_null() {
+    String::new()
+  } else {
+    CStr::from_ptr(origin).to_string_lossy().into_owned()
+  };
   let method = if method_path.is_null() {
     String::new()
   } else {
@@ -490,6 +523,7 @@ unsafe extern "C" fn js_call_handler(
     call_id,
     method: method.clone(),
     args: args_vec,
+    origin,
   };
 
   // Cloned out so the handler runs without the lock held: it may bind or
@@ -514,6 +548,17 @@ unsafe extern "C" fn js_call_handler(
 
 fn register_js_handler() {
   let api = api();
+  // API 44: the handler that also receives the calling document's origin.
+  if let Some(set_handler_ex) = api.set_js_call_handler_ex {
+    unsafe {
+      set_handler_ex(
+        api.backend_data,
+        Some(js_call_handler_ex),
+        std::ptr::null_mut(),
+      );
+    }
+    return;
+  }
   if let Some(set_handler) = api.set_js_call_handler {
     unsafe {
       set_handler(
@@ -655,9 +700,11 @@ impl SchemeExchange {
     }
   }
 
-  /// Append response body bytes. Returns bytes accepted, or a negative value
-  /// if the webview has gone away (the embedder should then stop and drop
-  /// the exchange via `finish`).
+  /// Append response body bytes. Never blocks. Returns `buf.len()` (all
+  /// taken); `0` when nothing was taken because the page is behind (the
+  /// backend holds its high-water mark, 4 MiB): wait a moment and write the
+  /// same bytes again (API 44 backpressure); or a negative value if the
+  /// webview has gone away (stop, and drop the exchange via `finish`).
   pub fn write(&self, buf: &[u8]) -> isize {
     let api = api();
     match api.scheme_response_write {
@@ -4585,6 +4632,47 @@ mod tests {
   }
 
   #[test]
+  fn a_js_call_carries_its_origin_to_the_binding() {
+    // API 44: the backend hands each call the calling document's origin; the
+    // plain (pre-44) handler path reports none.
+    let got: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = got.clone();
+    bindings().lock().unwrap().entry(4242).or_default().insert(
+      "whoami".to_string(),
+      Arc::new(BindingHandler::Sync(Box::new(move |call: JsCall| {
+        sink
+          .lock()
+          .unwrap()
+          .push((call.call_id, call.origin.clone()));
+      }))),
+    );
+    let method = CString::new("whoami").unwrap();
+    let origin = CString::new("myapp://app").unwrap();
+    unsafe {
+      js_call_handler_ex(
+        std::ptr::null_mut(),
+        4242,
+        1,
+        method.as_ptr(),
+        std::ptr::null_mut(),
+        origin.as_ptr(),
+      );
+      js_call_handler(
+        std::ptr::null_mut(),
+        4242,
+        2,
+        method.as_ptr(),
+        std::ptr::null_mut(),
+      );
+    }
+    bindings().lock().unwrap().remove(&4242);
+    assert_eq!(
+      *got.lock().unwrap(),
+      vec![(1, "myapp://app".to_string()), (2, String::new())]
+    );
+  }
+
+  #[test]
   fn strings_with_nul_bytes_fail_safely_instead_of_panicking() {
     use std::sync::mpsc;
     install_pdf_fake();
@@ -4634,6 +4722,7 @@ mod tests {
       call_id: 9,
       method: "m".into(),
       args: vec![],
+      origin: "myapp://app".into(),
     }
     .resolve(Value::List(vec![Value::String("x\0".into())]));
     let (result, error) = *nul::RESPONDED.lock().unwrap().last().unwrap();

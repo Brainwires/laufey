@@ -1,6 +1,8 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
 #include "runtime_loader.h"
+
+#include "laufey_bridge_origin.h"
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
@@ -1159,12 +1161,21 @@ static void Backend_SetJsCallHandler(void* data, laufey_js_call_fn handler,
   loader->SetJsCallHandler(handler, user_data);
 }
 
+static void Backend_SetJsCallHandlerEx(void* data, laufey_js_call_ex_fn handler,
+                                       void* user_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  loader->SetJsCallHandlerEx(handler, user_data);
+}
+
 static void Backend_JsCallRespond(void* data, uint64_t call_id,
                                   laufey_value_t* result,
                                   laufey_value_t* error) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
-  uint32_t window_id = loader->ConsumeCallWindow(call_id);
-  CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
+  // An id this backend never issued, or a second answer, reaches nothing.
+  laufey_common::JsCallRoute route;
+  if (!loader->TakeJsCall(call_id, &route))
+    return;
+  CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(route.window_id);
   if (!browser)
     return;
 
@@ -1173,7 +1184,7 @@ static void Backend_JsCallRespond(void* data, uint64_t call_id,
   CefRefPtr<CefListValue> args = msg->GetArgumentList();
   // IDs are 64-bit; carry as double (exact to 2^53) since CefValue has no
   // int64.
-  args->SetDouble(0, static_cast<double>(call_id));
+  args->SetDouble(0, static_cast<double>(route.page_call_id));
 
   if (result && result->value) {
     args->SetValue(1, LaufeyToCefValue(result->value));
@@ -3048,6 +3059,7 @@ void RuntimeLoader::InitializeBackendApi() {
   laufey_register_value_api(&backend_api_);
 
   backend_api_.set_js_call_handler = Backend_SetJsCallHandler;
+  backend_api_.set_js_call_handler_ex = Backend_SetJsCallHandlerEx;
   backend_api_.js_call_respond = Backend_JsCallRespond;
 
   backend_api_.invoke_js_callback = Backend_InvokeJsCallback;
@@ -3484,19 +3496,33 @@ void RuntimeLoader::HandleEvalResult(uint64_t eval_id,
   }
 }
 
-void RuntimeLoader::OnJsCall(uint32_t window_id, uint64_t call_id,
+void RuntimeLoader::OnJsCall(uint32_t window_id, uint64_t page_call_id,
                              const std::string& method_path,
-                             CefRefPtr<CefListValue> args) {
+                             CefRefPtr<CefListValue> args,
+                             const std::string& origin) {
   // The CefListValue passed in is owned by the CefProcessMessage and
   // becomes invalid once OnProcessMessageReceived returns. Copy it so the
   // queued entry survives until PollPendingJsCalls runs.
   CefRefPtr<CefListValue> owned_args =
       args ? args->Copy() : CefListValue::Create();
+  uint64_t call_id = js_calls_.Add(window_id, page_call_id);
+  // A document the launch file's bridge pin doesn't cover never reaches the
+  // runtime (the renderer doesn't bind the namespace there either; this
+  // catches a compromised renderer).
+  if (!laufey_common::BridgeOriginAllowed(
+          laufey_common::ProcessBridgeOriginPolicy(), origin)) {
+    std::cerr << "laufey: refused a bridge call from " << origin
+              << " (not in the app's bridgeOrigins)" << std::endl;
+    laufey_value_t err(
+        laufey::Value::String(laufey_common::kBridgeOriginRefused));
+    Backend_JsCallRespond(this, call_id, nullptr, &err);
+    return;
+  }
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
-    pending_js_calls_.push({window_id, call_id, method_path, owned_args});
+    pending_js_calls_.push(
+        {window_id, call_id, method_path, owned_args, origin});
   }
-  StoreCallWindow(call_id, window_id);
 
   std::lock_guard<std::mutex> lock(notify_mutex_);
   if (js_call_notify_fn_) {
@@ -3519,14 +3545,25 @@ void RuntimeLoader::PollPendingJsCalls() {
 
   laufey_js_call_fn handler;
   void* user_data;
+  laufey_js_call_ex_fn handler_ex;
+  void* user_data_ex;
   {
     std::lock_guard<std::mutex> lock(handler_mutex_);
     handler = js_call_handler_;
     user_data = js_call_user_data_;
+    handler_ex = js_call_handler_ex_;
+    user_data_ex = js_call_user_data_ex_;
   }
 
   for (auto& call : calls) {
-    if (handler) {
+    if (handler_ex) {
+      CefRefPtr<CefValue> argsValue = CefValue::Create();
+      argsValue->SetList(call.args);
+      laufey_value_t* argsWrapper =
+          new laufey_value(CefValueToLaufey(argsValue));
+      handler_ex(user_data_ex, call.window_id, call.call_id,
+                 call.method_path.c_str(), argsWrapper, call.origin.c_str());
+    } else if (handler) {
       CefRefPtr<CefValue> argsValue = CefValue::Create();
       argsValue->SetList(call.args);
       laufey_value_t* argsWrapper =

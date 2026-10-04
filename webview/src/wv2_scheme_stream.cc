@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstring>
 #include <cwchar>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <utility>
 
 #include "laufey_scheme_cancel.h"
+#include "laufey_scheme_registry.h"
 #include "runtime_loader.h"
 #include "scheme_exchange.h"
 
@@ -424,6 +426,13 @@ class Exchange : public std::enable_shared_from_this<Exchange> {
       std::lock_guard<std::mutex> lock(mutex_);
       if (cancelled_)
         return -1;
+      // Backpressure (API 44), while the body streams to the page: it hasn't
+      // taken this much yet, so take nothing; the runtime writes the same
+      // bytes again later. A response WebView2 takes in one piece (pending)
+      // is never throttled: nothing reads it before it ends.
+      if (mode_ == Mode::kPush &&
+          body_.size() >= laufey_common::kSchemeResponseHighWater)
+        return 0;
       if (mode_ == Mode::kPending && body_.size() + len > kMaxBuffered) {
         overflow_pending = true;
         cancelled_ = true;
@@ -877,6 +886,9 @@ HRESULT HandleSchemeRequest(ICoreWebView2Environment* env,
       }
     }
 
+    // The body is read whole before the handler runs. Past
+    // kMaxRequestBodyBytes the request goes on with no response, so it fails
+    // as a network error (as on CEF), without reaching the handler.
     std::vector<uint8_t> body;
     ComPtr<IStream> content;
     if (SUCCEEDED(request->get_Content(&content)) && content) {
@@ -884,6 +896,13 @@ HRESULT HandleSchemeRequest(ICoreWebView2Environment* env,
       ULONG read = 0;
       while (SUCCEEDED(content->Read(chunk, sizeof(chunk), &read)) &&
              read > 0) {
+        if (!laufey_common::RequestBodyFits(body.size(), read)) {
+          std::cerr << "laufey: the request body of " << method << " " << url
+                    << " is larger than "
+                    << (laufey_common::kMaxRequestBodyBytes >> 20)
+                    << " MiB; failing the request" << std::endl;
+          return S_OK;
+        }
         body.insert(body.end(), chunk, chunk + read);
       }
     }

@@ -18,11 +18,19 @@
 #define LAUFEY_SCHEME_CANCEL_H_
 
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <mutex>
 #include <thread>
 
 namespace laufey_common {
+
+// Backpressure (API 44): scheme_response_write accepts nothing, and returns
+// 0, while this many bytes of the exchange's response wait for the engine.
+// The runtime waits and writes the same bytes again. A write is accepted
+// whenever less than this is waiting, whatever its size, so a single write
+// larger than the mark still goes through.
+inline constexpr size_t kSchemeResponseHighWater = 4 * 1024 * 1024;
 
 class SchemeCancelGate {
  public:

@@ -24,6 +24,7 @@
 using laufey_common::Base64UrlDecode;
 using laufey_common::Base64UrlEncode;
 using laufey_common::BuildPasskeyClientDataJson;
+using laufey_common::IsPasskeyRpIdAllowed;
 using laufey_common::IsValidPasskeyRpId;
 using laufey_common::IsValidUtf8;
 using laufey_common::ParsePasskeyCreationOptions;
@@ -31,6 +32,7 @@ using laufey_common::ParsePasskeyRequestOptions;
 using laufey_common::PasskeyAssertionEnvelope;
 using laufey_common::PasskeyAssertionResult;
 using laufey_common::PasskeyBegin;
+using laufey_common::PasskeyBeginWithRpIds;
 using laufey_common::PasskeyBusyForTesting;
 using laufey_common::PasskeyCeremony;
 using laufey_common::PasskeyCreationOptions;
@@ -628,6 +630,68 @@ static void TestBeginRefusals() {
   EXPECT(!PasskeyBusyForTesting());
 }
 
+// The launch file's "passkeyRpIds" pins the relying parties: a ceremony for
+// any other RP ID is refused with invalid_rp before it takes the slot (so
+// before any OS UI), matching case-insensitively; without the key, any RP ID
+// the parser accepts goes through.
+static void TestRpIdPin() {
+  const std::vector<std::string> allowed = {"example.com", "clerk.example.com"};
+  EXPECT(IsPasskeyRpIdAllowed("clerk.example.com", allowed));
+  EXPECT(IsPasskeyRpIdAllowed("Clerk.Example.COM", allowed));
+  EXPECT(IsPasskeyRpIdAllowed("example.com", {"EXAMPLE.com"}));
+  // Exact names only: no subdomains, suffixes or registrable-domain logic.
+  EXPECT(!IsPasskeyRpIdAllowed("evil.example.com", allowed));
+  EXPECT(!IsPasskeyRpIdAllowed("example.co", allowed));
+  EXPECT(!IsPasskeyRpIdAllowed("example.com.evil", allowed));
+  EXPECT(!IsPasskeyRpIdAllowed("", allowed));
+  EXPECT(!IsPasskeyRpIdAllowed("example.com", {}));
+
+  Recorder r;
+  // Listed: the ceremony starts (and holds the slot) as without a pin.
+  auto c = PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r,
+                                 &allowed);
+  EXPECT(c && PasskeyBusyForTesting() && CountOf(r) == 0);
+  c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+  EXPECT(CountOf(r) == 1 && !PasskeyBusyForTesting());
+  c.reset();
+  c = PasskeyBeginWithRpIds(LAUFEY_PASSKEY_CREATE, kClerkCreate, Record, &r,
+                            &allowed);
+  EXPECT(c && c->creation().rp_id == "clerk.example.com");
+  c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+  EXPECT(CountOf(r) == 2);
+  c.reset();
+
+  // Not listed: refused synchronously with invalid_rp, nothing taken. Both
+  // kinds (rp.id for a registration, rpId for an authentication).
+  const std::vector<std::string> other = {"example.org"};
+  EXPECT(!PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r,
+                                &other));
+  EXPECT(CountOf(r) == 3 && HasCode(LastOf(r), "invalid_rp"));
+  EXPECT(LastOf(r).find("passkeyRpIds") != std::string::npos);
+  // The message names the key, never the RP ID asked for.
+  EXPECT(LastOf(r).find("clerk.example.com") == std::string::npos);
+  EXPECT(!PasskeyBusyForTesting());
+  EXPECT(!PasskeyBeginWithRpIds(LAUFEY_PASSKEY_CREATE, kClerkCreate, Record, &r,
+                                &other));
+  EXPECT(CountOf(r) == 4 && HasCode(LastOf(r), "invalid_rp"));
+  // An empty list (the key with no valid entry) refuses every RP ID.
+  const std::vector<std::string> none;
+  EXPECT(
+      !PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r, &none));
+  EXPECT(CountOf(r) == 5 && HasCode(LastOf(r), "invalid_rp"));
+  EXPECT(!PasskeyBusyForTesting());
+  // Malformed options are still answered by the parser first.
+  EXPECT(!PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, R"({"rpId":"example.org"})",
+                                Record, &r, &other));
+  EXPECT(CountOf(r) == 6 && HasCode(LastOf(r), "unknown"));
+
+  // No key (null): any valid RP ID goes through.
+  c = PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r, nullptr);
+  EXPECT(c && PasskeyBusyForTesting());
+  c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+  EXPECT(CountOf(r) == 7 && !PasskeyBusyForTesting());
+}
+
 static void TestOneAtATime() {
   Recorder first, second;
   auto c = PasskeyBegin(LAUFEY_PASSKEY_GET, kClerkGet, Record, &first);
@@ -855,6 +919,7 @@ int main() {
   TestClerkRoundTrip();
   TestNotSupportedText();
   TestBeginRefusals();
+  TestRpIdPin();
   TestOneAtATime();
   TestRequestFromCallback();
   TestAbortKeepsSlotUntilFinish();

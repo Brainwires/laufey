@@ -12,7 +12,9 @@
 // CefSchemeRegistrar), but the bookkeeping is shared here:
 //
 //   * name validation — RFC 3986 `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-"
-//     / "." )`, compared case-insensitively and stored lowercase;
+//     / "." )`, compared case-insensitively and stored lowercase, and never
+//     one of the schemes the engines give a meaning of their own (http, file,
+//     javascript, ...; IsReservedSchemeName);
 //   * the thread-safe set of registered names (the runtime registers from its
 //     own thread while the UI thread creates windows and reads the set).
 //
@@ -24,6 +26,7 @@
 #ifndef LAUFEY_SCHEME_REGISTRY_H_
 #define LAUFEY_SCHEME_REGISTRY_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <set>
@@ -36,6 +39,21 @@ namespace laufey_common {
 // sync with LAUFEY_APP_SCHEME in webview/src/scheme_exchange.h and
 // cef/src/scheme_handler.h.
 inline constexpr char kDefaultAppScheme[] = "app";
+
+// The most request body bytes a backend buffers for one custom-scheme request
+// (a page's POST / PUT body). Each backend reads the whole body before the
+// handler runs, so without a cap a page could make the host hold any amount
+// of memory. Past it the request fails without reaching the handler (see
+// docs/custom-schemes.md for what the page sees per engine). The same bound
+// as a response WebView2 holds whole (512 MiB).
+inline constexpr size_t kMaxRequestBodyBytes = 512u * 1024 * 1024;
+
+// Whether a body already holding `held` bytes may take `more`: the sum stays
+// within `cap` (kMaxRequestBodyBytes by default), without overflowing.
+inline bool RequestBodyFits(size_t held, size_t more,
+                            size_t cap = kMaxRequestBodyBytes) {
+  return held <= cap && more <= cap - held;
+}
 
 // Lowercase ASCII copy of `scheme` (URL schemes are case-insensitive).
 inline std::string NormalizeSchemeName(const std::string& scheme) {
@@ -51,7 +69,7 @@ inline std::string NormalizeSchemeName(const std::string& scheme) {
 // RFC 3986 scheme grammar: a letter followed by letters, digits, "+", "-" or
 // ".". Case-insensitive. Rejects the empty string, anything with "://", and
 // characters outside the grammar.
-inline bool IsValidSchemeName(const std::string& scheme) {
+inline bool IsSchemeNameGrammar(const std::string& scheme) {
   if (scheme.empty()) {
     return false;
   }
@@ -68,6 +86,35 @@ inline bool IsValidSchemeName(const std::string& scheme) {
     }
   }
   return true;
+}
+
+// Schemes an embedder may not register (any case): the ones the engines (or
+// the URL standard) already give a meaning of their own. Taking one over
+// would hand the embedder's handler the page's ordinary web traffic
+// (http, https, ws, wss, ftp), local files (file, filesystem), in-memory
+// documents (data, blob), script URLs (javascript) or the engines' own pages
+// (about, chrome, chrome-extension, chrome-untrusted, devtools,
+// view-source). Schemes only the OS handles (mailto, tel, ...) stay allowed.
+inline bool IsReservedSchemeName(const std::string& scheme) {
+  static const char* const kReserved[] = {
+      "about", "blob",     "chrome",     "chrome-extension", "chrome-untrusted",
+      "data",  "devtools", "file",       "filesystem",       "ftp",
+      "http",  "https",    "javascript", "view-source",      "ws",
+      "wss",
+  };
+  const std::string normalized = NormalizeSchemeName(scheme);
+  for (const char* reserved : kReserved) {
+    if (normalized == reserved) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A scheme name an embedder may register: the RFC 3986 grammar
+// (IsSchemeNameGrammar) and not reserved (IsReservedSchemeName).
+inline bool IsValidSchemeName(const std::string& scheme) {
+  return IsSchemeNameGrammar(scheme) && !IsReservedSchemeName(scheme);
 }
 
 // Split a comma-separated list ("myapp, other") into normalized, valid,
@@ -161,7 +208,7 @@ inline std::string OriginScheme(const std::string& origin) {
     return "";
   }
   std::string scheme = origin.substr(0, colon);
-  return IsValidSchemeName(scheme) ? NormalizeSchemeName(scheme) : "";
+  return IsSchemeNameGrammar(scheme) ? NormalizeSchemeName(scheme) : "";
 }
 
 // Local Network Access (Chromium's private network protection; CEF only).

@@ -294,11 +294,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
   // laufey's own options end at "--" (a registered URL scheme runs
   // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
-  // packaged app (a launch file or a runtime next to the executable) never
-  // takes its runtime from the command line. The arguments are also kept for
-  // the browser process's command line hook, which drops a deep-link
-  // launch's Chromium switches (LaufeyStripDeepLinkSwitches). See
-  // laufey_launch_args.h.
+  // packaged app (a launch file or a runtime next to the executable) loads
+  // only the runtime next to its executable: never one the command line or
+  // LAUFEY_RUNTIME_PATH names. The arguments are also kept for the browser
+  // process's command line hook, which drops a deep-link launch's Chromium
+  // switches (LaufeyStripDeepLinkSwitches). See laufey_launch_args.h.
   int argc;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   {
@@ -306,32 +306,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     for (int i = 1; argv && i < argc; ++i)
       args.push_back(laufey_common::WideToUtf8(argv[i]));
     laufey_common::SetProcessArgs(args);
-    const bool packaged =
-        laufey_common::IsPackagedLaunch(!LaufeyFindColocatedRuntime().empty());
-    g_runtime_path =
-        laufey_common::ParseHostOptions(args, packaged).runtime_path;
-  }
-
-  if (g_runtime_path.empty()) {
-    // Read as UTF-16 and convert to UTF-8; the ANSI variant would garble
-    // non-ASCII paths in the active codepage.
-    std::wstring envPath(MAX_PATH, L'\0');
-    DWORD envLen = GetEnvironmentVariableW(L"LAUFEY_RUNTIME_PATH", &envPath[0],
-                                           static_cast<DWORD>(envPath.size()));
-    if (envLen >= envPath.size()) {
-      // Buffer too small; envLen is the required size including the NUL.
-      envPath.resize(envLen);
-      envLen = GetEnvironmentVariableW(L"LAUFEY_RUNTIME_PATH", &envPath[0],
-                                       static_cast<DWORD>(envPath.size()));
+    laufey_common::RuntimeChoice choice = laufey_common::ResolveRuntimePath(
+        args, {LaufeyFindColocatedRuntime()}, {});
+    // A packaged app without its runtime exits at once, before CEF starts.
+    if (laufey_common::IsMissingPackagedRuntime(choice)) {
+      laufey_common::ReportMissingPackagedRuntime();
+      if (argv)
+        LocalFree(argv);
+      return laufey_common::kMissingRuntimeExitCode;
     }
-    if (envLen > 0 && envLen < envPath.size()) {
-      envPath.resize(envLen);
-      g_runtime_path = laufey_common::WideToUtf8(envPath);
-    }
-  }
-
-  if (g_runtime_path.empty()) {
-    g_runtime_path = LaufeyFindColocatedRuntime();
+    g_runtime_path = choice.path;
   }
 
   // Check for headless / forked worker mode (skip CEF entirely)

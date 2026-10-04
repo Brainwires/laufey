@@ -1,5 +1,6 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 // Brings the app to the front for a forwarded launch: presents the focused
 // (else the first visible) application window. Hidden windows stay hidden.
@@ -107,36 +109,22 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  std::string runtimePath;
-  for (int i = 1; i < argc; ++i) {
-    if (strcmp(argv[i], "--runtime") == 0 && i + 1 < argc) {
-      runtimePath = argv[++i];
-    }
+  // The runtime library: a packaged app (a launch file, or a runtime next to
+  // the executable) loads only the one next to its executable; a development
+  // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH, then the
+  // working directory and system fallbacks. See laufey_launch_args.h.
+  laufey_common::RuntimeChoice runtimeChoice =
+      laufey_common::ResolveRuntimePath(
+          std::vector<std::string>(argv + 1, argv + argc),
+          {LaufeyFindColocatedRuntime()},
+          {"./libruntime.so", "./target/debug/libhello.so",
+           "./target/release/libhello.so", "/usr/lib/laufey/libruntime.so",
+           "/usr/local/lib/laufey/libruntime.so"});
+  if (laufey_common::IsMissingPackagedRuntime(runtimeChoice)) {
+    laufey_common::ReportMissingPackagedRuntime();
+    return laufey_common::kMissingRuntimeExitCode;
   }
-
-  if (runtimePath.empty()) {
-    const char* envPath = getenv("LAUFEY_RUNTIME_PATH");
-    if (envPath) {
-      runtimePath = envPath;
-    }
-  }
-
-  if (runtimePath.empty()) {
-    runtimePath = LaufeyFindColocatedRuntime();
-  }
-
-  if (runtimePath.empty()) {
-    const char* searchPaths[] = {
-        "./libruntime.so", "./target/debug/libhello.so",
-        "./target/release/libhello.so", "/usr/lib/laufey/libruntime.so",
-        "/usr/local/lib/laufey/libruntime.so"};
-    for (const char* path : searchPaths) {
-      if (access(path, F_OK) == 0) {
-        runtimePath = path;
-        break;
-      }
-    }
-  }
+  std::string runtimePath = runtimeChoice.path;
 
   if (runtimePath.empty()) {
     std::cerr << "No runtime library found. Set LAUFEY_RUNTIME_PATH or use "

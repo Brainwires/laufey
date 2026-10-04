@@ -61,11 +61,14 @@ not `Plus`). Letters, digits and punctuation follow the current keyboard layout
 on macOS and Windows (`Ctrl+Z` is the key labelled Z on an AZERTY keyboard) and
 the keyboard map on X11.
 
-A key used while typing (a letter, digit, punctuation, Space, any numpad key,
-Enter, Tab, Backspace or Delete) needs a modifier other than Shift, so a global
-shortcut can never swallow or observe ordinary typing in other apps; `K`,
-`Shift+K`, `Num5` or `Enter` alone is `INVALID`. Function, navigation and media
-keys may stand alone (`F13`, `MediaPlayPause`).
+A key used while typing or moving around in a document (a letter, digit,
+punctuation, Space, any numpad key, Enter, Tab, Backspace, Delete, Insert,
+Escape, the arrows, Home, End, PageUp or PageDown) needs a modifier other than
+Shift, so a global shortcut can never swallow or observe ordinary typing and
+navigation in other apps; `K`, `Shift+K`, `Num5`, `Enter`, `Escape`, `Up` or
+`Shift+PageDown` alone is `INVALID`. There is no option to allow one: the C ABI
+has none, by design. Function, media and volume keys and PrintScreen may stand
+alone (`F13`, `MediaPlayPause`).
 
 Every combination has one **canonical** spelling, `Ctrl+Alt+Shift+Super+<Key>`
 with only the modifiers present (`Ctrl+Shift+K`, `Super+Space`, `Alt+F4`,

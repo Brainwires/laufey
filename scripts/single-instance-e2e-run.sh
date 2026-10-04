@@ -8,8 +8,11 @@
 #   (b) singleInstance on (from laufey-launch.json): a second launch, started
 #       without a display on Linux, exits 0 quickly without loading the
 #       runtime, and the first instance gets `second_instance` with exactly
-#       its arguments and working directory. An invalid app id setup warns
-#       and runs unlocked; LAUFEY_SINGLE_INSTANCE=0 overrides the file.
+#       its arguments and working directory, even with
+#       LAUFEY_SINGLE_INSTANCE=0 and LAUFEY_DATA_DIR in its environment (the
+#       file pins the app id, and with it the lock and the data directory).
+#       An invalid app id setup warns and runs unlocked; without an app id in
+#       the file, LAUFEY_SINGLE_INSTANCE=0 overrides it.
 #   (c) singleInstance off: two instances run side by side (on CEF with
 #       separate data directories: one CEF profile allows one process, see
 #       docs/app-data.md; scripts/storage-e2e-run.sh covers that refusal).
@@ -44,6 +47,7 @@ for c in \
   if [ -f "$c" ]; then rt="$PWD/$c"; break; fi
 done
 [ -n "$rt" ] || { echo "single_instance_e2e_runtime cdylib not found (build it first)"; exit 1; }
+rt_file="$rt"
 
 case "$backend" in
   webview)
@@ -82,23 +86,43 @@ mkdir -p "$scratch/logs"
 native() {
   if [ "$platform" = windows ]; then cygpath -w "$1"; else printf '%s' "$1"; fi
 }
+# A path for a JSON string: forward slashes on Windows too (C:/...), so
+# nothing needs escaping.
+json_path() {
+  if [ "$platform" = windows ]; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
 
 app_id=dev.laufey.e2e.single-instance
 case "$platform" in
   macos) launch_file="${bin%/MacOS/*}/Resources/laufey-launch.json" ;;
   *) launch_file="$(dirname "$bin")/laufey-launch.json" ;;
 esac
+# A launch file makes the backend a packaged app, which loads only the
+# runtime next to its executable (never LAUFEY_RUNTIME_PATH): while a launch
+# file is in place, the runtime is copied there as well.
+case "$platform" in
+  macos) colocated_rt="$bin.dylib" ;;
+  linux) colocated_rt="$bin.so" ;;
+  *) colocated_rt="${bin%.exe}.dll" ;;
+esac
+write_launch_file() { # <json>
+  mkdir -p "$(dirname "$launch_file")"
+  printf '%s\n' "$1" >"$launch_file"
+  cp "$rt_file" "$colocated_rt"
+  echo "== launch file $launch_file: $(cat "$launch_file")"
+}
+remove_launch_file() { rm -f "$launch_file" "$colocated_rt"; }
 
 pids=()
 cleanup() {
   for p in ${pids[@]+"${pids[@]}"}; do kill -9 "$p" 2>/dev/null || true; done
-  rm -f "$launch_file"
+  remove_launch_file
   if [ -z "${KEEP_SCRATCH:-}" ]; then
     for _ in 1 2 3 4 5; do rm -rf "$scratch" 2>/dev/null && break; sleep 1; done
   fi
 }
 trap cleanup EXIT
-rm -f "$launch_file"
+remove_launch_file
 
 failed=0
 pass() { echo "[si-e2e] PASS $*"; }
@@ -216,37 +240,47 @@ while IFS= read -r line; do second_expect+=("$line"); done \
   < <(expect_vars LAUFEY_E2E_SI_SECOND "${second_args[@]}")
 
 # --- (a) + (b): the lock, configured by the launch file ----------------------
-mkdir -p "$(dirname "$launch_file")"
-printf '{ "appId": "%s", "singleInstance": true }\n' "$app_id" >"$launch_file"
-echo "== launch file $launch_file: $(cat "$launch_file")"
+# The file pins the app id, so its data directory and lock come from the file
+# alone: the second launch below can't turn the lock off or move the profile
+# from its environment.
+write_launch_file "$(printf '{ "appId": "%s", "dataDir": "%s", "singleInstance": true }' \
+  "$app_id" "$(json_path "$scratch/data-primary")")"
 
-start primary LAUFEY_DATA_DIR="$(native "$scratch/data-primary")" \
+start primary \
   "${cold_expect[@]}" "${second_expect[@]}" \
   LAUFEY_E2E_SI_SECOND_CWD="$cwd_native" -- "${cold_args[@]}"
 primary_pid=$started_pid
 if wait_for primary '^\[e2e\] ready' 90; then
-  direct second "$cwd_dir" -- "${second_args[@]}"
+  direct second "$cwd_dir" LAUFEY_SINGLE_INSTANCE=0 \
+    LAUFEY_DATA_DIR="$(native "$scratch/data-second")" -- "${second_args[@]}"
   if [ "$direct_rc" = 0 ] && [ "$direct_secs" -le 10 ] &&
     ! grep -q '^\[e2e\]' "$scratch/logs/second.log"; then
     pass "second launch forwarded and exited 0 without loading the runtime (${direct_secs}s)"
   else
     fail "second launch (exit $direct_rc after ${direct_secs}s; see $scratch/logs/second.log)"
   fi
+  if grep -q 'LAUFEY_SINGLE_INSTANCE is ignored' "$scratch/logs/second.log"; then
+    pass "LAUFEY_SINGLE_INSTANCE=0 can't turn off the lock of a pinned app id (reported)"
+  else
+    fail "ignored LAUFEY_SINGLE_INSTANCE not reported (see $scratch/logs/second.log)"
+  fi
 else
   fail "primary never became ready"
 fi
 finish primary "$primary_pid" 60
 
-# LAUFEY_SINGLE_INSTANCE=0 wins over the file: two instances (CEF: separate
-# profiles). The first stays up until released through its hold file, not for
-# a fixed time: a second instance on a fresh profile can take several seconds
-# to start on a slow runner, and a timed hold then ran out before it finished.
-start env-off-a LAUFEY_SINGLE_INSTANCE=0 \
+# Without an app id in the file, LAUFEY_SINGLE_INSTANCE=0 wins over its
+# singleInstance: two instances (CEF: separate profiles). The first stays up
+# until released through its hold file, not for a fixed time: a second
+# instance on a fresh profile can take several seconds to start on a slow
+# runner, and a timed hold then ran out before it finished.
+write_launch_file '{ "singleInstance": true }'
+start env-off-a LAUFEY_APP_ID="$app_id" LAUFEY_SINGLE_INSTANCE=0 \
   LAUFEY_DATA_DIR="$(native "$scratch/data-off-a")" \
   LAUFEY_E2E_SI_HOLD_FILE="$(native "$scratch/release-env-off-a")" --
 a_pid=$started_pid
 if wait_for env-off-a '^\[e2e\] ready' 90; then
-  start env-off-b LAUFEY_SINGLE_INSTANCE=0 \
+  start env-off-b LAUFEY_APP_ID="$app_id" LAUFEY_SINGLE_INSTANCE=0 \
     LAUFEY_DATA_DIR="$(native "$scratch/data-off-b")" LAUFEY_E2E_SI_HOLD_MS=500 --
   finish env-off-b "$started_pid" 90
   if kill -0 "$a_pid" 2>/dev/null; then
@@ -259,7 +293,7 @@ else
 fi
 touch "$scratch/release-env-off-a"
 finish env-off-a "$a_pid" 60
-rm -f "$launch_file"
+remove_launch_file
 
 # Without an app id the lock can't be keyed: warn and run unlocked.
 start no-app-id LAUFEY_SINGLE_INSTANCE=1 --
@@ -300,7 +334,6 @@ if [ "$platform" != macos ]; then
   scheme=laufey-si-test
   url_cold="$scheme://open/cold?id=7"
   url_warm="$scheme://open/doc?id=42"
-  rt_native="$(native "$rt")"
   bin_native="$(native "$bin")"
   if [ "$platform" = windows ]; then
     key='HKCU\Software\Classes\'"$scheme"
@@ -308,7 +341,8 @@ if [ "$platform" != macos ]; then
     reg add "$key" /v "URL Protocol" /d "" /f >/dev/null
     # The registered form: options end at "--", the link after it is a
     # positional argument. The launch file below makes this a packaged app,
-    # which takes its runtime from LAUFEY_RUNTIME_PATH, never a command line.
+    # which loads the runtime next to its executable (write_launch_file puts
+    # it there), never one a command line or LAUFEY_RUNTIME_PATH names.
     reg add "$key\shell\open\command" /ve \
       /d "\"$bin_native\" -- \"%1\"" /f >/dev/null
     echo "== registered $scheme: $(reg query "$key\shell\open\command" /ve | tr -d '\r' | grep REG_)"
@@ -340,7 +374,8 @@ EOF2
     }
     unregister() { :; }
   fi
-  printf '{ "appId": "%s", "singleInstance": true }\n' "$app_id" >"$launch_file"
+  write_launch_file "$(printf '{ "appId": "%s", "dataDir": "%s", "singleInstance": true }' \
+    "$app_id" "$(json_path "$scratch/data-os")")"
 
   # Cold start: the OS starts the app with the URL; the runtime reads it from
   # its arguments. Its output goes to a result file (Windows doesn't hand an
@@ -348,8 +383,6 @@ EOF2
   result="$scratch/os-cold.result"
   echo "== [os-cold] open $url_cold through the OS"
   (
-    export LAUFEY_DATA_DIR="$(native "$scratch/data-os")"
-    export LAUFEY_RUNTIME_PATH="$rt_native"
     # Windows registers "-- %1"; a .desktop Exec passes %u as one argument
     # (GTK would drop a "--" from argv anyway).
     if [ "$platform" = windows ]; then
@@ -396,16 +429,14 @@ EOF2
     warm_expect=(LAUFEY_E2E_SI_SECOND_ARGC=1
       LAUFEY_E2E_SI_SECOND_ARG_0="$url_warm")
   fi
-  start os-warm LAUFEY_DATA_DIR="$(native "$scratch/data-os")" \
-    LAUFEY_E2E_SI_WAIT_MS=60000 "${warm_expect[@]}" --
+  start os-warm LAUFEY_E2E_SI_WAIT_MS=60000 "${warm_expect[@]}" --
   warm_pid=$started_pid
   if wait_for os-warm '^\[e2e\] ready' 90; then
     echo "== [os-warm] open $url_warm through the OS while it runs"
     # Should the OS-started launch not forward and load the runtime itself
     # instead, its own verdict lands here (it must stay empty).
     stray="$scratch/os-warm-second.result"
-    LAUFEY_RUNTIME_PATH="$rt_native" \
-      LAUFEY_E2E_SI_RESULT_FILE="$(native "$stray")" LAUFEY_E2E_SI_WAIT_MS=1000 \
+    LAUFEY_E2E_SI_RESULT_FILE="$(native "$stray")" LAUFEY_E2E_SI_WAIT_MS=1000 \
       os_open "$url_warm" >"$scratch/logs/os-warm-open.log" 2>&1 ||
       echo "    (opener exited $?)"
     sed 's/^/    /' "$scratch/logs/os-warm-open.log" | head -20
@@ -418,7 +449,7 @@ EOF2
     fail "os-warm never became ready"
   fi
   finish os-warm "$warm_pid" 60
-  rm -f "$launch_file"
+  remove_launch_file
   unregister
 fi
 

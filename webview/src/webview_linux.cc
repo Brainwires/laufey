@@ -12,6 +12,7 @@
 #include "laufey_notifications.h"
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_json.h"
 #include "laufey_scheme_body_stream.h"
 #include "laufey_scheme_cancel.h"
@@ -22,10 +23,12 @@
 #include <JavaScriptCore/JavaScript.h>
 
 #include <errno.h>
+#include <sys/random.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 #include <iostream>
@@ -108,6 +111,9 @@ struct LinuxWindowState {
   WebKitUserContentManager* content_manager;
   // GTK has no getter for the input shape region, so remember what we set.
   bool click_passthrough = false;
+  // The secret the bridge script of this window's top frame sends with every
+  // call (see BridgeToken). Fixed for the window's life.
+  std::string bridge_token;
 };
 
 // Track the click_count from press events for use in the corresponding release.
@@ -544,15 +550,31 @@ static void on_load_changed(WebKitWebView* /*webview*/,
 // Fired when the page requests a new webview (`target="_blank"` or
 // `window.open()`). These never reach the Navigation API interceptor, so route
 // http(s) destinations to the OS browser and create no new webview.
+// `target="_blank"` / `window.open()`: no popup web view; an http(s)
+// destination opens in the OS browser when a user action started the request
+// (laufey_external_links.h). WebKitGTK's own popup blocker
+// (javascript-can-open-windows-automatically, off by default) already drops
+// most requests without one; the gesture check here covers the rest.
 static WebKitWebView* on_create(WebKitWebView* /*webview*/,
                                 WebKitNavigationAction* navigation_action,
                                 gpointer /*user_data*/) {
   WebKitURIRequest* req =
       webkit_navigation_action_get_request(navigation_action);
   const char* uri = req ? webkit_uri_request_get_uri(req) : nullptr;
-  if (uri &&
-      (g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://"))) {
-    g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
+  if (!uri)
+    return nullptr;
+  bool gesture = webkit_navigation_action_is_user_gesture(navigation_action);
+  switch (DecideLaufeyPopup(uri, gesture)) {
+    case LaufeyPopupDecision::kOpenInBrowser:
+      g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
+      break;
+    case LaufeyPopupDecision::kBlockedNoGesture:
+      std::cerr << "laufey: not opening " << uri
+                << " in the browser: the page asked without a user gesture"
+                << std::endl;
+      break;
+    case LaufeyPopupDecision::kIgnored:
+      break;
   }
   return nullptr;
 }
@@ -877,6 +899,50 @@ static WebKitGTKBackend* g_gtk_backend = nullptr;
 // GtkWidget → window_id mapping for script message routing
 static std::map<WebKitUserContentManager*, uint32_t>
     g_content_manager_to_laufey_id;
+
+// A random 128-bit token, as hex: the proof that a bridge message comes from
+// the window's top frame.
+//
+// WebKitGTK's script-message-received signal names no frame, and the message
+// handler object (window.webkit.messageHandlers.laufey) exists in every frame
+// of the page, cross-origin iframes included, although the bridge script is
+// injected into the top frame only. So the top frame's bridge script holds a
+// per-window token in its closure, captured at document start before any page
+// script runs, and sends it with every call; a message without the window's
+// token is dropped. No other frame can read the closure.
+static std::string NewBridgeToken() {
+  unsigned char bytes[16];
+  size_t got = 0;
+  while (got < sizeof(bytes)) {
+    ssize_t n = getrandom(bytes + got, sizeof(bytes) - got, 0);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    got += static_cast<size_t>(n);
+  }
+  if (got < sizeof(bytes)) {
+    // getrandom is missing (a pre-3.17 kernel): read the device instead.
+    FILE* f = std::fopen("/dev/urandom", "rb");
+    got = f ? std::fread(bytes, 1, sizeof(bytes), f) : 0;
+    if (f)
+      std::fclose(f);
+    if (got != sizeof(bytes)) {
+      std::cerr << "laufey: no random source for the bridge token; the bridge "
+                   "is disabled"
+                << std::endl;
+      return std::string();
+    }
+  }
+  static const char kHex[] = "0123456789abcdef";
+  std::string token;
+  for (unsigned char b : bytes) {
+    token.push_back(kHex[b >> 4]);
+    token.push_back(kHex[b & 0xF]);
+  }
+  return token;
+}
 
 static void on_script_message(WebKitUserContentManager* manager,
                               WebKitJavascriptResult* js_result,
@@ -1220,17 +1286,30 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       webkit_web_view_set_background_color(webview, &clear);
     }
 
+    // The top frame's bridge script captures the handler, JSON.stringify and
+    // the window's token before any page script runs; every call carries the
+    // token, and HandleJsMessage drops a message without it (a sub-frame's).
+    std::string bridge_token = NewBridgeToken();
     std::string initScript = BuildInitScript(
         RuntimeLoader::GetInstance()->GetJsNamespace(),
-        "window.webkit.messageHandlers.laufey.postMessage(JSON.stringify({\n"
+        "__laufeyPost(__laufeyStringify({\n"
+        "            token: __laufeyToken,\n"
         "            callId: callId,\n"
         "            method: path.join('.'),\n"
         "            args: processedArgs\n"
-        "          }));");
+        "          }));",
+        "  const __laufeyHandler = window.webkit.messageHandlers.laufey;\n"
+        "  const __laufeyPost = "
+        "__laufeyHandler.postMessage.bind(__laufeyHandler);\n"
+        "  const __laufeyStringify = JSON.stringify;\n"
+        "  const __laufeyToken = '" +
+            bridge_token + "';\n",
+        RuntimeLoader::GetInstance()->BridgeGuardJs());
     // Inject the bridge into the top frame only. Cross-origin/sub frames must
     // not inherit it; otherwise embedded content could invoke bindings running
     // with the host process's permissions. Matches the macOS/iOS
-    // forMainFrameOnly:YES behavior.
+    // forMainFrameOnly:YES behavior. The handler object itself is visible to
+    // every frame, which is what the token is for.
     WebKitUserScript* script = webkit_user_script_new(
         initScript.c_str(), WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
         WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
@@ -1248,6 +1327,7 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     state.menu_bar = nullptr;
     state.webview = webview;
     state.content_manager = content_manager;
+    state.bridge_token = bridge_token;
 
     {
       std::lock_guard<std::mutex> lock(windows_mutex_);
@@ -1354,6 +1434,8 @@ static void on_execute_js_finished(GObject* source, GAsyncResult* result,
       gchar* json = jsc_value_to_json(value, 0);
       if (json) {
         auto val = json::ParseJson(json);
+        if (!val)
+          val = laufey::Value::Null();
         laufey_value laufey(val);
         cb_data->callback(&laufey, nullptr, cb_data->user_data);
         g_free(json);
@@ -2026,6 +2108,16 @@ void WebKitGTKBackend::Run() {
   gtk_main();
 }
 
+// Whether `a` and `b` are equal, in time that depends only on their lengths.
+static bool TokensEqual(const std::string& a, const std::string& b) {
+  if (a.size() != b.size())
+    return false;
+  unsigned char diff = 0;
+  for (size_t i = 0; i < a.size(); ++i)
+    diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+  return diff == 0;
+}
+
 void WebKitGTKBackend::HandleJsMessage(uint32_t window_id,
                                        const char* jsonStr) {
   laufey::ValuePtr msg = json::ParseJson(jsonStr);
@@ -2034,6 +2126,27 @@ void WebKitGTKBackend::HandleJsMessage(uint32_t window_id,
 
   const auto& dict = msg->GetDict();
 
+  // Only the window's top-frame bridge script knows its token (see
+  // NewBridgeToken); a sub-frame posting to the handler directly does not.
+  // The token proves the top frame; its origin is the web view's document's.
+  std::string expected;
+  std::string origin = laufey_common::kOpaqueOrigin;
+  {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id)) {
+      expected = state->bridge_token;
+      const gchar* uri = webkit_web_view_get_uri(state->webview);
+      if (uri)
+        origin = laufey_common::OriginOfUrl(uri);
+    }
+  }
+  auto tokenIt = dict.find("token");
+  if (expected.empty() || tokenIt == dict.end() ||
+      !tokenIt->second->IsString() ||
+      !TokensEqual(tokenIt->second->GetString(), expected)) {
+    return;
+  }
+
   auto callIdIt = dict.find("callId");
   auto methodIt = dict.find("method");
   auto argsIt = dict.find("args");
@@ -2041,11 +2154,20 @@ void WebKitGTKBackend::HandleJsMessage(uint32_t window_id,
   if (callIdIt == dict.end() || methodIt == dict.end())
     return;
 
+  // The page's own number for the call, echoed back with the answer. A
+  // number the bridge script can't have made (negative, fractional, past
+  // 2^53) is not a call.
   uint64_t call_id = 0;
-  if (callIdIt->second->IsInt()) {
+  if (callIdIt->second->IsInt() && callIdIt->second->GetInt() >= 0) {
     call_id = static_cast<uint64_t>(callIdIt->second->GetInt());
   } else if (callIdIt->second->IsDouble()) {
-    call_id = static_cast<uint64_t>(callIdIt->second->GetDouble());
+    double d = callIdIt->second->GetDouble();
+    if (!(d >= 0 && d <= 9007199254740992.0) ||
+        d != static_cast<double>(static_cast<uint64_t>(d)))
+      return;
+    call_id = static_cast<uint64_t>(d);
+  } else {
+    return;
   }
 
   std::string method =
@@ -2053,7 +2175,8 @@ void WebKitGTKBackend::HandleJsMessage(uint32_t window_id,
   laufey::ValuePtr args =
       (argsIt != dict.end()) ? argsIt->second : laufey::Value::List();
 
-  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args);
+  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args,
+                                         origin);
 }
 
 // ============================================================================
@@ -2662,6 +2785,24 @@ void OnSchemeRequestBodyChunk(GObject* source, GAsyncResult* result,
     g_bytes_unref(chunk);
     g_object_unref(body);
     DispatchPendingSchemeRequest(pending);
+    return;
+  }
+  if (!laufey_common::RequestBodyFits(pending->body.size(), size)) {
+    // Past the cap the request fails (the page's fetch rejects) without
+    // reaching the runtime, rather than the whole body being held.
+    std::cerr << "laufey: the request body of " << pending->method << " "
+              << pending->uri << " is larger than "
+              << (laufey_common::kMaxRequestBodyBytes >> 20)
+              << " MiB; failing the request" << std::endl;
+    GError* too_large =
+        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE,
+                            "the request body is too large");
+    webkit_uri_scheme_request_finish_error(pending->request, too_large);
+    g_error_free(too_large);
+    g_bytes_unref(chunk);
+    g_object_unref(pending->request);
+    delete pending;
+    g_object_unref(body);
     return;
   }
   pending->body.insert(pending->body.end(), bytes, bytes + size);

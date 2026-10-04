@@ -102,11 +102,27 @@ void TestParse() {
     EXPECT(ParseAccelerator(std::string("Ctrl+") + key, false, &a, nullptr));
     EXPECT(IsAllowedGlobalShortcut(a));
   }
-  // Keys nobody types with stay allowed alone.
-  EXPECT(ParseAccelerator("Escape", false, &a, nullptr));
-  EXPECT(IsAllowedGlobalShortcut(a));
-  EXPECT(ParseAccelerator("MediaPlayPause", false, &a, nullptr));
-  EXPECT(IsAllowedGlobalShortcut(a));
+  // The navigation keys (and Insert, Escape) too: refused alone or with
+  // Shift (which selects), allowed with a real modifier.
+  const char* navigation[] = {"Up",   "Down",     "Left",   "Right",
+                              "Home", "End",      "PageUp", "PageDown",
+                              "Esc",  "Escape",   "Insert"};
+  for (const char* key : navigation) {
+    EXPECT(ParseAccelerator(key, false, &a, nullptr));
+    EXPECT(!IsAllowedGlobalShortcut(a));
+    EXPECT(ParseAccelerator(std::string("Shift+") + key, false, &a, nullptr));
+    EXPECT(!IsAllowedGlobalShortcut(a));
+    EXPECT(ParseAccelerator(std::string("Alt+") + key, false, &a, nullptr));
+    EXPECT(IsAllowedGlobalShortcut(a));
+    EXPECT(ParseAccelerator(std::string("Super+") + key, false, &a, nullptr));
+    EXPECT(IsAllowedGlobalShortcut(a));
+  }
+  // Keys nobody types or moves with stay allowed alone.
+  for (const char* key : {"F1", "F13", "F24", "PrintScreen", "MediaPlayPause",
+                          "MediaNextTrack", "VolumeMute"}) {
+    EXPECT(ParseAccelerator(key, false, &a, nullptr));
+    EXPECT(IsAllowedGlobalShortcut(a));
+  }
 }
 
 // --- The registry over a fake OS side ------------------------------------------
@@ -185,6 +201,12 @@ void TestRegistry() {
   EXPECT(r.calls == 1 && r.status == LAUFEY_SHORTCUT_INVALID);
   r = Result();
   RegisterShortcut("K", OnResult, &r);
+  EXPECT(r.calls == 1 && r.status == LAUFEY_SHORTCUT_INVALID);
+  r = Result();
+  RegisterShortcut("Escape", OnResult, &r);
+  EXPECT(r.calls == 1 && r.status == LAUFEY_SHORTCUT_INVALID);
+  r = Result();
+  RegisterShortcut("Shift+PageDown", OnResult, &r);
   EXPECT(r.calls == 1 && r.status == LAUFEY_SHORTCUT_INVALID);
   r = Result();
   RegisterShortcut(nullptr, OnResult, &r);

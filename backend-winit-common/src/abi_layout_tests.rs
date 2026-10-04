@@ -213,6 +213,7 @@ fn vtable_layout_matches_the_header() {
     auth_session_capabilities,
     auth_session_start,
     test_cancel_auth_session,
-    auth_session_cancel
+    auth_session_cancel,
+    set_js_call_handler_ex
   );
 }

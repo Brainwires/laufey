@@ -45,9 +45,17 @@ sees each `write` as it happens (see
 [Streaming responses](#streaming-responses), which WebView2 supports only for
 `fetch`, `EventSource` and XHR). Scheme names follow RFC 3986 (a letter, then
 letters, digits, `+`, `-`, or `.`), are case-insensitive, and are stored in
-lowercase; an invalid name is logged and ignored. Engine-less backends such as
-Winit have no scheme support; `laufey::scheme_handlers_supported()` returns
-`false` there, and the application should fall back to a loopback server.
+lowercase; an invalid name is logged and ignored. So is a scheme the engines
+already give a meaning of their own, in any case: `http`, `https`, `ws`, `wss`,
+`ftp`, `file`, `filesystem`, `data`, `blob`, `javascript`, `about`, `chrome`,
+`chrome-extension`, `chrome-untrusted`, `devtools` and `view-source`. Taking one
+of them over would hand the handler the page's ordinary web traffic, local files
+or script URLs. This applies to `register_scheme_handler`, the
+`--laufey-custom-schemes` switch, `LAUFEY_CUSTOM_SCHEMES` and the launch file's
+`"customSchemes"` alike. Schemes only the OS handles (`mailto`, `tel`) are not
+reserved. Engine-less backends such as Winit have no scheme support;
+`laufey::scheme_handlers_supported()` returns `false` there, and the application
+should fall back to a loopback server.
 
 Register every scheme before creating the first window. The system web views
 read their scheme tables when a web view is created, so on most backends a
@@ -55,8 +63,8 @@ scheme registered afterwards is not served by a window that already exists, and
 the backend logs a warning. Each backend installs the schemes in its own way:
 
 - **WebView (macOS)** installs one `WKURLSchemeHandler` per scheme on the
-  `WKWebViewConfiguration` of each new window. Schemes that WebKit handles
-  itself (`http`, `https`, `file`, and so on) are skipped with a warning.
+  `WKWebViewConfiguration` of each new window. Any other scheme WebKit handles
+  itself (beyond the reserved list above) is skipped with a warning.
 - **WebView (Linux)** registers each scheme on WebKitGTK's default web context
   and marks it secure and CORS-enabled in the context's security manager. The
   web context is shared, so WebKitGTK also applies a late registration to
@@ -74,12 +82,14 @@ the backend logs a warning. Each backend installs the schemes in its own way:
   `--laufey-custom-schemes=myapp,other` or `LAUFEY_CUSTOM_SCHEMES=myapp,other`
   (comma-separated; `app` is always declared), or ships them as
   `"customSchemes"` in the app's [launch file](launch-config.md), which also
-  works when nothing sets the environment (the app is started directly). The
-  browser process forwards the list to its child processes. A declared scheme is
-  served in every window from the moment it is registered. A scheme that is
-  registered but was not declared is still served, but Chromium treats it as a
-  non-standard scheme with an opaque origin and no secure context, and the
-  backend logs a warning. Storage on a custom-scheme origin lives in the CEF
+  works when nothing sets the environment (the app is started directly). A
+  launch file that also has an `"appId"` makes its list the only one: the switch
+  and the variable are then ignored ([Precedence](launch-config.md#precedence)).
+  The browser process forwards the list to its child processes. A declared
+  scheme is served in every window from the moment it is registered. A scheme
+  that is registered but was not declared is still served, but Chromium treats
+  it as a non-standard scheme with an opaque origin and no secure context, and
+  the backend logs a warning. Storage on a custom-scheme origin lives in the CEF
   profile: with an app data directory (`LAUFEY_APP_ID` / `LAUFEY_DATA_DIR`, or
   `"appId"` / `"dataDir"` in the [launch file](launch-config.md)) that profile
   is `<dir>/CEF` and persists across launches (see
@@ -167,14 +177,31 @@ backend takes the bytes and hands them on as the engine reads:
   page doesn't consume).
 - **WebView2** streams through the page (below).
 
-The queue for a page that isn't reading is capped at **64 MiB** on WebKitGTK,
-CEF and WebView2 (for a response WebView2 streams through the page, below): past
-that the response fails (the page's `fetch` or read rejects) and the handler's
-next `write` returns a negative value, instead of the body growing without
-bound. WKWebView hands everything to WebKit, so it has no cap of its own. A
-response WebView2 answers in one piece is held whole until the handler finishes
-it, whether or not the page reads, so it is capped separately at **512 MiB**:
-past that the request fails.
+**Backpressure (API 44).** Not blocking doesn't mean taking everything: once **4
+MiB** of a response wait for a page that isn't reading
+(`kSchemeResponseHighWater`), a `write` takes nothing and returns **0**. The
+handler waits (a few milliseconds, or until the next turn of its event loop) and
+writes the same bytes again; a negative value still means the page is gone. A
+write is taken whole whenever less than the mark is waiting, whatever its size,
+and never in part. WebKitGTK, CEF and WebView2 (for a response it streams
+through the page, below) count what their queue holds for the engine; WKWebView
+counts what is queued for the main thread and not yet handed to WebKit, which
+then takes all of it (WebKit has no backpressure of its own for a scheme task).
+A response WebView2 answers in one piece is never throttled, since nothing reads
+it before it ends.
+
+A single write that would take the queue past **64 MiB** fails the response (the
+page's `fetch` or read rejects) and returns a negative value, on WebKitGTK, CEF
+and WebView2. A response WebView2 answers in one piece is held whole until the
+handler finishes it, whether or not the page reads, so it is capped separately
+at **512 MiB**: past that the request fails.
+
+Request bodies (a page's `POST` / `PUT`) are read whole before the handler runs,
+so `read_body` never waits. WebKitGTK, CEF and WebView2 hold at most **512 MiB**
+of one: a larger body fails the request without reaching the handler (the page's
+`fetch` rejects with a network error) and the backend logs it. WKWebView hands
+the host a body that is already in memory (and for some request kinds none at
+all), so it has no cap of laufey's own.
 
 A handler that calls `finish` without ever calling `begin` gives the page no
 response: its request fails, as a network error does (the `fetch` rejects), on
@@ -201,9 +228,9 @@ streams through the page instead:
   other request, is answered in one piece as before: the body is held until the
   handler finishes (up to 512 MiB) and handed to WebView2 without another copy.
 - The page acknowledges what it reads: at most 4 MiB is in flight to a page that
-  is not reading. Beyond that the backend holds up to 64 MiB, and a response
-  that outgrows it fails (the page's read rejects and the handler's write
-  returns a negative value); the handler's `write` itself never blocks.
+  is not reading. Beyond that the backend holds up to the 4 MiB high-water mark
+  and then answers `write` with 0 until the page reads (backpressure, above);
+  the handler's `write` itself never blocks.
 - Only a same-origin document may receive a body: the backend checks the origin
   of the document that asks for it against the request URL.
 

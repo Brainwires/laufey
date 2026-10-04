@@ -17,7 +17,8 @@ namespace laufey_common {
 
 class SchemeBodyQueue {
  public:
-  explicit SchemeBodyQueue(size_t max_queued) : max_queued_(max_queued) {}
+  SchemeBodyQueue(size_t max_queued, size_t high_water)
+      : max_queued_(max_queued), high_water_(high_water) {}
   ~SchemeBodyQueue() {
     if (context_)
       g_main_context_unref(context_);
@@ -37,6 +38,10 @@ class SchemeBodyQueue {
       if (closed_ || failed_ || ended_)
         return -1;
       if (len == 0)
+        return 0;
+      // Backpressure: nothing taken while the reader is this far behind;
+      // the writer retries (laufey.h, scheme_response_write).
+      if (queued_ >= high_water_)
         return 0;
       if (queued_ + len > max_queued_) {
         // The reader isn't keeping up: fail the response rather than hold
@@ -195,6 +200,7 @@ class SchemeBodyQueue {
   }
 
   const size_t max_queued_;
+  const size_t high_water_;
   std::mutex mutex_;
   std::condition_variable cv_;
   std::deque<std::vector<uint8_t>> chunks_;
@@ -346,8 +352,8 @@ static void laufey_scheme_body_stream_pollable_init(
 
 namespace laufey_common {
 
-SchemeBodyWriter::SchemeBodyWriter(size_t max_queued)
-    : queue_(std::make_shared<SchemeBodyQueue>(max_queued)) {}
+SchemeBodyWriter::SchemeBodyWriter(size_t max_queued, size_t high_water)
+    : queue_(std::make_shared<SchemeBodyQueue>(max_queued, high_water)) {}
 
 SchemeBodyWriter::~SchemeBodyWriter() {
   queue_->End();

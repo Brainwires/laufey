@@ -464,6 +464,25 @@ void TestObserverScript() {
   EXPECT(s.find("e.preventDefault()") != std::string::npos);
   EXPECT(s.find("fn, true)") != std::string::npos);
   EXPECT(s.find("e.dataTransfer.files") != std::string::npos);
+  // Nothing is looked up through a page-replaceable intrinsic at event time.
+  EXPECT(s.find("call.call") == std::string::npos);
+  EXPECT(s.find(".apply(") == std::string::npos);
+
+  // The WebView2 drop script: the token in the closure, the posting functions
+  // bound at document creation, and no call through Function.prototype.call
+  // (or apply) or chrome.webview at event time, so a page that replaces them
+  // later never sees the token.
+  std::string wv = BuildWebView2FileDropScript("0123abcd");
+  EXPECT(wv.find("var token = '0123abcd';") != std::string::npos);
+  EXPECT(wv.find("var post = call.bind(wv.postMessage);") != std::string::npos);
+  EXPECT(wv.find("call.bind(wv.postMessageWithAdditionalObjects)") !=
+         std::string::npos);
+  EXPECT(wv.find("postX(wv, m, files)") != std::string::npos);
+  EXPECT(wv.find("post(wv, m)") != std::string::npos);
+  EXPECT(wv.find("call.call") == std::string::npos);
+  EXPECT(wv.find(".apply(") == std::string::npos);
+  EXPECT(wv.find("wv.postMessage(") == std::string::npos);
+  EXPECT(wv.find(s) != std::string::npos);  // the shared observer, whole
 }
 
 }  // namespace

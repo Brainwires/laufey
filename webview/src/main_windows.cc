@@ -61,8 +61,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
   // laufey's own options end at "--" (a registered URL scheme runs
   // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
-  // packaged app (a launch file or a runtime next to the executable) never
-  // takes its runtime from the command line. See laufey_launch_args.h.
+  // packaged app (a launch file or a runtime next to the executable) loads
+  // only the runtime next to its executable: never one the command line,
+  // LAUFEY_RUNTIME_PATH or the working directory names. A development host
+  // takes --runtime, then LAUFEY_RUNTIME_PATH, then the working-directory
+  // fallbacks. See laufey_launch_args.h.
   std::vector<std::string> args;
   {
     int argc = 0;
@@ -74,45 +77,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
   }
   laufey_common::SetProcessArgs(args);
-  const bool packaged =
-      laufey_common::IsPackagedLaunch(!LaufeyFindColocatedRuntime().empty());
-  std::string runtimePath =
-      laufey_common::ParseHostOptions(args, packaged).runtime_path;
-
-  if (runtimePath.empty()) {
-    // Read as UTF-16 and convert to UTF-8; the ANSI variant would garble
-    // non-ASCII paths in the active codepage.
-    std::wstring envPath(MAX_PATH, L'\0');
-    DWORD envLen = GetEnvironmentVariableW(L"LAUFEY_RUNTIME_PATH", &envPath[0],
-                                           static_cast<DWORD>(envPath.size()));
-    if (envLen >= envPath.size()) {
-      // Buffer too small; envLen is the required size including the NUL.
-      envPath.resize(envLen);
-      envLen = GetEnvironmentVariableW(L"LAUFEY_RUNTIME_PATH", &envPath[0],
-                                       static_cast<DWORD>(envPath.size()));
-    }
-    if (envLen > 0 && envLen < envPath.size()) {
-      envPath.resize(envLen);
-      runtimePath = laufey_common::WideToUtf8(envPath);
-    }
-  }
-
-  if (runtimePath.empty()) {
-    runtimePath = LaufeyFindColocatedRuntime();
-  }
-
-  // Development fallbacks, relative to the working directory: never for a
-  // packaged app, whose working directory is wherever it was started from.
-  if (runtimePath.empty() && !packaged) {
-    const wchar_t* searchPaths[] = {L".\\runtime.dll",
-                                    L".\\target\\debug\\hello.dll",
-                                    L".\\target\\release\\hello.dll"};
-    for (const wchar_t* path : searchPaths) {
-      if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
-        runtimePath = laufey_common::WideToUtf8(path);
-        break;
-      }
-    }
+  laufey_common::RuntimeChoice runtimeChoice =
+      laufey_common::ResolveRuntimePath(
+          args, {LaufeyFindColocatedRuntime()},
+          {".\\runtime.dll", ".\\target\\debug\\hello.dll",
+           ".\\target\\release\\hello.dll"});
+  std::string runtimePath = runtimeChoice.path;
+  // A packaged app without its runtime exits at once (no dialog to wait on).
+  if (laufey_common::IsMissingPackagedRuntime(runtimeChoice)) {
+    laufey_common::ReportMissingPackagedRuntime();
+    CoUninitialize();
+    return laufey_common::kMissingRuntimeExitCode;
   }
 
   if (runtimePath.empty()) {

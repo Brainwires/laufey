@@ -6,6 +6,7 @@
 
 #include "laufey_scheme_registry.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -14,14 +15,18 @@
 
 using laufey_common::DecideLocalNetworkPrompt;
 using laufey_common::IsLocalNetworkTrustedOrigin;
+using laufey_common::IsReservedSchemeName;
+using laufey_common::IsSchemeNameGrammar;
 using laufey_common::IsValidSchemeName;
 using laufey_common::JoinForwardedSchemes;
+using laufey_common::kMaxRequestBodyBytes;
 using laufey_common::LocalNetworkPromptDecision;
 using laufey_common::MergeForwardedSchemes;
 using laufey_common::MergeSchemeLists;
 using laufey_common::NormalizeSchemeName;
 using laufey_common::OriginScheme;
 using laufey_common::ParseSchemeList;
+using laufey_common::RequestBodyFits;
 using laufey_common::SchemeRegistry;
 
 #define EXPECT(cond)                                                         \
@@ -48,6 +53,25 @@ static void TestSchemeNameGrammar() {
   EXPECT(!IsValidSchemeName("my_app"));  // "_" is not in the RFC grammar
   EXPECT(!IsValidSchemeName("app/x"));
   EXPECT(!IsValidSchemeName(std::string("app\0x", 5)));
+
+  // Schemes the engines already give a meaning to can't be taken over, in
+  // any case; they still follow the grammar (OriginScheme reads them).
+  for (const char* reserved :
+       {"http", "https", "file", "ws", "wss", "data", "blob", "javascript",
+        "about", "ftp", "filesystem", "chrome", "chrome-extension",
+        "chrome-untrusted", "devtools", "view-source", "HTTPS", "JavaScript",
+        "File", "Data", "BLOB", "View-Source"}) {
+    EXPECT(IsSchemeNameGrammar(reserved));
+    EXPECT(IsReservedSchemeName(reserved));
+    EXPECT(!IsValidSchemeName(reserved));
+  }
+  // Near misses and OS-only schemes stay allowed.
+  for (const char* allowed :
+       {"https2", "httpx", "xhttp", "files", "app", "mailto", "tel",
+        "javascript-app", "about-app", "wss.app"}) {
+    EXPECT(!IsReservedSchemeName(allowed));
+    EXPECT(IsValidSchemeName(allowed));
+  }
 
   EXPECT(NormalizeSchemeName("MyApp") == "myapp");
   EXPECT(NormalizeSchemeName("app") == "app");
@@ -86,6 +110,10 @@ static void TestRegistryAdd() {
   EXPECT(!registry.Add("bad scheme"));
   EXPECT(!registry.Add("app://"));
   EXPECT(!registry.Contains("bad scheme"));
+  // So are the reserved schemes: the registry never takes over http(s).
+  EXPECT(!registry.Add("https"));
+  EXPECT(!registry.Add("File"));
+  EXPECT(!registry.Contains("https"));
 
   // Snapshot keeps "app" first and then registration order.
   EXPECT(registry.Add("Zeta"));
@@ -167,6 +195,14 @@ static void TestParseSchemeList() {
   EXPECT(rejected[1] == "also good");
   EXPECT(rejected[2] == "app://");
 
+  // A reserved scheme is rejected like an invalid one (LAUFEY_CUSTOM_SCHEMES,
+  // --laufey-custom-schemes).
+  rejected.clear();
+  std::vector<std::string> reserved =
+      ParseSchemeList("myapp,HTTPS,file,data", &rejected);
+  EXPECT(reserved.size() == 1 && reserved[0] == "myapp");
+  EXPECT(rejected.size() == 3);
+
   // A null `rejected` is allowed.
   std::vector<std::string> quiet = ParseSchemeList("ok,not ok");
   EXPECT(quiet.size() == 1 && quiet[0] == "ok");
@@ -203,6 +239,14 @@ static void TestMergeSchemeLists() {
   EXPECT(mixed[1] == "good" && mixed[2] == "fine");
   EXPECT(rejected.size() == 2);
   EXPECT(rejected[0] == "bad name" && rejected[1] == "1bad");
+
+  // A reserved scheme is rejected like an invalid one (LAUFEY_CUSTOM_SCHEMES,
+  // --laufey-custom-schemes).
+  rejected.clear();
+  std::vector<std::string> reserved =
+      ParseSchemeList("myapp,HTTPS,file,data", &rejected);
+  EXPECT(reserved.size() == 1 && reserved[0] == "myapp");
+  EXPECT(rejected.size() == 3);
 
   // A null `rejected` is allowed.
   EXPECT(MergeSchemeLists({"ok,not ok"}).size() == 2);
@@ -247,6 +291,22 @@ static void TestOriginScheme() {
   EXPECT(OriginScheme("://app").empty());
   EXPECT(OriginScheme("my app://x").empty());
   EXPECT(OriginScheme("data:text/html,x").empty());
+}
+
+static void TestRequestBodyCap() {
+  EXPECT(kMaxRequestBodyBytes == 512u * 1024 * 1024);
+  EXPECT(RequestBodyFits(0, 0));
+  EXPECT(RequestBodyFits(0, kMaxRequestBodyBytes));
+  EXPECT(RequestBodyFits(kMaxRequestBodyBytes - 1, 1));
+  EXPECT(!RequestBodyFits(kMaxRequestBodyBytes, 1));
+  EXPECT(!RequestBodyFits(0, kMaxRequestBodyBytes + 1));
+  EXPECT(!RequestBodyFits(kMaxRequestBodyBytes + 1, 0));
+  // No wrap-around on a huge element count.
+  EXPECT(!RequestBodyFits(16, SIZE_MAX));
+  EXPECT(!RequestBodyFits(SIZE_MAX, SIZE_MAX));
+  // A smaller cap.
+  EXPECT(RequestBodyFits(6, 4, 10));
+  EXPECT(!RequestBodyFits(6, 5, 10));
 }
 
 static void TestLocalNetworkPrompt() {
@@ -310,6 +370,7 @@ int main() {
   TestJoinForwardedSchemes();
   TestMergeForwardedSchemes();
   TestOriginScheme();
+  TestRequestBodyCap();
   TestLocalNetworkPrompt();
   std::printf("scheme_registry_test: all tests passed\n");
   return 0;

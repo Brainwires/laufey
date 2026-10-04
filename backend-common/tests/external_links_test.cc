@@ -90,6 +90,27 @@ int main() {
   EXPECT(!IsAllowedExternalLinkUrl("https://example.com/" +
                                    std::string(40000, 'a')));
 
+  // The new-window hooks: an allowed URL opens in the OS browser only with a
+  // user gesture behind it; without one it is blocked; anything else is
+  // ignored either way.
+  EXPECT(DecideLaufeyPopup("https://example.com/", true) ==
+         LaufeyPopupDecision::kOpenInBrowser);
+  EXPECT(DecideLaufeyPopup("http://example.com/x", true) ==
+         LaufeyPopupDecision::kOpenInBrowser);
+  EXPECT(DecideLaufeyPopup("https://example.com/", false) ==
+         LaufeyPopupDecision::kBlockedNoGesture);
+  for (const char* other : {"", "about:blank", "javascript:alert(1)",
+                            "file:///etc/passwd", "myapp://app/", "https://"}) {
+    EXPECT(DecideLaufeyPopup(other, true) == LaufeyPopupDecision::kIgnored);
+    EXPECT(DecideLaufeyPopup(other, false) == LaufeyPopupDecision::kIgnored);
+  }
+
+  // The page-side interceptor acts on user-initiated navigations and trusted
+  // clicks only (a script's synthetic click stays in the view).
+  std::string script = BuildExternalLinkInterceptScript("laufey");
+  EXPECT(script.find("!e.userInitiated") != std::string::npos);
+  EXPECT(script.find("!e.isTrusted") != std::string::npos);
+
   std::printf("external_links_test: OK\n");
   return 0;
 }

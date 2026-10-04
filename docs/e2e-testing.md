@@ -95,10 +95,12 @@ asymmetric**, and that most of the surface is _not_ actually hard:
 
 ### 3.1 Backends are not interchangeable
 
-Runtimes are backend-agnostic cdylibs; a backend loads one via
-`--runtime <path>` or `LAUFEY_RUNTIME_PATH`. That means **one test runtime can
-be driven by every backend binary**. But the backends differ in what they
-implement:
+Runtimes are backend-agnostic cdylibs; a development backend loads one via
+`--runtime <path>` or `LAUFEY_RUNTIME_PATH` (a packaged one only loads the
+runtime next to its executable;
+[Runtime library](launch-config.md#runtime-library)). That means **one test
+runtime can be driven by every backend binary**. But the backends differ in what
+they implement:
 
 | Backend | Web engine                                 | Native-chrome impl                                    | OSes      |
 | ------- | ------------------------------------------ | ----------------------------------------------------- | --------- |
@@ -199,6 +201,20 @@ other origin must still be refused at once: the script declares a loopback port
 public (`--ip-address-space-overrides=127.0.0.1:<port>=public`, the port in
 `LAUFEY_E2E_PUBLIC_PORT`), serves a page there, and its fetch to the echo server
 must fail within five seconds instead of waiting for a prompt.
+
+The bridge (API 44) is held to the calling document. Every call of the
+request-body page must carry its origin (`call.origin == "app://e2e-body"`); a
+same-origin sub-frame that posts to the engine's message handler directly (an
+object and a JSON string, with no, an empty and a guessed WebKitGTK token) must
+never reach the binding; and the main frame posting malformed messages (wrong
+types, NaN / negative / huge ids, a lone surrogate, a `Date` argument,
+unparseable JSON) must neither crash the app nor stop the bridge.
+`--bridge-origin` (`bridge_origin_checks.rs`) writes a `laufey-launch.json` next
+to the backend pinning `"bridgeOrigins": ["app://e2e-bridge-ok"]`: a window on
+that origin must get the bridge with its origin on every call, and a window on
+`app://e2e-bridge-no` must get no `Laufey` namespace and see a call it posts to
+the engine's channel itself refused. The script removes the file when the run
+ends.
 
 Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
 and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body
@@ -669,8 +685,11 @@ profile. The driver asserts:
   executable (no `LAUFEY_*` in the environment), the file's `appId` gives a
   persistent per-app store and profile directory. On CEF the page is served over
   a custom scheme that only the file's `customSchemes` declares, and it must be
-  a secure origin. `LAUFEY_APP_ID` in the environment overrides the file, and a
-  malformed file is reported and ignored.
+  a secure origin. The file's `appId` wins over `LAUFEY_APP_ID` in the
+  environment, a `LAUFEY_DATA_DIR` in the environment is reported and ignored
+  (the pinned app id keeps its store), and a malformed file is reported and
+  ignored. While the file is in place the driver copies the runtime next to the
+  backend executable, since a packaged app loads only that one.
 
 The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, and on
 the webview/Linux leg, where the Layer-0 battery is excluded (see the status
@@ -692,8 +711,11 @@ runtime sees need real processes, so they have their own runtime,
   exits 0 within seconds without loading the runtime (on Linux it runs with no
   display at all), and the first instance receives `second_instance` with
   exactly those arguments and that directory;
-- `LAUFEY_SINGLE_INSTANCE=0` overrides the file, and single-instance mode
-  without an app id warns and runs unlocked;
+- with the app id pinned by the file, a second launch with
+  `LAUFEY_SINGLE_INSTANCE=0` and its own `LAUFEY_DATA_DIR` in its environment
+  still forwards (the variable is reported as ignored); without an app id in the
+  file, `LAUFEY_SINGLE_INSTANCE=0` overrides its `singleInstance`, and
+  single-instance mode without an app id warns and runs unlocked;
 - without single-instance mode two instances run side by side (on CEF with
   different data directories; one CEF profile admits one process, which
   `storage-e2e-run.sh` covers); the first one stays up until the driver releases
@@ -704,8 +726,8 @@ runtime sees need real processes, so they have their own runtime,
   `argv` only;
 - Windows and Linux: a test URL scheme registered with the OS as an installer
   would (`HKCU\Software\Classes\laufey-si-test` with a `shell\open\command` of
-  `"<backend>" -- "%1"`, the runtime from `LAUFEY_RUNTIME_PATH` since the launch
-  file makes it a packaged app; a `.desktop` file with
+  `"<backend>" -- "%1"`, the runtime copied next to the backend since the launch
+  file makes it a packaged app, which loads no other; a `.desktop` file with
   `x-scheme-handler/laufey-si-test` made the default with `xdg-mime`, in a
   private XDG home), and links opened through the OS (`Start-Process`,
   `xdg-open`): at a cold start the runtime sees the URL in its arguments, and
@@ -849,10 +871,11 @@ that it says so). `--devtools-off` runs the DevTools part again under
 
 - **Global shortcuts** (see [global-shortcuts.md](global-shortcuts.md)): a real
   OS registration answered with the canonical form, listed, another spelling
-  refused as `ALREADY_REGISTERED`, `INVALID` for a modifier-less key and an
-  unknown key, a press through `test_trigger_shortcut` reaching the handler with
-  the canonical form, and a real key press: on Windows injected with `SendInput`
-  and arriving as `WM_HOTKEY`, on X11 injected with xdotool (XTEST) and matched
+  refused as `ALREADY_REGISTERED`, `INVALID` for a modifier-less printable key,
+  a navigation key alone or with Shift (`Escape`, `Shift+Up`) and an unknown
+  key, a press through `test_trigger_shortcut` reaching the handler with the
+  canonical form, and a real key press: on Windows injected with `SendInput` and
+  arriving as `WM_HOTKEY`, on X11 injected with xdotool (XTEST) and matched
   against the shortcut's key grab. Then the **conflict**: the battery starts a
   second copy of the backend (`LAUFEY_E2E_ONLY=shortcut-holder`, its own data
   directory) that registers a shortcut and reports through a file; this process

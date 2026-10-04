@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `43`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `44`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -65,7 +65,9 @@ The pointers group into:
 - **Value marshalling** — the `value_*` family (below).
 - **JavaScript interop** — `set_js_call_handler`, `js_call_respond`,
   `invoke_js_callback`, `release_js_callback`, `execute_js`, `set_js_namespace`,
-  `poll_js_calls`, `set_js_call_notify`.
+  `poll_js_calls`, `set_js_call_notify`, and from API 44
+  `set_js_call_handler_ex` (the calling document's origin with every call; see
+  [below](#javascript-call-flow)).
 - **Event handlers** — `set_keyboard_event_handler`, `set_mouse_click_handler`,
   `set_mouse_move_handler`, `set_wheel_handler`,
   `set_cursor_enter_leave_handler`, `set_focused_handler`, `set_resize_handler`,
@@ -201,6 +203,48 @@ and free it with `release_js_callback(id)`.
    error)` — resolving or rejecting the
    JS-side promise.
 
+`call_id` is issued by the backend, unique in the process; it is not the page's
+own number for the call. An answer reaches exactly the call that asked, and an
+id that was never issued or was already answered reaches nothing.
+
+Only a window's top-level document can call: CEF binds the namespace in the main
+frame and drops a call from any other frame, WKWebView takes script messages
+from the main frame only, WebView2 the top document's, and on WebKitGTK the top
+frame's bridge script sends a per-window token.
+
+### The calling document's origin (API ≥ 44)
+
+```c
+typedef void (*laufey_js_call_ex_fn)(void* user_data, uint32_t window_id,
+                                     uint64_t call_id, const char* method_path,
+                                     laufey_value_t* args, const char* origin);
+void (*set_js_call_handler_ex)(void* backend_data, laufey_js_call_ex_fn handler,
+                               void* user_data);
+```
+
+A window's top-level document can navigate anywhere, and the bridge goes with
+it. `set_js_call_handler_ex` registers a handler that also receives the origin
+of the document that made each call, so the runtime can refuse a binding to a
+document it doesn't trust. `origin` is the HTML serialization: lowercase
+`scheme://host`, plus `:port` when the port isn't the scheme's default
+(`"myapp://app"`, `"http://127.0.0.1:5173"`), or `"null"` for an opaque origin
+(`about:blank`, `data:`, `file:`). It is never `NULL` and is valid for the
+duration of the call. Each backend takes it from the engine, not from the page:
+CEF from the frame's URL in the browser process, WKWebView from the frame's
+`securityOrigin`, WebView2 from the message's source, WebKitGTK from the web
+view's URL.
+
+There is one handler slot: while an ex handler is set it receives every call and
+the plain handler none; a `NULL` ex handler gives the slot back. Winit accepts
+the handler and never calls it (no web engine).
+
+A packaged app also pins its bridge in [laufey-launch.json](launch-config.md):
+`"bridgeOrigins"`, or by default one `<scheme>://*` per `"customSchemes"` entry.
+A document on any other origin gets no bridge namespace, and a call from one is
+rejected by the backend (`"laufey: this page's origin may not call the app"`)
+before it reaches either handler. Without a launch file, or with one that pins
+neither key, every origin may call, as before API 44.
+
 `execute_js` runs a script in a window and delivers its result/error through a
 `laufey_js_result_fn`. When the runtime services calls off the UI thread, the
 backend signals readiness via `set_js_call_notify` and the runtime drains the
@@ -235,6 +279,13 @@ embedded browser over an in-memory byte channel instead of a TCP loopback.
    needs WebKitGTK 2.40 or newer (`webkit_uri_scheme_request_get_http_body`); a
    WebView backend built against an older WebKitGTK forwards every request with
    an empty body.
+
+`scheme_response_write` never blocks. It returns `len` when it took the bytes
+and, from API 44, **0** when it took none because the page is behind: the
+backend already holds its high-water mark (4 MiB) of the response. The runtime
+then waits (a few milliseconds, or until `on_cancel`) and writes the same bytes
+again; a write is taken whole whenever less than the mark is waiting, never in
+part. See [custom-schemes.md](custom-schemes.md) for each backend.
 
 If the webview cancels (navigation away, window closed) before the response
 finishes, `scheme_response_write` / `scheme_request_read_body` return negative;

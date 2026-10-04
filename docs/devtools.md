@@ -55,6 +55,20 @@ created. Off means:
 In every backend `open_devtools` is then a no-op, and `is_devtools_enabled`
 reports `false`.
 
+WebView2 also reads environment variables of its own that would reopen what
+"off" closes. A packaged app (one with a `laufey-launch.json` or a runtime next
+to its executable) with DevTools off removes them from its environment, with a
+warning, before it creates the WebView2 environment:
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (extra Chromium switches such as a
+remote-debugging port), `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` (another browser
+binary), `WEBVIEW2_USER_DATA_FOLDER` (another profile),
+`WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER` and `WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER`.
+`WEBVIEW2_RELEASE_CHANNEL_PREFERENCE` and `WEBVIEW2_CHANNEL_SEARCH_KIND` are
+kept: they only choose among the signed WebView2 runtimes installed. A
+development launch, or an app with DevTools on, honours them all. The equivalent
+group policies (`HKLM`/`HKCU\Software\Policies\Microsoft\Edge\WebView2`) are an
+administrator's to set and are not touched.
+
 CEF note: Chromium's `devtools.availability` preference is deliberately not
 used. It would also refuse the in-process DevTools-protocol client that
 `print_to_pdf` uses (`ExecuteDevToolsMethod` / `Page.printToPDF`), so PDFs would

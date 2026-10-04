@@ -81,8 +81,9 @@ struct AsyncReader {
 };
 
 static void TestWritesNeverBlockAndArriveIntact() {
-  // 4 MiB written with nobody reading: every write returns at once.
-  constexpr size_t kLen = 4 * 1024 * 1024 + 7;
+  // 3 MiB written with nobody reading (below the high-water mark): every
+  // write takes everything and returns at once.
+  constexpr size_t kLen = 3 * 1024 * 1024 + 7;
   auto writer = std::make_shared<SchemeBodyWriter>();
   GMainContext* context = g_main_context_new();
   g_main_context_push_thread_default(context);
@@ -116,6 +117,71 @@ static void TestWritesNeverBlockAndArriveIntact() {
   g_main_loop_run(reader.loop);
   CHECK(reader.done && reader.error.empty());
   CHECK(reader.got == body);
+  g_main_loop_unref(reader.loop);
+  g_object_unref(stream);
+  g_main_context_pop_thread_default(context);
+  g_main_context_unref(context);
+}
+
+static void TestHighWaterMarkTakesNothingUntilRead() {
+  // Backpressure (API 44): once kSchemeResponseHighWater bytes wait, a write
+  // takes nothing and returns 0 (not -1: the response goes on); after the
+  // reader takes some, writes are taken again, and the body arrives whole.
+  constexpr size_t kMark = laufey_common::kSchemeResponseHighWater;
+  auto writer = std::make_shared<SchemeBodyWriter>();
+  GMainContext* context = g_main_context_new();
+  g_main_context_push_thread_default(context);
+  GInputStream* stream = writer->CreateStream();
+  std::vector<uint8_t> sent;
+  std::vector<uint8_t> chunk(100 * 1000);
+  intptr_t r = 0;
+  for (int i = 0; i < 1000; i++) {
+    for (size_t k = 0; k < chunk.size(); k++)
+      chunk[k] = PatternAt(sent.size() + k);
+    r = writer->Write(chunk.data(), chunk.size());
+    if (r != (intptr_t)chunk.size())
+      break;
+    sent.insert(sent.end(), chunk.begin(), chunk.end());
+  }
+  CHECK(r == 0);
+  CHECK(writer->queued() >= kMark);
+  CHECK(writer->queued() < kMark + chunk.size());
+  CHECK(writer->queued() == sent.size());
+  // Still full: nothing taken, the stream is still alive.
+  CHECK(writer->Write(chunk.data(), 1) == 0);
+  CHECK(!writer->reader_gone());
+  // A single write larger than the mark is taken whole when the queue is
+  // below it (after the reader catches up), see below.
+  std::vector<uint8_t> got(sent.size());
+  GError* error = nullptr;
+  gssize n = g_pollable_input_stream_read_nonblocking(
+      G_POLLABLE_INPUT_STREAM(stream), got.data(), 1024 * 1024, nullptr,
+      &error);
+  CHECK(n > 0 && error == nullptr);
+  size_t read_so_far = static_cast<size_t>(n);
+  while (writer->queued() >= kMark) {
+    n = g_pollable_input_stream_read_nonblocking(
+        G_POLLABLE_INPUT_STREAM(stream), got.data() + read_so_far,
+        got.size() - read_so_far, nullptr, &error);
+    CHECK(n > 0 && error == nullptr);
+    read_so_far += static_cast<size_t>(n);
+  }
+  std::vector<uint8_t> big(kMark + 12345);
+  for (size_t k = 0; k < big.size(); k++)
+    big[k] = PatternAt(sent.size() + k);
+  CHECK(writer->Write(big.data(), big.size()) == (intptr_t)big.size());
+  sent.insert(sent.end(), big.begin(), big.end());
+  CHECK(writer->Write(chunk.data(), 1) == 0);
+  writer->End();
+  got.resize(read_so_far);
+  AsyncReader reader;
+  reader.loop = g_main_loop_new(context, FALSE);
+  reader.stream = stream;
+  reader.Next();
+  g_main_loop_run(reader.loop);
+  CHECK(reader.done && reader.error.empty());
+  got.insert(got.end(), reader.got.begin(), reader.got.end());
+  CHECK(got == sent);
   g_main_loop_unref(reader.loop);
   g_object_unref(stream);
   g_main_context_pop_thread_default(context);
@@ -312,6 +378,7 @@ static void TestSynchronousReaderAndEof() {
 
 int main() {
   TestWritesNeverBlockAndArriveIntact();
+  TestHighWaterMarkTakesNothingUntilRead();
   TestReaderWokenByAnotherThread();
   TestCapFailsBothSides();
   TestReaderGoneFailsTheWriter();

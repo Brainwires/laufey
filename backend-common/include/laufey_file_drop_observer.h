@@ -27,9 +27,11 @@ inline std::string BuildDomFileDropObserverScript() {
   'use strict';
   var w = window;
   if (w.top !== w) return;
-  var add = EventTarget.prototype.addEventListener;
-  var now = Date.now;
+  // Bound now, so calling them later looks nothing up: a page that replaces
+  // Function.prototype.call (or Date.now) afterwards is never called here.
   var call = Function.prototype.call;
+  var addTo = call.bind(EventTarget.prototype.addEventListener);
+  var nowOf = call.bind(Date.now);
   var depth = 0, active = false, lastAt = 0, lastX = -1, lastY = -1;
   function files(e) {
     var dt = e.dataTransfer;
@@ -47,10 +49,10 @@ inline std::string BuildDomFileDropObserverScript() {
   }
   function enter(e) {
     active = true;
-    lastX = e.clientX; lastY = e.clientY; lastAt = call.call(now, Date);
+    lastX = e.clientX; lastY = e.clientY; lastAt = nowOf(Date);
     send(0, e.clientX, e.clientY, count(e), null);
   }
-  function on(type, fn) { call.call(add, w, type, fn, true); }
+  function on(type, fn) { addTo(w, type, fn, true); }
   on('dragenter', function (e) {
     if (!e.isTrusted || !files(e)) return;
     depth++;
@@ -63,7 +65,7 @@ inline std::string BuildDomFileDropObserverScript() {
     // own handlers still decide what the drop does there.
     e.preventDefault();
     if (!active) { depth = 1; enter(e); return; }
-    var t = call.call(now, Date);
+    var t = nowOf(Date);
     if ((e.clientX !== lastX || e.clientY !== lastY) && t - lastAt >= 50) {
       lastX = e.clientX; lastY = e.clientY; lastAt = t;
       send(1, e.clientX, e.clientY, count(e), null);
@@ -86,6 +88,38 @@ inline std::string BuildDomFileDropObserverScript() {
     send(3, e.clientX, e.clientY, count(e), e.dataTransfer.files);
   });
 }))JS";
+}
+
+// The WebView2 backend's whole drop observer: BuildDomFileDropObserverScript
+// with a `send` that posts `{"__laufeyFileDrop":"<token>",...}` (and the
+// dropped files) to the host through chrome.webview. The per-process `token`
+// ([0-9a-f], no quoting needed) is what tells the host a message came from
+// here, so it must never reach page script: everything `send` calls is
+// captured and bound when the script runs, at document creation, before any
+// page script. A page that later replaces Function.prototype.call / apply /
+// bind, chrome.webview.postMessage or String.prototype methods is never
+// called with the message.
+inline std::string BuildWebView2FileDropScript(const std::string& token) {
+  return "(function () {\n"
+         "  var wv = window.chrome && window.chrome.webview;\n"
+         "  if (!wv || window.top !== window) return;\n"
+         "  var call = Function.prototype.call;\n"
+         "  var post = call.bind(wv.postMessage);\n"
+         "  var postX = wv.postMessageWithAdditionalObjects ?\n"
+         "      call.bind(wv.postMessageWithAdditionalObjects) : null;\n"
+         "  var token = '" +
+         token +
+         "';\n"
+         "  (" +
+         BuildDomFileDropObserverScript() +
+         ")(function (p, x, y, n, files) {\n"
+         "    var m = '{\"__laufeyFileDrop\":\"' + token + "
+         "'\",\"p\":' + (p | 0) + ',\"x\":' + (+x || 0) + "
+         "',\"y\":' + (+y || 0) + ',\"n\":' + (n | 0) + '}';\n"
+         "    if (files && postX) postX(wv, m, files);\n"
+         "    else post(wv, m);\n"
+         "  });\n"
+         "})();\n";
 }
 
 }  // namespace laufey_common

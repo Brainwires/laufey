@@ -89,6 +89,21 @@ case "$platform" in
   macos) launch_file="${bin%/MacOS/*}/Resources/laufey-launch.json" ;;
   *) launch_file="$(dirname "$bin")/laufey-launch.json" ;;
 esac
+# A launch file makes the backend a packaged app, which loads only the
+# runtime next to its executable (never LAUFEY_RUNTIME_PATH): while a launch
+# file is in place, the runtime is copied there as well.
+case "$platform" in
+  macos) colocated_rt="$bin.dylib" ;;
+  linux) colocated_rt="$bin.so" ;;
+  windows) colocated_rt="${bin%.exe}.dll" ;;
+esac
+write_launch_file() { # <json>
+  mkdir -p "$(dirname "$launch_file")"
+  printf '%s\n' "$1" >"$launch_file"
+  cp "$rt" "$colocated_rt"
+  echo "== launch file $launch_file: $(cat "$launch_file")"
+}
+remove_launch_file() { rm -f "$launch_file" "$colocated_rt"; }
 explicit="$scratch/explicit-dir"
 if [ "$platform" = windows ]; then
   explicit_native="$(cygpath -w "$explicit")"
@@ -108,7 +123,7 @@ remove() {
   echo "[storage-e2e] warning: could not remove $1"
 }
 cleanup() {
-  rm -f "$launch_file"
+  remove_launch_file
   remove "$base/$id_a"
   remove "$base/$id_b"
   remove "$base/$id_f"
@@ -116,7 +131,7 @@ cleanup() {
 }
 trap cleanup EXIT
 rm -rf "$base/$id_a" "$base/$id_b" "$base/$id_f"
-rm -f "$launch_file"
+remove_launch_file
 
 failed=0
 pass() { echo "[storage-e2e] PASS $*"; }
@@ -246,10 +261,8 @@ scheme_env=()
 if [ "$backend" = cef ]; then
   scheme_env=(LAUFEY_E2E_STORAGE_SCHEME="$launch_scheme")
 fi
-mkdir -p "$(dirname "$launch_file")"
-printf '{ "appId": "%s", "customSchemes": ["%s"] }\n' "$id_f" "$launch_scheme" \
-  >"$launch_file"
-echo "== launch file $launch_file: $(cat "$launch_file")"
+write_launch_file \
+  "$(printf '{ "appId": "%s", "customSchemes": ["%s"] }' "$id_f" "$launch_scheme")"
 step file-write ${scheme_env[@]+"${scheme_env[@]}"} \
   LAUFEY_E2E_STORAGE_MODE=write LAUFEY_E2E_STORAGE_VALUE="${value}f"
 step file-read ${scheme_env[@]+"${scheme_env[@]}"} \
@@ -262,6 +275,17 @@ fi
 step file-env-override ${scheme_env[@]+"${scheme_env[@]}"} \
   LAUFEY_APP_ID="$id_b" LAUFEY_E2E_STORAGE_MODE=read \
   LAUFEY_E2E_STORAGE_EXPECT="${value}f"
+# The pinned app id pins the data directory too: a LAUFEY_DATA_DIR in the
+# environment (the explicit store, which holds "${value}d") is reported and
+# ignored, and the app keeps the app id's store.
+step file-env-data-dir ${scheme_env[@]+"${scheme_env[@]}"} \
+  LAUFEY_DATA_DIR="$explicit_native" LAUFEY_E2E_STORAGE_MODE=read \
+  LAUFEY_E2E_STORAGE_EXPECT="${value}f"
+if grep -q 'LAUFEY_DATA_DIR is ignored' "$scratch/logs/file-env-data-dir.log"; then
+  pass "LAUFEY_DATA_DIR ignored under a pinned app id is reported"
+else
+  fail "ignored LAUFEY_DATA_DIR not reported (see $scratch/logs/file-env-data-dir.log)"
+fi
 # A malformed file is reported and ignored: the app starts with the
 # unconfigured default store.
 printf '{ "appId": ' >"$launch_file"
@@ -272,7 +296,7 @@ if grep -q 'laufey-launch.json: not valid JSON' "$scratch/logs/file-malformed.lo
 else
   fail "malformed launch file not reported (see $scratch/logs/file-malformed.log)"
 fi
-rm -f "$launch_file"
+remove_launch_file
 
 if [ "$failed" = 0 ]; then
   echo "[storage-e2e] OVERALL PASS"

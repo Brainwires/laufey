@@ -18,6 +18,7 @@
 #endif
 
 #ifdef __APPLE__
+#include <TargetConditionals.h>
 #include <mach-o/dyld.h>
 #endif
 
@@ -341,11 +342,20 @@ static void Backend_SetJsCallHandler(void* data, laufey_js_call_fn handler,
   loader->SetJsCallHandler(handler, user_data);
 }
 
+static void Backend_SetJsCallHandlerEx(void* data, laufey_js_call_ex_fn handler,
+                                       void* user_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  loader->SetJsCallHandlerEx(handler, user_data);
+}
+
 static void Backend_JsCallRespond(void* data, uint64_t call_id,
                                   laufey_value_t* result,
                                   laufey_value_t* error) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
-  uint32_t window_id = loader->ConsumeCallWindow(call_id);
+  // An id this backend never issued, or a second answer, reaches nothing.
+  laufey_common::JsCallRoute route;
+  if (!loader->TakeJsCall(call_id, &route))
+    return;
   laufey::ValuePtr resultPtr =
       (result && result->value) ? result->value : laufey::Value::Null();
   // Keep the absent-error case as a genuine null pointer. RespondToJsCall on
@@ -353,7 +363,8 @@ static void Backend_JsCallRespond(void* data, uint64_t call_id,
   // fabricating a Value::Null() here would make every response look like a
   // rejection and resolve the JS promise with null.
   laufey::ValuePtr errorPtr = (error && error->value) ? error->value : nullptr;
-  loader->JsCallRespond(window_id, call_id, resultPtr, errorPtr);
+  loader->JsCallRespond(route.window_id, route.page_call_id, resultPtr,
+                        errorPtr);
 }
 
 // --- Custom URL scheme handling ---
@@ -1365,6 +1376,7 @@ void RuntimeLoader::InitializeBackendApi() {
 
   backend_api_.set_js_call_handler = Backend_SetJsCallHandler;
   backend_api_.js_call_respond = Backend_JsCallRespond;
+  backend_api_.set_js_call_handler_ex = Backend_SetJsCallHandlerEx;
 
   backend_api_.register_scheme_handler = Backend_RegisterSchemeHandler;
   backend_api_.scheme_request_read_body = Backend_SchemeRequestReadBody;
@@ -1735,13 +1747,33 @@ void RuntimeLoader::DispatchSchemeRequest(uint32_t window_id,
   }
 }
 
-void RuntimeLoader::OnJsCall(uint32_t window_id, uint64_t call_id,
+const laufey_common::BridgeOriginPolicy& RuntimeLoader::BridgePolicy() const {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+  // The iOS shell has no launch file.
+  static const laufey_common::BridgeOriginPolicy unrestricted;
+  return unrestricted;
+#else
+  return laufey_common::ProcessBridgeOriginPolicy();
+#endif
+}
+
+void RuntimeLoader::OnJsCall(uint32_t window_id, uint64_t page_call_id,
                              const std::string& method_path,
-                             laufey::ValuePtr args) {
-  StoreCallWindow(call_id, window_id);
+                             laufey::ValuePtr args, const std::string& origin) {
+  uint64_t call_id = js_calls_.Add(window_id, page_call_id);
+  // A document the launch file's bridge pin doesn't cover never reaches the
+  // runtime (its bridge script isn't installed either; this catches a page
+  // that posts to the engine's message channel itself).
+  if (!laufey_common::BridgeOriginAllowed(BridgePolicy(), origin)) {
+    std::cerr << "laufey: refused a bridge call from " << origin
+              << " (not in the app's bridgeOrigins)" << std::endl;
+    RespondToCall(call_id, nullptr,
+                  laufey::Value::String(laufey_common::kBridgeOriginRefused));
+    return;
+  }
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
-    pending_js_calls_.push({window_id, call_id, method_path, args});
+    pending_js_calls_.push({window_id, call_id, method_path, args, origin});
   }
 
   std::lock_guard<std::mutex> lock(notify_mutex_);
@@ -1765,10 +1797,14 @@ void RuntimeLoader::PollPendingJsCalls() {
 
   laufey_js_call_fn handler;
   void* user_data;
+  laufey_js_call_ex_fn handler_ex;
+  void* user_data_ex;
   {
     std::lock_guard<std::mutex> lock(handler_mutex_);
     handler = js_call_handler_;
     user_data = js_call_user_data_;
+    handler_ex = js_call_handler_ex_;
+    user_data_ex = js_call_user_data_ex_;
   }
 
   for (auto& call : calls) {
@@ -1788,20 +1824,30 @@ void RuntimeLoader::PollPendingJsCalls() {
           backend->OpenExternalURL(url);
         }
       }
-      JsCallRespond(call.window_id, call.call_id, laufey::Value::Null(),
-                    nullptr);
+      RespondToCall(call.call_id, laufey::Value::Null(), nullptr);
       continue;
     }
 
-    if (handler) {
+    if (handler_ex) {
+      laufey_value_t* argsWrapper = new laufey_value(call.args);
+      handler_ex(user_data_ex, call.window_id, call.call_id,
+                 call.method_path.c_str(), argsWrapper, call.origin.c_str());
+    } else if (handler) {
       laufey_value_t* argsWrapper = new laufey_value(call.args);
       handler(user_data, call.window_id, call.call_id, call.method_path.c_str(),
               argsWrapper);
     } else {
-      JsCallRespond(call.window_id, call.call_id, nullptr,
+      RespondToCall(call.call_id, nullptr,
                     laufey::Value::String("No JS call handler registered"));
     }
   }
+}
+
+void RuntimeLoader::RespondToCall(uint64_t call_id, laufey::ValuePtr result,
+                                  laufey::ValuePtr error) {
+  laufey_common::JsCallRoute route;
+  if (js_calls_.Take(call_id, &route))
+    JsCallRespond(route.window_id, route.page_call_id, result, error);
 }
 
 void RuntimeLoader::JsCallRespond(uint32_t window_id, uint64_t call_id,

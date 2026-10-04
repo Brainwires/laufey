@@ -194,6 +194,19 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_scheme_registry_test
            COMMAND laufey_scheme_registry_test)
 
+  # The bridge's call table (laufey_js_calls.h): backend-issued call ids.
+  add_executable(laufey_js_calls_test tests/js_calls_test.cc)
+  target_link_libraries(laufey_js_calls_test PRIVATE
+    laufey_backend_common
+    Threads::Threads
+  )
+  add_test(NAME laufey_js_calls_test COMMAND laufey_js_calls_test)
+
+  # The calling document's origin and the launch file's bridge pin.
+  add_executable(laufey_bridge_origin_test tests/bridge_origin_test.cc)
+  target_link_libraries(laufey_bridge_origin_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_bridge_origin_test COMMAND laufey_bridge_origin_test)
+
   # Writes (and removes) a laufey-launch.json next to the test binary.
   add_executable(laufey_launch_config_test tests/launch_config_test.cc)
   target_link_libraries(laufey_launch_config_test PRIVATE
@@ -256,6 +269,13 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_external_links_test tests/external_links_test.cc)
   target_link_libraries(laufey_external_links_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_external_links_test COMMAND laufey_external_links_test)
+
+  # UTF-8 for text from a JavaScript engine: JSON \u escapes (surrogate
+  # pairs, unpaired surrogates) and, on Windows, WideToUtf8 (no OS API
+  # elsewhere).
+  add_executable(laufey_utf8_test tests/utf8_test.cc)
+  target_link_libraries(laufey_utf8_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_utf8_test COMMAND laufey_utf8_test)
 
   # Accelerator parsing, the shortcut registry (with a fake OS side) and the
   # autostart entry format (no OS API).

@@ -44,9 +44,12 @@ arguments of its own (the class of Electron's CVE-2018-1000006). Everything
 after `--` is a positional argument: the hosts stop reading their own options
 there, Chromium (CEF) treats it as the end of its switches, and the runtime
 should do the same. As a second line of defence, a CEF launch whose positional
-arguments include a URL drops every Chromium switch from its command line, and a
-packaged app (one with a `laufey-launch.json` or a runtime next to its
-executable) never takes `--runtime` from the command line.
+arguments include a URL drops every Chromium switch from its command line (on
+Windows and Linux, the two that receive links in `argv`; the browser process
+logs each one it drops), and a packaged app (one with a `laufey-launch.json` or
+a runtime next to its executable) loads only the runtime it ships, never one
+named by `--runtime` or `LAUFEY_RUNTIME_PATH`
+([Runtime library](launch-config.md#runtime-library)).
 
 The OS also has to have _seen_ that metadata: macOS registers schemes through
 LaunchServices when the `.app` is installed (or after `lsregister -f`), Linux
@@ -118,8 +121,11 @@ Single-instance mode is off by default. Turn it on in the app's
 { "appId": "com.example.acme", "singleInstance": true }
 ```
 
-or with `LAUFEY_SINGLE_INSTANCE=1` (and `LAUFEY_APP_ID`) in the environment;
-`LAUFEY_SINGLE_INSTANCE=0` turns it off even when the file turns it on. Without
+or with `LAUFEY_SINGLE_INSTANCE=1` (and `LAUFEY_APP_ID`) in the environment.
+When the file has an `appId`, only its `singleInstance` counts and
+`LAUFEY_SINGLE_INSTANCE` is ignored (reported on stderr), so nothing inherited
+can turn the lock off; without one, `LAUFEY_SINGLE_INSTANCE=0` turns it off even
+when the file turns it on ([Precedence](launch-config.md#precedence)). Without
 an app id the backend prints a warning and runs unlocked. The backend decides
 this in `main()`, before it starts a web engine or loads the runtime, so it
 works the same when the app is started by the OS, a shortcut or `exec`.

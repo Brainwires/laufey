@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -14,6 +14,8 @@
 # --lna runs only the Local Network Access checks (lna_checks.rs): the
 # custom-scheme page's fetch and WebSocket to a loopback server, and (CEF) a
 # page on another origin that must not reach loopback.
+# --bridge-origin runs only the API 44 bridge pin checks
+# (bridge_origin_checks.rs) under a launch file it writes next to the backend.
 # --lifetime runs only the app-lifetime checks (keep-alive with no window,
 # then quit() ending the event loop); they end the process, so they can't
 # share the main battery's run.
@@ -82,6 +84,9 @@ if [ "$mode" = "--scheme-body" ]; then
 fi
 if [ "$mode" = "--lifetime" ]; then
   export LAUFEY_E2E_ONLY=lifetime
+fi
+if [ "$mode" = "--bridge-origin" ]; then
+  export LAUFEY_E2E_ONLY=bridge-origin
 fi
 if [ "$mode" = "--lna" ]; then
   export LAUFEY_E2E_ONLY=lna
@@ -161,6 +166,61 @@ case "$backend" in
   *) echo "unknown backend: $backend"; exit 2 ;;
 esac
 [ -n "$bin" ] || { echo "backend binary for '$backend' not found (build it first)"; exit 1; }
+
+# --bridge-origin: a launch file next to the backend pins the bridge to one
+# origin (docs/launch-config.md); removed when the run ends.
+if [ "$mode" = "--bridge-origin" ]; then
+  case "$bin" in
+    */Contents/MacOS/*) launch_file="${bin%/MacOS/*}/Resources/laufey-launch.json" ;;
+    *) launch_file="$(dirname "$bin")/laufey-launch.json" ;;
+  esac
+  # A launch file makes the backend a packaged app, which loads only the
+  # runtime next to its executable (never LAUFEY_RUNTIME_PATH): copy it there
+  # for the run. (Git Bash finds "laufey" for "laufey.exe", so ask the OS.)
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) colocated_rt="${bin%.exe}.dll" ;;
+    Darwin) colocated_rt="$bin.dylib" ;;
+    *) colocated_rt="$bin.so" ;;
+  esac
+  [ ! -e "$launch_file" ] || { echo "refusing to replace $launch_file"; exit 1; }
+  [ ! -e "$colocated_rt" ] || { echo "refusing to replace $colocated_rt"; exit 1; }
+  mkdir -p "$(dirname "$launch_file")"
+  printf '{ "bridgeOrigins": ["app://e2e-bridge-ok"] }\n' >"$launch_file"
+  trap 'rm -f "$launch_file" "$colocated_rt"' EXIT
+  # First without the runtime: a packaged app that ships none must exit at
+  # once with status 3 and say why, not wait (a dialog, an empty window).
+  missing_log="$(mktemp "${TMPDIR:-/tmp}/native-e2e-missing.XXXXXX")"
+  missing_cmd=("$bin")
+  if [ "$(uname -s)" = Linux ]; then
+    missing_cmd=(xvfb-run -a "$bin")
+  fi
+  "${missing_cmd[@]}" >"$missing_log" 2>&1 &
+  missing_pid=$!
+  for _ in $(seq 1 200); do
+    kill -0 "$missing_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$missing_pid" 2>/dev/null; then
+    kill -9 "$missing_pid" 2>/dev/null || true
+    cat "$missing_log"
+    echo "[e2e] FAIL a packaged app without its runtime exits at once (still running after 20 s)"
+    exit 1
+  fi
+  set +e
+  wait "$missing_pid"
+  missing_status=$?
+  set -e
+  if [ "$missing_status" = 3 ] && grep -q 'ships no runtime library' "$missing_log"; then
+    echo "[e2e] PASS a packaged app without its runtime exits at once (status 3)"
+  else
+    cat "$missing_log"
+    echo "[e2e] FAIL a packaged app without its runtime exits at once (status $missing_status)"
+    exit 1
+  fi
+  rm -f "$missing_log"
+  cp "$rt" "$colocated_rt"
+  echo "== launch file $launch_file: $(cat "$launch_file")"
+fi
 
 # Local Network Access (CEF; lna_checks.rs). The battery's custom-scheme page
 # reaches its loopback echo server (fetch and WebSocket) with Chromium's

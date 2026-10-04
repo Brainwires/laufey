@@ -29,11 +29,14 @@ The directory comes from the running executable's real path
   "customSchemes": ["myapp"],
   "dataDir": "/absolute/path",
   "singleInstance": true,
-  "inspectable": false
+  "inspectable": false,
+  "bridgeOrigins": ["myapp://app"],
+  "passkeyRpIds": ["example.com"]
 }
 ```
 
-Every key is optional, and each key stands in for one environment variable:
+Every key is optional, and each key but `passkeyRpIds` and `bridgeOrigins`
+stands in for one environment variable:
 
 | Key              | Environment variable     | Value                                                             |
 | ---------------- | ------------------------ | ----------------------------------------------------------------- |
@@ -42,6 +45,8 @@ Every key is optional, and each key stands in for one environment variable:
 | `dataDir`        | `LAUFEY_DATA_DIR`        | absolute path                                                     |
 | `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `inspectable`    | `LAUFEY_INSPECTABLE`     | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
+| `bridgeOrigins`  | none (file only)         | array of origins, `<scheme>://*` or `*` (see below)               |
+| `passkeyRpIds`   | none (file only)         | array of RP IDs: domain names, no scheme, port or path            |
 
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
@@ -66,6 +71,28 @@ what its variable does:
   no remote debugging, and `open_devtools` does nothing
   ([DevTools](devtools.md)). Release builds of an app usually ship it `false`.
   The WebView and CEF backends read it.
+- `passkeyRpIds` lists the relying parties the app's native
+  [passkey](passkeys.md) ceremonies may name. With the key, a request whose RP
+  ID (`rp.id` for a registration, `rpId` for an authentication) is not in the
+  list is refused with `invalid_rp` before any OS UI shows; names match without
+  regard to case, and an empty list refuses every request. Without the key any
+  RP ID goes to the OS, as before. It has no environment variable: only the
+  installed app decides. The macOS and Windows backends (WebView and CEF) read
+  it.
+
+- `bridgeOrigins` (API 44) pins the documents the JavaScript bridge serves
+  ([JavaScript interop](javascript-interop.md#which-documents-can-call)). Each
+  entry is an origin (`"myapp://app"`, `"https://example.com:8443"`; nothing
+  after the host and port but an optional `/`), `"<scheme>://*"` (every origin
+  of that scheme), or `"*"` (every origin: no pin). A document on any other
+  origin gets no bridge namespace, and the backend rejects a call from one
+  before it reaches the runtime. Without the key, a file with `customSchemes`
+  pins the bridge to those schemes (`"<scheme>://*"` each); a file with neither,
+  or no file, leaves every origin free to call. There is no environment
+  variable: only the installed app can set it. An invalid entry is reported and
+  skipped, but the key still pins: an empty list (or one with no valid entry)
+  gives the bridge to no document. The WebView and CEF backends read it (CEF's
+  renderers too).
 
 ## Precedence
 
@@ -81,14 +108,39 @@ them the shipped file wins:
   `LAUFEY_DATA_DIR` are ignored. Environment variables are inherited, so an app
   started by another laufey app would otherwise open that app's profile and take
   its single-instance lock.
+- A file with `appId` pins the rest of the app's identity with it. The data
+  directory is the file's `dataDir`, or else the app id's default directory;
+  `LAUFEY_DATA_DIR` is ignored even when the file has no `dataDir`. The custom
+  schemes are the file's `customSchemes` only (none without the key):
+  `LAUFEY_CUSTOM_SCHEMES` and CEF's `--laufey-custom-schemes` switch are
+  ignored. Single-instance mode is the file's `singleInstance` (off without the
+  key): `LAUFEY_SINGLE_INSTANCE` is ignored. Each ignored variable (and the
+  switch) is reported on stderr once. Otherwise a variable inherited from
+  another program, or a switch on a command line a link can add to, could move
+  the app's profile, give a scheme of its choosing a secure origin, or turn off
+  the lock that routes a second launch to the running instance.
 - `inspectable: false`: `LAUFEY_INSPECTABLE=1` cannot turn DevTools back on (it
   is reported and ignored); `LAUFEY_INSPECTABLE=0` still turns them off.
 
-The keys are resolved one at a time before they are combined. For example, a
-file with `dataDir` launched with `LAUFEY_APP_ID` set still uses the file's
-`dataDir`, because `LAUFEY_DATA_DIR` isn't set and a data dir outranks an app id
-([App data](app-data.md)). CEF's `--laufey-custom-schemes` switch is added to
-the list from `LAUFEY_CUSTOM_SCHEMES` or `customSchemes`.
+Without `appId` in the file, the keys are resolved one at a time before they are
+combined. For example, a file with `dataDir` launched with `LAUFEY_APP_ID` set
+still uses the file's `dataDir`, because a data dir outranks an app id
+([App data](app-data.md)). CEF's `--laufey-custom-schemes` switch is then added
+to the list from `LAUFEY_CUSTOM_SCHEMES` or `customSchemes`.
+
+## Runtime library
+
+A launch file also marks the app as packaged. A packaged app (one with a
+`laufey-launch.json`, or with a runtime library it ships) loads only that
+library: the one next to its executable (`<executable name>.so`, `.dll` or
+`.dylib`), or, on the macOS WebView backend,
+`Contents/Frameworks/libruntime.dylib` or `Contents/MacOS/libruntime.dylib` in
+its bundle. It ignores `--runtime` and `LAUFEY_RUNTIME_PATH` (both reported on
+stderr) and never searches the working directory or system directories such as
+`/usr/lib/laufey`. A packaged app without a shipped runtime reports that and
+loads none. Only a development host, with neither a launch file nor a shipped
+runtime, takes `--runtime <path>`, then `LAUFEY_RUNTIME_PATH`, then its
+development fallbacks.
 
 ## Validation
 
@@ -102,12 +154,16 @@ A problem with the file never stops the app. It is reported on stderr as
 - An unknown key is reported and ignored, so newer files keep working with older
   hosts.
 - `LAUFEY_SINGLE_INSTANCE` set to anything but `1`, `0`, `true` or `false` is
-  reported and ignored, and the file's value applies.
+  reported and ignored, and the file's value applies. With an `appId` in the
+  file, any value is ignored (see [Precedence](#precedence)).
 - A value of the wrong type, an empty string, a string containing NUL, or a
   value that breaks the rules above (an unsafe `appId`, a relative `dataDir`) is
   reported, and that key is ignored. It behaves as if it were absent.
-- An invalid entry in `customSchemes` is reported and skipped. The other entries
-  are kept.
+- An invalid entry in `customSchemes` (including a reserved scheme such as
+  `https` or `file`, see [Custom URL schemes](custom-schemes.md)) or in
+  `passkeyRpIds` is reported and skipped. The other entries are kept. A
+  `passkeyRpIds` entry is lowercased first, then held to the passkey parser's RP
+  ID rule (a domain name in LDH labels, not an IP address).
 - If a key appears more than once, the last one wins, and this is reported.
 
 ## Trust

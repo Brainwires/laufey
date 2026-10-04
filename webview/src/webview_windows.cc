@@ -3,9 +3,11 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
+#include "laufey_bridge_origin.h"
 #include "laufey_json.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
@@ -274,6 +276,30 @@ std::wstring SchemeUtf8ToWide(const std::string& s) {
 
 // The exchange itself (buffered, or streamed through the page shim) lives in
 // wv2_scheme_stream.cc.
+
+// WebView2 reads a few environment variables of its own when an environment
+// is created: extra Chromium switches, another browser binary, another
+// profile, a script debugger. A packaged app with DevTools off clears them
+// from its process environment first, once, so whoever starts it can't reopen
+// what it closed (laufey_common::WebView2EnvironmentOverridesToClear).
+void ClearWebView2EnvironmentOverrides() {
+  static const bool done = [] {
+    const bool packaged =
+        laufey_common::IsPackagedLaunch(!LaufeyFindColocatedRuntime().empty());
+    for (const std::string& name :
+         laufey_common::WebView2EnvironmentOverridesToClear(
+             packaged, laufey_common::LaunchInspectable())) {
+      std::wstring wname = SchemeUtf8ToWide(name);
+      if (GetEnvironmentVariableW(wname.c_str(), nullptr, 0) == 0)
+        continue;  // not set
+      std::cerr << "laufey: ignoring " << name
+                << " (a packaged app with DevTools off)" << std::endl;
+      SetEnvironmentVariableW(wname.c_str(), nullptr);
+    }
+    return true;
+  }();
+  (void)done;
+}
 
 }  // namespace
 
@@ -593,7 +619,8 @@ class WebView2Backend : public LaufeyBackend {
   bool TestTriggerMenuAccelerator(uint32_t window_id,
                                   const char* accelerator) override;
 
-  void HandleJsMessage(uint32_t window_id, const std::wstring& json);
+  void HandleJsMessage(uint32_t window_id, const std::wstring& json,
+                       const std::string& origin);
   // A message from the injected file-drop observer (see
   // BuildFileDropScript): true if `message` was one (handled or refused),
   // false if it is for the JS bridge.
@@ -1148,6 +1175,7 @@ void WebView2Backend::CreateEnvironmentForWindow(
   static const std::wstring user_data_folder =
       laufey_common::Utf8ToWide(laufey_common::AppDataSubdir("WebView2"));
 
+  ClearWebView2EnvironmentOverrides();
   HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
       nullptr, user_data_folder.empty() ? nullptr : user_data_folder.c_str(),
       options.Get(),
@@ -1254,7 +1282,8 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                 "            callId: callId,\n"
                 "            method: path.join('.'),\n"
                 "            args: processedArgs\n"
-                "          }));");
+                "          }));",
+                "", RuntimeLoader::GetInstance()->BridgeGuardJs());
             std::wstring wInitScript(initScript.begin(), initScript.end());
             state->webview->AddScriptToExecuteOnDocumentCreated(
                 wInitScript.c_str(), nullptr);
@@ -1262,27 +1291,10 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // The file-drop observer (API 39): reports file drags over the
             // page to the host, the drop with its File objects, whose native
             // paths WebView2 reveals to the host only (ICoreWebView2File).
-            // Its `send` posts with a per-process token kept in the closure.
+            // Its `send` posts with a per-process token kept in the closure,
+            // through intrinsics bound before any page script runs.
             std::string dropScript =
-                "(function () {\n"
-                "  var wv = window.chrome && window.chrome.webview;\n"
-                "  if (!wv || window.top !== window) return;\n"
-                "  var post = wv.postMessage;\n"
-                "  var postX = wv.postMessageWithAdditionalObjects;\n"
-                "  var call = Function.prototype.call;\n"
-                "  var token = '" +
-                file_drop_token_ +
-                "';\n"
-                "  (" +
-                laufey_common::BuildDomFileDropObserverScript() +
-                ")(function (p, x, y, n, files) {\n"
-                "    var m = '{\"__laufeyFileDrop\":\"' + token + "
-                "'\",\"p\":' + (p | 0) + ',\"x\":' + (+x || 0) + "
-                "',\"y\":' + (+y || 0) + ',\"n\":' + (n | 0) + '}';\n"
-                "    if (files && postX) call.call(postX, wv, m, files);\n"
-                "    else call.call(post, wv, m);\n"
-                "  });\n"
-                "})();\n";
+                laufey_common::BuildWebView2FileDropScript(file_drop_token_);
             std::wstring wDropScript(dropScript.begin(), dropScript.end());
             state->webview->AddScriptToExecuteOnDocumentCreated(
                 wDropScript.c_str(), nullptr);
@@ -1306,6 +1318,11 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                       sender->get_Source(&topSource);
                       bool from_main_frame = msgSource && topSource &&
                                              wcscmp(msgSource, topSource) == 0;
+                      // API 44: the calling document's origin.
+                      std::string origin = msgSource
+                                               ? laufey_common::OriginOfUrl(
+                                                     WideToUtf8(msgSource))
+                                               : laufey_common::kOpaqueOrigin;
                       if (msgSource) {
                         CoTaskMemFree(msgSource);
                       }
@@ -1324,7 +1341,7 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                         if (!laufey_wv2::HandleStreamMessage(wid, messageRaw,
                                                              source) &&
                             !HandleFileDropMessage(wid, messageRaw, args))
-                          HandleJsMessage(wid, messageRaw);
+                          HandleJsMessage(wid, messageRaw, origin);
                         if (source)
                           CoTaskMemFree(source);
                         CoTaskMemFree(messageRaw);
@@ -1337,21 +1354,36 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // `target="_blank"` / `window.open()` request a new window, which
             // the Navigation API interceptor never sees. WebView2 would spawn a
             // popup webview; instead route http(s) destinations to the OS
-            // browser and mark the request handled so no popup is created.
+            // browser when a user action started the request
+            // (laufey_external_links.h), and mark the request handled so no
+            // popup is created.
             state->webview->add_NewWindowRequested(
                 Callback<ICoreWebView2NewWindowRequestedEventHandler>(
-                    [](ICoreWebView2* sender,
-                       ICoreWebView2NewWindowRequestedEventArgs* args)
+                    [this](ICoreWebView2* sender,
+                           ICoreWebView2NewWindowRequestedEventArgs* args)
                         -> HRESULT {
                       LPWSTR uriRaw = nullptr;
                       args->get_Uri(&uriRaw);
+                      BOOL userInitiated = FALSE;
+                      if (FAILED(args->get_IsUserInitiated(&userInitiated)))
+                        userInitiated = FALSE;
                       if (uriRaw) {
-                        if (wcsncmp(uriRaw, L"http://", 7) == 0 ||
-                            wcsncmp(uriRaw, L"https://", 8) == 0) {
-                          ShellExecuteW(nullptr, L"open", uriRaw, nullptr,
-                                        nullptr, SW_SHOWNORMAL);
-                        }
+                        std::string url = laufey_common::WideToUtf8(uriRaw);
                         CoTaskMemFree(uriRaw);
+                        switch (
+                            DecideLaufeyPopup(url, userInitiated != FALSE)) {
+                          case LaufeyPopupDecision::kOpenInBrowser:
+                            OpenExternalURL(url);
+                            break;
+                          case LaufeyPopupDecision::kBlockedNoGesture:
+                            std::cerr << "laufey: not opening " << url
+                                      << " in the browser: the page asked "
+                                         "without a user gesture"
+                                      << std::endl;
+                            break;
+                          case LaufeyPopupDecision::kIgnored:
+                            break;
+                        }
                       }
                       args->put_Handled(TRUE);
                       return S_OK;
@@ -1609,10 +1641,14 @@ void WebView2Backend::ExecuteJs(uint32_t window_id, const std::string& script,
                 callback(nullptr, nullptr, callback_data);
                 return S_OK;
               }
-              // WebView2 returns the result as a JSON string
-              std::wstring wresult(resultJson);
-              std::string result(wresult.begin(), wresult.end());
+              // WebView2 returns the result as JSON in UTF-16. Convert it
+              // properly (a surrogate pair is one code point, an unpaired
+              // surrogate U+FFFD); it used to be narrowed code unit by code
+              // unit, which garbled every non-ASCII character.
+              std::string result = laufey_common::WideToUtf8(resultJson);
               auto val = json::ParseJson(result);
+              if (!val)
+                val = laufey::Value::Null();
               laufey_value laufey(val);
               callback(&laufey, nullptr, callback_data);
               return S_OK;
@@ -2335,7 +2371,8 @@ void WebView2Backend::Run() {
 }
 
 void WebView2Backend::HandleJsMessage(uint32_t window_id,
-                                      const std::wstring& json) {
+                                      const std::wstring& json,
+                                      const std::string& origin) {
   std::string jsonStr = WideToUtf8(json);
   laufey::ValuePtr msg = json::ParseJson(jsonStr);
   if (!msg || !msg->IsDict())
@@ -2350,11 +2387,20 @@ void WebView2Backend::HandleJsMessage(uint32_t window_id,
   if (callIdIt == dict.end() || methodIt == dict.end())
     return;
 
+  // The page's own number for the call, echoed back with the answer. A
+  // number the bridge script can't have made (negative, fractional, past
+  // 2^53) is not a call.
   uint64_t call_id = 0;
-  if (callIdIt->second->IsInt()) {
+  if (callIdIt->second->IsInt() && callIdIt->second->GetInt() >= 0) {
     call_id = static_cast<uint64_t>(callIdIt->second->GetInt());
   } else if (callIdIt->second->IsDouble()) {
-    call_id = static_cast<uint64_t>(callIdIt->second->GetDouble());
+    double d = callIdIt->second->GetDouble();
+    if (!(d >= 0 && d <= 9007199254740992.0) ||
+        d != static_cast<double>(static_cast<uint64_t>(d)))
+      return;
+    call_id = static_cast<uint64_t>(d);
+  } else {
+    return;
   }
 
   std::string method =
@@ -2362,7 +2408,8 @@ void WebView2Backend::HandleJsMessage(uint32_t window_id,
   laufey::ValuePtr args =
       (argsIt != dict.end()) ? argsIt->second : laufey::Value::List();
 
-  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args);
+  RuntimeLoader::GetInstance()->OnJsCall(window_id, call_id, method, args,
+                                         origin);
 }
 
 // ============================================================================

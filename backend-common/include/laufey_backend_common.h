@@ -477,8 +477,9 @@ void SetTrayDoubleClickHandlerLinux(uint32_t tray_id,
 // IndexedDB, cookies, caches), so storage is per app and survives relaunches.
 // Resolved at process start, because CEF and WebView2 need it before the
 // runtime library is loaded. Each of LAUFEY_DATA_DIR / LAUFEY_APP_ID below is
-// the environment variable if set, else the launch file's "dataDir" / "appId"
-// (laufey_launch_config.h):
+// the launch file's "dataDir" / "appId" if it has one, else the environment
+// variable; a file that pins "appId" also makes LAUFEY_DATA_DIR ignored
+// (LaunchDataDir in laufey_launch_config.h):
 //
 //   1. LAUFEY_DATA_DIR, if set and absolute (a relative value is ignored with
 //      a warning);
@@ -530,6 +531,16 @@ std::string JoinPath(const std::string& base, const std::string& child);
 // mkdir -p. New components are created 0700 on Unix. Returns true if `path`
 // is (now) a directory.
 bool EnsureDirectory(const std::string& path);
+
+#ifndef _WIN32
+// A new, empty, owner-only (0700) directory under `parent` named
+// `<prefix>XXXXXX` with a random suffix (mkdtemp), or "" with a warning when
+// it can't be created. Never an existing or predictable path, so another user
+// of a shared `parent` (/tmp) can't plant or read the contents. `parent` ""
+// means $TMPDIR if it is absolute, else /tmp.
+std::string MakePrivateTempDir(const std::string& parent,
+                               const std::string& prefix);
+#endif
 
 // ---------------------------------------------------------------------------
 // Test hooks (API >= 30)

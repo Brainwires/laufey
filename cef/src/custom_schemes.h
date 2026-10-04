@@ -12,7 +12,9 @@
 //   laufey --laufey-custom-schemes=myapp,other --runtime ...
 //   LAUFEY_CUSTOM_SCHEMES=myapp,other laufey --runtime ...
 //   "customSchemes": ["myapp", "other"] in laufey-launch.json next to the
-//   executable (laufey_launch_config.h; LAUFEY_CUSTOM_SCHEMES wins if set)
+//   executable (laufey_launch_config.h; LAUFEY_CUSTOM_SCHEMES wins if set,
+//   unless the file pins "appId": then the file's list is the only one, and
+//   the switch and the environment variable are ignored)
 //
 // All three are read in every process (the switch is forwarded to child
 // processes in OnBeforeChildProcessLaunch; the environment is inherited; the
@@ -41,7 +43,8 @@ extern const char kEnv[];
 // The schemes declared for this process: "app" first, then the valid,
 // normalized, deduplicated names from --laufey-custom-schemes and
 // LAUFEY_CUSTOM_SCHEMES (or, when that is unset, the launch file's
-// "customSchemes"), in that order. Invalid entries are logged once and
+// "customSchemes"), in that order; with an app id pinned by the launch file,
+// the file's "customSchemes" only. Invalid entries are logged once and
 // skipped. Safe to call in any process once the CEF command line exists
 // (i.e. inside OnRegisterCustomSchemes and later).
 std::vector<std::string> Declared();

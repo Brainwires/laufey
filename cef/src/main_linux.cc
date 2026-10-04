@@ -20,6 +20,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
@@ -707,6 +708,11 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
   void OnBeforeCommandLineProcessing(
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
+    // A deep-link launch keeps none of its own command line's Chromium
+    // switches. First, so the defaults below see what is left.
+    if (process_type.empty())
+      LaufeyStripDeepLinkSwitches(command_line);
+
     // Native Wayland support. By default CEF/Chromium uses the X11 Ozone
     // backend and runs through XWayland on Wayland sessions. Mirror the
     // approach Electron/Chrome standardized on: --ozone-platform-hint=auto,
@@ -748,7 +754,6 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     // Electron/Puppeteer do). Only the browser process needs the switch; CEF
     // propagates it to subprocesses.
     if (process_type.empty()) {
-      LaufeyStripDeepLinkSwitches(command_line);
       command_line->AppendSwitch("disable-background-networking");
       LaufeyApplyInspectableToCommandLine(command_line);
     }
@@ -813,24 +818,27 @@ int main(int argc, char* argv[]) {
     return exit_code;
   }
 
-  // Parse --runtime argument
-  for (int i = 1; i < argc; ++i) {
-    if (strcmp(argv[i], "--runtime") == 0 && i + 1 < argc) {
-      g_runtime_path = argv[++i];
-    } else if (strncmp(argv[i], "--runtime=", 10) == 0) {
-      g_runtime_path = argv[i] + 10;
-    }
-  }
+  // The browser process's command line hook drops every Chromium switch of a
+  // deep-link launch (LaufeyStripDeepLinkSwitches): a link handed to the app
+  // by its .desktop entry's %u can't pass switches through, as on Windows.
+  // See laufey_launch_args.h.
+  laufey_common::SetProcessArgs(
+      std::vector<std::string>(argv + (argc > 0 ? 1 : 0), argv + argc));
 
-  if (g_runtime_path.empty()) {
-    const char* envPath = getenv("LAUFEY_RUNTIME_PATH");
-    if (envPath) {
-      g_runtime_path = envPath;
+  // The runtime library: a packaged app (a launch file, or a runtime next to
+  // the executable) loads only the one next to its executable; a development
+  // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH. See
+  // laufey_launch_args.h.
+  {
+    laufey_common::RuntimeChoice choice = laufey_common::ResolveRuntimePath(
+        std::vector<std::string>(argv + 1, argv + argc),
+        {LaufeyFindColocatedRuntime()}, {});
+    // A packaged app without its runtime exits at once, before CEF starts.
+    if (laufey_common::IsMissingPackagedRuntime(choice)) {
+      laufey_common::ReportMissingPackagedRuntime();
+      return laufey_common::kMissingRuntimeExitCode;
     }
-  }
-
-  if (g_runtime_path.empty()) {
-    g_runtime_path = LaufeyFindColocatedRuntime();
+    g_runtime_path = choice.path;
   }
 
   // Wayland app_id / X11 WM_CLASS for our windows (see LaufeyWindowDelegate::
@@ -873,14 +881,18 @@ int main(int argc, char* argv[]) {
   // Set cache path. With a per-app data dir (LAUFEY_DATA_DIR / LAUFEY_APP_ID)
   // the profile persists there; cache_path must be set too (equal to the root)
   // or CEF runs the browser "incognito" and keeps localStorage/cookies in
-  // memory. Without one, keep the throwaway per-process temp root.
+  // memory. Without one, a throwaway per-process root: a fresh 0700
+  // directory with a random name under $TMPDIR or /tmp (never a fixed name
+  // another user of /tmp could create first). If even that fails the root
+  // stays unset and CEF keeps the profile in memory.
   std::string cache_path = laufey_common::AppDataSubdir("CEF");
   if (!cache_path.empty()) {
     CefString(&settings.root_cache_path) = cache_path;
     CefString(&settings.cache_path) = cache_path;
   } else {
-    cache_path = "/tmp/laufey_cef_" + std::to_string(getpid());
-    CefString(&settings.root_cache_path) = cache_path;
+    cache_path = laufey_common::MakePrivateTempDir("", "laufey_cef_");
+    if (!cache_path.empty())
+      CefString(&settings.root_cache_path) = cache_path;
   }
 
   // No remote debugging while DevTools are off (API 40, inspectable).

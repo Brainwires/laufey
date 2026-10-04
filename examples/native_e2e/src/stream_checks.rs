@@ -13,9 +13,10 @@
 //! runtime's event loop writes every response: `slow` writes a body while
 //! the UI thread is busy (a WebKitGTK pipe used to block once 64 KiB were
 //! unread), from one "event loop" thread that must still serve another
-//! request meanwhile, to a page that reads slowly; `cap` writes far more
-//! than a page that doesn't read can hold, and the response must fail at
-//! the backend's cap (64 MiB) instead of growing without bound.
+//! request meanwhile, to a page that reads slowly; `backpressure` writes far
+//! more than a page that isn't reading yet holds: once the backend holds its
+//! high-water mark (4 MiB) a write takes nothing and returns 0 (API 44), the
+//! writer retries, and the page, reading later, gets the whole body intact.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,18 +37,23 @@ const BIN_LEN: usize = 6 * 1024 * 1024 + 13;
 
 /// Length of the `slow` body: far over a pipe's 64 KiB.
 const SLOW_LEN: usize = 4 * 1024 * 1024 + 7;
-/// How long the UI thread is kept busy while `slow` / `cap` write.
+/// How long the UI thread is kept busy while `slow` / `backpressure` write.
 const UI_BUSY_MS: u64 = 1500;
-/// Bytes `cap` tries to write: over the 64 MiB cap.
-const CAP_LEN: usize = 80 * 1024 * 1024;
-/// The backends' cap on bytes queued for a page that isn't reading.
-const CAP_BYTES: usize = 64 * 1024 * 1024;
-/// What WebView2 posts to a page ahead of its reads (kCreditWindow).
-const CREDIT_WINDOW: usize = 4 * 1024 * 1024;
+/// Bytes `backpressure` writes: well over the high-water mark and WebView2's
+/// credit window together.
+const BP_LEN: usize = 16 * 1024 * 1024 + 5;
 
 /// The scenarios the page runs; each reports once.
 const LABELS: [&str; 9] = [
-  "fetch", "abort", "sse", "xhr", "bin", "fast", "slow", "cap", "nohead",
+  "fetch",
+  "abort",
+  "sse",
+  "xhr",
+  "bin",
+  "fast",
+  "slow",
+  "backpressure",
+  "nohead",
 ];
 /// Labels whose never-ending route must see its write fail (the engine
 /// cancelled the request) once the page is done with it.
@@ -61,18 +67,64 @@ pub struct State {
   /// Never-ending routes whose exchange reported the cancel
   /// (SchemeExchange::is_cancelled, the backend's on_cancel), by label.
   on_cancel: Arc<Mutex<HashSet<String>>>,
-  /// `slow`: how long writing the whole body took (ms), and whether every
-  /// write was accepted.
+  /// `slow`: the longest single write call (ms), and whether the whole body
+  /// was written.
   slow_write: Arc<Mutex<Option<(u128, bool)>>>,
-  /// `cap`: bytes accepted before a write failed (None: none failed).
-  cap_write: Arc<Mutex<Option<Option<usize>>>>,
+  /// `backpressure`: what the writer saw.
+  bp_write: Arc<Mutex<Option<Retried>>>,
 }
 
-/// Whether this backend caps what it holds for a page that isn't reading
-/// (WKWebView hands every write to WebKit, which takes it all).
-fn backend_caps_queue() -> bool {
+/// A body written with retries on backpressure (`write_retrying`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Retried {
+  /// Every byte was taken.
+  ok: bool,
+  /// Writes that took nothing (returned 0) and were retried.
+  zeros: u32,
+  /// Bytes taken before the first write that took nothing.
+  before_first_zero: Option<usize>,
+}
+
+/// Whether this backend holds what a page isn't reading itself, so its
+/// writes must start returning 0 (WKWebView hands every write to WebKit,
+/// which takes it all; only its main-thread queue is bounded).
+fn backend_throttles() -> bool {
   let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
   !(cfg!(target_os = "macos") && backend == "webview")
+}
+
+/// Writes `body` in `chunk`-byte writes, waiting and writing the same bytes
+/// again while the backend takes nothing (0, backpressure); stops at a
+/// failed write or a cancel. Gives up after 30 s of nothing taken.
+fn write_retrying(
+  exchange: &laufey::SchemeExchange,
+  body: &[u8],
+  chunk: usize,
+) -> Retried {
+  let mut out = Retried::default();
+  let mut off = 0;
+  let mut stuck_since: Option<Instant> = None;
+  while off < body.len() {
+    let end = (off + chunk).min(body.len());
+    let r = exchange.write(&body[off..end]);
+    if r == 0 {
+      out.zeros += 1;
+      out.before_first_zero.get_or_insert(off);
+      let since = *stuck_since.get_or_insert_with(Instant::now);
+      if exchange.is_cancelled() || since.elapsed() > Duration::from_secs(30) {
+        return out;
+      }
+      std::thread::sleep(Duration::from_millis(2));
+      continue;
+    }
+    if r < 0 {
+      return out;
+    }
+    stuck_since = None;
+    off = end;
+  }
+  out.ok = true;
+  out
 }
 
 /// The single "event loop" thread `slow`, `ping` and `cap` are served from,
@@ -268,30 +320,26 @@ const scenarios = {{
       return [e && e.name === 'TypeError', 'rejected with ' + (e && e.name) + ': ' + (e && e.message)];
     }}
   }},
-  // A response the page doesn't read fails once the backend holds its cap,
-  // and the page's read rejects instead of the response ending short.
-  async cap() {{
-    if (!{caps}) return [true, 'N/A: this backend hands every write to the engine'];
-    let res;
-    try {{
-      res = await fetch('/cap');
-    }} catch (e) {{
-      // The cap was reached before the head reached the page (WebKitGTK
-      // reads nothing while its thread is busy): the response failed.
-      return [true, 'fetch rejected (' + (e && e.name) + ')'];
-    }}
+  // A response the page doesn't read at first: the backend holds its
+  // high-water mark and takes nothing more (the writer retries), then the
+  // page reads the whole body, intact.
+  async backpressure() {{
+    const res = await fetch('/backpressure');
     const reader = res.body.getReader();
     await sleep({busy_ms} + 2500);
-    let got = 0;
-    try {{
-      for (;;) {{
-        const {{ value, done }} = await reader.read();
-        if (done) return [false, 'ended normally after ' + got + ' bytes'];
-        got += value.length;
+    const n = {bp_len};
+    let got = 0, bad = -1;
+    for (;;) {{
+      const {{ value, done }} = await reader.read();
+      if (done) break;
+      for (let i = 0; bad < 0 && i < value.length; i++) {{
+        const k = got + i;
+        if (value[i] !== ((k % 251) ^ (Math.floor(k / 251) & 255))) bad = k;
       }}
-    }} catch (e) {{
-      return [got < {cap_len}, 'read rejected (' + (e && e.name) + ') after ' + got + ' bytes'];
+      got += value.length;
     }}
+    return [got === n && bad < 0,
+            'length ' + got + (bad >= 0 ? ', first difference at ' + bad : '')];
   }},
 }};
 (async () => {{
@@ -307,9 +355,8 @@ const scenarios = {{
 </script></body></html>"#,
     bin_len = BIN_LEN,
     slow_len = SLOW_LEN,
-    caps = backend_caps_queue(),
     busy_ms = UI_BUSY_MS,
-    cap_len = CAP_LEN,
+    bp_len = BP_LEN,
   )
 }
 
@@ -361,6 +408,41 @@ fn never_ending(
   req.exchange.finish();
 }
 
+/// The `slow` body, written from the "event loop" thread the way a runtime
+/// writes: a write that takes nothing (backpressure) gives the loop back and
+/// the rest is written from a later turn, so the loop keeps serving.
+struct SlowWriter {
+  req: SchemeRequest,
+  body: Vec<u8>,
+  off: usize,
+  longest: Duration,
+  all: bool,
+  state: State,
+}
+
+fn slow_step(mut w: SlowWriter) {
+  while w.off < w.body.len() {
+    let end = (w.off + 64 * 1024).min(w.body.len());
+    let started = Instant::now();
+    let r = w.req.exchange.write(&w.body[w.off..end]);
+    w.longest = w.longest.max(started.elapsed());
+    if r == 0 {
+      std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(5));
+        on_event_loop(move || slow_step(w));
+      });
+      return;
+    }
+    if r < 0 {
+      w.all = false;
+      break;
+    }
+    w.off = end;
+  }
+  *w.state.slow_write.lock().unwrap() = Some((w.longest.as_millis(), w.all));
+  w.req.exchange.finish();
+}
+
 /// Serve `req` if it belongs to these checks; otherwise hand it back. Every
 /// route runs on its own thread: the handler must not block the backend
 /// thread it is called on.
@@ -403,11 +485,7 @@ pub fn serve(req: SchemeRequest, state: &State) -> Option<SchemeRequest> {
       // Late enough that a buffering backend streams it instead.
       std::thread::sleep(Duration::from_millis(150));
       let body = pattern(BIN_LEN);
-      for chunk in body.chunks(256 * 1024) {
-        if req.exchange.write(chunk) < 0 {
-          break;
-        }
-      }
+      write_retrying(&req.exchange, &body, 256 * 1024);
       req.exchange.finish();
     }
     "fast" => {
@@ -421,19 +499,15 @@ pub fn serve(req: SchemeRequest, state: &State) -> Option<SchemeRequest> {
       let state = state.clone();
       on_event_loop(move || {
         begin(&req, 200, "application/octet-stream");
-        let body = pattern(SLOW_LEN);
         let busy = block_ui_thread(UI_BUSY_MS);
-        let start = Instant::now();
-        let mut all = busy;
-        for chunk in body.chunks(64 * 1024) {
-          if req.exchange.write(chunk) < 0 {
-            all = false;
-            break;
-          }
-        }
-        *state.slow_write.lock().unwrap() =
-          Some((start.elapsed().as_millis(), all));
-        req.exchange.finish();
+        slow_step(SlowWriter {
+          req,
+          body: pattern(SLOW_LEN),
+          off: 0,
+          longest: Duration::ZERO,
+          all: busy,
+          state,
+        });
       });
     }
     "ping" => on_event_loop(move || {
@@ -441,35 +515,25 @@ pub fn serve(req: SchemeRequest, state: &State) -> Option<SchemeRequest> {
       req.exchange.write(b"pong");
       req.exchange.finish();
     }),
-    "cap" => {
+    "backpressure" => {
       let state = state.clone();
-      on_event_loop(move || {
-        begin(&req, 200, "application/octet-stream");
-        // WebKitGTK reads eagerly whenever its thread is free: keep it busy
-        // so the queue fills. The other engines stop reading for a page that
-        // doesn't read; WebView2 must not be held, since it starts streaming
-        // (and applies its cap) from a timer on the UI thread.
-        if cfg!(target_os = "linux")
-          && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
-        {
-          block_ui_thread(UI_BUSY_MS);
-        } else {
-          // Late enough that WebView2 streams it instead of buffering.
-          std::thread::sleep(Duration::from_millis(200));
-        }
-        let chunk = vec![0x5au8; 1024 * 1024];
-        let mut accepted = 0usize;
-        let mut failed_at = None;
-        while accepted < CAP_LEN {
-          if req.exchange.write(&chunk) < 0 {
-            failed_at = Some(accepted);
-            break;
-          }
-          accepted += chunk.len();
-        }
-        *state.cap_write.lock().unwrap() = Some(failed_at);
-        req.exchange.finish();
-      });
+      begin(&req, 200, "application/octet-stream");
+      // WebKitGTK reads eagerly whenever its thread is free: keep it busy so
+      // the queue fills. The other engines stop reading for a page that
+      // doesn't read; WebView2 must not be held, since it starts streaming
+      // from a timer on the UI thread.
+      if cfg!(target_os = "linux")
+        && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
+      {
+        block_ui_thread(UI_BUSY_MS);
+      } else {
+        // Late enough that WebView2 streams it instead of buffering.
+        std::thread::sleep(Duration::from_millis(200));
+      }
+      let body = pattern(BP_LEN);
+      let wrote = write_retrying(&req.exchange, &body, 1024 * 1024);
+      *state.bp_write.lock().unwrap() = Some(wrote);
+      req.exchange.finish();
     }
     _ => {
       begin(&req, 404, "text/plain");
@@ -525,7 +589,7 @@ pub async fn run(state: &State) -> Option<Window> {
     "xhr" => "XMLHttpRequest reaches LOADING with the first chunks of a never-ending response",
     "bin" => "a large binary body arrives intact",
     "slow" => "a big body written while the UI thread is busy arrives intact to a slow reader, and another request completes meanwhile",
-    "cap" => "a response the page doesn't read fails at the backend's cap (the page's read rejects)",
+    "backpressure" => "a body far larger than the backend holds reaches a page that starts reading late, intact",
     "nohead" => "a response finished without a head fails the request instead of leaving it pending",
     _ => "a response complete at once is unaffected",
   }
@@ -538,28 +602,37 @@ pub async fn run(state: &State) -> Option<Window> {
       None => check(&format!("{} (no report)", describe(label)), false),
     }
   }
-  // The writer was never blocked: the whole `slow` body went out while the
-  // UI thread (which reads it on WebKitGTK) was busy for UI_BUSY_MS.
+  // The writer was never blocked: no write of the `slow` body, made while
+  // the UI thread (which reads it on WebKitGTK) was busy for UI_BUSY_MS,
+  // waited for it.
   let slow = *state.slow_write.lock().unwrap();
   check(
     &format!(
-      "writing a 4 MiB body never blocks the writer while the UI thread is busy for {UI_BUSY_MS} ms (ms, all accepted: {slow:?})"
+      "writing a 4 MiB body never blocks the writer while the UI thread is busy for {UI_BUSY_MS} ms (longest write in ms, all written: {slow:?})"
     ),
-    matches!(slow, Some((ms, true)) if ms < (UI_BUSY_MS as u128) * 2 / 3),
+    matches!(slow, Some((ms, true)) if ms < (UI_BUSY_MS as u128) / 3),
   );
-  if backend_caps_queue() {
-    let cap = *state.cap_write.lock().unwrap();
+  // Backpressure (API 44): the writer was told to wait (0) instead of the
+  // backend holding the whole body, and nothing failed.
+  let bp = *state.bp_write.lock().unwrap();
+  check(
+    &format!("the backpressured body was written in full ({bp:?})"),
+    matches!(bp, Some(r) if r.ok),
+  );
+  if backend_throttles() {
     check(
       &format!(
-        "a write fails once 64 MiB are held for a page that isn't reading (bytes accepted before the failure: {cap:?})"
+        "a write takes nothing (0) once the backend holds its high-water mark for a page that isn't reading ({bp:?})"
       ),
-      // Up to the 64 MiB held plus WebView2's 4 MiB credit window already
-      // posted to the page (wv2_scheme_stream.cc kCreditWindow), which the
-      // page received but never read: 68 MiB on windows-11-arm.
-      matches!(cap, Some(Some(n)) if (CAP_BYTES / 2..=CAP_BYTES + CREDIT_WINDOW + 1024 * 1024).contains(&n)),
+      // Taken before the first 0: the 4 MiB mark, plus what the engine had
+      // read already (WebView2's 4 MiB credit window posted to the page).
+      matches!(bp, Some(Retried { zeros, before_first_zero: Some(n), .. })
+        if zeros > 0 && n <= 12 * 1024 * 1024),
     );
   } else {
-    na("the queued-bytes cap (WKWebView hands every write to WebKit)");
+    na(&format!(
+      "writes taking nothing at the high-water mark (WKWebView hands every write to WebKit; {bp:?})"
+    ));
   }
   // The engine's cancellation must reach the handler: its next write fails.
   let all_cancelled = wait_for(

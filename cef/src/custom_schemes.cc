@@ -19,12 +19,22 @@ std::vector<std::string> ComputeDeclared() {
   CefRefPtr<CefCommandLine> command_line =
       CefCommandLine::GetGlobalCommandLine();
   if (command_line && command_line->HasSwitch(kSwitch)) {
-    lists.push_back(command_line->GetSwitchValue(kSwitch).ToString());
+    if (!laufey_common::LaunchAppIdPinned()) {
+      lists.push_back(command_line->GetSwitchValue(kSwitch).ToString());
+    } else if (!command_line->HasSwitch("type")) {
+      // An app whose launch file pins its app id declares the file's schemes
+      // only, in every process (each one reads the same file; a child's
+      // switch, forwarded from the browser process, is ignored as well). Only
+      // the browser process's switch came from outside the app: report it.
+      std::cerr << "laufey: --" << kSwitch
+                << " is ignored: the app's launch file pins its app id"
+                << std::endl;
+    }
   }
   // LAUFEY_CUSTOM_SCHEMES if set, else the launch file's "customSchemes"
-  // (laufey_launch_config.h). Every process reads it, CEF's helper apps on
-  // macOS included, so children get the list even when the switch isn't
-  // forwarded.
+  // (laufey_launch_config.h); only the file's when it pins the app id. Every
+  // process reads it, CEF's helper apps on macOS included, so children get
+  // the list even when the switch isn't forwarded.
   std::string env_or_file = laufey_common::LaunchCustomSchemes();
   if (!env_or_file.empty()) {
     lists.push_back(env_or_file);
