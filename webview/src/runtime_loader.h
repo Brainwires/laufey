@@ -12,6 +12,7 @@
 #include <map>
 
 #include "laufey.h"
+#include "laufey_js_calls.h"
 #include "laufey_sync_call.h"
 #include "scheme_exchange.h"
 #include "webview_value.h"
@@ -59,29 +60,28 @@ class RuntimeLoader {
     return next_window_id_.fetch_add(1);
   }
 
-  void StoreCallWindow(uint64_t call_id, uint32_t window_id) {
-    std::lock_guard<std::mutex> lock(call_map_mutex_);
-    call_to_window_[call_id] = window_id;
+  // A bridge call travels to the runtime under a backend-issued id, not the
+  // page's own number (laufey_js_calls.h). Returns where the answer goes;
+  // false for an id the backend never issued or already answered.
+  bool TakeJsCall(uint64_t call_id, laufey_common::JsCallRoute* route) {
+    return js_calls_.Take(call_id, route);
   }
 
-  uint32_t ConsumeCallWindow(uint64_t call_id) {
-    std::lock_guard<std::mutex> lock(call_map_mutex_);
-    auto it = call_to_window_.find(call_id);
-    if (it != call_to_window_.end()) {
-      uint32_t wid = it->second;
-      call_to_window_.erase(it);
-      return wid;
-    }
-    return 0;
-  }
-
-  void OnJsCall(uint32_t window_id, uint64_t call_id,
+  // `page_call_id` is the number the page gave the call (its bridge script's
+  // callId); the runtime sees a backend-issued id instead.
+  void OnJsCall(uint32_t window_id, uint64_t page_call_id,
                 const std::string& method_path, laufey::ValuePtr args);
 
   void PollPendingJsCalls();
 
-  void JsCallRespond(uint32_t window_id, uint64_t call_id,
+  // Answers the page's call `page_call_id` in `window_id`.
+  void JsCallRespond(uint32_t window_id, uint64_t page_call_id,
                      laufey::ValuePtr result, laufey::ValuePtr error);
+
+  // Answers the call the runtime knows as `call_id` (a backend-issued id);
+  // nothing for an unknown or answered id.
+  void RespondToCall(uint64_t call_id, laufey::ValuePtr result,
+                     laufey::ValuePtr error);
 
   void SetJsCallHandler(laufey_js_call_fn handler, void* user_data) {
     std::lock_guard<std::mutex> lock(handler_mutex_);
@@ -356,8 +356,7 @@ class RuntimeLoader {
   std::mutex page_load_mutex_;
 
   std::atomic<uint32_t> next_window_id_{1};
-  std::map<uint64_t, uint32_t> call_to_window_;
-  std::mutex call_map_mutex_;
+  laufey_common::JsCallTable js_calls_;
 
   void (*js_call_notify_fn_)(void*) = nullptr;
   void* js_call_notify_data_ = nullptr;

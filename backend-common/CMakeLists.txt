@@ -194,6 +194,14 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_scheme_registry_test
            COMMAND laufey_scheme_registry_test)
 
+  # The bridge's call table (laufey_js_calls.h): backend-issued call ids.
+  add_executable(laufey_js_calls_test tests/js_calls_test.cc)
+  target_link_libraries(laufey_js_calls_test PRIVATE
+    laufey_backend_common
+    Threads::Threads
+  )
+  add_test(NAME laufey_js_calls_test COMMAND laufey_js_calls_test)
+
   # Writes (and removes) a laufey-launch.json next to the test binary.
   add_executable(laufey_launch_config_test tests/launch_config_test.cc)
   target_link_libraries(laufey_launch_config_test PRIVATE

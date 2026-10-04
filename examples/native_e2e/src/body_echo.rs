@@ -258,13 +258,18 @@ const mimeChecks = [
   }}],
   // A frame posting a bridge call to the native message handler itself (the
   // `Laufey` namespace is main-frame only, the handler object is not on
-  // WebKit). The runtime checks the call never reaches the binding.
+  // WebKit; WebKitGTK names no frame, so its top frame's bridge sends a
+  // per-window token). The runtime checks the call never reaches the binding.
   ['frame-bridge', async () => {{
     const d = await frameDoc('/mime/doc-utf8');
     const w = d.defaultView;
     const h = w && w.webkit && w.webkit.messageHandlers && w.webkit.messageHandlers.laufey;
     if (!h) return [true, 'the frame has no message handler'];
-    w.eval("window.webkit.messageHandlers.laufey.postMessage({{callId: 987654321, method: 'bodyReport', args: ['{forged}', true, 0, 'from a frame']}})");
+    // An object (WKWebView's message format) and a JSON string (WebKitGTK's),
+    // with and without a guessed token.
+    w.eval("var m = {{callId: 987654321, method: 'bodyReport', args: ['{forged}', true, 0, 'from a frame']}};"
+      + "var h = window.webkit.messageHandlers.laufey; h.postMessage(m); h.postMessage(JSON.stringify(m));"
+      + "m.token = ''; h.postMessage(JSON.stringify(m)); m.token = '0'.repeat(32); h.postMessage(JSON.stringify(m));");
     await new Promise(r => setTimeout(r, 1000));
     return [true, 'posted from a frame'];
   }}],

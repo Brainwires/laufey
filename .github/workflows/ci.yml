@@ -192,6 +192,13 @@ jobs:
             -Ibackend-common/include \
             backend-common/tests/sync_call_test.cc -o "$RUNNER_TEMP/sync_call_test"
           "$RUNNER_TEMP/sync_call_test"
+      # The bridge's call table: concurrent adds and takes.
+      - name: js_calls_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include \
+            backend-common/tests/js_calls_test.cc -o "$RUNNER_TEMP/js_calls_test"
+          "$RUNNER_TEMP/js_calls_test"
       - name: passkey_test
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \

@@ -345,7 +345,10 @@ static void Backend_JsCallRespond(void* data, uint64_t call_id,
                                   laufey_value_t* result,
                                   laufey_value_t* error) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
-  uint32_t window_id = loader->ConsumeCallWindow(call_id);
+  // An id this backend never issued, or a second answer, reaches nothing.
+  laufey_common::JsCallRoute route;
+  if (!loader->TakeJsCall(call_id, &route))
+    return;
   laufey::ValuePtr resultPtr =
       (result && result->value) ? result->value : laufey::Value::Null();
   // Keep the absent-error case as a genuine null pointer. RespondToJsCall on
@@ -353,7 +356,8 @@ static void Backend_JsCallRespond(void* data, uint64_t call_id,
   // fabricating a Value::Null() here would make every response look like a
   // rejection and resolve the JS promise with null.
   laufey::ValuePtr errorPtr = (error && error->value) ? error->value : nullptr;
-  loader->JsCallRespond(window_id, call_id, resultPtr, errorPtr);
+  loader->JsCallRespond(route.window_id, route.page_call_id, resultPtr,
+                        errorPtr);
 }
 
 // --- Custom URL scheme handling ---
@@ -1735,10 +1739,10 @@ void RuntimeLoader::DispatchSchemeRequest(uint32_t window_id,
   }
 }
 
-void RuntimeLoader::OnJsCall(uint32_t window_id, uint64_t call_id,
+void RuntimeLoader::OnJsCall(uint32_t window_id, uint64_t page_call_id,
                              const std::string& method_path,
                              laufey::ValuePtr args) {
-  StoreCallWindow(call_id, window_id);
+  uint64_t call_id = js_calls_.Add(window_id, page_call_id);
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     pending_js_calls_.push({window_id, call_id, method_path, args});
@@ -1788,8 +1792,7 @@ void RuntimeLoader::PollPendingJsCalls() {
           backend->OpenExternalURL(url);
         }
       }
-      JsCallRespond(call.window_id, call.call_id, laufey::Value::Null(),
-                    nullptr);
+      RespondToCall(call.call_id, laufey::Value::Null(), nullptr);
       continue;
     }
 
@@ -1798,10 +1801,17 @@ void RuntimeLoader::PollPendingJsCalls() {
       handler(user_data, call.window_id, call.call_id, call.method_path.c_str(),
               argsWrapper);
     } else {
-      JsCallRespond(call.window_id, call.call_id, nullptr,
+      RespondToCall(call.call_id, nullptr,
                     laufey::Value::String("No JS call handler registered"));
     }
   }
+}
+
+void RuntimeLoader::RespondToCall(uint64_t call_id, laufey::ValuePtr result,
+                                  laufey::ValuePtr error) {
+  laufey_common::JsCallRoute route;
+  if (js_calls_.Take(call_id, &route))
+    JsCallRespond(route.window_id, route.page_call_id, result, error);
 }
 
 void RuntimeLoader::JsCallRespond(uint32_t window_id, uint64_t call_id,

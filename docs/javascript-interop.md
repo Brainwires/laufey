@@ -36,3 +36,16 @@ are finished with it. The namespace object is named `Laufey` by default; call
 `laufey::set_js_namespace` before creating any windows to change it. All
 handlers run on the user-interface thread. None of this is available on the
 Winit backend, which has no JavaScript engine.
+
+## Which documents can call
+
+Only the window's top-level document gets the namespace, and only its calls
+reach your handlers. Sub-frames, cross-origin iframes included, can't call: CEF
+binds the namespace in the main frame only and drops a call from any other
+frame; WKWebView accepts script messages from the main frame only; WebView2
+takes the top document's messages; and on WebKitGTK, whose script message
+handler is visible to every frame and names no frame, the top frame's bridge
+script sends a per-window random token that the backend checks.
+
+`call.call_id` is issued by the backend, not taken from the page: two windows'
+pages never collide, and an answer goes back to exactly the call that asked.

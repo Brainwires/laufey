@@ -2352,11 +2352,20 @@ void WebView2Backend::HandleJsMessage(uint32_t window_id,
   if (callIdIt == dict.end() || methodIt == dict.end())
     return;
 
+  // The page's own number for the call, echoed back with the answer. A
+  // number the bridge script can't have made (negative, fractional, past
+  // 2^53) is not a call.
   uint64_t call_id = 0;
-  if (callIdIt->second->IsInt()) {
+  if (callIdIt->second->IsInt() && callIdIt->second->GetInt() >= 0) {
     call_id = static_cast<uint64_t>(callIdIt->second->GetInt());
   } else if (callIdIt->second->IsDouble()) {
-    call_id = static_cast<uint64_t>(callIdIt->second->GetDouble());
+    double d = callIdIt->second->GetDouble();
+    if (!(d >= 0 && d <= 9007199254740992.0) ||
+        d != static_cast<double>(static_cast<uint64_t>(d)))
+      return;
+    call_id = static_cast<uint64_t>(d);
+  } else {
+    return;
   }
 
   std::string method =
