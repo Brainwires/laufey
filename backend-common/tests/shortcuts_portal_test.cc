@@ -5,8 +5,12 @@
 // the version probe, the host app registration, CreateSession and
 // BindShortcuts through Request/Response objects with the accelerator as the
 // preferred trigger, Activated reaching the shortcut handler, a declined
-// binding (DENIED), and Session.Close on unregister. Exits 77 (skipped)
-// without dbus-daemon.
+// binding (DENIED), and Session.Close on unregister. The mock ties an app id
+// to a connection the way xdg-desktop-portal 1.19+ does: Register fails on a
+// connection that already talked to the portal, and CreateSession refuses a
+// connection without an app id, so the client must register on a connection
+// of its own (GTK reads the Settings portal over the shared one first).
+// Exits 77 (skipped) without dbus-daemon.
 
 #include <gio/gio.h>
 
@@ -16,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -80,6 +85,8 @@ struct Mock {
   std::map<std::string, std::string> triggers;      // id -> preferred_trigger
   std::map<std::string, std::string> descriptions;  // id -> description
   std::map<std::string, std::string> session_of;    // id -> session
+  std::set<std::string> talked;                      // senders seen
+  std::map<std::string, std::string> app_of;         // sender -> app id
   int counter = 0;
 };
 
@@ -112,13 +119,32 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
     const gchar* app_id = nullptr;
     GVariant* options = nullptr;
     g_variant_get(params, "(&s@a{sv})", &app_id, &options);
+    g_variant_unref(options);
     {
       std::lock_guard<std::mutex> lock(g_mock.mutex);
+      if (!g_mock.talked.insert(sender).second) {
+        g_dbus_method_invocation_return_dbus_error(
+            invocation, "org.freedesktop.portal.Error.Failed",
+            "Could not register app ID: Connection already associated with "
+            "an application ID");
+        return;
+      }
       g_mock.registered_app_id = app_id ? app_id : "";
+      g_mock.app_of[sender] = g_mock.registered_app_id;
     }
-    g_variant_unref(options);
     g_dbus_method_invocation_return_value(invocation, nullptr);
     return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    g_mock.talked.insert(sender);
+    if (strcmp(method, "CreateSession") == 0 &&
+        g_mock.app_of[sender].empty()) {
+      g_dbus_method_invocation_return_dbus_error(
+          invocation, "org.freedesktop.portal.Error.NotAllowed",
+          "An app id is required");
+      return;
+    }
   }
   if (strcmp(interface, "org.freedesktop.portal.Session") == 0) {
     {
@@ -216,9 +242,13 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
       invocation, "org.freedesktop.DBus.Error.UnknownMethod", method);
 }
 
-GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
+GVariant* GetProperty(GDBusConnection*, const gchar* sender, const gchar*,
                       const gchar*, const gchar* property, GError**,
                       gpointer) {
+  {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    g_mock.talked.insert(sender);
+  }
   if (strcmp(property, "version") == 0)
     return g_variant_new_uint32(1);
   return nullptr;
@@ -323,6 +353,24 @@ int main() {
     g_main_loop_run(loop);
   }).detach();
   EXPECT(WaitFor([&] { return mock_ready.load(); }));
+
+  // What GTK / WebKitGTK do at startup: read from the portal over the
+  // process's shared session connection, which ties that connection to the
+  // (empty) app id of an unsandboxed process.
+  {
+    GDBusConnection* shared = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr,
+                                             nullptr);
+    EXPECT(shared);
+    GVariant* v = g_dbus_connection_call_sync(
+        shared, "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Properties",
+        "Get",
+        g_variant_new("(ss)", "org.freedesktop.portal.GlobalShortcuts",
+                      "version"),
+        G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+    EXPECT(v);
+    g_variant_unref(v);
+  }
 
   // Presses are delivered "on the GTK thread"; here, inline.
   SetGtkThread([](std::function<void()> fn) { fn(); }, [] { return true; });

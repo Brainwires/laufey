@@ -485,14 +485,34 @@ class LinuxShortcuts : public ShortcutPlatform {
 
   bool PortalConnect() {
     GError* error = nullptr;
-    bus_ = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+    // A private connection, not the process's shared one (g_bus_get_sync):
+    // the portal ties an app id to a connection the first time that
+    // connection talks to it, and GTK / WebKitGTK read the Settings portal
+    // over the shared connection at startup. Registering there afterwards
+    // fails ("Connection already associated with an application ID"), the
+    // connection keeps the empty id of an unsandboxed process, and
+    // xdg-desktop-portal 1.19+ refuses CreateSession ("An app id is
+    // required").
+    gchar* address =
+        g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+    if (address) {
+      bus_ = g_dbus_connection_new_for_address_sync(
+          address,
+          static_cast<GDBusConnectionFlags>(
+              G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+              G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+          nullptr, nullptr, &error);
+      g_free(address);
+    }
     if (!bus_) {
       g_clear_error(&error);
       return false;
     }
+    g_dbus_connection_set_exit_on_close(bus_, FALSE);
     // A host (unsandboxed) app tells the portal who it is, where the portal
     // supports that (xdg-desktop-portal 1.19+); older portals take the app id
-    // from the process's systemd scope or .desktop file.
+    // from the process's systemd scope or .desktop file. This has to be the
+    // connection's first call to the portal.
     std::string app_id = LaunchAppId();
     if (!app_id.empty()) {
       GVariant* r = g_dbus_connection_call_sync(
