@@ -7,8 +7,10 @@
 // preferred trigger, Activated reaching the shortcut handler, a declined
 // binding (DENIED), an approval dialog nobody answers (closed through
 // Request.Close after LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS and reported DENIED,
-// instead of a registration that never finishes), and Session.Close on
-// unregister. The mock ties an app id
+// instead of a registration that never finishes), a CreateSession that never
+// answers or answers after LAUFEY_SHORTCUT_SESSION_TIMEOUT_MS (DENIED, and the
+// session closed by its predictable handle or by the late Response's), and
+// Session.Close on unregister. The mock ties an app id
 // to a connection the way xdg-desktop-portal 1.19+ does: Register fails on a
 // connection that already talked to the portal, and CreateSession refuses a
 // connection without an app id, so the client must register on a connection
@@ -95,7 +97,17 @@ struct Mock {
   std::set<std::string> talked;                      // senders seen
   std::map<std::string, std::string> app_of;         // sender -> app id
   int counter = 0;
+  GMainContext* ctx = nullptr;
+  // How CreateSession answers: kCreateNow, kCreateNever (the session exists,
+  // no Response ever comes) or kCreateLate (session and Response only after
+  // kLateMs, past the client's deadline).
+  std::atomic<int> create_mode{0};
 };
+
+constexpr int kCreateNow = 0;
+constexpr int kCreateNever = 1;
+constexpr int kCreateLate = 2;
+constexpr guint kLateMs = 1200;
 
 Mock g_mock;
 
@@ -184,6 +196,36 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
                           SenderPath(sender) + "/" +
                           (session_token ? session_token : "none");
     g_variant_unref(options);
+    int mode = g_mock.create_mode.load();
+    if (mode == kCreateLate) {
+      g_dbus_method_invocation_return_value(
+          invocation, g_variant_new("(o)", request.c_str()));
+      struct Late {
+        std::string request, session;
+      };
+      GSource* timer = g_timeout_source_new(kLateMs);
+      g_source_set_callback(
+          timer,
+          +[](gpointer data) -> gboolean {
+            auto* late = static_cast<Late*>(data);
+            RegisterSessionObject(late->session);
+            {
+              std::lock_guard<std::mutex> lock(g_mock.mutex);
+              g_mock.sessions.push_back(late->session);
+            }
+            GVariantBuilder results;
+            g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
+            g_variant_builder_add(&results, "{sv}", "session_handle",
+                                  g_variant_new_string(late->session.c_str()));
+            EmitResponse(late->request, 0, g_variant_builder_end(&results));
+            return G_SOURCE_REMOVE;
+          },
+          new Late{request, session},
+          [](gpointer data) { delete static_cast<Late*>(data); });
+      g_source_attach(timer, g_mock.ctx);
+      g_source_unref(timer);
+      return;
+    }
     RegisterSessionObject(session);
     {
       std::lock_guard<std::mutex> lock(g_mock.mutex);
@@ -191,6 +233,8 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
     }
     g_dbus_method_invocation_return_value(
         invocation, g_variant_new("(o)", request.c_str()));
+    if (mode == kCreateNever)
+      return;
     GVariantBuilder results;
     g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&results, "{sv}", "session_handle",
@@ -352,12 +396,14 @@ int main() {
   setenv("LAUFEY_GLOBAL_SHORTCUTS", "portal", 1);
   setenv("LAUFEY_APP_ID", "dev.laufey.portaltest", 1);
   setenv("LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS", "300", 1);
+  setenv("LAUFEY_SHORTCUT_SESSION_TIMEOUT_MS", "400", 1);
 
   // The mock portal: its own connection and main loop on a thread.
   std::atomic<bool> mock_ready{false};
   std::thread([&] {
     GMainContext* ctx = g_main_context_new();
     g_main_context_push_thread_default(ctx);
+    g_mock.ctx = ctx;
     GError* error = nullptr;
     g_mock.conn = g_dbus_connection_new_for_address_sync(
         g_test_dbus_get_bus_address(bus),
@@ -470,6 +516,65 @@ int main() {
     std::lock_guard<std::mutex> lock(g_mock.mutex);
     EXPECT(g_mock.closed_requests[0].find("/request/") != std::string::npos);
   }
+  list = ListShortcuts();
+  EXPECT(std::string(list) == "Ctrl+Shift+K");
+  free(list);
+
+  auto closed_has = [](const std::string& path) {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    for (const auto& c : g_mock.closed) {
+      if (c == path)
+        return true;
+    }
+    return false;
+  };
+
+  // CreateSession never answered: DENIED at the deadline, and the session
+  // the portal did create is closed by its predictable handle.
+  g_mock.create_mode = kCreateNever;
+  Result no_session;
+  auto start = std::chrono::steady_clock::now();
+  RegisterShortcut("Ctrl+Alt+S", OnResult, &no_session);
+  EXPECT(WaitFor([&] { return no_session.calls.load() == 1; }));
+  EXPECT(no_session.status == LAUFEY_SHORTCUT_DENIED);
+  EXPECT(std::chrono::steady_clock::now() - start < std::chrono::seconds(3));
+  std::string never_session;
+  {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    never_session = g_mock.sessions.back();
+  }
+  EXPECT(WaitFor([&] { return closed_has(never_session); }));
+
+  // CreateSession answers after the deadline: DENIED at the deadline, before
+  // the session exists; the session the late Response names is closed.
+  g_mock.create_mode = kCreateLate;
+  Result late;
+  size_t sessions_before = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    sessions_before = g_mock.sessions.size();
+  }
+  start = std::chrono::steady_clock::now();
+  RegisterShortcut("Ctrl+Alt+L", OnResult, &late);
+  EXPECT(WaitFor([&] { return late.calls.load() == 1; }));
+  EXPECT(late.status == LAUFEY_SHORTCUT_DENIED);
+  EXPECT(std::chrono::steady_clock::now() - start <
+         std::chrono::milliseconds(kLateMs));
+  {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    EXPECT(g_mock.sessions.size() == sessions_before);  // not created yet
+  }
+  std::string late_session;
+  EXPECT(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    if (g_mock.sessions.size() == sessions_before)
+      return false;
+    late_session = g_mock.sessions.back();
+    return true;
+  }));
+  EXPECT(WaitFor([&] { return closed_has(late_session); }));
+  EXPECT(late.calls.load() == 1);  // answered once
+  g_mock.create_mode = kCreateNow;
   list = ListShortcuts();
   EXPECT(std::string(list) == "Ctrl+Shift+K");
   free(list);

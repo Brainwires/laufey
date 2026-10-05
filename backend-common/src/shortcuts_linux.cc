@@ -562,6 +562,9 @@ class LinuxShortcuts : public ShortcutPlatform {
     guint subscription = 0;
     GSource* timer = nullptr;
     std::function<void(guint32, GVariant*)> on_response;
+    // When set, a request that timed out keeps listening for a while: a
+    // Response that still comes is handed here (to undo what it created).
+    std::function<void(guint32, GVariant*)> on_late;
   };
 
   // The response code of a request nobody answered in time (the portal's own
@@ -571,22 +574,75 @@ class LinuxShortcuts : public ShortcutPlatform {
   // How long the desktop's approval dialog (BindShortcuts) may stay
   // unanswered before the registration gives up and closes it.
   static int PromptTimeoutMs() {
-    std::string v = GetEnvUtf8("LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS");
+    return EnvMs("LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS", 30000);
+  }
+
+  // How long CreateSession may take (it asks the user nothing).
+  static int SessionTimeoutMs() {
+    return EnvMs("LAUFEY_SHORTCUT_SESSION_TIMEOUT_MS", 10000);
+  }
+
+  // How long a request that timed out still listens for a late Response.
+  static constexpr guint kLateListenMs = 120000;
+
+  static int EnvMs(const char* name, int fallback) {
+    std::string v = GetEnvUtf8(name);
     int ms = v.empty() ? 0 : atoi(v.c_str());
-    return ms > 0 ? ms : 30000;
+    return ms > 0 ? ms : fallback;
+  }
+
+  // Arms `req`'s timer: `ms` from now, FinishRequest(token, kTimedOut).
+  void ArmTimer(Request* req, const std::string& token, guint ms) {
+    struct Cb {
+      LinuxShortcuts* self;
+      std::string token;
+    };
+    req->timer = g_timeout_source_new(ms);
+    g_source_set_callback(
+        req->timer,
+        +[](gpointer data) -> gboolean {
+          auto* cb = static_cast<Cb*>(data);
+          std::string token = cb->token;
+          LinuxShortcuts* self = cb->self;
+          // The source is destroyed in FinishRequest; don't touch `cb` after.
+          self->FinishRequest(token, kTimedOut, nullptr);
+          return G_SOURCE_REMOVE;
+        },
+        new Cb{this, token},
+        [](gpointer data) { delete static_cast<Cb*>(data); });
+    g_source_attach(req->timer, ctx_);
+  }
+
+  // A request that timed out and is still listening (Request::on_late):
+  // its Response came after all, or it stopped listening (kTimedOut).
+  void FinishLate(const std::string& token, guint32 code, GVariant* results) {
+    auto it = late_.find(token);
+    if (it == late_.end())
+      return;
+    std::unique_ptr<Request> req = std::move(it->second);
+    late_.erase(it);
+    g_dbus_connection_signal_unsubscribe(bus_, req->subscription);
+    if (req->timer) {
+      g_source_destroy(req->timer);
+      g_source_unref(req->timer);
+    }
+    if (code != kTimedOut)
+      req->on_late(code, results);
   }
 
   void FinishRequest(const std::string& token, guint32 code,
                      GVariant* results) {
     auto it = requests_.find(token);
-    if (it == requests_.end())
+    if (it == requests_.end()) {
+      FinishLate(token, code, results);
       return;
+    }
     std::unique_ptr<Request> req = std::move(it->second);
     requests_.erase(it);
-    g_dbus_connection_signal_unsubscribe(bus_, req->subscription);
     if (req->timer) {
       g_source_destroy(req->timer);
       g_source_unref(req->timer);
+      req->timer = nullptr;
     }
     if (code == kTimedOut) {
       // Dismisses the dialog, if the desktop showed one.
@@ -595,7 +651,15 @@ class LinuxShortcuts : public ShortcutPlatform {
                              nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, -1,
                              nullptr, nullptr, nullptr);
     }
-    req->on_response(code, results);
+    auto on_response = std::move(req->on_response);
+    if (code == kTimedOut && req->on_late) {
+      // Keep the Response subscription for a while.
+      ArmTimer(req.get(), token, kLateListenMs);
+      late_[token] = std::move(req);
+    } else {
+      g_dbus_connection_signal_unsubscribe(bus_, req->subscription);
+    }
+    on_response(code, results);
   }
 
   // Calls `method` with `args_before_options` (a tuple, or null) followed by
@@ -603,9 +667,11 @@ class LinuxShortcuts : public ShortcutPlatform {
   // request's Response first, so it can't be missed. `on_response` gets the
   // response code (0 success, 1 cancelled by the user, 2 other, kTimedOut
   // when no answer came within `timeout_ms`) and results.
-  void PortalRequest(const char* method, GVariant* args_before_options,
-                     GVariantBuilder* options, int timeout_ms,
-                     std::function<void(guint32, GVariant*)> on_response) {
+  void PortalRequest(
+      const char* method, GVariant* args_before_options,
+      GVariantBuilder* options, int timeout_ms,
+      std::function<void(guint32, GVariant*)> on_response,
+      std::function<void(guint32, GVariant*)> on_late = nullptr) {
     std::string token = "laufey" + std::to_string(++token_counter_);
     g_variant_builder_add(options, "{sv}", "handle_token",
                           g_variant_new_string(token.c_str()));
@@ -613,6 +679,7 @@ class LinuxShortcuts : public ShortcutPlatform {
     req->path = std::string(kPortalPath) + "/request/" + sender_path_ + "/" +
                 token;
     req->on_response = std::move(on_response);
+    req->on_late = std::move(on_late);
     struct Cb {
       LinuxShortcuts* self;
       std::string token;
@@ -636,19 +703,7 @@ class LinuxShortcuts : public ShortcutPlatform {
             g_variant_unref(results);
         },
         new Cb{this, token}, free_cb);
-    req->timer = g_timeout_source_new(static_cast<guint>(timeout_ms));
-    g_source_set_callback(
-        req->timer,
-        +[](gpointer data) -> gboolean {
-          auto* cb = static_cast<Cb*>(data);
-          std::string token = cb->token;
-          LinuxShortcuts* self = cb->self;
-          // The source is destroyed in FinishRequest; don't touch `cb` after.
-          self->FinishRequest(token, kTimedOut, nullptr);
-          return G_SOURCE_REMOVE;
-        },
-        new Cb{this, token}, free_cb);
-    g_source_attach(req->timer, ctx_);
+    ArmTimer(req.get(), token, static_cast<guint>(timeout_ms));
     requests_[token] = std::move(req);
     // Assemble (args..., options).
     GVariantBuilder tuple;
@@ -698,11 +753,24 @@ class LinuxShortcuts : public ShortcutPlatform {
         "laufey_s" + std::to_string(++token_counter_);
     g_variant_builder_add(&options, "{sv}", "session_handle_token",
                           g_variant_new_string(session_token.c_str()));
+    // The handle the portal gives the session (the spec's predictable
+    // path), for closing a session whose CreateSession timed out.
+    std::string predicted = std::string(kPortalPath) + "/session/" +
+                            sender_path_ + "/" + session_token;
     // CreateSession asks the user nothing: a few seconds is plenty.
     PortalRequest(
-        "CreateSession", nullptr, &options, 10000,
-        [this, sid, canonical, trigger, shared_done](guint32 code,
-                                                     GVariant* results) {
+        "CreateSession", nullptr, &options, SessionTimeoutMs(),
+        [this, sid, canonical, trigger, shared_done, predicted](
+            guint32 code, GVariant* results) {
+          if (code == kTimedOut) {
+            // The portal didn't answer in time: the shortcut isn't bound
+            // (DENIED, like an unanswered approval dialog). The session may
+            // exist already, or still come: close it by its handle now, and
+            // whatever a late Response names (on_late below).
+            CloseSession(predicted);
+            (*shared_done)(LAUFEY_SHORTCUT_DENIED);
+            return;
+          }
           const gchar* handle = nullptr;
           if (code != 0 || !results ||
               !g_variant_lookup(results, "session_handle", "&s", &handle) ||
@@ -763,6 +831,14 @@ class LinuxShortcuts : public ShortcutPlatform {
                 (*shared_done)(code == 2 ? LAUFEY_SHORTCUT_FAILED
                                          : LAUFEY_SHORTCUT_DENIED);
               });
+        },
+        // A session created after the deadline: nobody uses it.
+        [this](guint32 code, GVariant* results) {
+          const gchar* handle = nullptr;
+          if (code == 0 && results &&
+              g_variant_lookup(results, "session_handle", "&s", &handle) &&
+              handle)
+            CloseSession(handle);
         });
   }
 
@@ -830,6 +906,8 @@ class LinuxShortcuts : public ShortcutPlatform {
   uint64_t token_counter_ = 0;
   std::map<uint32_t, std::string> sessions_;  // id -> portal session handle
   std::map<std::string, std::unique_ptr<Request>> requests_;  // by token
+  // Timed-out requests still listening for a late Response, by token.
+  std::map<std::string, std::unique_ptr<Request>> late_;
 };
 
 }  // namespace
