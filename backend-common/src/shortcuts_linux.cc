@@ -29,6 +29,7 @@
 
 #include <condition_variable>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -552,44 +553,103 @@ class LinuxShortcuts : public ShortcutPlatform {
     return true;
   }
 
-  // A pending portal request: Response arrives on its own object path.
+  // A pending portal request: Response arrives on its own object path. Kept
+  // in `requests_` by its handle token until it finishes, which happens once:
+  // on its Response, on a failed call, or when it times out (every callback
+  // runs on this thread, so the first one wins).
   struct Request {
-    LinuxShortcuts* self;
-    guint subscription;
+    std::string path;
+    guint subscription = 0;
+    GSource* timer = nullptr;
     std::function<void(guint32, GVariant*)> on_response;
   };
+
+  // The response code of a request nobody answered in time (the portal's own
+  // codes are 0 success, 1 cancelled by the user, 2 other).
+  static constexpr guint32 kTimedOut = 3;
+
+  // How long the desktop's approval dialog (BindShortcuts) may stay
+  // unanswered before the registration gives up and closes it.
+  static int PromptTimeoutMs() {
+    std::string v = GetEnvUtf8("LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS");
+    int ms = v.empty() ? 0 : atoi(v.c_str());
+    return ms > 0 ? ms : 30000;
+  }
+
+  void FinishRequest(const std::string& token, guint32 code,
+                     GVariant* results) {
+    auto it = requests_.find(token);
+    if (it == requests_.end())
+      return;
+    std::unique_ptr<Request> req = std::move(it->second);
+    requests_.erase(it);
+    g_dbus_connection_signal_unsubscribe(bus_, req->subscription);
+    if (req->timer) {
+      g_source_destroy(req->timer);
+      g_source_unref(req->timer);
+    }
+    if (code == kTimedOut) {
+      // Dismisses the dialog, if the desktop showed one.
+      g_dbus_connection_call(bus_, kPortalName, req->path.c_str(),
+                             "org.freedesktop.portal.Request", "Close",
+                             nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, -1,
+                             nullptr, nullptr, nullptr);
+    }
+    req->on_response(code, results);
+  }
 
   // Calls `method` with `args_before_options` (a tuple, or null) followed by
   // `options`, to which a fresh handle_token is added. Subscribes to the
   // request's Response first, so it can't be missed. `on_response` gets the
-  // response code (0 success, 1 cancelled by the user, 2 other) and results.
+  // response code (0 success, 1 cancelled by the user, 2 other, kTimedOut
+  // when no answer came within `timeout_ms`) and results.
   void PortalRequest(const char* method, GVariant* args_before_options,
-                     GVariantBuilder* options,
+                     GVariantBuilder* options, int timeout_ms,
                      std::function<void(guint32, GVariant*)> on_response) {
     std::string token = "laufey" + std::to_string(++token_counter_);
-    std::string path = std::string(kPortalPath) + "/request/" + sender_path_ +
-                       "/" + token;
     g_variant_builder_add(options, "{sv}", "handle_token",
                           g_variant_new_string(token.c_str()));
-    auto* req = new Request{this, 0, std::move(on_response)};
+    auto req = std::make_unique<Request>();
+    req->path = std::string(kPortalPath) + "/request/" + sender_path_ + "/" +
+                token;
+    req->on_response = std::move(on_response);
+    struct Cb {
+      LinuxShortcuts* self;
+      std::string token;
+    };
+    auto free_cb = [](gpointer data) { delete static_cast<Cb*>(data); };
     req->subscription = g_dbus_connection_signal_subscribe(
         bus_, kPortalName, "org.freedesktop.portal.Request", "Response",
-        path.c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
-        +[](GDBusConnection* conn, const gchar*, const gchar*, const gchar*,
+        req->path.c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+        +[](GDBusConnection*, const gchar*, const gchar*, const gchar*,
             const gchar*, GVariant* params, gpointer data) {
-          auto* r = static_cast<Request*>(data);
+          auto* cb = static_cast<Cb*>(data);
           if (!g_variant_is_of_type(params, G_VARIANT_TYPE("(ua{sv})")))
             return;
           guint32 code = 2;
           GVariant* results = nullptr;
           g_variant_get(params, "(u@a{sv})", &code, &results);
-          g_dbus_connection_signal_unsubscribe(conn, r->subscription);
-          r->on_response(code, results);
+          // FinishRequest unsubscribes, which frees `cb`: copy first.
+          std::string token = cb->token;
+          cb->self->FinishRequest(token, code, results);
           if (results)
             g_variant_unref(results);
-          delete r;
         },
-        req, nullptr);
+        new Cb{this, token}, free_cb);
+    req->timer = g_timeout_source_new(static_cast<guint>(timeout_ms));
+    g_source_set_callback(
+        req->timer,
+        +[](gpointer data) -> gboolean {
+          auto* cb = static_cast<Cb*>(data);
+          std::string token = cb->token;
+          LinuxShortcuts* self = cb->self;
+          // The source is destroyed in FinishRequest; don't touch `cb` after.
+          self->FinishRequest(token, kTimedOut, nullptr);
+          return G_SOURCE_REMOVE;
+        },
+        new Cb{this, token}, free_cb);
+    g_source_attach(req->timer, ctx_);
+    requests_[token] = std::move(req);
     // Assemble (args..., options).
     GVariantBuilder tuple;
     g_variant_builder_init(&tuple, G_VARIANT_TYPE_TUPLE);
@@ -604,33 +664,26 @@ class LinuxShortcuts : public ShortcutPlatform {
       g_variant_unref(args);
     }
     g_variant_builder_add_value(&tuple, g_variant_builder_end(options));
-    struct CallCtx {
-      Request* req;
-      LinuxShortcuts* self;
-    };
-    auto* call = new CallCtx{req, this};
     g_dbus_connection_call(
         bus_, kPortalName, kPortalPath, kShortcutsIface, method,
         g_variant_builder_end(&tuple), G_VARIANT_TYPE("(o)"),
         G_DBUS_CALL_FLAGS_NONE, -1, nullptr,
         +[](GObject* source, GAsyncResult* res, gpointer data) {
-          auto* c = static_cast<CallCtx*>(data);
+          auto* cb = static_cast<Cb*>(data);
           GError* error = nullptr;
           GVariant* reply = g_dbus_connection_call_finish(
               G_DBUS_CONNECTION(source), res, &error);
           if (reply) {
             g_variant_unref(reply);
           } else {
-            // The call itself failed: no Response will come.
+            // The call itself failed (e.g. "An app id is required"): no
+            // Response will come.
             g_clear_error(&error);
-            g_dbus_connection_signal_unsubscribe(G_DBUS_CONNECTION(source),
-                                                 c->req->subscription);
-            c->req->on_response(2, nullptr);
-            delete c->req;
+            cb->self->FinishRequest(cb->token, 2, nullptr);
           }
-          delete c;
+          delete cb;
         },
-        call);
+        new Cb{this, token});
   }
 
   void PortalBind(uint32_t sid, const Accelerator& a,
@@ -645,8 +698,9 @@ class LinuxShortcuts : public ShortcutPlatform {
         "laufey_s" + std::to_string(++token_counter_);
     g_variant_builder_add(&options, "{sv}", "session_handle_token",
                           g_variant_new_string(session_token.c_str()));
+    // CreateSession asks the user nothing: a few seconds is plenty.
     PortalRequest(
-        "CreateSession", nullptr, &options,
+        "CreateSession", nullptr, &options, 10000,
         [this, sid, canonical, trigger, shared_done](guint32 code,
                                                      GVariant* results) {
           const gchar* handle = nullptr;
@@ -675,8 +729,11 @@ class LinuxShortcuts : public ShortcutPlatform {
                             g_variant_builder_end(&list), "");
           GVariantBuilder bind_options;
           g_variant_builder_init(&bind_options, G_VARIANT_TYPE_VARDICT);
+          // The desktop may ask the user first (GNOME's approval dialog);
+          // an unanswered dialog is closed after PromptTimeoutMs() and the
+          // binding reported declined, instead of leaving the caller waiting.
           PortalRequest(
-              "BindShortcuts", args, &bind_options,
+              "BindShortcuts", args, &bind_options, PromptTimeoutMs(),
               [this, sid, canonical, session, shared_done](guint32 code,
                                                            GVariant* results) {
                 bool bound = false;
@@ -702,6 +759,7 @@ class LinuxShortcuts : public ShortcutPlatform {
                   return;
                 }
                 CloseSession(session);
+                // Declined (1), or left unanswered (kTimedOut): DENIED.
                 (*shared_done)(code == 2 ? LAUFEY_SHORTCUT_FAILED
                                          : LAUFEY_SHORTCUT_DENIED);
               });
@@ -771,6 +829,7 @@ class LinuxShortcuts : public ShortcutPlatform {
   std::string sender_path_;
   uint64_t token_counter_ = 0;
   std::map<uint32_t, std::string> sessions_;  // id -> portal session handle
+  std::map<std::string, std::unique_ptr<Request>> requests_;  // by token
 };
 
 }  // namespace

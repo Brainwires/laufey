@@ -5,7 +5,10 @@
 // the version probe, the host app registration, CreateSession and
 // BindShortcuts through Request/Response objects with the accelerator as the
 // preferred trigger, Activated reaching the shortcut handler, a declined
-// binding (DENIED), and Session.Close on unregister. The mock ties an app id
+// binding (DENIED), an approval dialog nobody answers (closed through
+// Request.Close after LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS and reported DENIED,
+// instead of a registration that never finishes), and Session.Close on
+// unregister. The mock ties an app id
 // to a connection the way xdg-desktop-portal 1.19+ does: Register fails on a
 // connection that already talked to the portal, and CreateSession refuses a
 // connection without an app id, so the client must register on a connection
@@ -73,6 +76,9 @@ const char kXml[] =
     " <interface name='org.freedesktop.portal.Session'>"
     "  <method name='Close'/>"
     " </interface>"
+    " <interface name='org.freedesktop.portal.Request'>"
+    "  <method name='Close'/>"
+    " </interface>"
     "</node>";
 
 struct Mock {
@@ -82,6 +88,7 @@ struct Mock {
   std::string registered_app_id;
   std::vector<std::string> sessions;
   std::vector<std::string> closed;
+  std::vector<std::string> closed_requests;
   std::map<std::string, std::string> triggers;      // id -> preferred_trigger
   std::map<std::string, std::string> descriptions;  // id -> description
   std::map<std::string, std::string> session_of;    // id -> session
@@ -110,6 +117,7 @@ void EmitResponse(const std::string& path, guint32 code, GVariant* results) {
 }
 
 void RegisterSessionObject(const std::string& path);
+void RegisterRequestObject(const std::string& path);
 
 void HandleMethod(GDBusConnection*, const gchar* sender,
                   const gchar* object_path, const gchar* interface,
@@ -145,6 +153,14 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
           "An app id is required");
       return;
     }
+  }
+  if (strcmp(interface, "org.freedesktop.portal.Request") == 0) {
+    {
+      std::lock_guard<std::mutex> lock(g_mock.mutex);
+      g_mock.closed_requests.push_back(object_path);
+    }
+    g_dbus_method_invocation_return_value(invocation, nullptr);
+    return;
   }
   if (strcmp(interface, "org.freedesktop.portal.Session") == 0) {
     {
@@ -192,7 +208,7 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
     const gchar* token = nullptr;
     g_variant_lookup(options, "handle_token", "&s", &token);
     std::string request = request_base + (token ? token : "none");
-    bool deny = false;
+    bool deny = false, unanswered = false;
     GVariantBuilder bound;
     g_variant_builder_init(&bound, G_VARIANT_TYPE("a(sa{sv})"));
     GVariantIter iter;
@@ -210,9 +226,12 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
         g_mock.descriptions[id] = description ? description : "";
         g_mock.session_of[id] = session;
       }
-      // The user declines anything with a D key in this mock.
+      // The user declines anything with a D key in this mock, and never
+      // answers the dialog for an N key.
       if (strstr(id, "+D"))
         deny = true;
+      if (strstr(id, "+N"))
+        unanswered = true;
       GVariantBuilder out;
       g_variant_builder_init(&out, G_VARIANT_TYPE_VARDICT);
       g_variant_builder_add(&out, "{sv}", "trigger_description",
@@ -225,6 +244,12 @@ void HandleMethod(GDBusConnection*, const gchar* sender,
     g_variant_unref(options);
     g_dbus_method_invocation_return_value(
         invocation, g_variant_new("(o)", request.c_str()));
+    if (unanswered) {
+      // The dialog stays up: no Response until the client closes it.
+      g_variant_builder_clear(&bound);
+      RegisterRequestObject(request);
+      return;
+    }
     if (deny) {
       g_variant_builder_clear(&bound);
       EmitResponse(request, 1,
@@ -261,6 +286,14 @@ void RegisterSessionObject(const std::string& path) {
       g_mock.conn, path.c_str(),
       g_dbus_node_info_lookup_interface(g_mock.info,
                                         "org.freedesktop.portal.Session"),
+      &kVTable, nullptr, nullptr, nullptr);
+}
+
+void RegisterRequestObject(const std::string& path) {
+  g_dbus_connection_register_object(
+      g_mock.conn, path.c_str(),
+      g_dbus_node_info_lookup_interface(g_mock.info,
+                                        "org.freedesktop.portal.Request"),
       &kVTable, nullptr, nullptr, nullptr);
 }
 
@@ -318,6 +351,7 @@ int main() {
   g_test_dbus_up(bus);  // sets DBUS_SESSION_BUS_ADDRESS
   setenv("LAUFEY_GLOBAL_SHORTCUTS", "portal", 1);
   setenv("LAUFEY_APP_ID", "dev.laufey.portaltest", 1);
+  setenv("LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS", "300", 1);
 
   // The mock portal: its own connection and main loop on a thread.
   std::atomic<bool> mock_ready{false};
@@ -417,6 +451,25 @@ int main() {
   RegisterShortcut("Ctrl+Alt+D", OnResult, &denied);
   EXPECT(WaitFor([&] { return denied.calls.load() == 1; }));
   EXPECT(denied.status == LAUFEY_SHORTCUT_DENIED);
+  list = ListShortcuts();
+  EXPECT(std::string(list) == "Ctrl+Shift+K");
+  free(list);
+
+  // An approval dialog nobody answers: closed, the binding declined, the
+  // session closed, nothing registered.
+  Result unanswered;
+  RegisterShortcut("Ctrl+Alt+N", OnResult, &unanswered);
+  EXPECT(WaitFor([&] { return unanswered.calls.load() == 1; }));
+  EXPECT(unanswered.status == LAUFEY_SHORTCUT_DENIED);
+  EXPECT(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    return g_mock.closed_requests.size() == 1 &&
+           g_mock.closed.size() == 2;  // the declined and the unanswered one
+  }));
+  {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    EXPECT(g_mock.closed_requests[0].find("/request/") != std::string::npos);
+  }
   list = ListShortcuts();
   EXPECT(std::string(list) == "Ctrl+Shift+K");
   free(list);
