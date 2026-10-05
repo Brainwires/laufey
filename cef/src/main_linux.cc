@@ -24,6 +24,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
+#include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
@@ -32,6 +33,59 @@
 
 void LaufeyOpenExternalURL(const std::string& url) {
   g_app_info_launch_default_for_uri(url.c_str(), nullptr, nullptr);
+}
+
+// Chromium's cookie store encrypts with a key it keeps in the Secret Service
+// (OSCrypt). When the service is locked (or not running and may start
+// locked) and no one can answer its unlock prompt (a headless, ssh or CI
+// session), Chromium waits for the key forever, and every request that
+// carries cookies (navigations, fetches, WebSocket handshakes) waits with
+// it. In that case use --password-store=basic (a fixed key: the cookies are
+// only obfuscated) and say so once. With no Secret Service at all (or no
+// session bus) Chromium falls back to basic by itself, and with KWallet
+// present it uses KWallet: both are left to Chromium. An explicit
+// --password-store is kept. platform_features() reports the choice as
+// "cookieEncryption". Browser process only.
+//
+// The OS key is sticky per profile: once a profile gets it, "os" is recorded
+// in the root cache directory (laufey_platform_features.h,
+// kPasswordStoreMarkerName), and later launches keep asking for it. Basic is
+// never recorded: Chromium still reads basic (v10) cookies under the OS key,
+// so a profile that started headless moves to the OS key losslessly the
+// first time a launch can reach it. When an "os" profile's key can't be
+// reached (a headless launch against a locked keyring), this launch alone
+// uses basic, the marker stays, and stderr says that the cookies stored with
+// the OS key are unavailable this run.
+static std::string g_root_cache_path;
+
+static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
+  std::string explicit_store;
+  bool has_explicit = command_line->HasSwitch("password-store");
+  if (has_explicit)
+    explicit_store = command_line->GetSwitchValue("password-store");
+  laufey_common::PasswordStoreChoice choice =
+      laufey_common::ChoosePasswordStore(
+          has_explicit ? &explicit_store : nullptr,
+          laufey_common::ReadPasswordStoreMarker(g_root_cache_path), [] {
+            laufey_common::PlatformFeatures features;
+            laufey_common::ProbeSecretService(&features);
+            return features;
+          });
+  if (choice.append_basic)
+    command_line->AppendSwitchWithValue("password-store", "basic");
+  if (choice.record)
+    laufey_common::WritePasswordStoreMarker(g_root_cache_path, choice.store);
+  laufey_common::SetCookieEncryption(choice.store.c_str());
+  if (choice.os_unavailable) {
+    std::cerr << "laufey: this profile's cookies stored with the OS key are "
+                 "unavailable this run, and new ones are stored with "
+                 "--password-store=basic: "
+              << choice.reason << std::endl;
+  } else if (choice.append_basic) {
+    std::cerr << "laufey: cookies are stored with --password-store=basic "
+                 "(not encrypted with an OS key): "
+              << choice.reason << std::endl;
+  }
 }
 
 // --- Native event monitors (Linux / X11) ---
@@ -44,6 +98,7 @@ void LaufeyOpenExternalURL(const std::string& url) {
 // into the GLib main loop via g_io_add_watch.
 
 #include <gdk/gdk.h>
+#include <gtk/gtk.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #include <X11/Xlib.h>
@@ -531,6 +586,27 @@ double GetLinuxWindowOpacity(unsigned long xid) {
 #endif
 }
 
+void LaufeySetDialogTransientFor(void* dialog, unsigned long parent_xid) {
+#ifdef GDK_WINDOWING_X11
+  GtkWidget* dlg = static_cast<GtkWidget*>(dialog);
+  GdkDisplay* gdk_display = gdk_display_get_default();
+  if (!dlg || !parent_xid || !gdk_display || !GDK_IS_X11_DISPLAY(gdk_display))
+    return;
+  GdkWindow* parent =
+      gdk_x11_window_foreign_new_for_display(gdk_display, parent_xid);
+  if (!parent)
+    return;
+  gtk_widget_realize(dlg);
+  gdk_window_set_transient_for(gtk_widget_get_window(dlg), parent);
+  // The foreign wrapper lives as long as the dialog.
+  g_object_set_data_full(G_OBJECT(dlg), "laufey-transient-parent", parent,
+                         g_object_unref);
+#else
+  (void)dialog;
+  (void)parent_xid;
+#endif
+}
+
 // X11 has no cheap query for "is the input shape empty", so remember which
 // windows we made click-passthrough. Only touched on the CEF UI thread.
 static std::set<unsigned long> g_click_passthrough_xids;
@@ -692,8 +768,10 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
       CefRefPtr<CefCommandLine> command_line) override {
     // A deep-link launch keeps none of its own command line's Chromium
     // switches. First, so the defaults below see what is left.
-    if (process_type.empty())
+    if (process_type.empty()) {
       LaufeyStripDeepLinkSwitches(command_line);
+      LaufeyApplyPasswordStore(command_line);
+    }
 
     // Native Wayland support. By default CEF/Chromium uses the X11 Ozone
     // backend and runs through XWayland on Wayland sessions. Mirror the
@@ -877,6 +955,9 @@ int main(int argc, char* argv[]) {
     if (!cache_path.empty())
       CefString(&settings.root_cache_path) = cache_path;
   }
+  // Where the profile records its password store (LaufeyApplyPasswordStore,
+  // called from CefInitialize).
+  g_root_cache_path = cache_path;
 
   // No remote debugging while DevTools are off (API 40, inspectable).
   const char* port_env = laufey_common::LaunchInspectable()

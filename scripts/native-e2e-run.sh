@@ -3,12 +3,16 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
 # tray's StatusNotifierItem and dbusmenu layout from outside, fires a menu
 # Event that must reach the app, and fails unless the battery passed.
+# --late-tray-host (Linux only) is --layer1 with no tray host at first: the
+# battery's first tray must be refused with a reason (platform_features,
+# API 45), then the observer starts its StatusNotifierWatcher and the
+# backend must see it (trayHost true) and register the next tray as usual.
 # --scheme-body runs only the custom-scheme request-body round trip (for
 # backends where the full battery can't run in CI).
 # --lna runs only the Local Network Access checks (lna_checks.rs): the
@@ -49,6 +53,11 @@
 # OS's own notion of the UI thread, refused after quit()) and auth sessions
 # (a real ASWebAuthenticationSession round trip on macOS, not_supported
 # elsewhere). Ends with quit().
+# --platform runs only the platform-features checks (API 45,
+# platform_checks.rs): the probe and the tray agree, and the
+# LAUFEY_E2E_EXPECT_* facts given for the session hold. With
+# LAUFEY_E2E_HOST_SESSION=1 (Linux) it runs in the caller's own desktop
+# session instead of Xvfb and a private bus: the per-desktop matrix check.
 # --launch-visibility runs only the launch checks (launch_checks.rs): the
 # first window of a fresh launch is on screen, its page visible and drawing
 # frames, a non-activating window's page too, and a hidden window stays
@@ -56,7 +65,7 @@
 # (scripts/launch-occluder.swift), as an editor or terminal would.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -116,6 +125,21 @@ if [ "$mode" = "--auth-thread" ]; then
   export LAUFEY_E2E_ONLY=auth-thread
 fi
 occluder_pid=""
+if [ "$mode" = "--platform" ]; then
+  export LAUFEY_E2E_ONLY=platform
+  # The private session bus gets a Secret Service that is installed but
+  # never starts (activatable, Exec=/bin/false), whatever this machine has
+  # installed: no one here could answer its unlock prompt, so CEF must pick
+  # --password-store=basic by itself. (No service at all would be left to
+  # Chromium's own fallback; LAUFEY_E2E_EXPECT_COOKIES checks the choice.)
+  if [ "$(uname -s)" = "Linux" ] && [ -z "${LAUFEY_E2E_HOST_SESSION:-}" ]; then
+    secrets_dir="$(mktemp -d "${TMPDIR:-/tmp}/laufey-e2e-secrets.XXXXXX")"
+    mkdir -p "$secrets_dir/dbus-1/services"
+    printf '[D-BUS Service]\nName=org.freedesktop.secrets\nExec=/bin/false\n' \
+      >"$secrets_dir/dbus-1/services/org.freedesktop.secrets.service"
+    export XDG_DATA_DIRS="$secrets_dir:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  fi
+fi
 if [ "$mode" = "--launch-visibility" ]; then
   export LAUFEY_E2E_ONLY=launch-visibility
   if [ "$(uname -s)" = "Darwin" ]; then
@@ -235,8 +259,9 @@ if [ "$backend" = "cef" ]; then
   # Chromium's password store would ask the private session bus's keyring
   # to unlock: gnome-keyring then shows gcr-prompter, which grabs the
   # pointer and keyboard for the rest of the run, so real X input (xdotool)
-  # goes to the prompt instead of the app.
-  if [ "$(uname -s)" = "Linux" ]; then
+  # goes to the prompt instead of the app. --platform checks the backend's
+  # own choice (API 45: basic when no one can answer the prompt) instead.
+  if [ "$(uname -s)" = "Linux" ] && [ "$mode" != "--platform" ]; then
     args+=(--password-store=basic)
   fi
   # On Windows the display itself is scaled (windows-display-scale.ps1).
@@ -250,9 +275,15 @@ is_linux() { [ "$(uname -s)" = "Linux" ]; }
 
 # What runs: the backend, or (--layer1) the D-Bus observer that starts it.
 target=("$bin")
-if [ "$mode" = "--layer1" ]; then
-  is_linux || { echo "--layer1 is Linux-only"; exit 2; }
+if [ "$mode" = "--layer1" ] || [ "$mode" = "--late-tray-host" ]; then
+  is_linux || { echo "$mode is Linux-only"; exit 2; }
   export LAUFEY_E2E_HOLD=1
+  if [ "$mode" = "--late-tray-host" ]; then
+    # Written by the battery once its first tray was refused; the driver
+    # starts the watcher then.
+    LAUFEY_E2E_LATE_TRAY_HOST="$(mktemp -u "${TMPDIR:-/tmp}/laufey-late-tray.XXXXXX")"
+    export LAUFEY_E2E_LATE_TRAY_HOST LAUFEY_E2E_REQUIRE_TRAY=1
+  fi
   driver="$(ls target/release/native_e2e_driver 2>/dev/null | head -1 || true)"
   [ -n "$driver" ] || { echo "native_e2e_driver not built"; exit 1; }
   target=("$PWD/$driver" "$bin")
@@ -308,7 +339,10 @@ fi
 # process, so a hang leaves evidence instead of only a step timeout.
 log="$(mktemp "${TMPDIR:-/tmp}/native-e2e.XXXXXX")"
 run_backend() {
-  if is_linux; then
+  if is_linux && [ -n "${LAUFEY_E2E_HOST_SESSION:-}" ]; then
+    # The caller's own desktop session (its display and session bus).
+    exec "${target[@]}" ${args[@]+"${args[@]}"}
+  elif is_linux; then
     # One X server and private session bus for the run. The window manager
     # (when wanted) manages the display before the backend starts, and the
     # stand-in notification server owns its name on the same bus.
@@ -371,6 +405,9 @@ wait "$pid"
 status=$?
 set -e
 wait "$watchdog" 2>/dev/null || true
+if [ -n "${LAUFEY_E2E_LATE_TRAY_HOST:-}" ]; then
+  rm -f "$LAUFEY_E2E_LATE_TRAY_HOST"
+fi
 # Let tee drain what the process wrote last.
 sleep 1
 echo "== native-e2e: backend exited with status $status =="

@@ -688,6 +688,13 @@ class LaufeyBackend {
   virtual char* CanonicalizeAccelerator(const char* /*accelerator*/) {
     return nullptr;
   }
+
+  // --- Platform features (API 45) -------------------------------------------
+  // The platform_features JSON (malloc'd, freed with string_free); NULL
+  // where the backend can't say (iOS, which has no backend-common).
+  virtual char* PlatformFeatures() {
+    return nullptr;
+  }
   virtual bool TestTriggerShortcut(const char* /*accelerator*/) {
     return false;
   }

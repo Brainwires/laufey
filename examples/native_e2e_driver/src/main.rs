@@ -17,6 +17,12 @@
 //!      LAUFEY_E2E_HOLD, checks that it arrived), then
 //!   5. waits for the backend and fails unless its battery passed.
 //!
+//! With LAUFEY_E2E_LATE_TRAY_HOST=<flag file> (scripts/native-e2e-run.sh
+//! --late-tray-host) it owns no watcher at first: the battery's first tray
+//! must be refused (no host), and once the battery writes the flag file the
+//! driver starts the watcher, which the backend must notice (its probe
+//! follows NameOwnerChanged) before the run goes on as above.
+//!
 //! On non-Linux targets this compiles to a stub so `cargo check --workspace`
 //! stays green everywhere. See docs/e2e-testing.md §7.1.
 
@@ -335,22 +341,27 @@ mod linux {
     let (item_tx, mut item_rx) = mpsc::unbounded_channel::<(String, String)>();
     let (notif_tx, mut notif_rx) = mpsc::unbounded_channel::<NotifyCall>();
 
-    let watcher = Watcher {
+    let mut watcher = Some(Watcher {
       items: std::sync::Mutex::new(Vec::new()),
       tx: item_tx,
-    };
+    });
     let notifications = Notifications {
       tx: notif_tx,
       next_id: std::sync::atomic::AtomicU32::new(1),
     };
 
-    let conn = connection::Builder::session()?
-      .name("org.kde.StatusNotifierWatcher")?
+    let late_host = std::env::var("LAUFEY_E2E_LATE_TRAY_HOST")
+      .ok()
+      .filter(|v| !v.is_empty());
+    let mut builder = connection::Builder::session()?
       .name("org.freedesktop.Notifications")?
-      .serve_at("/StatusNotifierWatcher", watcher)?
-      .serve_at("/org/freedesktop/Notifications", notifications)?
-      .build()
-      .await?;
+      .serve_at("/org/freedesktop/Notifications", notifications)?;
+    if late_host.is_none() {
+      builder = builder
+        .name("org.kde.StatusNotifierWatcher")?
+        .serve_at("/StatusNotifierWatcher", watcher.take().unwrap())?;
+    }
+    let conn = builder.build().await?;
     eprintln!("[e2e] shell services up; launching runtime");
 
     let mut args = std::env::args().skip(1);
@@ -361,6 +372,37 @@ mod linux {
       .args(args)
       .spawn()
       .expect("spawn backend");
+
+    // No tray host until the battery has seen its tray refused.
+    if let Some(flag) = late_host {
+      let mut refused = false;
+      for _ in 0..1200 {
+        if std::path::Path::new(&flag).exists() {
+          refused = true;
+          break;
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+      }
+      check(
+        "the battery reached its tray refusal (no watcher yet)",
+        refused,
+        &failed,
+      );
+      if !refused {
+        let _ = child.start_kill();
+        eprintln!("[e2e] OVERALL FAIL");
+        std::process::exit(1);
+      }
+      conn
+        .object_server()
+        .at("/StatusNotifierWatcher", watcher.take().unwrap())
+        .await?;
+      conn.request_name("org.kde.StatusNotifierWatcher").await?;
+      eprintln!("[e2e] watcher started late");
+    }
 
     // The battery creates its tray part-way through (after its windows and
     // the custom-scheme checks), which takes a while on a CEF cold start.

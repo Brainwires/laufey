@@ -1889,6 +1889,7 @@ version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
+ "gtk",
  "image",
  "laufey",
  "libloading 0.8.9",
@@ -1903,6 +1904,8 @@ dependencies = [
  "tray-icon",
  "windows-sys 0.61.2",
  "winit",
+ "x11rb",
+ "zbus",
 ]
 
 [[package]]

@@ -42,12 +42,15 @@ pub use ui_thread::*;
 mod auth_session;
 pub use auth_session::*;
 
+mod platform;
+pub use platform::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 44;
+pub const LAUFEY_API_VERSION: u32 = 45;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -1848,47 +1851,166 @@ impl Window {
   /// until dismissed; while the modal is up the platform's event loop is
   /// pumped so other LAUFEY windows continue to render and respond.
   pub fn confirm(&self, title: &str, message: &str) -> bool {
-    let (confirmed, _) =
+    let (status, _) =
       show_dialog_blocking(self.id, LAUFEY_DIALOG_CONFIRM, title, message, "");
-    confirmed
+    status == DialogStatus::Confirmed
   }
 
   /// Show a prompt dialog with a text input. Returns `Some(text)` if OK
-  /// was pressed, `None` if cancelled. Blocking semantics as `confirm`.
+  /// was pressed, `None` if cancelled (or, see [`Window::try_prompt`], if
+  /// no dialog could be shown). Blocking semantics as `confirm`.
   pub fn prompt(
     &self,
     title: &str,
     message: &str,
     default_value: &str,
   ) -> Option<String> {
-    let (confirmed, input) = show_dialog_blocking(
-      self.id,
-      LAUFEY_DIALOG_PROMPT,
-      title,
-      message,
-      default_value,
-    );
-    if confirmed {
-      input
-    } else {
-      None
-    }
+    self
+      .try_prompt(title, message, default_value)
+      .ok()
+      .flatten()
+  }
+
+  /// [`Window::prompt`] that tells a cancel (`Ok(None)`) from a backend that
+  /// has no way to show the dialog here (`Err(DialogUnsupported)`; API 45:
+  /// Winit on Linux without kdialog, zenity or a GTK display).
+  pub fn try_prompt(
+    &self,
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> Result<Option<String>, DialogUnsupported> {
+    prompt_outcome(self.id, title, message, default_value)
+  }
+
+  /// [`Window::confirm`] that tells a cancel (`Ok(false)`) from a backend
+  /// that has no way to show the dialog here (`Err(DialogUnsupported)`).
+  pub fn try_confirm(
+    &self,
+    title: &str,
+    message: &str,
+  ) -> Result<bool, DialogUnsupported> {
+    confirm_outcome(self.id, title, message)
+  }
+
+  /// [`Window::alert`] that says when nothing could be shown
+  /// (`Err(DialogUnsupported)`).
+  pub fn try_alert(
+    &self,
+    title: &str,
+    message: &str,
+  ) -> Result<(), DialogUnsupported> {
+    alert_outcome(self.id, title, message)
   }
 }
 
+fn confirm_outcome(
+  window_id: u32,
+  title: &str,
+  message: &str,
+) -> Result<bool, DialogUnsupported> {
+  confirm_result(
+    show_dialog_blocking(window_id, LAUFEY_DIALOG_CONFIRM, title, message, "")
+      .0,
+  )
+}
+
+fn confirm_result(status: DialogStatus) -> Result<bool, DialogUnsupported> {
+  match status {
+    DialogStatus::Confirmed => Ok(true),
+    DialogStatus::Cancelled => Ok(false),
+    DialogStatus::Unsupported => Err(DialogUnsupported),
+  }
+}
+
+fn alert_outcome(
+  window_id: u32,
+  title: &str,
+  message: &str,
+) -> Result<(), DialogUnsupported> {
+  alert_result(
+    show_dialog_blocking(window_id, LAUFEY_DIALOG_ALERT, title, message, "").0,
+  )
+}
+
+fn alert_result(status: DialogStatus) -> Result<(), DialogUnsupported> {
+  match status {
+    DialogStatus::Unsupported => Err(DialogUnsupported),
+    // Dismissed is seen.
+    DialogStatus::Confirmed | DialogStatus::Cancelled => Ok(()),
+  }
+}
+
+/// The backend can't show the dialog here (API 45); nothing was shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialogUnsupported;
+
+impl std::fmt::Display for DialogUnsupported {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("no dialog can be shown here")
+  }
+}
+
+impl std::error::Error for DialogUnsupported {}
+
+fn prompt_outcome(
+  window_id: u32,
+  title: &str,
+  message: &str,
+  default_value: &str,
+) -> Result<Option<String>, DialogUnsupported> {
+  let (status, input) = show_dialog_blocking(
+    window_id,
+    LAUFEY_DIALOG_PROMPT,
+    title,
+    message,
+    default_value,
+  );
+  match status {
+    DialogStatus::Confirmed => Ok(input),
+    DialogStatus::Cancelled => Ok(None),
+    DialogStatus::Unsupported => Err(DialogUnsupported),
+  }
+}
+
+/// What `show_dialog` returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogStatus {
+  Confirmed,
+  Cancelled,
+  Unsupported,
+}
+
 /// Shared dialog implementation. `window_id == 0` ⇒ app-wide modal.
-/// Returns `(confirmed, input_value)`. `input_value` is `Some` only when
-/// the dialog was a prompt and the user confirmed.
+/// Returns `(status, input_value)`. `input_value` is `Some` only when the
+/// dialog was a prompt and the user confirmed.
 fn show_dialog_blocking(
   window_id: u32,
   dialog_type: i32,
   title: &str,
   message: &str,
   default_value: &str,
-) -> (bool, Option<String>) {
-  let api = api();
+) -> (DialogStatus, Option<String>) {
+  show_dialog_blocking_with(
+    api(),
+    window_id,
+    dialog_type,
+    title,
+    message,
+    default_value,
+  )
+}
+
+fn show_dialog_blocking_with(
+  api: &LaufeyBackendApi,
+  window_id: u32,
+  dialog_type: i32,
+  title: &str,
+  message: &str,
+  default_value: &str,
+) -> (DialogStatus, Option<String>) {
   let Some(f) = api.show_dialog else {
-    return (false, None);
+    return (DialogStatus::Unsupported, None);
   };
   // Text with a NUL byte cannot cross the C ABI: no dialog, as if cancelled.
   let (Ok(c_title), Ok(c_message), Ok(c_default)) = (
@@ -1896,14 +2018,14 @@ fn show_dialog_blocking(
     CString::new(message),
     CString::new(default_value),
   ) else {
-    return (false, None);
+    return (DialogStatus::Cancelled, None);
   };
   let mut out_input: *mut c_char = std::ptr::null_mut();
   let want_input = dialog_type == LAUFEY_DIALOG_PROMPT;
   // SAFETY: All pointers are valid for the duration of the call. The
   // backend may write a heap-allocated string into `out_input`; we hand it
   // back to the backend's deallocator below.
-  let confirmed = unsafe {
+  let status = unsafe {
     f(
       api.backend_data,
       window_id,
@@ -1917,7 +2039,13 @@ fn show_dialog_blocking(
         std::ptr::null_mut()
       },
     )
-  } != 0;
+  };
+  // 1 OK, 0 cancelled, -1 (API 45) nothing could be shown.
+  let status = match status {
+    1 => DialogStatus::Confirmed,
+    s if s < 0 => DialogStatus::Unsupported,
+    _ => DialogStatus::Cancelled,
+  };
   let input = if !out_input.is_null() {
     // SAFETY: backend just wrote a NUL-terminated UTF-8 string here.
     let s = unsafe { CStr::from_ptr(out_input) }
@@ -1932,7 +2060,7 @@ fn show_dialog_blocking(
   } else {
     None
   };
-  (confirmed, input)
+  (status, input)
 }
 
 /// Read the system clipboard's plain-text content.
@@ -3171,30 +3299,46 @@ pub fn alert(title: &str, message: &str) {
 /// Show a confirm dialog (app-wide). Returns `true` if OK was pressed.
 /// Blocking semantics as `alert`.
 pub fn confirm(title: &str, message: &str) -> bool {
-  let (confirmed, _) =
+  let (status, _) =
     show_dialog_blocking(0, LAUFEY_DIALOG_CONFIRM, title, message, "");
-  confirmed
+  status == DialogStatus::Confirmed
 }
 
 /// Show a prompt dialog (app-wide). Returns `Some(text)` if OK, `None`
-/// if cancelled. Blocking semantics as `alert`.
+/// if cancelled (or no dialog could be shown; see [`try_prompt`]).
+/// Blocking semantics as `alert`.
 pub fn prompt(
   title: &str,
   message: &str,
   default_value: &str,
 ) -> Option<String> {
-  let (confirmed, input) = show_dialog_blocking(
-    0,
-    LAUFEY_DIALOG_PROMPT,
-    title,
-    message,
-    default_value,
-  );
-  if confirmed {
-    input
-  } else {
-    None
-  }
+  try_prompt(title, message, default_value).ok().flatten()
+}
+
+/// [`prompt`] that tells a cancel (`Ok(None)`) from a backend that has no
+/// way to show the dialog here (`Err(DialogUnsupported)`, API 45).
+pub fn try_prompt(
+  title: &str,
+  message: &str,
+  default_value: &str,
+) -> Result<Option<String>, DialogUnsupported> {
+  prompt_outcome(0, title, message, default_value)
+}
+
+/// [`confirm`] that tells a cancel (`Ok(false)`) from a backend that has no
+/// way to show the dialog here (`Err(DialogUnsupported)`, API 45: Winit on
+/// Linux without kdialog, zenity or a GTK display).
+pub fn try_confirm(
+  title: &str,
+  message: &str,
+) -> Result<bool, DialogUnsupported> {
+  confirm_outcome(0, title, message)
+}
+
+/// [`alert`] that says when nothing could be shown (`Err(DialogUnsupported)`,
+/// API 45).
+pub fn try_alert(title: &str, message: &str) -> Result<(), DialogUnsupported> {
+  alert_outcome(0, title, message)
 }
 
 // --- Notifications ---
@@ -3704,6 +3848,74 @@ macro_rules! main {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  // --- Dialogs: OK, cancel, and (API 45) unsupported ---
+
+  thread_local! {
+    static DIALOG_STATUS: std::cell::Cell<c_int> = const { std::cell::Cell::new(0) };
+  }
+
+  unsafe extern "C" fn fake_show_dialog(
+    _: *mut c_void,
+    _: u32,
+    _: c_int,
+    _: *const c_char,
+    _: *const c_char,
+    _: *const c_char,
+    out: *mut *mut c_char,
+  ) -> c_int {
+    let status = DIALOG_STATUS.with(|s| s.get());
+    if status == 1 && !out.is_null() {
+      unsafe { *out = CString::new("typed").unwrap().into_raw() };
+    }
+    status
+  }
+  unsafe extern "C" fn fake_dialog_string_free(_: *mut c_void, s: *mut c_char) {
+    drop(unsafe { CString::from_raw(s) });
+  }
+
+  #[test]
+  fn confirm_and_alert_tell_unsupported_from_a_cancel() {
+    assert_eq!(confirm_result(DialogStatus::Confirmed), Ok(true));
+    assert_eq!(confirm_result(DialogStatus::Cancelled), Ok(false));
+    assert_eq!(
+      confirm_result(DialogStatus::Unsupported),
+      Err(DialogUnsupported)
+    );
+    assert_eq!(alert_result(DialogStatus::Confirmed), Ok(()));
+    assert_eq!(alert_result(DialogStatus::Cancelled), Ok(()));
+    assert_eq!(
+      alert_result(DialogStatus::Unsupported),
+      Err(DialogUnsupported)
+    );
+  }
+
+  #[test]
+  fn dialog_status() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    let prompt = |api: &LaufeyBackendApi| {
+      show_dialog_blocking_with(api, 0, LAUFEY_DIALOG_PROMPT, "T", "M", "D")
+    };
+    // No entry point: nothing can be shown.
+    assert_eq!(prompt(&fake), (DialogStatus::Unsupported, None));
+    fake.show_dialog = Some(fake_show_dialog);
+    fake.string_free = Some(fake_dialog_string_free);
+    DIALOG_STATUS.with(|s| s.set(1));
+    assert_eq!(
+      prompt(&fake),
+      (DialogStatus::Confirmed, Some("typed".to_string()))
+    );
+    DIALOG_STATUS.with(|s| s.set(0));
+    assert_eq!(prompt(&fake), (DialogStatus::Cancelled, None));
+    // -1 is not "confirmed" (any non-zero used to read as OK).
+    DIALOG_STATUS.with(|s| s.set(-1));
+    assert_eq!(prompt(&fake), (DialogStatus::Unsupported, None));
+    // Text with a NUL can't cross the ABI: as if cancelled.
+    assert_eq!(
+      show_dialog_blocking_with(&fake, 0, LAUFEY_DIALOG_PROMPT, "T\0", "", ""),
+      (DialogStatus::Cancelled, None)
+    );
+  }
 
   // --- KeyModifiers ---
 

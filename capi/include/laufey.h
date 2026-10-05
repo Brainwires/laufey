@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 44
+#define LAUFEY_API_VERSION 45
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -442,6 +442,13 @@ typedef void (*laufey_window_state_fn)(void* user_data, uint32_t window_id,
 // scale factors change. Fires on the backend UI thread; call get_screens to
 // read the new layout.
 typedef void (*laufey_display_changed_fn)(void* user_data);
+
+// Callback fired when what platform_features reports may have changed
+// (API 45): on Linux, a tray host (StatusNotifierWatcher) appeared or went
+// away. Fires on whichever thread the backend observes the change on (the
+// UI thread on CEF and WebView, a watcher thread on Winit); call
+// platform_features again for the new answer.
+typedef void (*laufey_platform_features_changed_fn)(void* user_data);
 
 typedef struct laufey_backend_api laufey_backend_api_t;
 
@@ -1051,7 +1058,10 @@ struct laufey_backend_api {
   // pumps OS events while the dialog is up, so other LAUFEY windows continue
   // to render and respond.
   //
-  // Returns 1 if the user clicked OK/Yes, 0 otherwise.
+  // Returns 1 if the user clicked OK/Yes, 0 otherwise, and (API >= 45) -1
+  // when the backend has no way to show the dialog here (Winit on Linux
+  // without kdialog, zenity or a GTK display): nothing was shown, which is
+  // not the user cancelling.
   // For LAUFEY_DIALOG_PROMPT, on a confirmed result `*out_input_value` is set
   // to a heap-allocated UTF-8 string the caller must free by calling
   // `string_free` (below). For alert/confirm, or on cancel, set to NULL.
@@ -2079,6 +2089,34 @@ struct laufey_backend_api {
   // engine).
   void (*set_js_call_handler_ex)(void* backend_data,
                                  laufey_js_call_ex_fn handler, void* user_data);
+
+  // --- Platform features (API >= 45) ---------------------------------------
+  //
+  // What this session provides, as a JSON object freed with string_free
+  // (NULL where the backend can't say: the iOS shell). Probed, never guessed
+  // from the desktop's name: on Linux the tray host (a StatusNotifierWatcher,
+  // or an XEmbed tray on X11, followed live), whether the Secret Service can
+  // hand out a key without a prompt no one can answer, the session type and the
+  // xdg-desktop-portal interface versions; on macOS and Windows a static
+  // answer. CEF also reports the cookie store it chose ("os", or "basic"
+  // when the Secret Service could not answer). Keys and values are listed in
+  // docs/platform-features.md. Any thread; the first call on Linux may wait
+  // up to a few seconds for xdg-desktop-portal to start.
+  char* (*platform_features)(void* backend_data);
+
+  // Why a tray icon can't be shown here (the "trayReason" of
+  // platform_features), or NULL when one can: the tray part of the probe
+  // alone, so it never waits for xdg-desktop-portal. Freed with string_free.
+  // Any thread.
+  char* (*tray_unavailable_reason)(void* backend_data);
+
+  // The handler fired when platform_features may answer differently (see
+  // laufey_platform_features_changed_fn): on Linux, when the tray host
+  // appears (create the tray again) or goes away. One handler per process;
+  // NULL clears it. Never fires on macOS and Windows.
+  void (*set_platform_features_changed_handler)(
+      void* backend_data, laufey_platform_features_changed_fn handler,
+      void* user_data);
 };
 
 #ifdef __cplusplus

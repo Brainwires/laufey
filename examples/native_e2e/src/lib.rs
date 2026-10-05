@@ -36,6 +36,7 @@ mod launch_checks;
 mod lna_checks;
 mod menu_notification_checks;
 mod os_view;
+mod platform_checks;
 mod stream_checks;
 mod system_checks;
 
@@ -777,6 +778,11 @@ fn e2e_main() {
         menu_notification_checks::run().await;
         finish();
       }
+      // Platform features (API 45) in the run's own session.
+      Ok("platform") => {
+        platform_checks::run().await;
+        finish();
+      }
       // UI-thread tasks and auth sessions (API 42). Ends with quit().
       Ok("auth-thread") => auth_thread_checks::run().await,
       // The first window of a fresh launch is on screen and renders frames
@@ -1382,6 +1388,29 @@ fn e2e_main() {
       None => na("clipboard (backend has no clipboard support)"),
     }
 
+    // ---- platform features (API 45) ---------------------------------------
+    // What this session provides, as JSON, on every backend.
+    match laufey::platform_features() {
+      Some(f) => {
+        let os = if cfg!(target_os = "linux") {
+          "linux"
+        } else if cfg!(target_os = "macos") {
+          "macos"
+        } else {
+          "windows"
+        };
+        eprintln!("[e2e] platform features: {f}");
+        check(
+          "platform_features answers a JSON object for this OS",
+          f.starts_with(&format!("{{\"os\":\"{os}\""))
+            && f.contains("\"portalVersions\":{")
+            && f.contains("\"cookieEncryption\":")
+            && f.ends_with('}'),
+        );
+      }
+      None => check("platform_features answers (API 45)", false),
+    }
+
     // ---- native chrome: menu + tray click round-trips -------------------
     // Build an app menu and a tray menu with distinct item ids, then use the
     // test hook (test_click_menu_item) to synthesize a click and assert the
@@ -1432,16 +1461,87 @@ fn e2e_main() {
     // of passing silently (issue #63).
     let require_tray =
       std::env::var("LAUFEY_E2E_REQUIRE_TRAY").is_ok_and(|v| !v.is_empty());
+    // API 45: with no tray host (no StatusNotifierWatcher, no XEmbed tray)
+    // create_tray_icon refuses, and platform_features says why. Under
+    // scripts/native-e2e-run.sh --late-tray-host the observer owns no
+    // watcher until this battery writes the flag file below: the refusal
+    // comes first, then a watcher that starts later must count.
+    if let Some(flag) = std::env::var("LAUFEY_E2E_LATE_TRAY_HOST")
+      .ok()
+      .filter(|v| !v.is_empty())
+    {
+      // API 45: the change handler fires when the tray host appears.
+      let changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+      {
+        let changed = changed.clone();
+        laufey::on_platform_features_changed(move || {
+          changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+      }
+      let refused = TrayIcon::new();
+      check(
+        "no tray host: create_tray_icon refuses (id 0)",
+        refused.id() == 0,
+      );
+      check(
+        "no tray host: tray_unavailable_reason says why (tray part only)",
+        laufey::tray_unavailable_reason()
+          .is_some_and(|r| r.contains("StatusNotifierWatcher")),
+      );
+      let features = laufey::platform_features().unwrap_or_default();
+      check(
+        "no tray host: platform_features says trayHost false, with the reason",
+        features.contains("\"trayHost\":false")
+          && features.contains("StatusNotifierWatcher"),
+      );
+      drop(refused);
+      let _ = std::fs::write(&flag, b"refused");
+      let seen = wait_for(
+        || {
+          laufey::platform_features()
+            .is_some_and(|f| f.contains("\"trayHost\":true"))
+        },
+        600,
+        50,
+      )
+      .await;
+      check(
+        "a tray watcher that starts later is seen (trayHost true)",
+        seen,
+      );
+      let fired = wait_for(
+        || changed.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        200,
+        50,
+      )
+      .await;
+      check(
+        "the platform-features change handler fired when the host appeared",
+        fired,
+      );
+      check(
+        "a tray host: tray_unavailable_reason is none",
+        laufey::tray_unavailable_reason().is_none(),
+      );
+    }
     let tray = TrayIcon::new();
     // Every tray menu click, counted for the Layer-1 hold below (the D-Bus
     // observer's dbusmenu Event must arrive here too).
     let tray_clicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut own_tray_clicks = 0usize;
     if tray.id() == 0 {
+      let features = laufey::platform_features().unwrap_or_default();
       if require_tray {
         check(
           "create_tray_icon returned nonzero id (LAUFEY_E2E_REQUIRE_TRAY)",
           false,
+        );
+      } else if features.contains("\"trayHost\":false") {
+        // A host-less session (the Layer-0 Xvfb run): refused, never a dead
+        // icon, and the reason is reported.
+        check(
+          "no tray host: the tray is refused and platform_features says why",
+          features.contains("\"trayReason\":\"no tray"),
         );
       } else {
         na("tray (backend has no tray support on this platform)");

@@ -1,36 +1,58 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
-//! The prompt dialog (`LAUFEY_DIALOG_PROMPT`) of the winit / servo backends.
+//! The dialogs of the winit / servo backends: the prompt
+//! (`LAUFEY_DIALOG_PROMPT`) everywhere, and on Linux the alert and confirm
+//! too.
 //!
 //! The title, message and default value may come from page content, so none
 //! of them is ever part of a command line a shell parses or of a script's
-//! source:
+//! source, and each is shown as plain text:
 //! - Windows: an in-process Win32 dialog (an in-memory template); each string
-//!   is a control's text.
+//!   is a control's text. (Alert and confirm: rfd, lib.rs.)
 //! - macOS: `osascript` runs a fixed script; the strings are its `argv`
-//!   (after `--`, so one starting with `-` is not an option).
-//! - Linux: `zenity --entry`, each string an `--opt=value` argument (never a
-//!   separate argument that could read as an option), escaped for the two
-//!   transformations zenity applies to `--text` (backslash escapes, then a
-//!   mnemonic `_`).
+//!   (after `--`, so one starting with `-` is not an option). (Alert and
+//!   confirm: rfd.)
+//! - Linux, every dialog: the first provider this session has, in the same
+//!   order for all three (`mod linux`): `kdialog` (Plasma's own dialogs),
+//!   `zenity` (GNOME's), then an in-process GTK dialog on a GTK thread of
+//!   its own (`gtk_thread`; the main path where neither tool is installed,
+//!   as on Fedora). xdg-desktop-portal has no text-input portal, so there
+//!   is no portal step. The tools run directly (never through a shell),
+//!   each string an `--opt=value` argument or after `--`, never a separate
+//!   argument that could read as an option. A tool that finds no display
+//!   is not a cancel: the next provider runs. With none of them (no
+//!   display, or neither tool nor a GTK display), the result is
+//!   [`DialogOutcome::Unsupported`]: nothing was shown, which is not a
+//!   cancel.
 //!
-//! Returns `(confirmed, text)`; `text` is `Some` when confirmed.
+//! Returns a [`DialogOutcome`].
+
+/// What a dialog came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogOutcome {
+  /// OK; a prompt's text.
+  Confirmed(Option<String>),
+  /// The user dismissed it.
+  Cancelled,
+  /// No way to show it here; nothing was shown.
+  Unsupported,
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn show_prompt_dialog(
   title: &str,
   message: &str,
   default_value: &str,
-) -> (bool, Option<String>) {
+) -> DialogOutcome {
   match std::process::Command::new("osascript")
     .args(osascript_prompt_args(title, message, default_value))
     .output()
   {
     Ok(output) if output.status.success() => {
       let text = String::from_utf8_lossy(&output.stdout);
-      (true, Some(strip_one_newline(&text).to_string()))
+      DialogOutcome::Confirmed(Some(strip_one_newline(&text).to_string()))
     }
-    _ => (false, None),
+    _ => DialogOutcome::Cancelled,
   }
 }
 
@@ -68,41 +90,390 @@ fn strip_one_newline(s: &str) -> &str {
   s.strip_suffix('\n').unwrap_or(s)
 }
 
+/// Which dialog (`LAUFEY_DIALOG_ALERT` / `_CONFIRM` / `_PROMPT`).
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+  Alert,
+  Confirm,
+  Prompt,
+}
+
 #[cfg(target_os = "linux")]
-pub(crate) fn show_prompt_dialog(
-  title: &str,
-  message: &str,
-  default_value: &str,
-) -> (bool, Option<String>) {
-  match std::process::Command::new("zenity")
-    .args(zenity_prompt_args(title, message, default_value))
-    .output()
-  {
-    Ok(output) if output.status.success() => {
-      let text = String::from_utf8_lossy(&output.stdout);
-      (true, Some(strip_one_newline(&text).to_string()))
+pub(crate) use linux::show_dialog;
+
+#[cfg(any(target_os = "linux", test))]
+mod linux {
+  use super::{strip_one_newline, DialogOutcome, Kind};
+
+  /// An external dialog tool.
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  pub(super) enum Tool {
+    Kdialog,
+    Zenity,
+  }
+
+  impl Tool {
+    pub(super) fn program(self) -> &'static str {
+      match self {
+        Tool::Kdialog => "kdialog",
+        Tool::Zenity => "zenity",
+      }
     }
-    _ => (false, None),
+
+    pub(super) fn args(
+      self,
+      kind: Kind,
+      title: &str,
+      message: &str,
+      default_value: &str,
+    ) -> Vec<String> {
+      match self {
+        Tool::Kdialog => kdialog_args(kind, title, message, default_value),
+        Tool::Zenity => zenity_args(kind, title, message, default_value),
+      }
+    }
+  }
+
+  /// The order the tools are tried in (the same for every dialog).
+  pub(super) const TOOLS: [Tool; 2] = [Tool::Kdialog, Tool::Zenity];
+
+  /// What running a tool came to.
+  #[derive(Debug, Clone, PartialEq, Eq)]
+  pub(super) enum Run {
+    /// It isn't installed (or couldn't start): try the next provider.
+    Missing,
+    /// It ran: its exit code (None when a signal ended it), stdout, stderr.
+    Exited(Option<i32>, String, String),
+  }
+
+  /// The tool could not show anything: it found no display. zenity 4.x
+  /// exits 1 (the cancel code) with "Gtk-WARNING: Failed to open display"
+  /// (zenity 3.x: "cannot open display"); Qt tools (kdialog) print "could
+  /// not connect to display" and abort.
+  pub(super) fn display_failure(stderr: &str) -> bool {
+    let e = stderr.to_ascii_lowercase();
+    e.contains("open display")
+      || e.contains("connect to display")
+      || e.contains("unable to init server")
+  }
+
+  /// What a tool's exit means, or `None` when it showed nothing (try the
+  /// next provider). Exit 0 is OK; 1 is the user dismissing it (for an
+  /// alert that is still "seen"), unless the tool says it found no display;
+  /// anything else (a crash, a signal, an unknown option) is not an answer.
+  pub(super) fn outcome(kind: Kind, run: Run) -> Option<DialogOutcome> {
+    let Run::Exited(code, stdout, stderr) = run else {
+      return None;
+    };
+    match code {
+      Some(0) => Some(DialogOutcome::Confirmed(
+        (kind == Kind::Prompt).then(|| strip_one_newline(&stdout).to_string()),
+      )),
+      Some(1) if display_failure(&stderr) => None,
+      Some(1) if kind == Kind::Alert => Some(DialogOutcome::Confirmed(None)),
+      Some(1) => Some(DialogOutcome::Cancelled),
+      _ => None,
+    }
+  }
+
+  /// Try each tool, then the in-process GTK dialog. `run` starts a tool
+  /// (argv, never a shell); `in_process` shows the GTK dialog, or `None`
+  /// when GTK has no display. With no display at all nothing is tried.
+  pub(super) fn dialog_with(
+    kind: Kind,
+    title: &str,
+    message: &str,
+    default_value: &str,
+    have_display: bool,
+    run: impl Fn(Tool, &[String]) -> Run,
+    in_process: impl FnOnce() -> Option<DialogOutcome>,
+  ) -> DialogOutcome {
+    if !have_display {
+      return DialogOutcome::Unsupported;
+    }
+    for tool in TOOLS {
+      let args = tool.args(kind, title, message, default_value);
+      if let Some(outcome) = outcome(kind, run(tool, &args)) {
+        return outcome;
+      }
+    }
+    in_process().unwrap_or(DialogOutcome::Unsupported)
+  }
+
+  /// Page text for a kdialog label, shown as plain text. kdialog first
+  /// unescapes `\\` and `\n` (Utils::parseString), then Qt shows the label
+  /// as rich text when it looks like HTML (Qt::AutoText): so the text is
+  /// HTML-escaped inside `<qt>`, newlines kept by `white-space:pre-wrap`,
+  /// and every backslash doubled. `mnemonic`: the label has a buddy (the
+  /// input box's), so Qt strips each `&` from the document as a mnemonic
+  /// marker, and a literal one is written `&&`.
+  pub(super) fn kdialog_text(text: &str, mnemonic: bool) -> String {
+    let mut html = String::new();
+    for c in text.chars() {
+      match c {
+        '&' if mnemonic => html.push_str("&amp;&amp;"),
+        '&' => html.push_str("&amp;"),
+        '<' => html.push_str("&lt;"),
+        '>' => html.push_str("&gt;"),
+        '"' => html.push_str("&quot;"),
+        '\n' => html.push_str("<br>"),
+        c => html.push(c),
+      }
+    }
+    format!("<qt><p style=\"white-space:pre-wrap\">{html}</p></qt>")
+      .replace('\\', "\\\\")
+  }
+
+  /// kdialog arguments. Every string is in the same argument as its
+  /// option (`--opt=value`) or after `--`, so none can read as an option.
+  pub(super) fn kdialog_args(
+    kind: Kind,
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> Vec<String> {
+    let mut args = vec![format!("--title={title}")];
+    match kind {
+      Kind::Alert => {
+        args.push(format!("--msgbox={}", kdialog_text(message, false)))
+      }
+      Kind::Confirm => args.extend([
+        format!("--yesno={}", kdialog_text(message, false)),
+        "--yes-label=OK".to_string(),
+        "--no-label=Cancel".to_string(),
+      ]),
+      Kind::Prompt => args.extend([
+        format!("--inputbox={}", kdialog_text(message, true)),
+        "--".to_string(),
+        default_value.to_string(),
+      ]),
+    }
+    args
+  }
+
+  /// zenity arguments (checked against zenity 4.2's source: msg.c,
+  /// entry.c). An alert or confirm takes `--no-markup`, so `--text` is
+  /// shown with gtk_label_set_text, as given. The entry dialog has no
+  /// `--no-markup`: it shows `--text` with
+  /// `gtk_label_set_text_with_mnemonic(g_strcompress(text))`, so a literal
+  /// backslash is written `\\` and a literal underscore `__`. Titles and
+  /// the entry text are shown as given.
+  pub(super) fn zenity_args(
+    kind: Kind,
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> Vec<String> {
+    let title = format!("--title={title}");
+    match kind {
+      Kind::Alert => vec![
+        "--info".to_string(),
+        title,
+        "--no-markup".to_string(),
+        format!("--text={message}"),
+      ],
+      Kind::Confirm => vec![
+        "--question".to_string(),
+        title,
+        "--no-markup".to_string(),
+        format!("--text={message}"),
+        "--ok-label=OK".to_string(),
+        "--cancel-label=Cancel".to_string(),
+      ],
+      Kind::Prompt => {
+        let text = message.replace('\\', "\\\\").replace('_', "__");
+        vec![
+          "--entry".to_string(),
+          title,
+          format!("--text={text}"),
+          format!("--entry-text={default_value}"),
+        ]
+      }
+    }
+  }
+
+  /// The dialog, from the first provider this session has.
+  #[cfg(target_os = "linux")]
+  pub(crate) fn show_dialog(
+    kind: Kind,
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> DialogOutcome {
+    let have_display = std::env::var_os("WAYLAND_DISPLAY")
+      .is_some_and(|v| !v.is_empty())
+      || std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+    let (title_s, message_s, default_s) = (
+      title.to_string(),
+      message.to_string(),
+      default_value.to_string(),
+    );
+    dialog_with(
+      kind,
+      title,
+      message,
+      default_value,
+      have_display,
+      |tool, args| match std::process::Command::new(tool.program())
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+      {
+        Ok(output) => Run::Exited(
+          output.status.code(),
+          String::from_utf8_lossy(&output.stdout).into_owned(),
+          String::from_utf8_lossy(&output.stderr).into_owned(),
+        ),
+        Err(_) => Run::Missing,
+      },
+      move || {
+        super::gtk_thread::run(move |gtk_ok| {
+          gtk_ok
+            .then(|| super::gtk_dialog(kind, &title_s, &message_s, &default_s))
+        })
+        .flatten()
+      },
+    )
   }
 }
 
-/// `zenity --entry` arguments. zenity shows `--text` with
-/// `gtk_label_set_text_with_mnemonic(g_strcompress(text))`, so a literal
-/// backslash is written `\\` and a literal underscore `__`; the title and the
-/// entry text are shown as given.
+/// The in-process GTK dialogs run on one thread of their own, started on
+/// first use: GTK may only ever be used from the thread that initialized it,
+/// and `show_dialog` is called from whichever thread the runtime calls on.
+/// A job that panics is caught there; the caller gets `None`.
 #[cfg(any(target_os = "linux", test))]
-fn zenity_prompt_args(
+pub(crate) mod gtk_thread {
+  use std::panic::{catch_unwind, AssertUnwindSafe};
+  use std::sync::mpsc;
+  use std::sync::Mutex;
+
+  type Job = Box<dyn FnOnce(bool) + Send>;
+
+  fn sender() -> &'static Mutex<Option<mpsc::Sender<Job>>> {
+    static SENDER: Mutex<Option<mpsc::Sender<Job>>> = Mutex::new(None);
+    &SENDER
+  }
+
+  /// Whether GTK starts on the dialog thread: not when it can't open a
+  /// display, nor when something else in the process already initialized it
+  /// on another thread (gtk-rs would panic).
+  #[cfg(target_os = "linux")]
+  fn init_gtk() -> bool {
+    catch_unwind(|| !gtk::is_initialized() && gtk::init().is_ok())
+      .unwrap_or(false)
+  }
+
+  #[cfg(not(target_os = "linux"))]
+  fn init_gtk() -> bool {
+    false
+  }
+
+  /// Run `job` on the GTK thread (its argument: GTK is usable there) and
+  /// wait for its result. `None` when the job panicked or the thread is
+  /// gone.
+  pub(crate) fn run<R: Send + 'static>(
+    job: impl FnOnce(bool) -> R + Send + 'static,
+  ) -> Option<R> {
+    let (tx, rx) = mpsc::channel();
+    let job: Job = Box::new(move |gtk_ok| {
+      let _ = tx.send(job(gtk_ok));
+    });
+    {
+      let mut guard = sender().lock().unwrap_or_else(|e| e.into_inner());
+      let sender = guard.get_or_insert_with(|| {
+        let (tx, rx) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+          .name("laufey-gtk-dialogs".into())
+          .spawn(move || {
+            let gtk_ok = init_gtk();
+            for job in rx {
+              // A panicking job drops its result sender: the caller sees
+              // None, and the thread serves the next one.
+              let _ = catch_unwind(AssertUnwindSafe(|| job(gtk_ok)));
+            }
+          })
+          .expect("spawn the GTK dialog thread");
+        tx
+      });
+      sender.send(job).ok()?;
+    }
+    rx.recv().ok()
+  }
+}
+
+/// Test hook: answer the next in-process GTK dialog by itself once it is up
+/// (`(OK?, text for a prompt's entry)`), so the GTK path runs end to end
+/// under Xvfb.
+#[cfg(all(target_os = "linux", test))]
+pub(crate) static GTK_AUTO_ANSWER: std::sync::Mutex<
+  Option<(bool, Option<String>)>,
+> = std::sync::Mutex::new(None);
+
+/// The in-process GTK dialog: a message dialog (with an entry for a
+/// prompt), its text as plain text. Runs on the GTK thread.
+#[cfg(target_os = "linux")]
+fn gtk_dialog(
+  kind: Kind,
   title: &str,
   message: &str,
   default_value: &str,
-) -> Vec<String> {
-  let text = message.replace('\\', "\\\\").replace('_', "__");
-  vec![
-    "--entry".to_string(),
-    format!("--title={title}"),
-    format!("--text={text}"),
-    format!("--entry-text={default_value}"),
-  ]
+) -> DialogOutcome {
+  use gtk::prelude::*;
+  let (message_type, buttons) = match kind {
+    Kind::Alert => (gtk::MessageType::Info, gtk::ButtonsType::Ok),
+    Kind::Confirm => (gtk::MessageType::Question, gtk::ButtonsType::OkCancel),
+    Kind::Prompt => (gtk::MessageType::Question, gtk::ButtonsType::OkCancel),
+  };
+  // The "text" property: plain text (use-markup stays false).
+  let dialog = gtk::MessageDialog::new(
+    None::<&gtk::Window>,
+    gtk::DialogFlags::MODAL,
+    message_type,
+    buttons,
+    message,
+  );
+  dialog.set_title(title);
+  dialog.set_default_response(gtk::ResponseType::Ok);
+  dialog.set_keep_above(true);
+  let entry = (kind == Kind::Prompt).then(|| {
+    let entry = gtk::Entry::new();
+    entry.set_text(default_value);
+    entry.set_activates_default(true);
+    dialog.content_area().add(&entry);
+    entry.show();
+    entry
+  });
+  #[cfg(test)]
+  if let Some((ok, text)) = GTK_AUTO_ANSWER.lock().unwrap().take() {
+    let (d, e) = (dialog.clone(), entry.clone());
+    gtk::glib::timeout_add_local_once(
+      std::time::Duration::from_millis(100),
+      move || {
+        if let (Some(e), Some(text)) = (e, text) {
+          e.set_text(&text);
+        }
+        d.response(if ok {
+          gtk::ResponseType::Ok
+        } else {
+          gtk::ResponseType::Cancel
+        });
+      },
+    );
+  }
+  let response = dialog.run();
+  let text = entry.map(|e| e.text().to_string());
+  // SAFETY: the dialog is ours and no reference to it outlives this call.
+  unsafe { dialog.destroy() };
+  while gtk::events_pending() {
+    gtk::main_iteration();
+  }
+  match (kind, response == gtk::ResponseType::Ok) {
+    // An alert closed any way was seen.
+    (Kind::Alert, _) => DialogOutcome::Confirmed(None),
+    (_, true) => DialogOutcome::Confirmed(text),
+    (_, false) => DialogOutcome::Cancelled,
+  }
 }
 
 #[cfg(not(any(
@@ -114,8 +485,8 @@ pub(crate) fn show_prompt_dialog(
   _title: &str,
   _message: &str,
   default_value: &str,
-) -> (bool, Option<String>) {
-  (true, Some(default_value.to_string()))
+) -> DialogOutcome {
+  DialogOutcome::Confirmed(Some(default_value.to_string()))
 }
 
 #[cfg(target_os = "windows")]
@@ -460,7 +831,7 @@ mod win {
     title: &str,
     message: &str,
     default_value: &str,
-  ) -> (bool, Option<String>) {
+  ) -> super::DialogOutcome {
     let template = Template {
       style: WS_POPUP
         | WS_CAPTION
@@ -496,19 +867,22 @@ mod win {
       )
     };
     if result == IDOK as isize {
-      (true, Some(state.result.take().unwrap_or_default()))
+      super::DialogOutcome::Confirmed(Some(
+        state.result.take().unwrap_or_default(),
+      ))
     } else {
-      (false, None)
+      super::DialogOutcome::Cancelled
     }
   }
 }
 
 #[cfg(test)]
 mod tests {
+  use super::linux::{Run, Tool};
   use super::*;
 
   const HOSTILE: &str =
-    "'; calc; ' $(touch /tmp/x) `id` \"q\" \\n \\\\ _a_ &b\nline2 \u{2019}; \u{1F600}";
+    "'; calc; ' $(touch /tmp/x) `id` \"q\" \\n \\\\ _a_ &b <b>x</b> &amp;\nline2 \u{2019}; \u{1F600}";
 
   #[test]
   fn osascript_strings_are_argv_not_script() {
@@ -523,8 +897,8 @@ mod tests {
   }
 
   #[test]
-  fn zenity_strings_are_option_values() {
-    let args = zenity_prompt_args("--help", HOSTILE, "--x");
+  fn zenity_strings_are_option_values_and_plain_text() {
+    let args = linux::zenity_args(Kind::Prompt, "--help", HOSTILE, "--x");
     assert_eq!(args.len(), 4);
     assert_eq!(args[0], "--entry");
     assert_eq!(args[1], "--title=--help");
@@ -532,6 +906,291 @@ mod tests {
     // Escaped so g_strcompress + the mnemonic parse give the text back.
     let text = args[2].strip_prefix("--text=").unwrap();
     assert_eq!(unmnemonic(&strcompress(text)), HOSTILE);
+    // Alert and confirm: --no-markup, so the text is shown as given (no
+    // g_strcompress, no Pango markup).
+    for (kind, first) in
+      [(Kind::Alert, "--info"), (Kind::Confirm, "--question")]
+    {
+      let args = linux::zenity_args(kind, "--help", HOSTILE, "");
+      assert_eq!(args[0], first);
+      assert_eq!(args[1], "--title=--help");
+      assert!(args.contains(&"--no-markup".to_string()));
+      assert!(args.contains(&format!("--text={HOSTILE}")));
+    }
+    let confirm = linux::zenity_args(Kind::Confirm, "T", "M", "");
+    assert!(confirm.contains(&"--ok-label=OK".to_string()));
+    assert!(confirm.contains(&"--cancel-label=Cancel".to_string()));
+  }
+
+  #[test]
+  fn kdialog_strings_are_option_values_or_after_dashdash() {
+    let args = linux::kdialog_args(Kind::Prompt, "--help", HOSTILE, "--x");
+    assert_eq!(args.len(), 4);
+    assert_eq!(args[0], "--title=--help");
+    assert!(args[1].starts_with("--inputbox=<qt>"));
+    assert_eq!(&args[2..], &["--".to_string(), "--x".to_string()]);
+    let alert = linux::kdialog_args(Kind::Alert, "T", HOSTILE, "");
+    assert_eq!(alert[0], "--title=T");
+    assert!(alert[1].starts_with("--msgbox=<qt>"));
+    assert_eq!(alert.len(), 2);
+    let confirm = linux::kdialog_args(Kind::Confirm, "T", HOSTILE, "");
+    assert!(confirm[1].starts_with("--yesno=<qt>"));
+    assert_eq!(&confirm[2..], &["--yes-label=OK", "--no-label=Cancel"]);
+  }
+
+  #[test]
+  fn kdialog_text_is_plain() {
+    // What kdialog and Qt do with it: Utils::parseString, then the rich
+    // text document, then (input box only) the mnemonic strip.
+    for mnemonic in [false, true] {
+      let text = linux::kdialog_text(HOSTILE, mnemonic);
+      assert!(text.starts_with("<qt>"));
+      let mut shown = html_text(&parse_string(&text));
+      if mnemonic {
+        shown = strip_mnemonics(&shown);
+      }
+      assert_eq!(shown, HOSTILE, "mnemonic: {mnemonic}");
+    }
+  }
+
+  /// Runs `dialog_with` over scripted tool results, recording the tools
+  /// tried.
+  fn scripted(
+    kind: Kind,
+    have_display: bool,
+    kdialog: Run,
+    zenity: Run,
+    in_process: Option<DialogOutcome>,
+  ) -> (DialogOutcome, Vec<&'static str>, bool) {
+    let tried = std::cell::RefCell::new(Vec::new());
+    let gtk_ran = std::cell::Cell::new(false);
+    let outcome = linux::dialog_with(
+      kind,
+      "T",
+      "M",
+      "D",
+      have_display,
+      |tool, args| {
+        tried.borrow_mut().push(tool.program());
+        // Never a shell: the program is the tool itself, the strings argv.
+        assert!(!args.iter().any(|a| a == "-c"));
+        match tool {
+          Tool::Kdialog => kdialog.clone(),
+          Tool::Zenity => zenity.clone(),
+        }
+      },
+      || {
+        gtk_ran.set(true);
+        in_process
+      },
+    );
+    (outcome, tried.into_inner(), gtk_ran.get())
+  }
+
+  fn ok(out: &str) -> Run {
+    Run::Exited(Some(0), out.into(), String::new())
+  }
+  fn code(c: i32, err: &str) -> Run {
+    Run::Exited(Some(c), String::new(), err.into())
+  }
+
+  #[test]
+  fn linux_providers_in_order() {
+    use Run::Missing;
+    // kdialog first (Plasma); its answer is final, OK or cancel.
+    let (o, tried, gtk) =
+      scripted(Kind::Prompt, true, ok("typed\n"), Missing, None);
+    assert_eq!(o, DialogOutcome::Confirmed(Some("typed".into())));
+    assert_eq!(tried, ["kdialog"]);
+    assert!(!gtk);
+    let (o, tried, _) =
+      scripted(Kind::Prompt, true, code(1, ""), Missing, None);
+    assert_eq!(o, DialogOutcome::Cancelled);
+    assert_eq!(tried, ["kdialog"]);
+    // No kdialog (stock GNOME): zenity.
+    let (o, tried, _) = scripted(Kind::Prompt, true, Missing, ok("z\n"), None);
+    assert_eq!(o, DialogOutcome::Confirmed(Some("z".into())));
+    assert_eq!(tried, ["kdialog", "zenity"]);
+    // A tool that failed (crashed, couldn't open the display) is not a
+    // cancel: the next provider runs.
+    let (o, tried, gtk) = scripted(
+      Kind::Prompt,
+      true,
+      Run::Exited(None, String::new(), String::new()),
+      code(255, ""),
+      Some(DialogOutcome::Confirmed(Some("g".into()))),
+    );
+    assert_eq!(o, DialogOutcome::Confirmed(Some("g".into())));
+    assert_eq!(tried, ["kdialog", "zenity"]);
+    assert!(gtk);
+    // Neither tool (Fedora, stock Kubuntu's missing zenity): the in-process
+    // dialog.
+    let (o, _, gtk) = scripted(
+      Kind::Prompt,
+      true,
+      Missing,
+      Missing,
+      Some(DialogOutcome::Cancelled),
+    );
+    assert_eq!(o, DialogOutcome::Cancelled);
+    assert!(gtk);
+    // Nothing can show it: unsupported, never a fake cancel.
+    let (o, _, _) = scripted(Kind::Prompt, true, Missing, Missing, None);
+    assert_eq!(o, DialogOutcome::Unsupported);
+    let (o, tried, gtk) = scripted(
+      Kind::Prompt,
+      false,
+      ok("x"),
+      Missing,
+      Some(DialogOutcome::Cancelled),
+    );
+    assert_eq!(o, DialogOutcome::Unsupported);
+    assert!(tried.is_empty());
+    assert!(!gtk);
+  }
+
+  #[test]
+  fn alert_and_confirm_use_the_same_providers() {
+    use Run::Missing;
+    for kind in [Kind::Alert, Kind::Confirm] {
+      // kdialog, then zenity, then GTK: not a zenity-only path.
+      let (o, tried, _) = scripted(kind, true, ok(""), Missing, None);
+      assert_eq!(o, DialogOutcome::Confirmed(None));
+      assert_eq!(tried, ["kdialog"]);
+      let (_, tried, gtk) = scripted(
+        kind,
+        true,
+        Missing,
+        Missing,
+        Some(DialogOutcome::Confirmed(None)),
+      );
+      assert_eq!(tried, ["kdialog", "zenity"]);
+      assert!(gtk);
+      let (o, _, _) = scripted(kind, true, Missing, Missing, None);
+      assert_eq!(o, DialogOutcome::Unsupported);
+      let (o, _, _) = scripted(kind, false, ok(""), Missing, None);
+      assert_eq!(o, DialogOutcome::Unsupported);
+    }
+    // Dismissing an alert is still having seen it; a confirm's dismissal
+    // is a cancel.
+    let (o, _, _) = scripted(Kind::Alert, true, code(1, ""), Missing, None);
+    assert_eq!(o, DialogOutcome::Confirmed(None));
+    let (o, _, _) = scripted(Kind::Confirm, true, Missing, code(1, ""), None);
+    assert_eq!(o, DialogOutcome::Cancelled);
+  }
+
+  #[test]
+  fn a_tool_with_no_display_is_not_a_cancel() {
+    // zenity 4.2 with no display (checked on Ubuntu 26.04): exit 1, the
+    // cancel code, with this on stderr.
+    let zenity4 = "\n(zenity:14211): Gtk-WARNING **: 14:26:18.363: Failed to \
+                   open display\n";
+    assert!(linux::display_failure(zenity4));
+    assert!(linux::display_failure("zenity: cannot open display: :0"));
+    assert!(linux::display_failure(
+      "qt.qpa.xcb: could not connect to display "
+    ));
+    assert!(!linux::display_failure("Gtk-Message: GtkDialog mapped without a transient parent. This is discouraged."));
+    for kind in [Kind::Alert, Kind::Confirm, Kind::Prompt] {
+      let (o, tried, gtk) = scripted(
+        kind,
+        true,
+        Run::Missing,
+        code(1, zenity4),
+        Some(DialogOutcome::Confirmed(None)),
+      );
+      assert_eq!(o, DialogOutcome::Confirmed(None), "{kind:?}");
+      assert_eq!(tried, ["kdialog", "zenity"]);
+      assert!(gtk);
+    }
+    // A plain cancel still is one (warnings on stderr are common).
+    let (o, _, gtk) = scripted(
+      Kind::Prompt,
+      true,
+      Run::Missing,
+      code(
+        1,
+        "Gtk-Message: GtkDialog mapped without a transient parent",
+      ),
+      Some(DialogOutcome::Confirmed(None)),
+    );
+    assert_eq!(o, DialogOutcome::Cancelled);
+    assert!(!gtk);
+  }
+
+  #[test]
+  fn gtk_jobs_run_on_one_thread() {
+    // Whatever thread asks, GTK is only ever used from the dialog thread.
+    let here = std::thread::current().id();
+    let a = gtk_thread::run(|_| std::thread::current().id()).unwrap();
+    let b = std::thread::spawn(|| {
+      gtk_thread::run(|_| std::thread::current().id()).unwrap()
+    })
+    .join()
+    .unwrap();
+    assert_eq!(a, b);
+    assert_ne!(a, here);
+    // A job that panics is caught there (it never reaches an extern "C"
+    // caller), and the thread serves the next one.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let panicked = gtk_thread::run(|_| -> u32 { panic!("in a dialog") });
+    std::panic::set_hook(prev);
+    assert_eq!(panicked, None);
+    assert_eq!(gtk_thread::run(|_| 7), Some(7));
+  }
+
+  /// The real GTK dialogs, end to end (Linux with a display: CI runs this
+  /// under xvfb-run). Each is answered by GTK_AUTO_ANSWER once it is up,
+  /// from threads other than the GTK one, and GTK is never initialized on
+  /// the asking thread.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn gtk_dialogs_end_to_end() {
+    let display = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
+      || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    let gtk_ok = gtk_thread::run(|ok| ok).unwrap();
+    if !display || !gtk_ok {
+      eprintln!("gtk_dialogs_end_to_end: no display GTK can open, skipped");
+      return;
+    }
+    let ask = |kind, ok: bool, text: Option<&str>| {
+      *GTK_AUTO_ANSWER.lock().unwrap() = Some((ok, text.map(str::to_string)));
+      let (k, t) = (kind, HOSTILE.to_string());
+      std::thread::spawn(move || {
+        gtk_thread::run(move |ok| ok.then(|| gtk_dialog(k, &t, &t, "def")))
+          .flatten()
+      })
+      .join()
+      .unwrap()
+    };
+    assert_eq!(
+      ask(Kind::Prompt, true, Some("typed")),
+      Some(DialogOutcome::Confirmed(Some("typed".into())))
+    );
+    // OK with the default text untouched.
+    assert_eq!(
+      ask(Kind::Prompt, true, None),
+      Some(DialogOutcome::Confirmed(Some("def".into())))
+    );
+    assert_eq!(
+      ask(Kind::Prompt, false, None),
+      Some(DialogOutcome::Cancelled)
+    );
+    assert_eq!(
+      ask(Kind::Confirm, true, None),
+      Some(DialogOutcome::Confirmed(None))
+    );
+    assert_eq!(
+      ask(Kind::Confirm, false, None),
+      Some(DialogOutcome::Cancelled)
+    );
+    assert_eq!(
+      ask(Kind::Alert, false, None),
+      Some(DialogOutcome::Confirmed(None))
+    );
+    // The asking thread never initialized GTK.
+    assert!(!gtk::is_initialized_main_thread());
   }
 
   #[test]
@@ -540,8 +1199,8 @@ mod tests {
     assert_eq!(strip_one_newline("a"), "a");
   }
 
-  /// g_strcompress for the escapes `zenity_prompt_args` can produce (`\\`)
-  /// and the ones a message could contain (`\n`).
+  /// g_strcompress for the escapes `zenity_args` can produce (`\\`) and the
+  /// ones a message could contain (`\n`).
   fn strcompress(s: &str) -> String {
     let mut out = String::new();
     let mut it = s.chars();
@@ -569,6 +1228,62 @@ mod tests {
         if it.peek() == Some(&'_') {
           it.next();
           out.push('_');
+        }
+        continue;
+      }
+      out.push(c);
+    }
+    out
+  }
+
+  /// kdialog's Utils::parseString: `\\` is `\`, `\n` a newline.
+  fn parse_string(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+      if c != '\\' {
+        out.push(c);
+        continue;
+      }
+      match it.next() {
+        Some('\\') => out.push('\\'),
+        Some('n') => out.push('\n'),
+        Some(other) => {
+          out.push('\\');
+          out.push(other);
+        }
+        None => {}
+      }
+    }
+    out
+  }
+
+  /// The text of the `<qt><p style=...>…</p></qt>` document `kdialog_text`
+  /// builds: entities decoded, `<br>` a newline.
+  fn html_text(s: &str) -> String {
+    let body = s
+      .strip_prefix("<qt><p style=\"white-space:pre-wrap\">")
+      .and_then(|b| b.strip_suffix("</p></qt>"))
+      .expect("the kdialog wrapper");
+    // No raw tag may be left in the body but <br>.
+    let body = body.replace("<br>", "\n");
+    assert!(!body.contains('<') && !body.contains('>'));
+    body
+      .replace("&lt;", "<")
+      .replace("&gt;", ">")
+      .replace("&quot;", "\"")
+      .replace("&amp;", "&")
+  }
+
+  /// QLabel with a buddy: each `&` is removed, `&&` keeps one.
+  fn strip_mnemonics(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+      if c == '&' {
+        if let Some(&next) = it.peek() {
+          it.next();
+          out.push(next);
         }
         continue;
       }
