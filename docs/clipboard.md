@@ -92,9 +92,19 @@ while it is in the background or the session is locked. So, on Wayland:
   private Wayland connection: focused or not, both backends.
 - GNOME's mutter has no data-control. Its Xwayland selection bridge copies the
   clipboard between X11 and Wayland in both directions whatever has focus, so
-  there GTK uses the clipboard of an X11 display (Xwayland, started on demand)
-  instead of its Wayland one. Without Xwayland it falls back to GTK's Wayland
-  clipboard, which works only while one of the app's windows has focus.
+  there laufey is an X11 client of Xwayland's `CLIPBOARD` selection, over a
+  private XCB connection served by a thread of its own (GTK and the process
+  environment are left alone). The connection is opened on the first clipboard
+  call, which starts Xwayland if mutter hasn't yet (the documented price: a
+  moment on that first call, off the UI thread). Reads convert `TARGETS` and
+  then the wanted target, following `INCR` for large transfers, every step with
+  a 3 s deadline; as the owner laufey answers `TARGETS`, `TIMESTAMP` and each
+  type it offers, large data through `INCR` (at most 8 transfers at once, each
+  dropped after 3 s without progress). Text goes out as `UTF8_STRING` and
+  `text/plain;charset=utf-8`, and as `STRING` only when it is Latin-1 (ICCCM),
+  converted. Change events come from XFixes. Without Xwayland it falls back to
+  GTK's Wayland clipboard, which works only while one of the app's windows has
+  focus.
 - Elsewhere (another compositor without data-control) GTK's Wayland clipboard is
   used: only while one of the app's windows has focus, and never under CEF.
 

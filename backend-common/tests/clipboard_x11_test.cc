@@ -1,0 +1,589 @@
+// Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
+//
+// The X11 CLIPBOARD client laufey uses on mutter (clipboard_x11_linux.h),
+// against a private Xvfb, with a second X client in the test (a "peer" on
+// a connection of its own) on the other end of every transfer:
+//   - we own: the peer reads TARGETS, TIMESTAMP, UTF8_STRING, STRING (offered
+//     only when the text is Latin-1, and then as Latin-1), and a PNG larger
+//     than a chunk through INCR; we read our own PNG back the same way;
+//   - the peer owns: we read its UTF-8 text, Latin-1 STRING, an HTML larger
+//     than a chunk through INCR, and the formats; change events (XFixes);
+//   - hostile peers: an owner that never answers (the read gives up after
+//     its timeout), a requestor that starts 10 INCR transfers and never
+//     takes a chunk (8 run at once, all dropped after their idle timeout,
+//     and the next read still works), a read over max_bytes.
+// The process environment is not touched by the code under test. Exits 77
+// (skipped) without Xvfb.
+
+#include <fcntl.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
+#include <glib.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <xcb/xcb.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "../src/clipboard_x11_linux.h"
+#include "laufey_backend_common.h"
+#include "laufey_io.h"
+
+using namespace laufey_common;
+
+#define EXPECT(cond)                                                         \
+  do {                                                                       \
+    if (!(cond)) {                                                           \
+      std::fprintf(stderr, "%s:%d: EXPECT(%s) failed\n", __FILE__, __LINE__, \
+                   #cond);                                                   \
+      Finish(1);                                                             \
+    }                                                                        \
+  } while (0)
+
+namespace {
+
+pid_t g_xvfb = -1;
+
+[[noreturn]] void Finish(int code) {
+  if (g_xvfb > 0)
+    kill(g_xvfb, SIGTERM);
+  std::fflush(stdout);
+  // The bridge's thread is detached; skip static teardown.
+  std::_Exit(code);
+}
+
+using Clock = std::chrono::steady_clock;
+
+double SecondsSince(Clock::time_point t) {
+  return std::chrono::duration<double>(Clock::now() - t).count();
+}
+
+template <typename F>
+bool WaitFor(F cond, int ms = 5000) {
+  for (int i = 0; i < ms / 10; i++) {
+    if (cond())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return cond();
+}
+
+std::string Take(char* s) {
+  std::string out = s ? s : "";
+  free(s);
+  return out;
+}
+
+// A noise image: its PNG is far larger than a 64 KiB chunk.
+std::string NoisePng() {
+  GdkPixbuf* pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 300, 300);
+  guchar* px = gdk_pixbuf_get_pixels(pixbuf);
+  int stride = gdk_pixbuf_get_rowstride(pixbuf);
+  uint32_t x = 2463534242u;
+  for (int y = 0; y < 300; y++) {
+    for (int i = 0; i < 300 * 3; i++) {
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      px[y * stride + i] = static_cast<guchar>(x);
+    }
+  }
+  gchar* buf = nullptr;
+  gsize len = 0;
+  EXPECT(
+      gdk_pixbuf_save_to_buffer(pixbuf, &buf, &len, "png", nullptr, nullptr));
+  std::string png(buf, len);
+  g_free(buf);
+  g_object_unref(pixbuf);
+  return png;
+}
+
+// --- The peer: a plain X client on a connection of its own ----------------
+
+class Peer {
+ public:
+  Peer() {
+    conn_ = xcb_connect(nullptr, nullptr);
+    EXPECT(conn_ && !xcb_connection_has_error(conn_));
+    xcb_screen_t* screen = xcb_setup_roots_iterator(xcb_get_setup(conn_)).data;
+    window_ = xcb_generate_id(conn_);
+    uint32_t mask = XCB_EVENT_MASK_PROPERTY_CHANGE;
+    xcb_create_window(conn_, XCB_COPY_FROM_PARENT, window_, screen->root, 0, 0,
+                      1, 1, 0, XCB_WINDOW_CLASS_INPUT_ONLY,
+                      XCB_COPY_FROM_PARENT, XCB_CW_EVENT_MASK, &mask);
+    clipboard_ = Atom("CLIPBOARD");
+    xcb_flush(conn_);
+  }
+  ~Peer() {
+    xcb_disconnect(conn_);
+  }
+
+  xcb_atom_t Atom(const std::string& name) {
+    xcb_intern_atom_reply_t* r = xcb_intern_atom_reply(
+        conn_,
+        xcb_intern_atom(conn_, 0, static_cast<uint16_t>(name.size()),
+                        name.c_str()),
+        nullptr);
+    EXPECT(r);
+    xcb_atom_t a = r->atom;
+    free(r);
+    return a;
+  }
+
+  std::string Name(xcb_atom_t a) {
+    xcb_get_atom_name_reply_t* r =
+        xcb_get_atom_name_reply(conn_, xcb_get_atom_name(conn_, a), nullptr);
+    if (!r)
+      return "";
+    std::string s(xcb_get_atom_name_name(r),
+                  static_cast<size_t>(xcb_get_atom_name_name_length(r)));
+    free(r);
+    return s;
+  }
+
+  // The next event `want` accepts, within `ms`; null on timeout.
+  xcb_generic_event_t* Wait(std::function<bool(xcb_generic_event_t*)> want,
+                            int ms = 5000) {
+    auto deadline = Clock::now() + std::chrono::milliseconds(ms);
+    while (true) {
+      while (xcb_generic_event_t* ev = xcb_poll_for_event(conn_)) {
+        if (want(ev))
+          return ev;
+        free(ev);
+      }
+      auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      deadline - Clock::now())
+                      .count();
+      if (left <= 0)
+        return nullptr;
+      pollfd p = {xcb_get_file_descriptor(conn_), POLLIN, 0};
+      poll(&p, 1, static_cast<int>(left));
+    }
+  }
+
+  std::string GetProperty(xcb_atom_t prop, xcb_atom_t* type) {
+    std::string out;
+    uint32_t offset = 0;
+    while (true) {
+      xcb_get_property_reply_t* r = xcb_get_property_reply(
+          conn_,
+          xcb_get_property(conn_, 0, window_, prop, XCB_GET_PROPERTY_TYPE_ANY,
+                           offset, 1 << 20),
+          nullptr);
+      EXPECT(r);
+      *type = r->type;
+      int len = xcb_get_property_value_length(r);
+      out.append(static_cast<const char*>(xcb_get_property_value(r)),
+                 static_cast<size_t>(len));
+      uint32_t after = r->bytes_after;
+      free(r);
+      if (after == 0 || len <= 0)
+        break;
+      offset += static_cast<uint32_t>(len) / 4;
+    }
+    return out;
+  }
+
+  // Converts CLIPBOARD to `target` (ICCCM requestor, INCR included).
+  bool Fetch(const std::string& target, std::string* data,
+             std::string* type_out, bool* incr_used = nullptr) {
+    xcb_atom_t t = Atom(target), prop = Atom("PEER_PROP");
+    xcb_delete_property(conn_, window_, prop);
+    xcb_convert_selection(conn_, window_, clipboard_, t, prop,
+                          XCB_CURRENT_TIME);
+    xcb_flush(conn_);
+    xcb_generic_event_t* ev = Wait([&](xcb_generic_event_t* e) {
+      return (e->response_type & 0x7f) == XCB_SELECTION_NOTIFY;
+    });
+    if (!ev)
+      return false;
+    auto* n = reinterpret_cast<xcb_selection_notify_event_t*>(ev);
+    bool refused = n->property == XCB_NONE;
+    free(ev);
+    if (refused)
+      return false;
+    xcb_atom_t type = XCB_NONE;
+    *data = GetProperty(prop, &type);
+    xcb_delete_property(conn_, window_, prop);
+    xcb_flush(conn_);
+    if (incr_used)
+      *incr_used = type == Atom("INCR");
+    if (type == Atom("INCR")) {
+      data->clear();
+      while (true) {
+        ev = Wait([&](xcb_generic_event_t* e) {
+          auto* p = reinterpret_cast<xcb_property_notify_event_t*>(e);
+          return (e->response_type & 0x7f) == XCB_PROPERTY_NOTIFY &&
+                 p->window == window_ && p->atom == prop &&
+                 p->state == XCB_PROPERTY_NEW_VALUE;
+        });
+        if (!ev)
+          return false;
+        free(ev);
+        std::string chunk = GetProperty(prop, &type);
+        xcb_delete_property(conn_, window_, prop);
+        xcb_flush(conn_);
+        if (chunk.empty())
+          break;
+        data->append(chunk);
+      }
+    }
+    if (type_out)
+      *type_out = Name(type);
+    return true;
+  }
+
+  std::vector<std::string> Targets() {
+    std::string data, type;
+    std::vector<std::string> out;
+    if (!Fetch("TARGETS", &data, &type) || type != "ATOM")
+      return out;
+    for (size_t i = 0; i + 4 <= data.size(); i += 4) {
+      xcb_atom_t a;
+      memcpy(&a, data.data() + i, 4);
+      out.push_back(Name(a));
+    }
+    return out;
+  }
+
+  // Starts `n` INCR conversions of `target` into separate properties and
+  // takes nothing; true when each was answered with INCR or refused.
+  int Hoard(const std::string& target, int n) {
+    int incr = 0;
+    xcb_atom_t t = Atom(target);
+    for (int i = 0; i < n; i++) {
+      xcb_atom_t prop = Atom("HOARD_" + std::to_string(i));
+      xcb_convert_selection(conn_, window_, clipboard_, t, prop,
+                            XCB_CURRENT_TIME);
+      xcb_flush(conn_);
+      xcb_generic_event_t* ev = Wait([&](xcb_generic_event_t* e) {
+        return (e->response_type & 0x7f) == XCB_SELECTION_NOTIFY;
+      });
+      EXPECT(ev);
+      auto* sn = reinterpret_cast<xcb_selection_notify_event_t*>(ev);
+      if (sn->property != XCB_NONE)
+        incr++;  // INCR announced; the property is never deleted
+      free(ev);
+    }
+    return incr;
+  }
+
+  // Owns CLIPBOARD with `entries` and serves requests on a thread of its own
+  // until destroyed; `silent` answers nothing.
+  void Own(std::map<std::string, std::string> entries, bool silent) {
+    entries_ = std::move(entries);
+    silent_ = silent;
+    for (const auto& [name, data] : entries_)
+      atoms_[Atom(name)] = name;
+    targets_ = Atom("TARGETS");
+    incr_ = Atom("INCR");
+    xcb_set_selection_owner(conn_, window_, clipboard_, XCB_CURRENT_TIME);
+    xcb_flush(conn_);
+    serving_ = true;
+    thread_ = std::thread([this] { Serve(); });
+  }
+
+  void Stop() {
+    if (!serving_)
+      return;
+    serving_ = false;
+    thread_.join();
+  }
+
+ private:
+  void Serve() {
+    while (serving_) {
+      xcb_generic_event_t* ev = Wait(
+          [](xcb_generic_event_t* e) {
+            return (e->response_type & 0x7f) == XCB_SELECTION_REQUEST;
+          },
+          100);
+      if (!ev)
+        continue;
+      auto req = *reinterpret_cast<xcb_selection_request_event_t*>(ev);
+      free(ev);
+      if (!silent_)
+        Answer(req);
+    }
+  }
+
+  void Notify(const xcb_selection_request_event_t& r, xcb_atom_t property) {
+    xcb_selection_notify_event_t n = {};
+    n.response_type = XCB_SELECTION_NOTIFY;
+    n.time = r.time;
+    n.requestor = r.requestor;
+    n.selection = r.selection;
+    n.target = r.target;
+    n.property = property;
+    xcb_send_event(conn_, 0, r.requestor, 0, reinterpret_cast<char*>(&n));
+    xcb_flush(conn_);
+  }
+
+  void Answer(const xcb_selection_request_event_t& r) {
+    if (r.target == targets_) {
+      std::vector<xcb_atom_t> list = {targets_};
+      for (const auto& [a, name] : atoms_)
+        list.push_back(a);
+      xcb_change_property(conn_, XCB_PROP_MODE_REPLACE, r.requestor, r.property,
+                          XCB_ATOM_ATOM, 32, static_cast<uint32_t>(list.size()),
+                          list.data());
+      Notify(r, r.property);
+      return;
+    }
+    auto it = atoms_.find(r.target);
+    if (it == atoms_.end()) {
+      Notify(r, XCB_NONE);
+      return;
+    }
+    const std::string& data = entries_[it->second];
+    constexpr size_t kPeerChunk = 32 * 1024;
+    if (data.size() <= kPeerChunk) {
+      xcb_change_property(conn_, XCB_PROP_MODE_REPLACE, r.requestor, r.property,
+                          r.target, 8, static_cast<uint32_t>(data.size()),
+                          data.data());
+      Notify(r, r.property);
+      return;
+    }
+    // INCR, served here to the end (the test peer handles one at a time).
+    uint32_t mask = XCB_EVENT_MASK_PROPERTY_CHANGE;
+    xcb_change_window_attributes(conn_, r.requestor, XCB_CW_EVENT_MASK, &mask);
+    uint32_t size = static_cast<uint32_t>(data.size());
+    xcb_change_property(conn_, XCB_PROP_MODE_REPLACE, r.requestor, r.property,
+                        incr_, 32, 1, &size);
+    Notify(r, r.property);
+    size_t off = 0;
+    while (true) {
+      xcb_generic_event_t* ev = Wait([&](xcb_generic_event_t* e) {
+        auto* p = reinterpret_cast<xcb_property_notify_event_t*>(e);
+        return (e->response_type & 0x7f) == XCB_PROPERTY_NOTIFY &&
+               p->window == r.requestor && p->atom == r.property &&
+               p->state == XCB_PROPERTY_DELETE;
+      });
+      if (!ev)
+        return;
+      free(ev);
+      size_t n = std::min(kPeerChunk, data.size() - off);
+      xcb_change_property(conn_, XCB_PROP_MODE_REPLACE, r.requestor, r.property,
+                          r.target, 8, static_cast<uint32_t>(n),
+                          data.data() + off);
+      xcb_flush(conn_);
+      off += n;
+      if (n == 0)
+        return;
+    }
+  }
+
+  xcb_connection_t* conn_ = nullptr;
+  xcb_window_t window_ = 0;
+  xcb_atom_t clipboard_ = 0, targets_ = 0, incr_ = 0;
+  std::map<std::string, std::string> entries_;
+  std::map<xcb_atom_t, std::string> atoms_;
+  bool silent_ = false;
+  std::atomic<bool> serving_{false};
+  std::thread thread_;
+};
+
+bool Has(const std::vector<std::string>& v, const std::string& s) {
+  for (const auto& x : v) {
+    if (x == s)
+      return true;
+  }
+  return false;
+}
+
+std::atomic<int> g_changes{0};
+void OnChange(void*) {
+  g_changes++;
+}
+
+// Starts a private Xvfb and points DISPLAY at it; its pid, or -1.
+pid_t StartXvfb() {
+  gchar* xvfb = g_find_program_in_path("Xvfb");
+  if (!xvfb)
+    return -1;
+  int fds[2];
+  EXPECT(pipe(fds) == 0);
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(fds[0]);
+    int null = open("/dev/null", O_RDWR);
+    dup2(null, STDIN_FILENO);
+    dup2(null, STDOUT_FILENO);
+    dup2(null, STDERR_FILENO);
+    std::string fd = std::to_string(fds[1]);
+    execl(xvfb, xvfb, "-displayfd", fd.c_str(), "-nolisten", "tcp", "-screen",
+          "0", "640x480x24", static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  g_free(xvfb);
+  close(fds[1]);
+  pollfd p = {fds[0], POLLIN, 0};
+  char buf[32] = {};
+  if (poll(&p, 1, 10000) != 1 || read(fds[0], buf, sizeof(buf) - 1) <= 0) {
+    kill(pid, SIGKILL);
+    return -1;
+  }
+  close(fds[0]);
+  std::string display = std::string(":") + strtok(buf, "\n");
+  setenv("DISPLAY", display.c_str(), 1);
+  return pid;
+}
+
+}  // namespace
+
+int main() {
+  g_xvfb = StartXvfb();
+  if (g_xvfb < 0) {
+    std::printf("laufey_clipboard_x11_test: Xvfb missing, skipped\n");
+    return 77;
+  }
+  // No data-control: the X11 client is the clipboard.
+  unsetenv("WAYLAND_DISPLAY");
+  x11_clipboard::EnableForTesting();
+  // Change events are delivered "on the GTK thread"; here, inline.
+  SetGtkThread([](std::function<void()> fn) { fn(); }, [] { return true; });
+  auto start = Clock::now();
+  EXPECT(x11_clipboard::Available());
+  std::printf("connected in %.2f s\n", SecondsSince(start));
+  Peer peer;
+
+  // --- We own -------------------------------------------------------------
+
+  // Text outside Latin-1: UTF8_STRING, no STRING.
+  ClipboardWriteTextLinux("h\xc3\xa9llo \xe2\x9c\x93");
+  std::vector<std::string> targets = peer.Targets();
+  EXPECT(Has(targets, "TARGETS") && Has(targets, "TIMESTAMP"));
+  EXPECT(Has(targets, "UTF8_STRING"));
+  EXPECT(Has(targets, "text/plain;charset=utf-8"));
+  EXPECT(!Has(targets, "STRING"));
+  EXPECT(!Has(targets, "TEXT"));
+  std::string data, type;
+  EXPECT(peer.Fetch("UTF8_STRING", &data, &type));
+  EXPECT(data == "h\xc3\xa9llo \xe2\x9c\x93" && type == "UTF8_STRING");
+  EXPECT(!peer.Fetch("STRING", &data, &type));  // refused
+  EXPECT(!peer.Fetch("MULTIPLE", &data, &type));
+  EXPECT(peer.Fetch("TIMESTAMP", &data, &type));
+  EXPECT(type == "INTEGER" && data.size() == 4);
+
+  // Latin-1 text: STRING too, as Latin-1.
+  ClipboardWriteTextLinux("caf\xc3\xa9");
+  EXPECT(Has(peer.Targets(), "STRING"));
+  EXPECT(peer.Fetch("STRING", &data, &type));
+  EXPECT(data == "caf\xe9" && type == "STRING");
+  EXPECT(peer.Fetch("UTF8_STRING", &data, &type));
+  EXPECT(data == "caf\xc3\xa9");
+  // And our own read of it.
+  EXPECT(Take(ClipboardReadTextLinux()) == "caf\xc3\xa9");
+
+  // HTML with its text alternative.
+  EXPECT(ClipboardWriteHtmlLinux("<b>bold</b>", "bold"));
+  EXPECT(peer.Fetch("text/html", &data, &type));
+  EXPECT(data == "<b>bold</b>");
+  EXPECT(Take(ClipboardReadHtmlLinux()) == "<b>bold</b>");
+  EXPECT(Take(ClipboardReadTextLinux()) == "bold");
+
+  // A PNG larger than a chunk: INCR, to the peer and to ourselves.
+  std::string png = NoisePng();
+  EXPECT(png.size() > 128 * 1024);
+  EXPECT(ClipboardWriteImageLinux(reinterpret_cast<const uint8_t*>(png.data()),
+                                  png.size()));
+  bool incr = false;
+  EXPECT(peer.Fetch("image/png", &data, &type, &incr));
+  EXPECT(incr && data == png && type == "image/png");
+  size_t len = 0;
+  uint8_t* got = ClipboardReadImageLinux(&len);
+  EXPECT(got && len == png.size() && memcmp(got, png.data(), len) == 0);
+  free(got);
+  EXPECT(Take(ClipboardReadFormatsLinux()) == "image/png");
+
+  // Over max_bytes: not delivered.
+  {
+    bool found = true;
+    EXPECT(x11_clipboard::Read({"image/png"}, 1000, &data, nullptr, &found));
+    EXPECT(!found);
+  }
+
+  // A requestor that starts 10 INCR transfers and never takes a chunk: 8 at
+  // once, the rest refused, all dropped after their idle timeout (3 s).
+  // (First, the transfer the read above abandoned ends the same way.)
+  EXPECT(WaitFor([] { return x11_clipboard::ActiveTransfers() == 0; }, 8000));
+  {
+    Peer hoarder;
+    int announced = hoarder.Hoard("image/png", 10);
+    std::printf("hoarder: %d INCR transfers announced, %d in flight\n",
+                announced, x11_clipboard::ActiveTransfers());
+    EXPECT(announced == 8);
+    EXPECT(x11_clipboard::ActiveTransfers() == 8);
+    start = Clock::now();
+    EXPECT(WaitFor([] { return x11_clipboard::ActiveTransfers() == 0; }, 8000));
+    std::printf("hoarder: transfers dropped after %.1f s\n",
+                SecondsSince(start));
+    // Still serving.
+    EXPECT(peer.Fetch("image/png", &data, &type));
+    EXPECT(data == png);
+  }
+
+  // --- The peer owns ------------------------------------------------------
+
+  SetClipboardChangeHandler(OnChange, nullptr);
+  int before = g_changes.load();
+  std::string html(300 * 1024, 'h');
+  html = "<p>" + html + "</p>";
+  {
+    Peer owner;
+    owner.Own({{"UTF8_STRING", "peer \xe2\x9c\x93"},
+               {"text/html", html},
+               {"image/png", png}},
+              false);
+    EXPECT(WaitFor([&] { return g_changes.load() > before; }));
+    EXPECT(Take(ClipboardReadTextLinux()) == "peer \xe2\x9c\x93");
+    EXPECT(Take(ClipboardReadHtmlLinux()) == html);  // INCR
+    std::string formats = Take(ClipboardReadFormatsLinux());
+    EXPECT(formats.find("text/plain") != std::string::npos);
+    EXPECT(formats.find("text/html") != std::string::npos);
+    EXPECT(formats.find("image/png") != std::string::npos);
+    got = ClipboardReadImageLinux(&len);
+    EXPECT(got && len == png.size() && memcmp(got, png.data(), len) == 0);
+    free(got);
+    owner.Stop();
+  }
+  {
+    Peer owner;
+    owner.Own({{"STRING", "na\xefve"}}, false);  // Latin-1 only
+    EXPECT(WaitFor(
+        [] { return Take(ClipboardReadTextLinux()) == "na\xc3\xafve"; }));
+    owner.Stop();
+  }
+  SetClipboardChangeHandler(nullptr, nullptr);
+
+  // An owner that never answers: the read gives up after its timeout.
+  {
+    Peer owner;
+    owner.Own({{"UTF8_STRING", "never"}}, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    start = Clock::now();
+    EXPECT(Take(ClipboardReadTextLinux()).empty());
+    double took = SecondsSince(start);
+    std::printf("silent owner: read gave up after %.1f s\n", took);
+    EXPECT(took >= 2.5 && took < 5.0);
+    owner.Stop();
+  }
+
+  // And we can take the clipboard back.
+  ClipboardWriteTextLinux("back");
+  EXPECT(Take(ClipboardReadTextLinux()) == "back");
+  EXPECT(peer.Fetch("UTF8_STRING", &data, &type) && data == "back");
+
+  std::printf("laufey_clipboard_x11_test: ok\n");
+  Finish(0);
+}
