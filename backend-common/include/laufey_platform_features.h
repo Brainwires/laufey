@@ -60,6 +60,10 @@ struct PlatformFeatures {
   bool tray_tooltip = true;   // set_tray_tooltip shows something
 
   SecretServiceState secret_service = SecretServiceState::kNotApplicable;
+  // KWallet (org.kde.kwalletd5 / org.kde.kwalletd6) runs or can be started.
+  // Chromium uses it instead of the Secret Service on Plasma, and it asks
+  // for its own unlock.
+  bool kwallet = false;
   // A person can answer an unlock prompt here: a graphical session
   // (XDG_SESSION_TYPE x11 / wayland with a display and, where logind can
   // say, an active x11 / wayland logind session), and the provider's
@@ -98,10 +102,13 @@ PlatformFeatures ProbePlatformFeatures();
 // --- Decisions (pure; tested without a bus)
 // ------------------------------------
 
-// True when Chromium's cookie store must not use the Secret Service: there
-// is none (or no bus), or reaching its key needs a prompt no one can answer.
-// Chromium would otherwise wait for the key forever, holding every request
-// that carries cookies.
+// True when Chromium's cookie store must be told --password-store=basic:
+// the Secret Service is locked (or not running and may start locked) and no
+// one here can answer its unlock prompt. Chromium would wait for that key
+// forever, holding every request that carries cookies. When there is no
+// Secret Service at all (or no session bus), Chromium falls back to basic
+// by itself, so the choice is left to it; likewise when KWallet is present
+// (Chromium's store on Plasma).
 bool NeedsBasicPasswordStore(const PlatformFeatures& f);
 
 // Whether a tray icon can be shown, and why not ("" when it can).

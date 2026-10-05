@@ -36,12 +36,14 @@ void LaufeyOpenExternalURL(const std::string& url) {
 }
 
 // Chromium's cookie store encrypts with a key it keeps in the Secret Service
-// (OSCrypt). When the service can't hand that key out without a prompt no
-// one can answer (a locked keyring in a headless or ssh session), or there
-// is no service at all, Chromium waits for the key forever, and every
-// request that carries cookies (navigations, fetches, WebSocket handshakes)
-// waits with it. In that case use --password-store=basic (a fixed key: the
-// cookies are only obfuscated) and say so once. An explicit
+// (OSCrypt). When the service is locked (or not running and may start
+// locked) and no one can answer its unlock prompt (a headless, ssh or CI
+// session), Chromium waits for the key forever, and every request that
+// carries cookies (navigations, fetches, WebSocket handshakes) waits with
+// it. In that case use --password-store=basic (a fixed key: the cookies are
+// only obfuscated) and say so once. With no Secret Service at all (or no
+// session bus) Chromium falls back to basic by itself, and with KWallet
+// present it uses KWallet: both are left to Chromium. An explicit
 // --password-store is kept. platform_features() reports the choice as
 // "cookieEncryption". Browser process only.
 static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {

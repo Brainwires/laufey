@@ -93,41 +93,39 @@ const char* SecretServiceStateName(SecretServiceState state) {
 }
 
 bool NeedsBasicPasswordStore(const PlatformFeatures& f) {
+  // KWallet asks for its own unlock, and Chromium picks it on Plasma.
+  if (f.kwallet)
+    return false;
   switch (f.secret_service) {
-    case SecretServiceState::kAvailable:
-    case SecretServiceState::kNotApplicable:
-      return false;
-    case SecretServiceState::kAbsent:
-    case SecretServiceState::kNoSessionBus:
-      return true;
     case SecretServiceState::kLocked:
     case SecretServiceState::kActivatable:
       // Reaching the key may need an unlock prompt (a freshly started
       // gnome-keyring opens with its login keyring locked). Fine when a
       // person can answer it; a hang otherwise.
       return !f.secret_prompter;
+    case SecretServiceState::kAvailable:
+    case SecretServiceState::kNotApplicable:
+    // No service (or no bus): Chromium finds none and falls back to basic by
+    // itself, without waiting. Left to it.
+    case SecretServiceState::kAbsent:
+    case SecretServiceState::kNoSessionBus:
+      return false;
   }
-  return true;
+  return false;
 }
 
 std::string BasicPasswordStoreReason(const PlatformFeatures& f) {
+  std::string session =
+      f.session_type.empty() ? std::string("unknown") : f.session_type;
   switch (f.secret_service) {
-    case SecretServiceState::kAbsent:
-      return "no Secret Service (org.freedesktop.secrets) on the session bus";
-    case SecretServiceState::kNoSessionBus:
-      return "no D-Bus session bus";
     case SecretServiceState::kLocked:
       return "the Secret Service's default keyring is locked and no one can "
              "answer its unlock prompt in this " +
-             (f.session_type.empty() ? std::string("unknown")
-                                     : f.session_type) +
-             " session";
+             session + " session";
     case SecretServiceState::kActivatable:
       return "the Secret Service is not running, and once started it may ask "
              "for an unlock no one can answer in this " +
-             (f.session_type.empty() ? std::string("unknown")
-                                     : f.session_type) +
-             " session";
+             session + " session";
     default:
       return "";
   }

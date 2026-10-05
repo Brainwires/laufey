@@ -127,6 +127,18 @@ fi
 occluder_pid=""
 if [ "$mode" = "--platform" ]; then
   export LAUFEY_E2E_ONLY=platform
+  # The private session bus gets a Secret Service that is installed but
+  # never starts (activatable, Exec=/bin/false), whatever this machine has
+  # installed: no one here could answer its unlock prompt, so CEF must pick
+  # --password-store=basic by itself. (No service at all would be left to
+  # Chromium's own fallback; LAUFEY_E2E_EXPECT_COOKIES checks the choice.)
+  if [ "$(uname -s)" = "Linux" ] && [ -z "${LAUFEY_E2E_HOST_SESSION:-}" ]; then
+    secrets_dir="$(mktemp -d "${TMPDIR:-/tmp}/laufey-e2e-secrets.XXXXXX")"
+    mkdir -p "$secrets_dir/dbus-1/services"
+    printf '[D-BUS Service]\nName=org.freedesktop.secrets\nExec=/bin/false\n' \
+      >"$secrets_dir/dbus-1/services/org.freedesktop.secrets.service"
+    export XDG_DATA_DIRS="$secrets_dir:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  fi
 fi
 if [ "$mode" = "--launch-visibility" ]; then
   export LAUFEY_E2E_ONLY=launch-visibility

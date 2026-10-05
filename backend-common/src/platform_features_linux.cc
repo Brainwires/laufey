@@ -12,7 +12,8 @@
 //     started), whether its default collection is locked (a property read:
 //     no unlock, no prompt), and whether anyone could answer an unlock
 //     prompt (a graphical session, and gnome-keyring's prompter where
-//     gnome-keyring is the provider);
+//     gnome-keyring is the provider); and whether KWallet
+//     (org.kde.kwalletd5 / 6) runs or can be started;
 //   - the session type: XDG_SESSION_TYPE as set, never guessed from the
 //     display variables (Xvfb, cron and systemd services that run
 //     `xvfb-run` have a $DISPLAY and no one in front of it). A session is
@@ -52,6 +53,8 @@ constexpr char kWatcherName[] = "org.kde.StatusNotifierWatcher";
 constexpr char kSecretsName[] = "org.freedesktop.secrets";
 constexpr char kGnomeKeyringName[] = "org.gnome.keyring";
 constexpr char kGcrPrompterName[] = "org.gnome.keyring.SystemPrompter";
+constexpr const char* kKWalletNames[] = {"org.kde.kwalletd5",
+                                         "org.kde.kwalletd6"};
 constexpr char kPortalName[] = "org.freedesktop.portal.Desktop";
 constexpr char kPortalPath[] = "/org/freedesktop/portal/desktop";
 constexpr const char* kPortalInterfaces[] = {
@@ -291,6 +294,9 @@ void ProbeSecretServiceOn(GDBusConnection* bus, const std::string& session,
   } else {
     out->secret_service = SecretServiceState::kAbsent;
   }
+  out->kwallet = false;
+  for (const char* name : kKWalletNames)
+    out->kwallet = out->kwallet || known(name);
   // gnome-keyring asks through gcr's prompter (gnome-shell's own, or
   // gcr-prompter); KWallet's provider prompts by itself.
   bool needs_gcr = known(kGnomeKeyringName);
@@ -436,6 +442,7 @@ void ProbeSecretService(PlatformFeatures* out) {
   out->session_bus = s.base.session_bus;
   out->secret_service = s.base.secret_service;
   out->secret_prompter = s.base.secret_prompter;
+  out->kwallet = s.base.kwallet;
 }
 
 void ProbeTray(PlatformFeatures* out) {

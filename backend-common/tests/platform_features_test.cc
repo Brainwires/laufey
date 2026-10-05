@@ -53,13 +53,14 @@ int main() {
   EXPECT(!NeedsBasicPasswordStore(f));
   EXPECT(BasicPasswordStoreReason(f).empty());
 
-  // No provider, or no bus: nothing to wait for, so no OS key either.
+  // No provider, or no bus: Chromium finds no keystore and falls back to
+  // basic by itself, without waiting. Left to it.
   f.secret_service = SecretServiceState::kAbsent;
-  EXPECT(NeedsBasicPasswordStore(f));
-  EXPECT(Contains(BasicPasswordStoreReason(f), "org.freedesktop.secrets"));
+  f.secret_prompter = false;
+  EXPECT(!NeedsBasicPasswordStore(f));
   f.secret_service = SecretServiceState::kNoSessionBus;
-  EXPECT(NeedsBasicPasswordStore(f));
-  EXPECT(Contains(BasicPasswordStoreReason(f), "session bus"));
+  EXPECT(!NeedsBasicPasswordStore(f));
+  f.secret_prompter = true;
 
   // Locked (or not yet started): fine while someone can answer the prompt,
   // a hang when no one can.
@@ -72,6 +73,10 @@ int main() {
     f.session_type = "tty";
     EXPECT(NeedsBasicPasswordStore(f));
     EXPECT(Contains(BasicPasswordStoreReason(f), "tty session"));
+    // KWallet (Chromium's store on Plasma) asks for its own unlock.
+    f.kwallet = true;
+    EXPECT(!NeedsBasicPasswordStore(f));
+    f.kwallet = false;
     f.session_type = "wayland";
   }
 

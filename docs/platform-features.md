@@ -33,7 +33,7 @@ may wait a few seconds for xdg-desktop-portal to start.
 | `secretService`       | Linux: `"available"` (the default collection is unlocked), `"locked"` (locked, or missing: using it means a prompt), `"activatable"` (not running; D-Bus can start it), `"absent"`, `"no-session-bus"`. `"os"` on macOS and Windows.                                                                                  |
 | `secretServicePrompt` | Someone could answer an unlock prompt: `sessionType` is `x11` or `wayland` with a display and, where logind can say, the process's logind session is an active x11 / wayland one; and, where gnome-keyring is the provider, its prompter exists. A display alone (Xvfb, cron, `xvfb-run` under systemd) never counts. |
 | `portalVersions`      | Linux: `{ "Notification": 2, "FileChooser": 4, "GlobalShortcuts": 1, "Settings": 2 }` for the xdg-desktop-portal interfaces the portal offers; an interface it lacks is absent. `{}` elsewhere.                                                                                                                       |
-| `cookieEncryption`    | CEF: `"os"` (the cookie key is kept by the OS keystore) or `"basic"` (see below). `null` on the WebView and Winit backends, whose engines don't encrypt cookies with an OS key.                                                                                                                                       |
+| `cookieEncryption`    | CEF: `"basic"` when it started Chromium with `--password-store=basic` (see below), otherwise `"os"`: the store was left to Chromium, which keeps the key in the OS keystore when there is one. `null` on the WebView and Winit backends, whose engines don't encrypt cookies with an OS key. |
 
 The probe never starts the Secret Service and never asks it to unlock: it reads
 the default collection's `Locked` property. The tray host is followed live
@@ -43,13 +43,19 @@ once per process.
 
 ## The cookie store on Linux (CEF)
 
-Chromium encrypts its cookie store with a key it keeps in the Secret Service.
-When the service can't hand that key out without a prompt no one can answer (a
-locked keyring in an ssh, CI or other headless session), or there is no service
-at all, Chromium would wait for the key forever, and every request that carries
-cookies (navigations, fetches, WebSocket handshakes) with it. The CEF backend
-checks this before Chromium starts and, in that case, starts it with
-`--password-store=basic`: cookies are stored with a fixed key (obfuscated, not
-protected by the OS). It says so once on stderr and reports
-`"cookieEncryption": "basic"`. An explicit `--password-store` on the command
-line is kept as given.
+Chromium encrypts its cookie store with a key it keeps in the Secret Service
+(or, on Plasma, in KWallet). When the Secret Service is locked, or not running
+and may start locked, and no one can answer its unlock prompt (an ssh, CI or
+other headless session: see `secretServicePrompt`), Chromium waits for the key
+forever, and every request that carries cookies (navigations, fetches, WebSocket
+handshakes) waits with it. The CEF backend checks this before Chromium starts
+and, in that case, starts it with `--password-store=basic`: cookies are stored
+with a fixed key (obfuscated, not protected by the OS). It says so once on
+stderr and reports `"cookieEncryption": "basic"`.
+
+Everything else is left to Chromium (`"cookieEncryption": "os"`): an unlocked
+keyring, a locked one someone can unlock, KWallet (`org.kde.kwalletd5` /
+`org.kde.kwalletd6` runs or can be started; it asks for its own unlock), and no
+Secret Service at all or no session bus, where Chromium finds no keystore and
+falls back to `basic` by itself without waiting. An explicit `--password-store`
+on the command line is kept as given.

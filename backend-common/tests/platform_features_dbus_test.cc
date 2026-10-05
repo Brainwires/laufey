@@ -405,6 +405,20 @@ int main() {
   unsetenv("WAYLAND_DISPLAY");
   BusCall("ReleaseName", "org.freedesktop.login1");
 
+  // KWallet running (Chromium's store on Plasma; it asks for its own
+  // unlock): never forced to basic, even locked with no one to answer.
+  setenv("XDG_SESSION_TYPE", "tty", 1);
+  s = SecretServiceProbe();
+  EXPECT(s.secret_service == SecretServiceState::kLocked);
+  EXPECT(!s.kwallet && NeedsBasicPasswordStore(s));
+  for (const char* kwallet : {"org.kde.kwalletd5", "org.kde.kwalletd6"}) {
+    BusCall("RequestName", kwallet);
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet);
+    EXPECT(!NeedsBasicPasswordStore(s));
+    BusCall("ReleaseName", kwallet);
+  }
+
   // Unlocked: no prompt at all, even headless.
   g_locked = false;
   setenv("XDG_SESSION_TYPE", "tty", 1);
@@ -438,7 +452,8 @@ int main() {
   f = ProbePlatformFeatures();
   EXPECT(!f.session_bus);
   EXPECT(f.secret_service == SecretServiceState::kNoSessionBus);
-  EXPECT(NeedsBasicPasswordStore(f));
+  // Chromium falls back to basic by itself here: left to it.
+  EXPECT(!NeedsBasicPasswordStore(f));
   EXPECT(!f.tray_watcher);
   EXPECT(f.portal_versions.empty());
   setenv("DBUS_SESSION_BUS_ADDRESS", address.c_str(), 1);
