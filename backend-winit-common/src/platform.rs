@@ -6,7 +6,8 @@
 //! Linux it reads the session bus (zbus) and, for the XEmbed tray, the X
 //! server (x11rb); nothing branches on `XDG_CURRENT_DESKTOP`, which is only
 //! a hint for a reason's wording. Winit has no web engine, so
-//! `cookieEncryption` is always `null`.
+//! `cookieEncryption` and `cookieEncryptionWait` are always `null`, and
+//! `kwallet` (which only Chromium's cookie store would use) too.
 //!
 //! The tray host is read live on every call (Winit runs no GLib loop to
 //! follow NameOwnerChanged with), so a watcher that starts late counts on the
@@ -139,8 +140,9 @@ impl PlatformFeatures {
       "{{\"os\":{},\"sessionType\":{},\"desktopHint\":{},\"sessionBus\":{},\
        \"trayHost\":{},\"trayReason\":{},\"trayClicks\":{clicks},\
        \"trayTooltip\":true,\"secretService\":{},\"secretServicePrompt\":{},\
-       \"notificationServer\":{},\"notificationReason\":{},\
-       \"portalVersions\":{{{portals}}},\"cookieEncryption\":null}}",
+       \"kwallet\":null,\"notificationServer\":{},\"notificationReason\":{},\
+       \"portalVersions\":{{{portals}}},\"cookieEncryption\":null,\
+       \"cookieEncryptionWait\":null}}",
       quote(self.os),
       opt(&self.session_type),
       opt(&self.desktop_hint),
@@ -884,9 +886,10 @@ mod tests {
        \"sessionBus\":true,\"trayHost\":true,\"trayReason\":null,\
        \"trayClicks\":false,\"trayTooltip\":true,\
        \"secretService\":\"available\",\"secretServicePrompt\":true,\
+       \"kwallet\":null,\
        \"notificationServer\":\"mako\",\"notificationReason\":null,\
        \"portalVersions\":{\"FileChooser\":4,\"Settings\":2},\
-       \"cookieEncryption\":null}"
+       \"cookieEncryption\":null,\"cookieEncryptionWait\":null}"
     );
     let mac = PlatformFeatures {
       os: "macos",

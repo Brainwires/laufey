@@ -41,6 +41,23 @@ enum class SecretServiceState {
 
 const char* SecretServiceStateName(SecretServiceState state);
 
+// KWallet, where Chromium's cookie store would use it (`kwallet`): whether
+// it can hand out the key without anyone answering anything. Read from
+// kwalletd over D-Bus (org.kde.KWallet isEnabled / localWallet / isOpen),
+// never starting it. Only an open wallet answers: on Plasma, Chromium's
+// request for a closed wallet's key is never answered, with a person in
+// front or not (no unlock prompt reaches anyone).
+enum class KWalletState {
+  kNotUsed,     // Chromium wouldn't use KWallet here
+  kOpen,        // kwalletd runs, enabled, its local wallet is open
+  kClosed,      // kwalletd runs, enabled, its local wallet is closed
+  kDisabled,    // kwalletd runs, KWallet is disabled
+  kNotRunning,  // no kwalletd (kwalletd6 / kwalletd5 / kwalletd) is running
+};
+
+// "open", "closed", "disabled", "not-running"; nullptr for kNotUsed.
+const char* KWalletStateName(KWalletState state);
+
 // What the probe found. Strings are empty when not applicable.
 struct PlatformFeatures {
   std::string os;            // "linux", "macos", "windows"
@@ -63,11 +80,12 @@ struct PlatformFeatures {
 
   SecretServiceState secret_service = SecretServiceState::kNotApplicable;
   // Chromium's cookie store would use KWallet here, not the Secret Service:
-  // the desktop is KDE as Chromium reads it (ChromiumPicksKWallet), or
-  // kwalletd5 / kwalletd6 owns its name right now. A KWallet that is only
-  // activatable on another desktop doesn't count: Chromium picks libsecret
-  // there. KWallet asks for its own unlock.
+  // the desktop is KDE as Chromium reads it (ChromiumPicksKWallet). Only
+  // the desktop decides, as in Chromium: on GNOME (or any other desktop)
+  // it uses the Secret Service even with kwalletd running.
   bool kwallet = false;
+  // KWallet's state when `kwallet` (kNotUsed otherwise).
+  KWalletState kwallet_state = KWalletState::kNotUsed;
   // A person can answer an unlock prompt here: a graphical session
   // (XDG_SESSION_TYPE x11 / wayland with a display and, where logind can
   // say, an active x11 / wayland logind session), and the provider's
@@ -90,6 +108,11 @@ struct PlatformFeatures {
   // (--password-store=basic: the key is fixed, cookies are only obfuscated).
   // Empty on engines that don't encrypt with an OS key (WebKit, Winit).
   std::string cookie_encryption;
+  // CEF only: why this launch keeps the OS key store although no one may be
+  // able to unlock it (the profile holds cookies encrypted with the OS key,
+  // which basic would delete): requests that carry cookies wait until the
+  // keystore is unlocked. Empty otherwise.
+  std::string cookie_encryption_wait;
 };
 
 // --- The probe
@@ -115,77 +138,121 @@ PlatformFeatures ProbePlatformFeatures();
 // ------------------------------------
 
 // Whether Chromium's password-store selection (os_crypt SelectBackend over
-// base::nix::GetDesktopEnvironment) lands on KWallet: the first desktop
+// base::nix::GetDesktopEnvironment) lands on KWallet, i.e. the desktop is
+// KDE 3, 4, 5 or 6 as Chromium reads it: the first desktop
 // XDG_CURRENT_DESKTOP names that Chromium knows is KDE; with none it knows,
-// DESKTOP_SESSION kde4 / kde-plasma (or kde with KDE_SESSION_VERSION), else
-// KDE_FULL_SESSION with KDE_SESSION_VERSION. KDE 3 (no KDE_SESSION_VERSION)
-// is basic in Chromium, not KWallet. `env` returns a variable's value, ""
-// when unset. The one place the desktop's name decides anything: it is
+// DESKTOP_SESSION kde4 / kde-plasma / kde; else (no GNOME_DESKTOP_SESSION_ID
+// set) KDE_FULL_SESSION set. A variable counts as set even when empty, as
+// Chromium's HasVar does. `env` returns a variable's value, nullptr when
+// unset. The one place the desktop's name decides anything: it is
 // Chromium's own rule.
-bool ChromiumPicksKWallet(const std::function<std::string(const char*)>& env);
+bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env);
 
-// True when Chromium's cookie store must be told --password-store=basic:
-// the Secret Service is locked (or not running and may start locked) and no
-// one here can answer its unlock prompt. Chromium would wait for that key
-// forever, holding every request that carries cookies. When there is no
-// Secret Service at all (or no session bus), Chromium falls back to basic
-// by itself, so the choice is left to it; likewise when Chromium would use
-// KWallet (`kwallet`).
+// True when no one here can hand Chromium's cookie store its OS key: the
+// Secret Service is locked (or not running and may start locked) and no one
+// can answer its unlock prompt; or, where Chromium would use KWallet, the
+// wallet isn't open (KWalletState). Chromium would wait for that key
+// forever, holding every request that carries cookies. Then the store is
+// --password-store=basic, unless the profile holds cookies encrypted with
+// the OS key (ChoosePasswordStore). When there is no Secret Service at all
+// (or no session bus), Chromium falls back to basic by itself, so the
+// choice is left to it.
 bool NeedsBasicPasswordStore(const PlatformFeatures& f);
 
-// --- The cookie store, sticky per profile (CEF on Linux)
+// --- The cookie store per profile (CEF on Linux)
 // -------------------------------------------------------------------
+
+// Whether a CEF profile holds cookies encrypted with the OS key. Chromium
+// writes those with a "v11" prefix (basic ones "v10"). A v11 cookie it can't
+// decrypt (--password-store=basic has no v11 key) is dropped, and its whole
+// eTLD+1 group is then deleted from the database
+// (sqlite_persistent_cookie_store.cc): switching such a profile to basic,
+// even for one launch, loses those cookies for good. Cookies written under
+// basic stay readable under the OS key, so basic -> os loses nothing.
+enum class ProfileCookieKeys {
+  kNone,     // no cookie database, or one without v11 rows
+  kOsKey,    // at least one v11 row
+  kUnknown,  // a database that can't be read (corrupt, locked by a running
+             // instance, no libsqlite3): counts as kOsKey
+};
+
+const char* ProfileCookieKeysName(ProfileCookieKeys keys);
+
+// Reads `<root_cache_dir>/Default/Cookies` (and Default/Network/Cookies)
+// read-only with SQLite (the system libsqlite3, loaded at run time): any row
+// whose encrypted_value starts with "v11". `detail` (optional) says why
+// kUnknown. kNone for an empty root (a profile kept in memory). Linux only;
+// kNone elsewhere.
+ProfileCookieKeys ReadProfileCookieKeys(const std::string& root_cache_dir,
+                                        std::string* detail = nullptr);
 
 // The file in a CEF root cache directory that records that its profile
 // chose the OS key ("os": the store was left to Chromium). Only "os" is
-// recorded: cookies written under basic (v10) stay readable under os, so
-// basic -> os loses nothing, while os -> basic would make the OS-key
-// cookies (v11) unreadable. So a profile that once had the OS key keeps
-// asking for it, and one that never did decides on each launch.
+// recorded. It is a hint for the reader: the profile's cookie database
+// (ReadProfileCookieKeys) decides whether the profile may use basic.
 extern const char kPasswordStoreMarkerName[];
 
 // "os" when the profile recorded it, else "" (none, unreadable, or any
 // other value: an older "basic" marker counts as none).
 std::string ReadPasswordStoreMarker(const std::string& root_cache_dir);
 
-// Records "os", atomically (a temporary file renamed over the marker). Any
-// other store is refused. False when it can't be written (no directory: a
-// profile kept in memory).
+// Records "os", atomically and durably (a temporary file, synced, renamed
+// over the marker, and the directory synced). Any other store is refused.
+// False when it can't be written (no directory: a profile kept in memory).
 bool WritePasswordStoreMarker(const std::string& root_cache_dir,
                               const std::string& store);
+
+// Removes temporary marker files (`<marker>.tmp*`) last modified before
+// `launched_at` (a launch that crashed mid-write left them). A newer one
+// may be another instance's write in progress and is left. POSIX only.
+void RemoveStalePasswordStoreTemps(const std::string& root_cache_dir,
+                                   int64_t launched_at);
 
 struct PasswordStoreChoice {
   std::string store;          // "basic" or "os": what this launch uses
   bool append_basic = false;  // add --password-store=basic to the command line
   bool record = false;        // write "os" to the marker
-  // "explicit" (--password-store on the command line), "profile" (the
-  // marker), "probe" (this launch's platform features).
+  // "explicit" (--password-store on the command line), "cookies" (the
+  // profile holds OS-key cookies), "profile" (the marker, with a reachable
+  // key), "probe" (this launch's platform features).
   std::string source;
-  std::string reason;  // why basic, when the probe chose it
-  // An "os" profile whose key can't be reached this launch (the keyring is
-  // locked, or not running, and no one can answer its prompt): basic for
-  // this launch only, the marker unchanged. Its OS-key cookies are
-  // unavailable until a launch that can reach the key.
-  bool os_unavailable = false;
+  // Why no one can hand out the OS key (NeedsBasicPasswordStore), when that
+  // decided anything: the store is basic, or `wait`.
+  std::string reason;
+  // The profile holds OS-key cookies (or a cookie database that can't be
+  // read) and no one may be able to unlock the key: the OS store is kept
+  // anyway, and requests that carry cookies wait until it is unlocked.
+  // Basic would make Chromium delete those cookies.
+  bool wait = false;
+  // An explicit --password-store=basic on a profile that holds OS-key
+  // cookies: honoured, but Chromium deletes them.
+  bool explicit_basic_deletes = false;
 };
 
-// Picks the store: an explicit --password-store wins (recorded when it is an
-// OS store); else probe the session (NeedsBasicPasswordStore): an "os"
-// profile stays "os" unless its key can't be reached, then basic for this
-// launch only (os_unavailable); a profile without a marker gets the probe's
-// answer, and "os" is recorded.
+// Picks the store: an explicit --password-store wins (an OS store is
+// recorded; basic on a profile with OS-key cookies sets
+// explicit_basic_deletes). Otherwise the probe (NeedsBasicPasswordStore):
+// with the key reachable, os (recorded); without, basic, unless `cookies`
+// is kOsKey or kUnknown: then os and `wait`, never basic. The marker never
+// overrides the database: an "os" profile without OS-key cookies still gets
+// basic when the key can't be reached (nothing is lost).
 PasswordStoreChoice ChoosePasswordStore(
-    const std::string* explicit_store,
-    const std::string& marker,
-    const std::function<PlatformFeatures()>& probe);
+    const std::string* explicit_store, const std::string& marker,
+    ProfileCookieKeys cookies, const std::function<PlatformFeatures()>& probe);
+
+// The stderr line for a choice ("" when there is nothing to say). `detail`
+// is ReadProfileCookieKeys's.
+std::string PasswordStoreWarning(const PasswordStoreChoice& choice,
+                                 ProfileCookieKeys cookies,
+                                 const std::string& detail);
 
 // Whether a tray icon can be shown, and why not ("" when it can).
 bool TrayAvailable(const PlatformFeatures& f);
 
 std::string TrayUnavailableReason(const PlatformFeatures& f);
 
-// The secret-service situation in a sentence, for the --password-store=basic
-// warning.
+// Why no one can hand out the OS key, in a sentence (the Secret Service's or
+// KWallet's state), for the warnings; "" when someone can.
 std::string BasicPasswordStoreReason(const PlatformFeatures& f);
 
 // Why notifications may not show ("" when a server runs; Linux only).
@@ -197,9 +264,10 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f);
 // --- Backend hooks
 // ---------------------------------------------------------------
 
-// The cookie-store decision a CEF backend made ("os" / "basic"); reported by
-// PlatformFeaturesJsonForAbi. Any thread.
-void SetCookieEncryption(const char* value);
+// The cookie-store decision a CEF backend made ("os" / "basic"), and why it
+// waits for the OS key (PasswordStoreChoice::wait; nullptr: it doesn't);
+// reported by PlatformFeaturesJsonForAbi. Any thread.
+void SetCookieEncryption(const char* value, const char* wait = nullptr);
 
 // ProbePlatformFeatures() as JSON, malloc'd for the C ABI (freed with the
 // backend's string_free). Any thread.
