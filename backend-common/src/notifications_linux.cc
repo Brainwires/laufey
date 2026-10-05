@@ -20,7 +20,10 @@
 // - Permission is "granted" when a notification server owns the name, or
 //   one can be started for it (D-Bus activation is tried once: an installed
 //   daemon that fails to start in this session doesn't count), else
-//   "unsupported"; there is no prompt. platform_features()'
+//   "unsupported"; there is no prompt. Neither the permission query nor
+//   capabilities waits for a server to start: the start runs on the
+//   notification thread, the permission answer follows it, and
+//   capabilities counts the server until the start fails. platform_features()'
 //   "notificationServer" names the running server.
 //
 // Everything runs on one thread of laufey's own, with its own GLib main
@@ -216,14 +219,21 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     cv.wait(lock, [&] { return started; });
   }
 
+  // Never waits for a server to start: one D-Bus can start is started in
+  // the background (Activate), and until it answers it counts (show,
+  // schedule and clicks; actions are known once it runs). A start that
+  // failed counts for nothing from then on.
   uint32_t Capabilities() override {
     uint32_t caps = 0;
     RunSync([&] {
-      if (!ServerPresent())
+      Server server = ServerState();
+      if (server == Server::kNone)
         return;
       caps = LAUFEY_NOTIFICATION_CAP_SHOW | LAUFEY_NOTIFICATION_CAP_SCHEDULE |
              LAUFEY_NOTIFICATION_CAP_CLICKS;
-      if (ServerHasActions())
+      if (server == Server::kActivatable)
+        Activate(nullptr);
+      else if (ServerHasActions())
         caps |= LAUFEY_NOTIFICATION_CAP_ACTIONS;
     });
     return caps;
@@ -275,11 +285,26 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     done(std::move(list));
   }
 
+  // Answered from the notification thread without blocking the caller: a
+  // server D-Bus can start is started asynchronously, and the answer waits
+  // for that (granted when it started, unsupported when it failed).
   void QueryPermission(int /*kind*/, std::function<void(int)> done) override {
-    bool present = false;
-    RunSync([&] { present = ServerPresent(); });
-    done(present ? LAUFEY_PERMISSION_STATUS_GRANTED
-                 : LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+    RunAsync([this, done] {
+      switch (ServerState()) {
+        case Server::kRunning:
+          done(LAUFEY_PERMISSION_STATUS_GRANTED);
+          return;
+        case Server::kNone:
+          done(LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+          return;
+        case Server::kActivatable:
+          Activate([done](bool started) {
+            done(started ? LAUFEY_PERMISSION_STATUS_GRANTED
+                         : LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+          });
+          return;
+      }
+    });
   }
 
   // No prompt on Linux: the server shows what it is sent.
@@ -332,6 +357,21 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     call.cv.wait(lock, [&] { return call.done; });
   }
 
+  // Runs `fn` on the notification thread and returns at once (inline when
+  // already there).
+  void RunAsync(std::function<void()> fn) {
+    g_main_context_invoke_full(
+        ctx_, G_PRIORITY_DEFAULT,
+        [](gpointer data) -> gboolean {
+          (*static_cast<std::function<void()>*>(data))();
+          return G_SOURCE_REMOVE;
+        },
+        new std::function<void()>(std::move(fn)),
+        [](gpointer data) {
+          delete static_cast<std::function<void()>*>(data);
+        });
+  }
+
   // The session bus, connected (and subscribed) on first use. Thread only.
   GDBusConnection* Connection() {
     if (conn_ || conn_failed_)
@@ -353,50 +393,107 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     return conn_;
   }
 
-  bool ServerPresent() {
+  enum class Server {
+    kRunning,      // something owns the name
+    kActivatable,  // D-Bus can start one (not known to fail)
+    kNone,         // neither, or its start failed earlier
+  };
+
+  // Thread only. Bus-daemon calls only: never waits for a server to start.
+  Server ServerState() {
     if (!Connection())
-      return false;
-    bool present = false;
+      return Server::kNone;
+    if (NameOwned())
+      return Server::kRunning;
+    return !activation_failed_ && Activatable() ? Server::kActivatable
+                                                : Server::kNone;
+  }
+
+  // Starts the activatable server in the background (once at a time) and
+  // calls `done` (may be null) on this thread with whether it started. A
+  // failure is remembered for the process: an installed daemon that can't
+  // start in this session (Sway with no daemon of its own) would otherwise
+  // make every Notify wait for the activation to time out. Thread only.
+  void Activate(std::function<void(bool)> done) {
+    if (activation_failed_ || !Connection()) {
+      if (done)
+        done(false);
+      return;
+    }
+    if (done)
+      activation_waiters_.push_back(std::move(done));
+    if (activation_pending_)
+      return;
+    activation_pending_ = true;
+    g_dbus_connection_call(
+        conn_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "StartServiceByName",
+        g_variant_new("(su)", kName, 0u), G_VARIANT_TYPE("(u)"),
+        G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr,
+        [](GObject* source, GAsyncResult* result, gpointer self_ptr) {
+          auto* self = static_cast<LinuxNotificationPlatform*>(self_ptr);
+          GVariant* r = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),
+                                                      result, nullptr);
+          bool started = r != nullptr;
+          if (r)
+            g_variant_unref(r);
+          self->activation_failed_ = !started;
+          self->activation_pending_ = false;
+          std::vector<std::function<void(bool)>> waiters;
+          waiters.swap(self->activation_waiters_);
+          for (auto& waiter : waiters)
+            waiter(started);
+        },
+        this);
+  }
+
+  bool NameOwned() {
     GVariant* r = g_dbus_connection_call_sync(
         conn_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
         "org.freedesktop.DBus", "NameHasOwner", g_variant_new("(s)", kName),
         G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr,
         nullptr);
-    if (r) {
-      gboolean owned = FALSE;
-      g_variant_get(r, "(b)", &owned);
-      g_variant_unref(r);
-      present = owned;
-    }
-    if (present)
-      return true;
-    // Not running, but D-Bus can start it.
-    r = g_dbus_connection_call_sync(
+    if (!r)
+      return false;
+    gboolean owned = FALSE;
+    g_variant_get(r, "(b)", &owned);
+    g_variant_unref(r);
+    return owned;
+  }
+
+  bool Activatable() {
+    bool found = false;
+    GVariant* r = g_dbus_connection_call_sync(
         conn_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
         "org.freedesktop.DBus", "ListActivatableNames", nullptr,
         G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr,
         nullptr);
-    if (r) {
-      GVariantIter* iter = nullptr;
-      const char* name = nullptr;
-      g_variant_get(r, "(as)", &iter);
-      while (g_variant_iter_loop(iter, "&s", &name)) {
-        if (g_strcmp0(name, kName) == 0)
-          present = true;
-      }
-      g_variant_iter_free(iter);
-      g_variant_unref(r);
+    if (!r)
+      return false;
+    GVariantIter* iter = nullptr;
+    const char* name = nullptr;
+    g_variant_get(r, "(as)", &iter);
+    while (g_variant_iter_loop(iter, "&s", &name)) {
+      if (g_strcmp0(name, kName) == 0)
+        found = true;
     }
-    if (!present)
-      return false;
-    // Activatable is not proof: an installed daemon may not start in this
-    // session (on Sway with no daemon of its own, a desktop's service file
-    // can be there and fail), and every Notify would then wait for the
-    // activation to time out. Start it once and see; a failure is
-    // remembered for the process.
-    if (activation_failed_)
-      return false;
-    r = g_dbus_connection_call_sync(
+    g_variant_iter_free(iter);
+    g_variant_unref(r);
+    return found;
+  }
+
+  // For posting (Show, a schedule, a timer): waits for an activatable
+  // server to start (Notify would wait for it anyway). Thread only.
+  bool ServerPresent() {
+    switch (ServerState()) {
+      case Server::kRunning:
+        return true;
+      case Server::kNone:
+        return false;
+      case Server::kActivatable:
+        break;
+    }
+    GVariant* r = g_dbus_connection_call_sync(
         conn_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
         "org.freedesktop.DBus", "StartServiceByName",
         g_variant_new("(su)", kName, 0u), G_VARIANT_TYPE("(u)"),
@@ -665,8 +762,11 @@ class LinuxNotificationPlatform : public NotificationPlatform {
   GMainLoop* loop_ = nullptr;
   GDBusConnection* conn_ = nullptr;
   bool conn_failed_ = false;
-  // An activatable notification server failed to start (ServerPresent).
+  // An activatable notification server failed to start (Activate,
+  // ServerPresent); remembered for the process.
   bool activation_failed_ = false;
+  bool activation_pending_ = false;  // an Activate call is in flight
+  std::vector<std::function<void(bool)>> activation_waiters_;
   std::map<uint32_t, std::string> by_id_;    // server id -> tag
   std::map<std::string, uint32_t> by_tag_;   // tag -> server id
   std::map<std::string, std::string> data_;  // tag -> data

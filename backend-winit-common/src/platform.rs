@@ -518,8 +518,7 @@ mod linux {
   pub(super) fn notification_server_usable() -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
     static ACTIVATION_FAILED: AtomicBool = AtomicBool::new(false);
-    // A daemon may take a few seconds to start.
-    let Some(conn) = connect(Duration::from_secs(5)) else {
+    let Some(conn) = notification_connection() else {
       return false;
     };
     if has_owner(&conn, NOTIFICATIONS) {
@@ -541,6 +540,19 @@ mod linux {
       .is_ok();
     ACTIVATION_FAILED.store(!started, Ordering::Relaxed);
     started
+  }
+
+  /// One session-bus connection for every permission query, made on the
+  /// first (and again after a failed attempt). Its method timeout is 5 s: a
+  /// daemon may take a few seconds to start.
+  fn notification_connection() -> Option<Connection> {
+    static CONN: std::sync::Mutex<Option<Connection>> =
+      std::sync::Mutex::new(None);
+    let mut conn = CONN.lock().unwrap();
+    if conn.is_none() {
+      *conn = connect(Duration::from_secs(5));
+    }
+    conn.clone()
   }
 
   /// Follow the StatusNotifierWatcher's owner on a thread of its own (Winit

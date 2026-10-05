@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -251,8 +252,8 @@ int main() {
     return 77;
   }
   g_free(daemon);
-  // This thread is the UI thread, where permission callbacks are delivered
-  // (inline: the Linux platform answers on the caller's thread).
+  // This thread is the UI thread; permission callbacks answered on the
+  // notification thread can't be queued here (no loop), so they run there.
   UiTaskDispatcher::Get().Bind([](void (*)(void*), void*) { return false; });
 
   // A notification daemon that is installed (activatable) but can't start
@@ -263,7 +264,9 @@ int main() {
       std::string(services) + "/org.freedesktop.Notifications.service";
   EXPECT(g_file_set_contents(
       service_file.c_str(),
-      "[D-BUS Service]\nName=org.freedesktop.Notifications\nExec=/bin/false\n",
+      // Slow to fail (2 s), so a caller that waited for it would show.
+      "[D-BUS Service]\nName=org.freedesktop.Notifications\n"
+      "Exec=/bin/sh -c 'sleep 2; exit 1'\n",
       -1, nullptr));
   GTestDBus* bus = g_test_dbus_new(G_TEST_DBUS_NONE);
   g_test_dbus_add_service_dir(bus, services);
@@ -274,14 +277,35 @@ int main() {
   setenv("LAUFEY_APP_ID", "dev.laufey.notiftest", 1);
   std::string file = dir + "/laufey-notifications.json";
 
-  // No server yet (one is activatable, but it fails to start): nothing
-  // works, and a permission query says so instead of "granted".
-  EXPECT(NotificationCapabilities() == 0);
-  QueryNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPerm, nullptr);
-  EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+  // No server yet (one is activatable, but it fails to start). Neither
+  // capabilities nor a permission query waits for the start (they run on
+  // the JavaScript thread): capabilities counts the server until its start
+  // fails, and the permission answer follows the start, "unsupported"
+  // instead of "granted".
+  auto quick = [](const std::function<void()>& fn) {
+    auto start = std::chrono::steady_clock::now();
+    fn();
+    return std::chrono::steady_clock::now() - start <
+           std::chrono::milliseconds(1000);
+  };
+  uint32_t caps = 0;
+  EXPECT(quick([&] { caps = NotificationCapabilities(); }));
+  EXPECT(caps ==
+         (LAUFEY_NOTIFICATION_CAP_SHOW | LAUFEY_NOTIFICATION_CAP_SCHEDULE |
+          LAUFEY_NOTIFICATION_CAP_CLICKS));
+  EXPECT(quick([] {
+    QueryNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPerm,
+                                nullptr);
+  }));
+  EXPECT(g_perm == -1);  // the start is still running
+  EXPECT(WaitFor([] { return g_perm == LAUFEY_PERMISSION_STATUS_UNSUPPORTED; },
+                 8000));
+  EXPECT(NotificationCapabilities() == 0);  // the start failed: remembered
+  g_perm = -1;
   RequestNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPerm,
                                 nullptr);
-  EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+  EXPECT(
+      WaitFor([] { return g_perm == LAUFEY_PERMISSION_STATUS_UNSUPPORTED; }));
   NotificationOptions none;
   none.title = "nobody listens";
   EXPECT(ShowNotification(none, nullptr, nullptr) == 0);
@@ -342,11 +366,13 @@ int main() {
   EXPECT(NotificationCapabilities() ==
          (LAUFEY_NOTIFICATION_CAP_SHOW | LAUFEY_NOTIFICATION_CAP_SCHEDULE |
           LAUFEY_NOTIFICATION_CAP_CLICKS | LAUFEY_NOTIFICATION_CAP_ACTIONS));
+  g_perm = -1;
   QueryNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPerm, nullptr);
-  EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_GRANTED);
+  EXPECT(WaitFor([] { return g_perm == LAUFEY_PERMISSION_STATUS_GRANTED; }));
+  g_perm = -1;
   RequestNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPerm,
                                 nullptr);
-  EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_GRANTED);
+  EXPECT(WaitFor([] { return g_perm == LAUFEY_PERMISSION_STATUS_GRANTED; }));
 
   // Notify: actions with "default", hints, the timeout.
   NotificationOptions o;
