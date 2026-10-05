@@ -92,8 +92,50 @@ const char* SecretServiceStateName(SecretServiceState state) {
   return "absent";
 }
 
+bool ChromiumPicksKWallet(const std::function<std::string(const char*)>& env) {
+  // base::nix::GetDesktopEnvironment: XDG_CURRENT_DESKTOP's values in
+  // priority order; the first one Chromium knows decides.
+  static const char* const kKnown[] = {
+      "Unity", "Deepin", "GNOME", "X-Cinnamon", "Pantheon",
+      "XFCE",  "UKUI",   "LXQt",  "COSMIC",
+  };
+  std::string current = env("XDG_CURRENT_DESKTOP");
+  size_t start = 0;
+  while (start <= current.size()) {
+    size_t end = current.find(':', start);
+    if (end == std::string::npos)
+      end = current.size();
+    std::string value = current.substr(start, end - start);
+    // TRIM_WHITESPACE
+    size_t b = value.find_first_not_of(" \t\r\n");
+    size_t e = value.find_last_not_of(" \t\r\n");
+    value = b == std::string::npos ? "" : value.substr(b, e - b + 1);
+    if (value == "KDE")
+      return true;  // KDE4 / KDE5 / KDE6: KWallet
+    for (const char* known : kKnown) {
+      if (value == known)
+        return false;
+    }
+    start = end + 1;
+  }
+  // DESKTOP_SESSION, then the older variables.
+  std::string session = env("DESKTOP_SESSION");
+  bool kde_version = !env("KDE_SESSION_VERSION").empty();
+  if (session == "kde4" || session == "kde-plasma")
+    return true;
+  if (session == "kde")
+    return kde_version;  // KDE3 without it: basic, not KWallet
+  if (session == "deepin" || session == "gnome" || session == "mate" ||
+      session.find("xfce") != std::string::npos || session == "xubuntu" ||
+      session == "ukui")
+    return false;
+  if (!env("GNOME_DESKTOP_SESSION_ID").empty())
+    return false;
+  return !env("KDE_FULL_SESSION").empty() && kde_version;
+}
+
 bool NeedsBasicPasswordStore(const PlatformFeatures& f) {
-  // KWallet asks for its own unlock, and Chromium picks it on Plasma.
+  // Chromium would use KWallet, which asks for its own unlock.
   if (f.kwallet)
     return false;
   switch (f.secret_service) {

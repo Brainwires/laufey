@@ -24,7 +24,7 @@ may wait a few seconds for xdg-desktop-portal to start.
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `os`                  | `"linux"`, `"macos"` or `"windows"`.                                                                                                                                                                                                                                                                                                         |
 | `sessionType`         | Linux: `XDG_SESSION_TYPE` as set (`"wayland"`, `"x11"`, `"tty"` for an ssh or console session), or `"unknown"` when it is unset. Never guessed from `$DISPLAY` or `$WAYLAND_DISPLAY`. `null` elsewhere.                                                                                                                                      |
-| `desktopHint`         | `XDG_CURRENT_DESKTOP` as set, or `null`. A hint for wording only.                                                                                                                                                                                                                                                                            |
+| `desktopHint`         | `XDG_CURRENT_DESKTOP` as set, or `null`. A hint for wording only (no feature is guessed from it).                                                                                                                                                                                                                                            |
 | `sessionBus`          | Linux: a D-Bus session bus answered.                                                                                                                                                                                                                                                                                                         |
 | `trayHost`            | A tray icon can be seen: on Linux, `org.kde.StatusNotifierWatcher` has an owner, or an XEmbed tray runs on X11, and the appindicator library loads. Always `true` on macOS and Windows.                                                                                                                                                      |
 | `trayReason`          | Why not, when `trayHost` is `false`; otherwise `null`.                                                                                                                                                                                                                                                                                       |
@@ -56,8 +56,11 @@ with a fixed key (obfuscated, not protected by the OS). It says so once on
 stderr and reports `"cookieEncryption": "basic"`.
 
 Everything else is left to Chromium (`"cookieEncryption": "os"`): an unlocked
-keyring, a locked one someone can unlock, KWallet (`org.kde.kwalletd5` /
-`org.kde.kwalletd6` runs or can be started; it asks for its own unlock), and no
+keyring, a locked one someone can unlock, KWallet where Chromium would use it
+(a KDE desktop by Chromium's own rule: the first desktop it knows in
+`XDG_CURRENT_DESKTOP` is `KDE`, else `DESKTOP_SESSION` / `KDE_FULL_SESSION`;
+or `org.kde.kwalletd5` / `org.kde.kwalletd6` running now; it asks for its own
+unlock), and no
 Secret Service at all or no session bus, where Chromium finds no keystore and
 falls back to `basic` by itself without waiting. An explicit `--password-store`
 on the command line is kept as given.

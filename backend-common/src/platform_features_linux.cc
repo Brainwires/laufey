@@ -1,7 +1,8 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 //
 // Platform features (API 45), the Linux probe. Everything is read from the
-// session itself, never from the desktop's name:
+// session itself, never from the desktop's name (the one exception mirrors
+// Chromium: whether its cookie store would use KWallet):
 //
 //   - the tray host: an owner of org.kde.StatusNotifierWatcher, followed
 //     through NameOwnerChanged so a watcher that starts late (or restarts)
@@ -12,8 +13,9 @@
 //     started), whether its default collection is locked (a property read:
 //     no unlock, no prompt), and whether anyone could answer an unlock
 //     prompt (a graphical session, and gnome-keyring's prompter where
-//     gnome-keyring is the provider); and whether KWallet
-//     (org.kde.kwalletd5 / 6) runs or can be started;
+//     gnome-keyring is the provider); and whether Chromium would use
+//     KWallet instead (a KDE desktop by Chromium's own rule, or
+//     org.kde.kwalletd5 / 6 running now);
 //   - the session type: XDG_SESSION_TYPE as set, never guessed from the
 //     display variables (Xvfb, cron and systemd services that run
 //     `xvfb-run` have a $DISPLAY and no one in front of it). A session is
@@ -315,9 +317,13 @@ void ProbeSecretServiceOn(GDBusConnection* bus, const std::string& session,
   } else {
     out->secret_service = SecretServiceState::kAbsent;
   }
-  out->kwallet = false;
+  // KWallet only where Chromium would pick it: a KDE desktop (Chromium's
+  // own rule), or kwalletd running now. One that is merely activatable on
+  // GNOME (KDE apps installed) is not Chromium's store there.
+  out->kwallet =
+      ChromiumPicksKWallet([](const char* name) { return Env(name); });
   for (const char* name : kKWalletNames)
-    out->kwallet = out->kwallet || known(name);
+    out->kwallet = out->kwallet || owned.count(name) > 0;
   // gnome-keyring asks through gcr's prompter (gnome-shell's own, or
   // gcr-prompter); KWallet's provider prompts by itself.
   bool needs_gcr = known(kGnomeKeyringName);

@@ -12,8 +12,9 @@
 //   platform_features_linux.cc  the probe over the session bus (GDBus) and,
 //                               for the XEmbed tray, the X server (XCB)
 //
-// XDG_CURRENT_DESKTOP is read only as a hint for wording a reason; nothing
-// branches on it. See docs/platform-features.md.
+// XDG_CURRENT_DESKTOP is read as a hint for wording a reason, and only to
+// mirror Chromium's own password-store choice (ChromiumPicksKWallet); no
+// feature is guessed from it. See docs/platform-features.md.
 
 #ifndef LAUFEY_PLATFORM_FEATURES_H_
 #define LAUFEY_PLATFORM_FEATURES_H_
@@ -61,9 +62,11 @@ struct PlatformFeatures {
   bool tray_tooltip = true;   // set_tray_tooltip shows something
 
   SecretServiceState secret_service = SecretServiceState::kNotApplicable;
-  // KWallet (org.kde.kwalletd5 / org.kde.kwalletd6) runs or can be started.
-  // Chromium uses it instead of the Secret Service on Plasma, and it asks
-  // for its own unlock.
+  // Chromium's cookie store would use KWallet here, not the Secret Service:
+  // the desktop is KDE as Chromium reads it (ChromiumPicksKWallet), or
+  // kwalletd5 / kwalletd6 owns its name right now. A KWallet that is only
+  // activatable on another desktop doesn't count: Chromium picks libsecret
+  // there. KWallet asks for its own unlock.
   bool kwallet = false;
   // A person can answer an unlock prompt here: a graphical session
   // (XDG_SESSION_TYPE x11 / wayland with a display and, where logind can
@@ -111,13 +114,23 @@ PlatformFeatures ProbePlatformFeatures();
 // --- Decisions (pure; tested without a bus)
 // ------------------------------------
 
+// Whether Chromium's password-store selection (os_crypt SelectBackend over
+// base::nix::GetDesktopEnvironment) lands on KWallet: the first desktop
+// XDG_CURRENT_DESKTOP names that Chromium knows is KDE; with none it knows,
+// DESKTOP_SESSION kde4 / kde-plasma (or kde with KDE_SESSION_VERSION), else
+// KDE_FULL_SESSION with KDE_SESSION_VERSION. KDE 3 (no KDE_SESSION_VERSION)
+// is basic in Chromium, not KWallet. `env` returns a variable's value, ""
+// when unset. The one place the desktop's name decides anything: it is
+// Chromium's own rule.
+bool ChromiumPicksKWallet(const std::function<std::string(const char*)>& env);
+
 // True when Chromium's cookie store must be told --password-store=basic:
 // the Secret Service is locked (or not running and may start locked) and no
 // one here can answer its unlock prompt. Chromium would wait for that key
 // forever, holding every request that carries cookies. When there is no
 // Secret Service at all (or no session bus), Chromium falls back to basic
-// by itself, so the choice is left to it; likewise when KWallet is present
-// (Chromium's store on Plasma).
+// by itself, so the choice is left to it; likewise when Chromium would use
+// KWallet (`kwallet`).
 bool NeedsBasicPasswordStore(const PlatformFeatures& f);
 
 // --- The cookie store, sticky per profile (CEF on Linux)

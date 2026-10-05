@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <string>
 
 #define EXPECT(cond)                                                         \
@@ -79,6 +80,44 @@ int main() {
     EXPECT(!NeedsBasicPasswordStore(f));
     f.kwallet = false;
     f.session_type = "wayland";
+  }
+
+  // Whether Chromium's cookie store would use KWallet: its own rule over
+  // XDG_CURRENT_DESKTOP (the first desktop it knows), then DESKTOP_SESSION
+  // and the older variables.
+  {
+    auto picks = [](std::map<std::string, std::string> vars) {
+      return ChromiumPicksKWallet([&vars](const char* name) {
+        auto it = vars.find(name);
+        return it == vars.end() ? std::string() : it->second;
+      });
+    };
+    EXPECT(picks({{"XDG_CURRENT_DESKTOP", "KDE"}}));
+    EXPECT(
+        picks({{"XDG_CURRENT_DESKTOP", "KDE"}, {"KDE_SESSION_VERSION", "6"}}));
+    EXPECT(!picks({{"XDG_CURRENT_DESKTOP", "GNOME"}}));
+    EXPECT(!picks({{"XDG_CURRENT_DESKTOP", "ubuntu:GNOME"}}));
+    // The first desktop Chromium knows decides; unknown ones are skipped.
+    EXPECT(!picks({{"XDG_CURRENT_DESKTOP", "GNOME:KDE"}}));
+    EXPECT(picks({{"XDG_CURRENT_DESKTOP", "Hyprland: KDE :GNOME"}}));
+    EXPECT(!picks({{"XDG_CURRENT_DESKTOP", "sway"}}));
+    EXPECT(!picks({{"XDG_CURRENT_DESKTOP", "KDE-ish"}}));
+    EXPECT(!picks({}));
+    // Nothing it knows in XDG_CURRENT_DESKTOP: DESKTOP_SESSION.
+    EXPECT(picks({{"XDG_CURRENT_DESKTOP", "sway"},
+                  {"DESKTOP_SESSION", "plasma"},
+                  {"KDE_FULL_SESSION", "true"},
+                  {"KDE_SESSION_VERSION", "5"}}));
+    EXPECT(picks({{"DESKTOP_SESSION", "kde-plasma"}}));
+    EXPECT(picks({{"DESKTOP_SESSION", "kde4"}}));
+    EXPECT(picks({{"DESKTOP_SESSION", "kde"}, {"KDE_SESSION_VERSION", "5"}}));
+    EXPECT(!picks({{"DESKTOP_SESSION", "kde"}}));  // KDE 3: basic
+    EXPECT(!picks({{"DESKTOP_SESSION", "gnome"}, {"KDE_FULL_SESSION", "1"}}));
+    EXPECT(!picks({{"GNOME_DESKTOP_SESSION_ID", "x"},
+                   {"KDE_FULL_SESSION", "true"},
+                   {"KDE_SESSION_VERSION", "5"}}));
+    EXPECT(picks({{"KDE_FULL_SESSION", "true"}, {"KDE_SESSION_VERSION", "5"}}));
+    EXPECT(!picks({{"KDE_FULL_SESSION", "true"}}));
   }
 
   // macOS and Windows: the OS keystore.

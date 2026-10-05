@@ -11,6 +11,8 @@
 //   - the Secret Service activatable (not running), running with its
 //     default collection locked, with and without someone to answer the
 //     unlock prompt, unlocked, and no session bus at all;
+//   - KWallet counted only where Chromium would use it: a KDE desktop, or
+//     kwalletd running (an activatable one on GNOME is not);
 //   - the portal interface versions (an interface the portal lacks is
 //     absent);
 //   - when a session counts as graphical (someone could answer the unlock
@@ -262,6 +264,9 @@ int main() {
   EXPECT(services);
   WriteService(services, "org.freedesktop.secrets");
   WriteService(services, "org.gnome.keyring");
+  // KDE's wallet installed (activatable) on a GNOME session.
+  WriteService(services, "org.kde.kwalletd5");
+  WriteService(services, "org.kde.kwalletd6");
 
   GTestDBus* bus = g_test_dbus_new(G_TEST_DBUS_NONE);
   g_test_dbus_add_service_dir(bus, services);
@@ -274,6 +279,9 @@ int main() {
   // A headless (ssh / CI) session: no display, no graphical session.
   setenv("XDG_SESSION_TYPE", "tty", 1);
   setenv("XDG_CURRENT_DESKTOP", "GNOME", 1);
+  for (const char* name : {"DESKTOP_SESSION", "KDE_FULL_SESSION",
+                           "KDE_SESSION_VERSION", "GNOME_DESKTOP_SESSION_ID"})
+    unsetenv(name);
   unsetenv("DISPLAY");
   unsetenv("WAYLAND_DISPLAY");
 
@@ -465,12 +473,17 @@ int main() {
   unsetenv("WAYLAND_DISPLAY");
   BusCall("ReleaseName", "org.freedesktop.login1");
 
-  // KWallet running (Chromium's store on Plasma; it asks for its own
-  // unlock): never forced to basic, even locked with no one to answer.
+  // KWallet. On GNOME an activatable kwalletd (KDE apps installed) is not
+  // Chromium's store: it picks libsecret there, so a locked gnome-keyring
+  // with no one to answer still means basic.
   setenv("XDG_SESSION_TYPE", "tty", 1);
+  setenv("XDG_CURRENT_DESKTOP", "GNOME", 1);
   s = SecretServiceProbe();
   EXPECT(s.secret_service == SecretServiceState::kLocked);
+  EXPECT(!s.secret_prompter);
   EXPECT(!s.kwallet && NeedsBasicPasswordStore(s));
+  // Running kwalletd (it owns its name now): Chromium's KWallet store asks
+  // for its own unlock, so never forced to basic.
   for (const char* kwallet : {"org.kde.kwalletd5", "org.kde.kwalletd6"}) {
     BusCall("RequestName", kwallet);
     s = SecretServiceProbe();
@@ -478,6 +491,12 @@ int main() {
     EXPECT(!NeedsBasicPasswordStore(s));
     BusCall("ReleaseName", kwallet);
   }
+  // A KDE desktop (Chromium's rule): KWallet, running or not.
+  setenv("XDG_CURRENT_DESKTOP", "KDE", 1);
+  s = SecretServiceProbe();
+  EXPECT(s.kwallet);
+  EXPECT(!NeedsBasicPasswordStore(s));
+  setenv("XDG_CURRENT_DESKTOP", "GNOME", 1);
 
   // Unlocked: no prompt at all, even headless.
   g_locked = false;
@@ -523,7 +542,8 @@ int main() {
   ResetPlatformFeaturesForTesting();
   g_test_dbus_down(bus);
   g_object_unref(bus);
-  for (const char* name : {"org.freedesktop.secrets", "org.gnome.keyring"}) {
+  for (const char* name : {"org.freedesktop.secrets", "org.gnome.keyring",
+                           "org.kde.kwalletd5", "org.kde.kwalletd6"}) {
     std::string path = std::string(services) + "/" + name + ".service";
     g_unlink(path.c_str());
   }
