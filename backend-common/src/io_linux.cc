@@ -14,10 +14,14 @@
 #include "laufey_io.h"
 #include "laufey_ui_tasks.h"
 
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -56,11 +60,41 @@ struct ExitPark {
   bool answered = false;
 };
 
-void ParkUiThreadForExit() {
-  UiTaskDispatcher& dispatcher = UiTaskDispatcher::Get();
-  // The UI thread itself exiting (main returning) has nothing to stop.
-  if (dispatcher.IsUiThread())
+// How long exit may take, once it has begun, before the process ends anyway
+// (a destructor or another exit handler that hangs: a lock the parked UI
+// thread holds, a library waiting for a thread that is gone).
+constexpr time_t kExitWatchdogSeconds = 5;
+
+void* ExitWatchdog(void* arg) {
+  int status = static_cast<int>(reinterpret_cast<intptr_t>(arg));
+  struct timespec left = {kExitWatchdogSeconds, 0};
+  while (nanosleep(&left, &left) != 0 && errno == EINTR) {
+  }
+  _exit(status);
+}
+
+// A raw detached thread (nothing exit tears down) that ends the process with
+// `status` after kExitWatchdogSeconds.
+void ArmExitWatchdog(int status) {
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) != 0)
     return;
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_t thread;
+  pthread_create(&thread, &attr, ExitWatchdog,
+                 reinterpret_cast<void*>(static_cast<intptr_t>(status)));
+  pthread_attr_destroy(&attr);
+}
+
+void ParkUiThreadForExit(int status) {
+  ArmExitWatchdog(status);
+  UiTaskDispatcher& dispatcher = UiTaskDispatcher::Get();
+  // The UI thread itself exiting (main returning) has nothing to park; its
+  // loop is over, so later dispatches are answered at once.
+  if (dispatcher.IsUiThread()) {
+    dispatcher.Close();
+    return;
+  }
   auto* park = new ExitPark();
   dispatcher.Dispatch(
       [](void* data, bool ran) {
@@ -77,16 +111,37 @@ void ParkUiThreadForExit() {
           pause();
       },
       park);
-  std::unique_lock<std::mutex> lock(park->mutex);
-  park->cv.wait_for(lock, std::chrono::seconds(1),
-                    [park] { return park->answered; });
+  {
+    std::unique_lock<std::mutex> lock(park->mutex);
+    park->cv.wait_for(lock, std::chrono::seconds(1),
+                      [park] { return park->answered; });
+  }
+  // Nothing runs on the UI thread any more: every task still waiting for it
+  // (a runtime thread in a synchronous UI call, say) is answered with `ran`
+  // false, and so is every later dispatch, instead of queueing forever.
+  dispatcher.Close();
 }
+
+#if defined(__GLIBC__)
+void ParkUiThreadOnExit(int status, void*) {
+  ParkUiThreadForExit(status);
+}
+#else
+void ParkUiThreadAtExit() {
+  ParkUiThreadForExit(0);
+}
+#endif
 
 }  // namespace
 
 void InstallUiExitGuard() {
   static std::once_flag once;
-  std::call_once(once, [] { atexit(ParkUiThreadForExit); });
+#if defined(__GLIBC__)
+  // on_exit: the watchdog ends the process with the status exit was given.
+  std::call_once(once, [] { on_exit(ParkUiThreadOnExit, nullptr); });
+#else
+  std::call_once(once, [] { atexit(ParkUiThreadAtExit); });
+#endif
 }
 
 void SetGtkThread(std::function<void(std::function<void()>)> post,
