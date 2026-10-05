@@ -3,12 +3,25 @@
 // The Linux clipboard through ext-data-control-v1 against the session's real
 // compositor (clipboard_data_control_linux.h): text, HTML with its text
 // alternative, a PNG larger than a pipe's buffer (our own source answers our
-// own read on the same connection), the formats list, and change events. No
-// window is shown, so nothing here has keyboard focus: the core Wayland
+// own read on the same connection), the formats list, change events, and
+// the hostile cases against a second client (this binary run as a peer
+// process with a data-control connection of its own):
+//   - a read larger than its max_bytes is not delivered;
+//   - an owner that never writes: the read gives up after its timeout;
+//   - a peer that asks for our selection again and again and never reads:
+//     at most 8 writer threads at once, each gone after its idle timeout.
+// No window is shown, so nothing here has keyboard focus: the core Wayland
 // clipboard would refuse every one of these. Exits 77 (skipped) outside a
-// Wayland session or where the compositor has no data-control (GNOME, CI).
+// Wayland session or where the compositor has no data-control (GNOME). CI
+// runs it under a headless sway.
 
+#include <fcntl.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <wayland-client.h>
 
 #include <atomic>
 #include <chrono>
@@ -17,8 +30,10 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "../src/clipboard_data_control_linux.h"
+#include "../src/wayland/ext-data-control-v1-client-protocol.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 
@@ -67,8 +82,8 @@ std::string NoisePng() {
   }
   gchar* buf = nullptr;
   gsize len = 0;
-  EXPECT(gdk_pixbuf_save_to_buffer(pixbuf, &buf, &len, "png", nullptr,
-                                   nullptr));
+  EXPECT(
+      gdk_pixbuf_save_to_buffer(pixbuf, &buf, &len, "png", nullptr, nullptr));
   std::string png(buf, len);
   g_free(buf);
   g_object_unref(pixbuf);
@@ -81,9 +96,159 @@ std::string Take(char* s) {
   return out;
 }
 
+// --- The peer: a second data-control client, in a process of its own ------
+
+constexpr char kText[] = "text/plain;charset=utf-8";
+
+struct Peer {
+  wl_display* display = nullptr;
+  ext_data_control_manager_v1* manager = nullptr;
+  wl_seat* seat = nullptr;
+  ext_data_control_device_v1* device = nullptr;
+  ext_data_control_offer_v1* selection = nullptr;
+  std::vector<int> held;  // descriptors kept open, never written or read
+};
+
+Peer g_peer;
+
+void PeerGlobal(void*, wl_registry* registry, uint32_t name,
+                const char* interface, uint32_t) {
+  if (strcmp(interface, ext_data_control_manager_v1_interface.name) == 0)
+    g_peer.manager = static_cast<ext_data_control_manager_v1*>(wl_registry_bind(
+        registry, name, &ext_data_control_manager_v1_interface, 1));
+  else if (strcmp(interface, wl_seat_interface.name) == 0 && !g_peer.seat)
+    g_peer.seat = static_cast<wl_seat*>(
+        wl_registry_bind(registry, name, &wl_seat_interface, 1));
+}
+void PeerGlobalRemove(void*, wl_registry*, uint32_t) {}
+const wl_registry_listener kPeerRegistry = {PeerGlobal, PeerGlobalRemove};
+
+void PeerOffer(void*, ext_data_control_offer_v1*, const char*) {}
+const ext_data_control_offer_v1_listener kPeerOffer = {PeerOffer};
+void PeerDataOffer(void*, ext_data_control_device_v1*,
+                   ext_data_control_offer_v1* offer) {
+  ext_data_control_offer_v1_add_listener(offer, &kPeerOffer, nullptr);
+}
+void PeerSelection(void*, ext_data_control_device_v1*,
+                   ext_data_control_offer_v1* offer) {
+  g_peer.selection = offer;
+}
+void PeerFinished(void*, ext_data_control_device_v1*) {}
+void PeerPrimary(void*, ext_data_control_device_v1*,
+                 ext_data_control_offer_v1*) {}
+const ext_data_control_device_v1_listener kPeerDevice = {
+    PeerDataOffer, PeerSelection, PeerFinished, PeerPrimary};
+
+// The owner that never answers: each request's descriptor is kept open,
+// nothing written.
+void PeerSend(void*, ext_data_control_source_v1*, const char*, int32_t fd) {
+  g_peer.held.push_back(fd);
+}
+void PeerCancelled(void*, ext_data_control_source_v1*) {}
+const ext_data_control_source_v1_listener kPeerSource = {PeerSend,
+                                                         PeerCancelled};
+
+[[noreturn]] void PeerFail(const char* what) {
+  std::fprintf(stderr, "peer: %s\n", what);
+  _exit(3);
+}
+
+void PeerConnect() {
+  g_peer.display = wl_display_connect(nullptr);
+  if (!g_peer.display)
+    PeerFail("no Wayland display");
+  wl_registry* registry = wl_display_get_registry(g_peer.display);
+  wl_registry_add_listener(registry, &kPeerRegistry, nullptr);
+  wl_display_roundtrip(g_peer.display);
+  if (!g_peer.manager || !g_peer.seat)
+    PeerFail("no data-control");
+  g_peer.device =
+      ext_data_control_manager_v1_get_data_device(g_peer.manager, g_peer.seat);
+  ext_data_control_device_v1_add_listener(g_peer.device, &kPeerDevice, nullptr);
+  wl_display_roundtrip(g_peer.display);
+}
+
+[[noreturn]] void PeerServe() {
+  std::printf("ready\n");
+  std::fflush(stdout);
+  while (wl_display_dispatch(g_peer.display) >= 0) {
+  }
+  _exit(0);
+}
+
+// "silent-owner": owns the selection (text) and never answers a request.
+// "hoarder <n>": asks for the current selection n times and never reads.
+int PeerMain(const std::string& mode, int n) {
+  PeerConnect();
+  if (mode == "silent-owner") {
+    ext_data_control_source_v1* source =
+        ext_data_control_manager_v1_create_data_source(g_peer.manager);
+    ext_data_control_source_v1_add_listener(source, &kPeerSource, nullptr);
+    ext_data_control_source_v1_offer(source, kText);
+    ext_data_control_device_v1_set_selection(g_peer.device, source);
+    wl_display_roundtrip(g_peer.display);
+    PeerServe();
+  }
+  if (mode == "hoarder") {
+    if (!g_peer.selection)
+      PeerFail("no selection to ask for");
+    for (int i = 0; i < n; i++) {
+      int fds[2];
+      if (pipe2(fds, O_CLOEXEC) != 0)
+        PeerFail("pipe");
+      ext_data_control_offer_v1_receive(g_peer.selection, kText, fds[1]);
+      close(fds[1]);
+      g_peer.held.push_back(fds[0]);  // never read
+    }
+    wl_display_roundtrip(g_peer.display);
+    PeerServe();
+  }
+  PeerFail("unknown mode");
+}
+
+struct PeerProcess {
+  pid_t pid = -1;
+  ~PeerProcess() {
+    if (pid > 0) {
+      kill(pid, SIGKILL);
+      waitpid(pid, nullptr, 0);
+    }
+  }
+};
+
+// Starts this binary as a peer and waits for it to say it is ready.
+void StartPeer(const char* self, const char* mode, int n, PeerProcess* out) {
+  int out_pipe[2];
+  EXPECT(pipe2(out_pipe, O_CLOEXEC) == 0);
+  pid_t pid = fork();
+  if (pid == 0) {
+    dup2(out_pipe[1], STDOUT_FILENO);
+    std::string count = std::to_string(n);
+    execl(self, self, "--peer", mode, count.c_str(),
+          static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  EXPECT(pid > 0);
+  out->pid = pid;
+  close(out_pipe[1]);
+  pollfd p = {out_pipe[0], POLLIN, 0};
+  EXPECT(poll(&p, 1, 5000) == 1);
+  char buf[16] = {};
+  EXPECT(read(out_pipe[0], buf, sizeof(buf) - 1) > 0);
+  EXPECT(strncmp(buf, "ready", 5) == 0);
+  close(out_pipe[0]);
+}
+
+double SecondsSince(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t)
+      .count();
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc >= 3 && strcmp(argv[1], "--peer") == 0)
+    return PeerMain(argv[2], argc >= 4 ? atoi(argv[3]) : 0);
   const char* wayland = getenv("WAYLAND_DISPLAY");
   if (!wayland || !*wayland || !data_control::Available()) {
     std::printf(
@@ -110,8 +275,8 @@ int main() {
   // A PNG bigger than a pipe buffer, verbatim.
   std::string png = NoisePng();
   EXPECT(png.size() > 256 * 1024);
-  EXPECT(ClipboardWriteImageLinux(
-      reinterpret_cast<const uint8_t*>(png.data()), png.size()));
+  EXPECT(ClipboardWriteImageLinux(reinterpret_cast<const uint8_t*>(png.data()),
+                                  png.size()));
   size_t len = 0;
   uint8_t* got = ClipboardReadImageLinux(&len);
   EXPECT(got && len == png.size() && memcmp(got, png.data(), len) == 0);
@@ -124,6 +289,57 @@ int main() {
   ClipboardWriteTextLinux("changed");
   EXPECT(WaitFor([&] { return g_changes.load() > before; }));
   SetClipboardChangeHandler(nullptr, nullptr);
+
+  // A read larger than max_bytes is not delivered (our own 1 MiB selection).
+  std::string big(1024 * 1024, 'x');
+  ClipboardWriteTextLinux(big);
+  {
+    std::string data;
+    bool found = true;
+    EXPECT(data_control::Read({kText}, 64 * 1024, &data, nullptr, &found));
+    EXPECT(!found && data.empty());
+    EXPECT(
+        data_control::Read({kText}, 2 * 1024 * 1024, &data, nullptr, &found));
+    EXPECT(found && data == big);
+  }
+
+  // A peer asks for our 1 MiB selection 20 times and never reads: at most 8
+  // transfers run at once (the rest are refused), and each gives up after
+  // its idle timeout instead of keeping a thread forever.
+  {
+    PeerProcess hoarder;
+    StartPeer(argv[0], "hoarder", 20, &hoarder);
+    EXPECT(WaitFor([] { return data_control::ActiveWriters() > 0; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    int active = data_control::ActiveWriters();
+    std::printf("non-reading peer: %d writers in flight\n", active);
+    EXPECT(active == 8);
+    auto start = std::chrono::steady_clock::now();
+    while (data_control::ActiveWriters() > 0 && SecondsSince(start) < 10)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT(data_control::ActiveWriters() == 0);
+    std::printf("non-reading peer: writers gone after %.1f s\n",
+                SecondsSince(start));
+  }
+
+  // An owner that never writes: the read gives up after its timeout (3 s),
+  // answering nothing, and the next read works.
+  {
+    PeerProcess owner;
+    StartPeer(argv[0], "silent-owner", 0, &owner);
+    std::vector<std::string> types;
+    EXPECT(WaitFor([&] {
+      return data_control::Types(&types) && types.size() == 1 &&
+             types[0] == kText;
+    }));
+    auto start = std::chrono::steady_clock::now();
+    EXPECT(Take(ClipboardReadTextLinux()).empty());
+    double took = SecondsSince(start);
+    std::printf("silent owner: read gave up after %.1f s\n", took);
+    EXPECT(took >= 2.5 && took < 5.0);
+  }
+  ClipboardWriteTextLinux("after");
+  EXPECT(Take(ClipboardReadTextLinux()) == "after");
 
   std::printf("laufey_clipboard_wayland_test: ok\n");
   std::fflush(stdout);

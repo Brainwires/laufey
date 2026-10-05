@@ -48,6 +48,10 @@ bool Write(Entries entries);
 // Selection changes call FireClipboardChange() while on.
 void Watch(bool on);
 
+// Transfers of our own selection in flight (each on a writer thread of its
+// own, at most 8 at once; tests).
+int ActiveWriters();
+
 }  // namespace data_control
 }  // namespace laufey_common
 

@@ -5,7 +5,8 @@
 // requests from any thread run there as tasks, the selection's data is read
 // from its pipe without blocking that thread (the owner may be this very
 // process, whose source answers on the same thread), and our own source
-// writes each transfer from a short-lived writer thread.
+// writes each transfer from a short-lived writer thread (at most 8 at once,
+// each with a deadline).
 
 #include "clipboard_data_control_linux.h"
 
@@ -45,6 +46,15 @@ using Clock = std::chrono::steady_clock;
 constexpr auto kReadTimeout = std::chrono::seconds(3);
 // How long a caller waits for the connection's thread at all.
 constexpr auto kCallTimeout = std::chrono::seconds(5);
+// How long a reader of our own selection may take nothing before its
+// transfer is dropped, and how long one transfer may take in all.
+constexpr auto kWriteIdleTimeout = kReadTimeout;
+constexpr auto kWriteTimeout = std::chrono::seconds(30);
+// Transfers of our selection in flight at once; a request beyond these is
+// refused (its descriptor closed at once: the reader sees an empty answer).
+constexpr int kMaxWriters = 8;
+
+std::atomic<int> g_writers{0};
 
 // Whether the compositor advertised gtk_shell1, which only GNOME's mutter
 // does (recorded while connecting, whether or not data-control is there).
@@ -69,8 +79,11 @@ struct PendingRead {
   std::shared_ptr<std::promise<std::pair<bool, std::string>>> done;
 };
 
-// Writes `data` to `fd` and closes it. SIGPIPE (a reader that went away) is
-// blocked on this thread and consumed, so it can't end the process.
+// Writes `data` to `fd` and closes it, giving up on a reader that takes
+// nothing for kWriteIdleTimeout or hasn't taken it all after kWriteTimeout
+// (the descriptor is non-blocking, so a peer that never reads can't pin the
+// thread). SIGPIPE (a reader that went away) is blocked on this thread and
+// consumed, so it can't end the process. Ends one of the g_writers.
 void WriteAndClose(int fd, std::shared_ptr<const std::string> data) {
   sigset_t pipe_set, old_set;
   sigemptyset(&pipe_set);
@@ -78,22 +91,42 @@ void WriteAndClose(int fd, std::shared_ptr<const std::string> data) {
   pthread_sigmask(SIG_BLOCK, &pipe_set, &old_set);
   int flags = fcntl(fd, F_GETFL);
   if (flags >= 0)
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  auto now = Clock::now();
+  const auto deadline = now + kWriteTimeout;
+  auto idle_deadline = now + kWriteIdleTimeout;
   size_t off = 0;
   while (data && off < data->size()) {
     ssize_t n = write(fd, data->data() + off, data->size() - off);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      break;
+    if (n > 0) {
+      off += static_cast<size_t>(n);
+      idle_deadline = Clock::now() + kWriteIdleTimeout;
+      continue;
     }
-    off += static_cast<size_t>(n);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+      break;
+    // The pipe is full: wait for the reader to take some.
+    auto until = std::min(deadline, idle_deadline);
+    auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    until - Clock::now())
+                    .count();
+    if (left <= 0)
+      break;
+    pollfd p = {fd, POLLOUT, 0};
+    int r = poll(&p, 1, static_cast<int>(left));
+    if (r < 0 && errno != EINTR)
+      break;
+    if (r > 0 && (p.revents & (POLLERR | POLLHUP | POLLNVAL)))
+      break;
   }
   close(fd);
   struct timespec zero = {0, 0};
   while (sigtimedwait(&pipe_set, nullptr, &zero) > 0) {
   }
   pthread_sigmask(SIG_SETMASK, &old_set, nullptr);
+  g_writers--;
 }
 
 class Client {
@@ -450,6 +483,13 @@ class Client {
       close(fd);
       return;
     }
+    // At most kMaxWriters transfers at once: refuse the rest, so a peer
+    // that asks again and again without reading can't pile up threads.
+    if (g_writers.fetch_add(1) >= kMaxWriters) {
+      g_writers--;
+      close(fd);
+      return;
+    }
     // Off this thread: the reader may be this process, waiting on it.
     std::thread(WriteAndClose, fd, payload).detach();
   }
@@ -513,6 +553,10 @@ Client* Usable() {
 }
 
 }  // namespace
+
+int ActiveWriters() {
+  return g_writers.load();
+}
 
 bool Available() {
   return Usable() != nullptr;
