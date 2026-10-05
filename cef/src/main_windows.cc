@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 
 #include "include/base/cef_callback.h"
@@ -261,24 +262,13 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
   IMPLEMENT_REFCOUNTING(LaufeyCombinedApp);
 };
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                   LPSTR lpCmdLine, int nCmdShow) {
+// The host's entry point, in every process (browser, renderer, GPU, ...;
+// single-exe model). `sandbox_info` is bootstrap.exe's sandbox information,
+// or null for an unsandboxed build (-DUSE_SANDBOX=OFF), which then runs every
+// child with no_sandbox.
+static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
   CefMainArgs main_args(hInstance);
 
-  // Single-exe model: check if we are a subprocess first
-  CefRefPtr<LaufeyCombinedApp> app(new LaufeyCombinedApp());
-  int exit_code = CefExecuteProcess(main_args, app, nullptr);
-  if (exit_code >= 0) {
-    return exit_code;
-  }
-
-  // laufey's own options end at "--" (a registered URL scheme runs
-  // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
-  // packaged app (a launch file or a runtime next to the executable) loads
-  // only the runtime next to its executable: never one the command line or
-  // LAUFEY_RUNTIME_PATH names. The arguments are also kept for the browser
-  // process's command line hook, which drops a deep-link launch's Chromium
-  // switches (LaufeyStripDeepLinkSwitches). See laufey_launch_args.h.
   std::vector<std::string> args;
   {
     int argc = 0;
@@ -288,8 +278,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (argv)
       LocalFree(argv);
   }
-  laufey_common::SetProcessArgs(args);
-  {
+  // A CEF subprocess (renderer, GPU, utility, ...) carries --type=; anything
+  // else is the browser process or a headless worker.
+  bool cef_child = false;
+  for (const std::string& a : args) {
+    if (a == "--")
+      break;
+    if (a.rfind("--type=", 0) == 0) {
+      cef_child = true;
+      break;
+    }
+  }
+
+  if (!cef_child) {
+    // laufey's own options end at "--" (a registered URL scheme runs
+    // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
+    // packaged app (a launch file or a runtime next to the executable) loads
+    // only the runtime next to its executable: never one the command line or
+    // LAUFEY_RUNTIME_PATH names. The arguments are also kept for the browser
+    // process's command line hook, which drops a deep-link launch's Chromium
+    // switches (LaufeyStripDeepLinkSwitches). See laufey_launch_args.h.
+    laufey_common::SetProcessArgs(args);
     laufey_common::RuntimeChoice choice = laufey_common::ResolveRuntimePath(
         args, {LaufeyFindColocatedRuntime()}, {});
     // A packaged app without its runtime exits at once, before CEF starts.
@@ -298,11 +307,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
       return laufey_common::kMissingRuntimeExitCode;
     }
     g_runtime_path = choice.path;
+
+    // A headless / forked worker never loads CEF (libcef.dll is delay-loaded
+    // and first called by CefExecuteProcess below): no Chromium threads or
+    // files held open in a process that, like the full-app updater's helper,
+    // may outlive or move the app's install directory.
+    if (laufey_common::IsHeadlessWorkerLaunch(args)) {
+      return run_headless(g_runtime_path);
+    }
   }
 
-  // Check for headless / forked worker mode (skip CEF entirely)
-  if (laufey_common::IsHeadlessWorkerLaunch(args)) {
-    return run_headless(g_runtime_path);
+  // Single-exe model: CEF subprocesses run in here. A sandboxed child (a
+  // renderer, the GPU process) enters the sandbox in CefExecuteProcess.
+  CefRefPtr<LaufeyCombinedApp> app(new LaufeyCombinedApp());
+  int exit_code = CefExecuteProcess(main_args, app, sandbox_info);
+  if (exit_code >= 0) {
+    return exit_code;
   }
 
   // Single-instance mode (docs/deep-links.md): a second launch forwards its
@@ -321,7 +341,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   laufey_common::InitNotificationsAtLaunch();
 
   CefSettings settings;
-  settings.no_sandbox = true;
+  // `--no-sandbox` on the command line still turns it off for a debugging
+  // session (Chromium reads the switch itself); a deep-link launch drops it
+  // with every other Chromium switch (LaufeyStripDeepLinkSwitches).
+  settings.no_sandbox = sandbox_info == nullptr;
   settings.log_severity = LaufeyCefLogSeverity();
 
   // Set cache path. With a per-app data dir (LAUFEY_DATA_DIR / LAUFEY_APP_ID)
@@ -360,7 +383,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
   }
 
-  if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
+  if (!CefInitialize(main_args, settings, app.get(), sandbox_info)) {
     LaufeyReportCefInitializeFailure(cache_path);
     return 1;
   }
@@ -380,3 +403,99 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
   return 0;
 }
+
+#if defined(CEF_USE_BOOTSTRAP)
+
+namespace {
+
+// Whether bootstrap.exe (`theirs`) comes from the CEF distribution this DLL
+// was built against: the sandbox information it created is passed to this
+// DLL's libcef, so a bootstrap from another CEF release must not run it.
+bool LaufeyBootstrapMatches(const cef_version_info_t* theirs) {
+  if (!theirs ||
+      theirs->size < offsetof(cef_version_info_t, chrome_version_patch) +
+                         sizeof(theirs->chrome_version_patch)) {
+    return false;
+  }
+  cef_version_info_t ours = {};
+  CEF_POPULATE_VERSION_INFO(&ours);
+  if (theirs->cef_version_major != ours.cef_version_major ||
+      theirs->cef_version_minor != ours.cef_version_minor ||
+      theirs->cef_version_patch != ours.cef_version_patch ||
+      theirs->cef_commit_number != ours.cef_commit_number ||
+      theirs->chrome_version_major != ours.chrome_version_major ||
+      theirs->chrome_version_minor != ours.chrome_version_minor ||
+      theirs->chrome_version_build != ours.chrome_version_build ||
+      theirs->chrome_version_patch != ours.chrome_version_patch) {
+    return false;
+  }
+#if CEF_API_ADDED(14600)
+  // The sandbox compatibility hash, when the bootstrap passes one.
+  if (theirs->size >= CEF_VERSION_INFO_SIZE_WITH_SANDBOX_HASH &&
+      strncmp(theirs->sandbox_compat_hash, ours.sandbox_compat_hash,
+              sizeof(ours.sandbox_compat_hash)) != 0) {
+    return false;
+  }
+#endif
+  return true;
+}
+
+// CEF's bootstrap moves a browser-type process (the app, a headless worker)
+// to the executable's directory before calling RunWinMain
+// (SetCwdForBrowserProcess in CEF's bootstrap_win.cc), so a process loses
+// the working directory it was started in. A launcher that knows it, such as
+// the runtime forking a worker of its own executable, passes it in
+// LAUFEY_CWD: change back to it. The variable is removed either way, so the
+// app's own child processes don't inherit it.
+void LaufeyRestoreLaunchWorkingDirectory() {
+  const wchar_t kName[] = L"LAUFEY_CWD";
+  DWORD len = GetEnvironmentVariableW(kName, nullptr, 0);
+  if (len == 0)
+    return;
+  std::wstring dir(len, L'\0');
+  DWORD got = GetEnvironmentVariableW(kName, dir.data(), len);
+  SetEnvironmentVariableW(kName, nullptr);
+  if (got == 0 || got >= len)
+    return;
+  dir.resize(got);
+  if (!SetCurrentDirectoryW(dir.c_str())) {
+    std::cerr << "laufey: LAUFEY_CWD: can't change to "
+              << laufey_common::WideToUtf8(dir) << " (error " << GetLastError()
+              << ")" << std::endl;
+  }
+}
+
+}  // namespace
+
+// Called by bootstrap.exe, the app's executable (`<app>.exe` loads this DLL
+// as `<app>.dll`), in every process, with the sandbox information it created.
+// See docs/backends.md, "The Chromium sandbox".
+CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance, LPTSTR lpCmdLine,
+                                    int nCmdShow, void* sandbox_info,
+                                    cef_version_info_t* version_info) {
+  (void)lpCmdLine;
+  (void)nCmdShow;
+  if (!LaufeyBootstrapMatches(version_info)) {
+    // WIN32 subsystem: stderr is usually detached, so also show a dialog.
+    const wchar_t* msg =
+        L"This app's executable (CEF's bootstrap) comes from a different CEF "
+        L"release than its host library.";
+    std::cerr << laufey_common::WideToUtf8(msg) << std::endl;
+    MessageBoxW(nullptr, msg, L"LAUFEY Error", MB_OK | MB_ICONERROR);
+    return 1;
+  }
+  LaufeyRestoreLaunchWorkingDirectory();
+  return LaufeyWinMain(hInstance, sandbox_info);
+}
+
+#else
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                   LPSTR lpCmdLine, int nCmdShow) {
+  (void)hPrevInstance;
+  (void)lpCmdLine;
+  (void)nCmdShow;
+  return LaufeyWinMain(hInstance, nullptr);
+}
+
+#endif  // defined(CEF_USE_BOOTSTRAP)

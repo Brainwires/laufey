@@ -44,9 +44,9 @@ when launching the host — `--laufey-custom-schemes=myapp` or
 ### The Chromium sandbox
 
 The CEF backend runs Chromium's renderer, GPU and utility processes in
-Chromium's sandbox on macOS and Linux. On Windows it doesn't yet (see below).
-The WebView backends are not affected: WKWebView, WebView2 and WebKitGTK sandbox
-their web content processes themselves.
+Chromium's sandbox on macOS, Linux and Windows. The WebView backends are not
+affected: WKWebView, WebView2 and WebKitGTK sandbox their web content processes
+themselves.
 
 `--no-sandbox` on the host's command line still turns it off for a debugging
 session; a deep-link launch drops that switch with every other Chromium switch
@@ -97,25 +97,56 @@ session; a deep-link launch drops that switch with every other Chromium switch
   the sandbox off). The GPU process's seccomp sandbox is Chromium's own
   decision: Chromium skips it when the GL driver started threads before the
   sandbox, as Mesa's llvmpipe (software GL, e.g. under Xvfb) does.
-- **Windows (off).** CEF 149's Windows sandbox comes with the bootstrap model
-  (`USE_SANDBOX=ON` defines `CEF_USE_BOOTSTRAP`): the distribution's
-  `bootstrap.exe` becomes the app's executable, creates the sandbox information
-  (`cef_sandbox_info_create` is linked into it, not into `libcef.dll`), and
-  calls `RunWinMain` in a client DLL named after the executable (`<app>.exe`
-  loads `<app>.dll`). A signed bootstrap executable loads only a client DLL
-  signed with the same certificate. laufey's host is a single `laufey.exe` today
-  (`WinMain` in `main_windows.cc`, which also runs the headless worker mode),
-  and a packaged app already uses `<app>.dll` for its runtime library (laufey
-  loads the runtime named after the executable), so the bootstrap's client DLL
-  and the runtime would need the same name. Turning it on therefore takes,
-  together: the host built as a DLL exporting `RunWinMain` that passes the
-  sandbox information to `CefExecuteProcess` and `CefInitialize`; the runtime
-  renamed (on Windows only) in laufey's co-located runtime lookup and in Deno's
-  packaging, installer and updater; the packaging shipping `bootstrap.exe` as
-  `<app>.exe` with the app's icon and version resources; and signing both
-  executables with one certificate. Until then, keep CEF windows on content the
-  app serves itself (its custom schemes) and open other sites in the user's
-  browser, as laufey's external-link handling does by default.
+- **Windows.** CEF 149's Windows sandbox comes with the bootstrap model
+  (`USE_SANDBOX=ON`, CEF's default, defines `CEF_USE_BOOTSTRAP`): the sandbox
+  information is created by the distribution's `bootstrap.exe`
+  (`cef_sandbox_info_create` is linked into it, not into `libcef.dll`), so the
+  bootstrap is the app's executable and laufey's CEF host is a DLL it loads. The
+  build ships the two side by side in `cef/build/Release`:
+  - `laufey.exe`, CEF's `bootstrap.exe` copied under laufey's name. It loads the
+    client DLL named after itself (`<app>.exe` loads `<app>.dll`) and calls its
+    `RunWinMain` in every process, with the sandbox information;
+  - `laufey.dll`, the host (`main_windows.cc`): `RunWinMain` checks that the
+    bootstrap comes from the CEF release the host was built against, then passes
+    the sandbox information to `CefExecuteProcess` and `CefInitialize`
+    (`no_sandbox = false`). It also runs the headless worker mode.
+
+  So a packaged Windows CEF app is laid out as:
+
+  ```
+  <App>/
+    <App>.exe          CEF's bootstrap, with the app's icon and version resources
+    <App>.dll          laufey's CEF host (laufey.dll, renamed)
+    <App>.runtime.dll  the runtime
+    libcef.dll, ...
+  ```
+
+  The runtime is `<app>.runtime.dll` because `<app>.dll` is the host: the
+  Windows CEF host's co-located runtime lookup (`LaufeyFindColocatedRuntime`)
+  looks for `<executable name>.runtime.dll`. The WebView backend is not
+  affected: its host is the executable itself and keeps loading `<app>.dll`. A
+  packager renames `laufey.exe` and `laufey.dll` together and replaces the
+  bootstrap's icon and version resources (CEF's own: "CEF bootstrap" in Task
+  Manager) with the app's. A signed bootstrap loads only a client DLL signed
+  with the same certificate, and it verifies its own signature first
+  (WinVerifyTrust): one that doesn't chain to a trusted root, such as a
+  self-signed test certificate nobody trusted, stops the app at launch with a
+  fatal "certificate checks" error. So the two are signed together, with a
+  trusted certificate (a packager that signs every PE file in the app does).
+
+  The bootstrap moves the browser process to the executable's directory before
+  the host runs (`SetCwdForBrowserProcess` in CEF's `bootstrap_win.cc`, so no
+  handle to an arbitrary directory leaks into child processes), and the
+  directory the app was started in is gone. A launcher that knows it passes it
+  in `LAUFEY_CWD`: the host changes back to it and removes the variable (Deno
+  Desktop's runtime does this for the workers it forks of its own executable, so
+  a dev server's workers keep the project directory). Any other launch, from a
+  shell or a shortcut, starts in the executable's directory.
+
+  The renderers run at Untrusted integrity and the GPU process at Low.
+  `-DUSE_SANDBOX=OFF` builds the unsandboxed single `laufey.exe` instead
+  (`WinMain`, `no_sandbox = true`); it loads `<executable name>.runtime.dll`
+  too.
 
 The native e2e battery checks the result from outside the backend
 (`examples/native_e2e/src/sandbox_checks.rs`,
@@ -123,11 +154,13 @@ The native e2e battery checks the result from outside the backend
 cef --sandbox`): on Linux every renderer has a
 seccomp-bpf filter (`/proc/<pid>/status` `Seccomp: 2`), `NoNewPrivs: 1` and a
 PID namespace of its own (a nested `NSpid`); on macOS `sandbox_check()` reports
-the renderer and GPU helpers sandboxed; on Windows it reads the children's
-integrity level. `LAUFEY_E2E_EXPECT_SANDBOX=0` asserts the opposite, for a Linux
-run without a usable sandbox. On Linux `LAUFEY_E2E_EXPECT_SANDBOX_MODE` names
-the layer (`namespace`: the renderer has a user namespace of its own; `setuid`:
-it doesn't), checked against the host's `laufey: sandbox:` line too.
+the renderer and GPU helpers sandboxed; on Windows the renderer and GPU
+processes (by their `--type=`) run below Medium integrity or in an AppContainer,
+while the browser process doesn't. `LAUFEY_E2E_EXPECT_SANDBOX=0` asserts the
+opposite, for a Linux run without a usable sandbox or a Windows build with
+`-DUSE_SANDBOX=OFF`. On Linux `LAUFEY_E2E_EXPECT_SANDBOX_MODE` names the layer
+(`namespace`: the renderer has a user namespace of its own; `setuid`: it
+doesn't), checked against the host's `laufey: sandbox:` line too.
 
 ## WebView
 

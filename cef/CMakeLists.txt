@@ -218,23 +218,40 @@ elseif(OS_WINDOWS)
     ${LAUFEY_RENDERER_SRCS}
   )
 
-  add_executable(${CEF_TARGET} WIN32 ${LAUFEY_SRCS_COMMON} ${LAUFEY_SRCS_WIN})
-  SET_EXECUTABLE_TARGET_PROPERTIES(${CEF_TARGET})
+  # Chromium's sandbox (docs/backends.md, "The Chromium sandbox"). CEF 149
+  # links the Windows sandbox into the distribution's bootstrap.exe only
+  # (USE_SANDBOX, on by default in cef_variables.cmake, defines
+  # CEF_USE_BOOTSTRAP), so with it the host is a DLL: laufey.dll exports
+  # RunWinMain, and bootstrap.exe, copied in as laufey.exe, creates the
+  # sandbox information and calls it (an <app>.exe loads the <app>.dll next
+  # to it). bootstrap.exe carries its own manifest, with the Windows 10
+  # supportedOS GUID that keeps Chromium's GPU acceleration on (see the
+  # manifest note below and denoland/deno#36523). -DUSE_SANDBOX=OFF builds
+  # the unsandboxed single laufey.exe instead.
+  if(USE_SANDBOX)
+    add_library(${CEF_TARGET} SHARED ${LAUFEY_SRCS_COMMON} ${LAUFEY_SRCS_WIN})
+    SET_LIBRARY_TARGET_PROPERTIES(${CEF_TARGET})
+  else()
+    add_executable(${CEF_TARGET} WIN32 ${LAUFEY_SRCS_COMMON} ${LAUFEY_SRCS_WIN})
+    SET_EXECUTABLE_TARGET_PROPERTIES(${CEF_TARGET})
 
-  # Embed the application manifest (win/laufey.exe.manifest merged with
-  # win/compatibility.manifest, same layout as cefclient). CEF's toolchain
-  # links with /MANIFEST:NO, so without this post-build mt.exe step the exe
-  # ships with no manifest at all. The Win10 supportedOS GUID in the
-  # compatibility section is load-bearing: GetVersionEx caps the reported OS
-  # version at Windows 8 for unmanifested exes, and Chromium then treats the
-  # OS as unsupported and disables all GPU acceleration (WebGL included) —
-  # see denoland/deno#36523.
-  ADD_WINDOWS_MANIFEST("${CMAKE_CURRENT_SOURCE_DIR}/win" "${CEF_TARGET}" "exe")
+    # Embed the application manifest (win/laufey.exe.manifest merged with
+    # win/compatibility.manifest, same layout as cefclient). CEF's toolchain
+    # links with /MANIFEST:NO, so without this post-build mt.exe step the exe
+    # ships with no manifest at all. The Win10 supportedOS GUID in the
+    # compatibility section is load-bearing: GetVersionEx caps the reported
+    # OS version at Windows 8 for unmanifested exes, and Chromium then treats
+    # the OS as unsupported and disables all GPU acceleration (WebGL
+    # included) — see denoland/deno#36523.
+    ADD_WINDOWS_MANIFEST("${CMAKE_CURRENT_SOURCE_DIR}/win" "${CEF_TARGET}" "exe")
+  endif()
 
   target_link_libraries(${CEF_TARGET} libcef_dll_wrapper ${CEF_LIB_RELEASE} ${CEF_STANDARD_LIBS} laufey_backend_common)
   target_include_directories(${CEF_TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${LAUFEY_INCLUDE_DIR}")
 
-  # Copy CEF binaries and resources to the output directory
+  # Copy CEF binaries and resources to the output directory. The
+  # distribution's bootstrap executables never ship under their own names:
+  # with the sandbox, bootstrap.exe becomes laufey.exe.
   add_custom_command(
     TARGET ${CEF_TARGET}
     POST_BUILD
@@ -244,8 +261,21 @@ elseif(OS_WINDOWS)
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CEF_RESOURCE_DIR}"
             "${CEF_TARGET_OUT_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E remove -f
+            "${CEF_TARGET_OUT_DIR}/bootstrap.exe"
+            "${CEF_TARGET_OUT_DIR}/bootstrapc.exe"
     VERBATIM
   )
+  if(USE_SANDBOX)
+    add_custom_command(
+      TARGET ${CEF_TARGET}
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy
+              "${CEF_BINARY_DIR_RELEASE}/bootstrap.exe"
+              "${CEF_TARGET_OUT_DIR}/${CEF_TARGET}.exe"
+      VERBATIM
+    )
+  endif()
 
 elseif(OS_LINUX)
   set(CEF_WRAPPER_LIB "${CEF_ROOT}/libcef_dll_wrapper/libcef_dll_wrapper.a")

@@ -107,7 +107,9 @@ esac
 case "$platform" in
   macos) colocated_rt="$bin.dylib" ;;
   linux) colocated_rt="$bin.so" ;;
-  *) colocated_rt="${bin%.exe}.dll" ;;
+  # Windows CEF: <exe>.dll is the host behind CEF's bootstrap.
+  *) [ "$backend" = cef ] && colocated_rt="${bin%.exe}.runtime.dll" ||
+    colocated_rt="${bin%.exe}.dll" ;;
 esac
 write_launch_file() { # <json>
   mkdir -p "$(dirname "$launch_file")"
@@ -257,8 +259,16 @@ start primary \
   LAUFEY_E2E_SI_SECOND_CWD="$cwd_native" \
   LAUFEY_E2E_SI_HOLD_FILE="$(native "$scratch/release-primary")" -- "${cold_args[@]}"
 primary_pid=$started_pid
+# The Windows CEF executable is CEF's bootstrap, which moves the process to
+# the executable's directory before laufey runs; laufey changes back to the
+# directory LAUFEY_CWD names (docs/backends.md). A launch without it starts in
+# the executable's directory.
+second_cwd_env=()
+if [ "$platform" = windows ] && [ "$backend" = cef ]; then
+  second_cwd_env=(LAUFEY_CWD="$cwd_native")
+fi
 if wait_for primary '^\[e2e\] ready' 90; then
-  direct second "$cwd_dir" LAUFEY_SINGLE_INSTANCE=0 \
+  direct second "$cwd_dir" LAUFEY_SINGLE_INSTANCE=0 ${second_cwd_env[@]+"${second_cwd_env[@]}"} \
     LAUFEY_DATA_DIR="$(native "$scratch/data-second")" -- "${second_args[@]}"
   if [ "$direct_rc" = 0 ] && [ "$direct_secs" -le 10 ] &&
     ! grep -q '^\[e2e\]' "$scratch/logs/second.log"; then

@@ -186,7 +186,14 @@ if [ "$mode" = "--bridge-origin" ]; then
   # runtime next to its executable (never LAUFEY_RUNTIME_PATH): copy it there
   # for the run. (Git Bash finds "laufey" for "laufey.exe", so ask the OS.)
   case "$(uname -s)" in
-    MINGW* | MSYS* | CYGWIN*) colocated_rt="${bin%.exe}.dll" ;;
+    # The Windows CEF executable is CEF's bootstrap, and <exe>.dll is the
+    # host it loads, so the runtime is <exe>.runtime.dll there.
+    MINGW* | MSYS* | CYGWIN*)
+      if [ "$backend" = cef ]; then
+        colocated_rt="${bin%.exe}.runtime.dll"
+      else
+        colocated_rt="${bin%.exe}.dll"
+      fi ;;
     Darwin) colocated_rt="$bin.dylib" ;;
     *) colocated_rt="$bin.so" ;;
   esac
