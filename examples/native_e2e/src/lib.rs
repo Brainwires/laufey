@@ -36,6 +36,7 @@ mod launch_checks;
 mod lna_checks;
 mod menu_notification_checks;
 mod os_view;
+mod sandbox_checks;
 mod stream_checks;
 mod system_checks;
 
@@ -799,6 +800,12 @@ fn e2e_main() {
     // real window manager, where the rest of the battery assumes none).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("window-api") {
       window_api_checks().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=sandbox: only the CEF sandbox checks
+    // (sandbox_checks.rs).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("sandbox") {
+      sandbox_checks::run().await;
       finish();
     }
     // LAUFEY_E2E_ONLY=lna: only the Local Network Access checks
@@ -1677,6 +1684,9 @@ fn e2e_main() {
       na("a WebSocket to loopback (backend has no web engine)");
     }
     lna_checks::other_origin_blocked(echo_url.as_deref()).await;
+
+    // ---- the engine's sandbox (CEF) ----------------------------------------
+    sandbox_checks::run().await;
 
     // ---- request body over the custom scheme -----------------------------
     let body_win = body_round_trip(&body_received).await;
