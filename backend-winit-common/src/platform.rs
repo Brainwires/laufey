@@ -54,19 +54,26 @@ impl PlatformFeatures {
           .into(),
       );
     }
-    let mut reason = String::from(
-      "no tray host: nothing owns org.kde.StatusNotifierWatcher on the \
-       session bus",
-    );
+    // Neutral wording: no desktop is named outside the hint's suffix, which
+    // is the reason's last part (a runtime that may not show the hint cuts
+    // the reason there), as backend-common words it.
+    let mut reason = String::from("no tray host (StatusNotifierWatcher)");
     if self.session_type.as_deref() == Some("x11") {
-      reason.push_str(" and no XEmbed system tray runs");
+      reason.push_str(" and no XEmbed system tray");
     }
+    reason.push_str(" on this session; some desktops need an extension");
     if let Some(hint) = &self.desktop_hint {
-      reason.push_str(&format!(" (XDG_CURRENT_DESKTOP={hint})"));
+      let gnome = hint.split(':').any(|d| d == "GNOME");
+      reason.push_str(&format!(
+        " (XDG_CURRENT_DESKTOP={hint}{})",
+        if gnome {
+          "; GNOME shows tray icons only with the AppIndicator extension \
+           enabled"
+        } else {
+          ""
+        }
+      ));
     }
-    reason.push_str(
-      "; GNOME shows tray icons only with the AppIndicator extension enabled",
-    );
     Some(reason)
   }
 
@@ -199,8 +206,16 @@ fn tray_library() -> bool {
     ]
     .iter()
     // SAFETY: loading a shared library runs its constructors; these are
-    // the libraries tray-icon itself loads.
-    .any(|name| unsafe { libloading::Library::new(name) }.is_ok())
+    // the libraries tray-icon itself loads. Kept loaded for the process
+    // (never dlclose'd: tray-icon loads it again, and a library with GLib
+    // types registered can't be unloaded safely).
+    .any(|name| match unsafe { libloading::Library::new(name) } {
+      Ok(library) => {
+        std::mem::forget(library);
+        true
+      }
+      Err(_) => false,
+    })
   })
 }
 
@@ -367,6 +382,40 @@ mod linux {
       .unwrap_or(false)
   }
 
+  /// A method call with NO_AUTO_START: the bus never starts the destination
+  /// for it (an absent one is an error, `None`).
+  fn call_no_start<B, R>(
+    conn: &Connection,
+    dest: &str,
+    path: &str,
+    iface: &str,
+    method: &str,
+    body: &B,
+  ) -> Option<R>
+  where
+    B: zbus::export::serde::ser::Serialize + zbus::zvariant::DynamicType,
+    R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
+  {
+    let proxy =
+      zbus::blocking::proxy::Builder::<zbus::blocking::Proxy>::new(conn)
+        .destination(dest)
+        .ok()?
+        .path(path)
+        .ok()?
+        .interface(iface)
+        .ok()?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .ok()?;
+    proxy
+      .call_with_flags(
+        method,
+        zbus::proxy::MethodFlags::NoAutoStart.into(),
+        body,
+      )
+      .ok()?
+  }
+
   /// A property, read only from a service that is running (the callers
   /// check), so the call never starts one.
   fn get_property<T>(
@@ -401,42 +450,39 @@ mod linux {
   /// This process's logind session (XDG_SESSION_ID's, else the process's
   /// own) as `(Type, Active)`, or `None` when logind can't say (no system
   /// bus, no logind, no session: a systemd user service, a container).
-  /// Property reads on the system bus; never starts logind.
+  /// Property reads on one system-bus connection for the probe, every call
+  /// NO_AUTO_START: never starts logind.
   fn logind_session() -> Option<(String, bool)> {
     let conn = zbus::blocking::connection::Builder::system()
       .ok()?
       .method_timeout(TIMEOUT)
       .build()
       .ok()?;
+    const LOGIND: &str = "org.freedesktop.login1";
     let manager = "/org/freedesktop/login1";
-    let iface = Some("org.freedesktop.login1.Manager");
-    let dest = Some("org.freedesktop.login1");
-    let reply = match env("XDG_SESSION_ID") {
-      Some(id) => conn.call_method(dest, manager, iface, "GetSession", &(id,)),
-      None => conn.call_method(
-        dest,
+    let iface = "org.freedesktop.login1.Manager";
+    let path: zbus::zvariant::OwnedObjectPath = match env("XDG_SESSION_ID") {
+      Some(id) => {
+        call_no_start(&conn, LOGIND, manager, iface, "GetSession", &(id,))
+      }
+      None => call_no_start(
+        &conn,
+        LOGIND,
         manager,
         iface,
         "GetSessionByPID",
         &(std::process::id(),),
       ),
-    }
-    .ok()?;
-    let path: zbus::zvariant::OwnedObjectPath =
-      reply.body().deserialize().ok()?;
-    let get = |prop: &str| {
-      conn
-        .call_method(
-          Some("org.freedesktop.login1"),
-          path.as_str(),
-          Some("org.freedesktop.DBus.Properties"),
-          "Get",
-          &("org.freedesktop.login1.Session", prop),
-        )
-        .ok()?
-        .body()
-        .deserialize::<zbus::zvariant::OwnedValue>()
-        .ok()
+    }?;
+    let get = |prop: &str| -> Option<zbus::zvariant::OwnedValue> {
+      call_no_start(
+        &conn,
+        LOGIND,
+        path.as_str(),
+        "org.freedesktop.DBus.Properties",
+        "Get",
+        &("org.freedesktop.login1.Session", prop),
+      )
     };
     let session_type = String::try_from(get("Type")?).ok()?;
     let active = bool::try_from(get("Active")?).ok()?;
@@ -793,9 +839,28 @@ mod tests {
     };
     assert!(!f.tray_host());
     let reason = f.tray_reason().unwrap();
-    assert!(reason.contains("org.kde.StatusNotifierWatcher"));
-    assert!(reason.contains("XDG_CURRENT_DESKTOP=GNOME"));
+    assert_eq!(
+      reason,
+      "no tray host (StatusNotifierWatcher) on this session; some desktops \
+       need an extension (XDG_CURRENT_DESKTOP=GNOME; GNOME shows tray icons \
+       only with the AppIndicator extension enabled)"
+    );
     assert!(!reason.contains("XEmbed"));
+    // No desktop is named outside the hint's suffix, the reason's last part.
+    let neutral = "no tray host (StatusNotifierWatcher) on this session; \
+                   some desktops need an extension";
+    assert_eq!(
+      &reason[..reason.find(" (XDG_CURRENT_DESKTOP=").unwrap()],
+      neutral
+    );
+    f.desktop_hint = Some("sway".into());
+    assert_eq!(
+      f.tray_reason().unwrap(),
+      format!("{neutral} (XDG_CURRENT_DESKTOP=sway)")
+    );
+    f.desktop_hint = None;
+    assert_eq!(f.tray_reason().unwrap(), neutral);
+    f.desktop_hint = Some("GNOME".into());
     f.session_type = Some("x11".into());
     assert!(f.tray_reason().unwrap().contains("XEmbed"));
     f.tray_xembed = true;

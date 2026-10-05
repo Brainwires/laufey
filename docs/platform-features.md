@@ -27,7 +27,7 @@ may wait a few seconds for xdg-desktop-portal to start.
 | `desktopHint`         | `XDG_CURRENT_DESKTOP` as set, or `null`. A hint for wording only (no feature is guessed from it).                                                                                                                                                                                                                                            |
 | `sessionBus`          | Linux: a D-Bus session bus answered.                                                                                                                                                                                                                                                                                                         |
 | `trayHost`            | A tray icon can be seen: on Linux, `org.kde.StatusNotifierWatcher` has an owner, or an XEmbed tray runs on X11, and the appindicator library loads. Always `true` on macOS and Windows.                                                                                                                                                      |
-| `trayReason`          | Why not, when `trayHost` is `false`; otherwise `null`.                                                                                                                                                                                                                                                                                       |
+| `trayReason`          | Why not, when `trayHost` is `false`; otherwise `null`. Reasons name no desktop except in a last `(XDG_CURRENT_DESKTOP=…)` part, which a runtime that may not show `desktopHint` cuts.                                                                                                                                                        |
 | `trayClicks`          | The icon reports clicks (`false` on Linux: AppIndicator opens its menu instead).                                                                                                                                                                                                                                                             |
 | `trayTooltip`         | The tooltip shows (on Linux, as the indicator's title).                                                                                                                                                                                                                                                                                      |
 | `secretService`       | Linux: `"available"` (the default collection is unlocked), `"locked"` (locked, or missing: using it means a prompt), `"activatable"` (not running; D-Bus can start it), `"absent"`, `"no-session-bus"`. `"os"` on macOS and Windows.                                                                                                         |
@@ -56,14 +56,13 @@ with a fixed key (obfuscated, not protected by the OS). It says so once on
 stderr and reports `"cookieEncryption": "basic"`.
 
 Everything else is left to Chromium (`"cookieEncryption": "os"`): an unlocked
-keyring, a locked one someone can unlock, KWallet where Chromium would use it
-(a KDE desktop by Chromium's own rule: the first desktop it knows in
-`XDG_CURRENT_DESKTOP` is `KDE`, else `DESKTOP_SESSION` / `KDE_FULL_SESSION`;
-or `org.kde.kwalletd5` / `org.kde.kwalletd6` running now; it asks for its own
-unlock), and no
-Secret Service at all or no session bus, where Chromium finds no keystore and
-falls back to `basic` by itself without waiting. An explicit `--password-store`
-on the command line is kept as given.
+keyring, a locked one someone can unlock, KWallet where Chromium would use it (a
+KDE desktop by Chromium's own rule: the first desktop it knows in
+`XDG_CURRENT_DESKTOP` is `KDE`, else `DESKTOP_SESSION` / `KDE_FULL_SESSION`; or
+`org.kde.kwalletd5` / `org.kde.kwalletd6` running now; it asks for its own
+unlock), and no Secret Service at all or no session bus, where Chromium finds no
+keystore and falls back to `basic` by itself without waiting. An explicit
+`--password-store` on the command line is kept as given.
 
 The OS key is sticky per profile. Once a profile gets it, CEF records `os` in
 the profile's root cache directory (a `laufey-password-store` file, written to a
@@ -72,9 +71,11 @@ temporary file and renamed over it), and later launches keep asking for it.
 when it has the OS key, so a profile created in a headless session moves to the
 OS key without losing anything the first time a launch can reach it. When an
 `os` profile meets a Secret Service that is locked (or not running) with no one
-to answer its prompt, that launch alone uses `basic` (`"cookieEncryption":
-"basic"`), the marker stays `os`, and stderr says once that the cookies stored
-with the OS key are unavailable this run; the next launch that can reach the key
-reads them again. An explicit `--password-store` is kept as given; an OS store
-given that way is recorded, `basic` is not. A profile with no data directory
-(the throwaway per-process one) decides on every launch.
+to answer its prompt, that launch alone uses `basic`
+(`"cookieEncryption":
+"basic"`), the marker stays `os`, and stderr says once
+that the cookies stored with the OS key are unavailable this run; the next
+launch that can reach the key reads them again. An explicit `--password-store`
+is kept as given; an OS store given that way is recorded, `basic` is not. A
+profile with no data directory (the throwaway per-process one) decides on every
+launch.

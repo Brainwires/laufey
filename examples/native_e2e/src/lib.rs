@@ -1486,13 +1486,13 @@ fn e2e_main() {
       check(
         "no tray host: tray_unavailable_reason says why (tray part only)",
         laufey::tray_unavailable_reason()
-          .is_some_and(|r| r.contains("org.kde.StatusNotifierWatcher")),
+          .is_some_and(|r| r.contains("StatusNotifierWatcher")),
       );
       let features = laufey::platform_features().unwrap_or_default();
       check(
         "no tray host: platform_features says trayHost false, with the reason",
         features.contains("\"trayHost\":false")
-          && features.contains("org.kde.StatusNotifierWatcher"),
+          && features.contains("StatusNotifierWatcher"),
       );
       drop(refused);
       let _ = std::fs::write(&flag, b"refused");

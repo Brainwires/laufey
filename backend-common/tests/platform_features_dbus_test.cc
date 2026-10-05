@@ -236,7 +236,7 @@ void SubscribeOffTheOwnerThread() {
   EXPECT(g_changed == 2);
   EXPECT(g_changed_on_owner);
   char* reason = TrayUnavailableReasonForAbi();
-  EXPECT(reason && strstr(reason, "org.kde.StatusNotifierWatcher"));
+  EXPECT(reason && strstr(reason, "StatusNotifierWatcher"));
   free(reason);
   SetPlatformFeaturesChangedHandler(nullptr, nullptr);
   g_main_loop_quit(loop);

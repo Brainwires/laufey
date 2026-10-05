@@ -238,10 +238,27 @@ int main() {
   f.desktop_hint = "GNOME";
   EXPECT(!TrayAvailable(f));
   std::string reason = TrayUnavailableReason(f);
-  EXPECT(Contains(reason, "org.kde.StatusNotifierWatcher"));
-  EXPECT(Contains(reason, "XDG_CURRENT_DESKTOP=GNOME"));
-  EXPECT(Contains(reason, "AppIndicator extension"));
+  EXPECT(reason ==
+         "no tray host (StatusNotifierWatcher) on this session; some desktops "
+         "need an extension (XDG_CURRENT_DESKTOP=GNOME; GNOME shows tray "
+         "icons only with the AppIndicator extension enabled)");
   EXPECT(!Contains(reason, "XEmbed"));  // a Wayland session has none
+  // No desktop is named outside the hint's suffix, which is the reason's
+  // last part: cut there (a runtime that may not show the hint), the
+  // wording is neutral.
+  EXPECT(reason.substr(0, reason.find(" (XDG_CURRENT_DESKTOP=")) ==
+         "no tray host (StatusNotifierWatcher) on this session; some desktops "
+         "need an extension");
+  f.desktop_hint = "ubuntu:GNOME";
+  EXPECT(Contains(TrayUnavailableReason(f), "AppIndicator extension"));
+  f.desktop_hint = "sway";
+  EXPECT(TrayUnavailableReason(f) ==
+         "no tray host (StatusNotifierWatcher) on this session; some desktops "
+         "need an extension (XDG_CURRENT_DESKTOP=sway)");
+  f.desktop_hint = "";
+  EXPECT(TrayUnavailableReason(f) ==
+         "no tray host (StatusNotifierWatcher) on this session; some desktops "
+         "need an extension");
   // X11: an XEmbed tray is a host too (appindicator falls back to it).
   f.session_type = "x11";
   EXPECT(Contains(TrayUnavailableReason(f), "XEmbed"));

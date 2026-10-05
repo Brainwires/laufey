@@ -201,30 +201,54 @@ bool GetProperty(GDBusConnection* bus, const char* dest, const char* path,
   return true;
 }
 
-// What logind says about this process's session: 1 a graphical (x11 /
-// wayland) session that is active, 0 not (a tty or ssh session, or an
-// inactive one: someone else's seat is in front), -1 logind can't say (no
-// system bus, no logind, or the process belongs to no session: a systemd
-// user service, a container). The session is XDG_SESSION_ID's, else the
-// process's own. Property reads only, on the system bus, never starting
-// logind.
-int LogindSessionGraphical() {
+// A private connection to the system bus, given up after kCallTimeoutMs (a
+// bus daemon that accepts the socket and never finishes the handshake can't
+// hold the probe): an asynchronous connect on `ctx` (this thread's
+// thread-default context, a private one), cancelled by a timer.
+GDBusConnection* ConnectSystemBus(GMainContext* ctx) {
   GError* error = nullptr;
   gchar* address =
       g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, nullptr, &error);
   g_clear_error(&error);
   if (!address)
-    return -1;
-  GDBusConnection* sys = g_dbus_connection_new_for_address_sync(
+    return nullptr;
+  struct Pending {
+    GDBusConnection* conn = nullptr;
+    bool done = false;
+  } pending;
+  GCancellable* cancel = g_cancellable_new();
+  g_dbus_connection_new_for_address(
       address,
       static_cast<GDBusConnectionFlags>(
           G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
           G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
-      nullptr, nullptr, &error);
+      nullptr, cancel,
+      [](GObject*, GAsyncResult* result, gpointer data) {
+        auto* p = static_cast<Pending*>(data);
+        p->conn = g_dbus_connection_new_for_address_finish(result, nullptr);
+        p->done = true;
+      },
+      &pending);
+  GSource* timer = g_timeout_source_new(kCallTimeoutMs);
+  g_source_set_callback(
+      timer,
+      [](gpointer c) -> gboolean {
+        g_cancellable_cancel(G_CANCELLABLE(c));
+        return G_SOURCE_REMOVE;
+      },
+      cancel, nullptr);
+  g_source_attach(timer, ctx);
+  while (!pending.done)
+    g_main_context_iteration(ctx, TRUE);
+  g_source_destroy(timer);
+  g_source_unref(timer);
+  g_object_unref(cancel);
   g_free(address);
-  g_clear_error(&error);
-  if (!sys)
-    return -1;
+  return pending.conn;
+}
+
+// The logind part of LogindSessionGraphical, on a system-bus connection.
+int LogindSessionOn(GDBusConnection* sys) {
   std::string id = Env("XDG_SESSION_ID");
   GVariant* r = g_dbus_connection_call_sync(
       sys, "org.freedesktop.login1", "/org/freedesktop/login1",
@@ -257,8 +281,31 @@ int LogindSessionGraphical() {
       g_variant_unref(active);
     g_variant_unref(r);
   }
-  g_dbus_connection_close_sync(sys, nullptr, nullptr);
-  g_object_unref(sys);
+  return result;
+}
+
+// What logind says about this process's session: 1 a graphical (x11 /
+// wayland) session that is active, 0 not (a tty or ssh session, or an
+// inactive one: someone else's seat is in front), -1 logind can't say (no
+// system bus, no logind, or the process belongs to no session: a systemd
+// user service, a container). The session is XDG_SESSION_ID's, else the
+// process's own. Property reads only, on the system bus, never starting
+// logind.
+int LogindSessionGraphical() {
+  // A private context for the connect (and whatever the connection queues
+  // on it), drained before it goes.
+  GMainContext* ctx = g_main_context_new();
+  g_main_context_push_thread_default(ctx);
+  int result = -1;
+  if (GDBusConnection* sys = ConnectSystemBus(ctx)) {
+    result = LogindSessionOn(sys);
+    g_dbus_connection_close_sync(sys, nullptr, nullptr);
+    g_object_unref(sys);
+  }
+  while (g_main_context_iteration(ctx, FALSE)) {
+  }
+  g_main_context_pop_thread_default(ctx);
+  g_main_context_unref(ctx);
   return result;
 }
 
@@ -566,10 +613,10 @@ void SetPlatformFeaturesChangedHandler(void (*handler)(void* user_data),
   if (!handler)
     return;
   // Follow the watcher from now on (the subscription the tray probe makes).
+  // Only the bus: none of the base probe (the Secret Service, logind).
   State& s = S();
   std::lock_guard<std::mutex> lock(s.mutex);
-  EnsureBaseLocked(s);
-  TrayWatcherLocked(s, s.bus);
+  TrayWatcherLocked(s, SessionBusLocked(s));
 }
 
 int XEmbedProbeCountForTesting() {

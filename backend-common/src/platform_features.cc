@@ -70,11 +70,22 @@ const char* Bool(bool b) {
   return b ? "true" : "false";
 }
 
-// "on GNOME" style suffix from the desktop hint, for wording only.
-std::string DesktopSuffix(const PlatformFeatures& f) {
+// The desktop hint in a reason: " (XDG_CURRENT_DESKTOP=<hint><more>)",
+// always the LAST part of the reason, so a runtime that may not show the
+// hint (deno without env access) cuts the reason there. `more` (wording
+// that names the desktop) goes inside it for the same reason. Empty without
+// a hint.
+std::string DesktopSuffix(const PlatformFeatures& f,
+                          const std::string& more = "") {
   if (f.desktop_hint.empty())
     return "";
-  return " (XDG_CURRENT_DESKTOP=" + f.desktop_hint + ")";
+  return " (XDG_CURRENT_DESKTOP=" + f.desktop_hint + more + ")";
+}
+
+// XDG_CURRENT_DESKTOP lists `name` (it is a colon-separated list).
+bool HintNames(const PlatformFeatures& f, const char* name) {
+  std::string list = ":" + f.desktop_hint + ":";
+  return list.find(std::string(":") + name + ":") != std::string::npos;
 }
 
 }  // namespace
@@ -191,14 +202,15 @@ std::string TrayUnavailableReason(const PlatformFeatures& f) {
     return "no tray library: install libayatana-appindicator3 (or "
            "libappindicator3)";
   }
-  std::string reason =
-      "no tray host: nothing owns org.kde.StatusNotifierWatcher on the "
-      "session bus";
+  // Neutral wording: no desktop is named outside the hint's suffix.
+  std::string reason = "no tray host (StatusNotifierWatcher)";
   if (f.session_type == "x11")
-    reason += " and no XEmbed system tray runs";
-  reason += DesktopSuffix(f);
-  reason +=
-      "; GNOME shows tray icons only with the AppIndicator extension enabled";
+    reason += " and no XEmbed system tray";
+  reason += " on this session; some desktops need an extension";
+  reason += DesktopSuffix(f, HintNames(f, "GNOME")
+                                 ? "; GNOME shows tray icons only with the "
+                                   "AppIndicator extension enabled"
+                                 : "");
   return reason;
 }
 
