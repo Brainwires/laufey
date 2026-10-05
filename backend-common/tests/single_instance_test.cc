@@ -19,7 +19,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -611,41 +610,6 @@ static void TestRace() {
   }
 }
 
-static void TestRuntimeHelperLaunch() {
-  // The runtime's helpers start from the app's executable but are not a
-  // launch of the app: no lock, no forwarding.
-  std::map<std::string, std::string> vars;
-  auto env = [&vars](const char* name) {
-    auto it = vars.find(name);
-    return it == vars.end() ? std::string() : it->second;
-  };
-  using Args = std::vector<std::string>;
-  // A normal launch, a deep link, a file, an argument that merely says run.
-  EXPECT(!IsRuntimeHelperLaunch(Args{}, env));
-  EXPECT(!IsRuntimeHelperLaunch(Args{"--", "acme://x"}, env));
-  EXPECT(!IsRuntimeHelperLaunch(Args{"/home/u/run"}, env));
-  EXPECT(!IsRuntimeHelperLaunch(Args{"--", "run"}, env));
-  EXPECT(!IsRuntimeHelperLaunch(Args{"x", "run"}, env));
-  EXPECT(!IsRuntimeHelperLaunch(Args{"RUN"}, env));
-  // The update helper and CLI workers: `<exe> run ...`.
-  EXPECT(IsRuntimeHelperLaunch(
-      Args{"run", "denext-update-helper", "apply", "1234"}, env));
-  EXPECT(IsRuntimeHelperLaunch(Args{"run"}, env));
-  // A forked worker (`<exe> <module>` with the child entrypoint set).
-  vars["DENO_INTERNAL_CHILD_ENTRYPOINT"] = "1";
-  EXPECT(IsRuntimeHelperLaunch(Args{"worker.js"}, env));
-  vars.clear();
-  vars["NODE_CHANNEL_FD"] = "3";
-  EXPECT(IsRuntimeHelperLaunch(Args{}, env));
-  vars.clear();
-  vars["NEXT_PRIVATE_WORKER"] = "1";
-  EXPECT(IsRuntimeHelperLaunch(Args{}, env));
-  // Set but empty counts as unset.
-  vars.clear();
-  vars["DENO_INTERNAL_CHILD_ENTRYPOINT"] = "";
-  EXPECT(!IsRuntimeHelperLaunch(Args{"worker.js"}, env));
-}
-
 int main() {
   TestRoundTrip();
   TestHeader();
@@ -656,7 +620,6 @@ int main() {
   TestDelivery();
   TestTransport();
   TestRace();
-  TestRuntimeHelperLaunch();
   if (g_failures) {
     std::fprintf(stderr, "%d expectation(s) failed\n", g_failures);
     return 1;

@@ -189,23 +189,11 @@ SingleInstanceForward ForwardToPrimaryInstance(
 // `argv` are ignored), and its working directory.
 SecondInstanceMessage CurrentProcessInvocation(int argc, char** argv);
 
-// Whether this launch of the executable is not the app but a helper process
-// the runtime starts from the same binary, which must neither take the
-// single-instance lock nor be forwarded to the running app: a CLI / update
-// helper (`<exe> run ...`, the first argument "run"), or a forked worker
-// (DENO_INTERNAL_CHILD_ENTRYPOINT, NODE_CHANNEL_FD or NEXT_PRIVATE_WORKER set
-// in its environment; `env` reads one, "" when unset). The runtime checks such
-// launches itself. Pure, for tests.
-bool IsRuntimeHelperLaunch(
-    const std::vector<std::string>& args,
-    const std::function<std::string(const char*)>& env);
-
 // Called first thing in each backend's main(), before any web engine or the
 // runtime is initialized. Does nothing unless single-instance mode is on
 // (LaunchSingleInstance()). Without an app id (LaunchAppId()) it warns and
-// continues unlocked. A runtime helper launch (IsRuntimeHelperLaunch) skips
-// the lock altogether and runs. If another instance holds the lock, forwards
-// this invocation to it and returns false with `*exit_code` set (0 once the
+// continues unlocked. If another instance holds the lock, forwards this
+// invocation to it and returns false with `*exit_code` set (0 once the
 // primary acknowledged, 1 otherwise): the caller must return that from
 // main() right away. Otherwise returns true and, as the primary, keeps the
 // server running for the life of the process; forwarded messages are queued

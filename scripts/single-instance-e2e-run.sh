@@ -11,8 +11,6 @@
 #       its arguments and working directory, even with
 #       LAUFEY_SINGLE_INSTANCE=0 and LAUFEY_DATA_DIR in its environment (the
 #       file pins the app id, and with it the lock and the data directory).
-#       The runtime's helpers (`<exe> run ...`, a forked worker with
-#       DENO_INTERNAL_CHILD_ENTRYPOINT) are neither forwarded nor locked.
 #       An invalid app id setup warns and runs unlocked; without an app id in
 #       the file, LAUFEY_SINGLE_INSTANCE=0 overrides it.
 #   (c) singleInstance off: two instances run side by side (on CEF with
@@ -253,30 +251,6 @@ start primary \
   LAUFEY_E2E_SI_SECOND_CWD="$cwd_native" -- "${cold_args[@]}"
 primary_pid=$started_pid
 if wait_for primary '^\[e2e\] ready' 90; then
-  # The runtime's own helpers start from the same executable but are not a
-  # launch of the app: an update helper / CLI worker (`<exe> run ...`) and a
-  # forked worker (DENO_INTERNAL_CHILD_ENTRYPOINT) must neither be forwarded
-  # to the primary nor take the lock. The primary checks it gets exactly one
-  # second_instance (the real second launch below); a forwarded helper would
-  # make it two. A helper isn't forwarded, so it runs its own process: it
-  # must not exit 0 at once, as a forwarded launch does.
-  for helper in run-helper child-worker; do
-    if [ "$helper" = run-helper ]; then
-      direct "$helper" "$cwd_dir" LAUFEY_E2E_SI_HOLD_MS=1500 -- \
-        run denext-update-helper apply 1
-    else
-      direct "$helper" "$cwd_dir" DENO_INTERNAL_CHILD_ENTRYPOINT=1 \
-        LAUFEY_E2E_SI_HOLD_MS=1500 -- worker.js
-    fi
-    if grep -q 'second_instance' "$scratch/logs/primary.log"; then
-      fail "$helper was forwarded to the running app (see $scratch/logs/primary.log)"
-    elif [ "$direct_rc" = 0 ] && [ "$direct_secs" -le 1 ] &&
-      ! grep -q . "$scratch/logs/$helper.log"; then
-      fail "$helper exited 0 at once, like a forwarded launch (see $scratch/logs/$helper.log)"
-    else
-      pass "$helper runs as its own process, not forwarded (exit $direct_rc after ${direct_secs}s)"
-    fi
-  done
   direct second "$cwd_dir" LAUFEY_SINGLE_INSTANCE=0 \
     LAUFEY_DATA_DIR="$(native "$scratch/data-second")" -- "${second_args[@]}"
   if [ "$direct_rc" = 0 ] && [ "$direct_secs" -le 10 ] &&
