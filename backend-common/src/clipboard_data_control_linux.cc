@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -30,6 +31,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
@@ -46,6 +48,8 @@ using Clock = std::chrono::steady_clock;
 constexpr auto kReadTimeout = std::chrono::seconds(3);
 // How long a caller waits for the connection's thread at all.
 constexpr auto kCallTimeout = std::chrono::seconds(5);
+// How long connecting (the connection and its roundtrips) may take.
+constexpr auto kConnectTimeout = std::chrono::seconds(3);
 // How long a reader of our own selection may take nothing before its
 // transfer is dropped, and how long one transfer may take in all.
 constexpr auto kWriteIdleTimeout = kReadTimeout;
@@ -131,40 +135,54 @@ void WriteAndClose(int fd, std::shared_ptr<const std::string> data) {
 
 class Client {
  public:
+  // The client, connected; null when the protocol is unavailable. The
+  // first call connects, on the connection's own thread (never the
+  // caller's, which may be the UI thread), and waits for that at most
+  // kConnectTimeout: a compositor that doesn't answer leaves the protocol
+  // off for good.
   static Client* Get() {
     static Client* client = [] {
-      auto* c = new Client();
-      if (!c->Connect()) {
-        delete c;
+      auto* c = new Client();  // never freed: its thread may outlive us
+      std::thread([c] { c->Main(); }).detach();
+      std::unique_lock<std::mutex> lock(c->connect_mutex_);
+      if (!c->connect_cv_.wait_for(lock,
+                                   kConnectTimeout + std::chrono::seconds(1),
+                                   [c] { return c->connect_done_; })) {
+        c->abandoned_ = true;  // the thread tears down when it gets there
         return static_cast<Client*>(nullptr);
       }
-      c->Start();
-      return c;
+      return c->connected_ ? c : nullptr;
     }();
     return client;
   }
 
-  bool ok() const { return ok_.load(); }
+  bool ok() const {
+    return ok_.load();
+  }
 
-  // Runs `fn` on the connection's thread; false when it didn't run in time
-  // (or the connection is gone).
-  bool Run(std::function<void()> fn) {
+  // Runs `fn(live)` on the connection's thread: `live` is false when the
+  // connection broke before it could run (it then runs on the thread that
+  // noticed). True if it ran live in time.
+  bool Run(std::function<void(bool)> fn) {
     if (!ok())
       return false;
-    auto ran = std::make_shared<std::promise<void>>();
-    std::future<void> done = ran->get_future();
-    Post([fn = std::move(fn), ran] {
-      fn();
-      ran->set_value();
+    auto ran = std::make_shared<std::promise<bool>>();
+    std::future<bool> done = ran->get_future();
+    Post([fn = std::move(fn), ran](bool live) {
+      fn(live);
+      ran->set_value(live);
     });
-    return done.wait_for(kCallTimeout) == std::future_status::ready;
+    return done.wait_for(kCallTimeout) == std::future_status::ready &&
+           done.get();
   }
 
   // (Each task's state is shared with it: a task that misses the caller's
   // deadline still runs later.)
   std::vector<std::string> SelectionTypes() {
     auto types = std::make_shared<std::vector<std::string>>();
-    if (!Run([this, types] {
+    if (!Run([this, types](bool live) {
+          if (!live)
+            return;
           auto it = offers_.find(selection_);
           if (selection_ && it != offers_.end())
             *types = it->second.types;
@@ -173,15 +191,22 @@ class Client {
     return *types;
   }
 
+  // Note on who answers: the selection's owner may be this very process.
+  // Our own data-control source is served from this connection's thread
+  // and its writer threads, so reading it never needs the caller's thread.
+  // But under CEF a selection copied in the page is owned by Chromium's own
+  // Wayland connection, whose source is served on the browser UI thread: a
+  // read made ON that thread blocks the thread that has to answer it, so it
+  // ends after kReadTimeout with nothing (not a deadlock). Read off the UI
+  // thread (the runtime's clipboard calls do).
   bool Read(const std::vector<std::string>& mimes, size_t max_bytes,
             std::string* out, std::string* mime_out) {
-    auto done =
-        std::make_shared<std::promise<std::pair<bool, std::string>>>();
+    auto done = std::make_shared<std::promise<std::pair<bool, std::string>>>();
     std::future<std::pair<bool, std::string>> result = done->get_future();
     auto chosen = std::make_shared<std::string>();
-    bool started = Run([this, mimes, max_bytes, done, chosen] {
+    bool started = Run([this, mimes, max_bytes, done, chosen](bool live) {
       auto it = offers_.find(selection_);
-      if (!selection_ || it == offers_.end()) {
+      if (!live || !selection_ || it == offers_.end()) {
         done->set_value({false, ""});
         return;
       }
@@ -225,17 +250,21 @@ class Client {
     return true;
   }
 
+  // True once the compositor has handled set_selection (within
+  // kCallTimeout): a sync issued after it is answered after the selection
+  // events it caused, so a read right after this one sees our own offer.
   bool Write(Entries entries) {
-    // Done once the compositor has handled set_selection: a sync issued
-    // after it is answered after the selection events it caused, so a read
-    // right after this one sees our own offer.
-    auto synced = std::make_shared<std::promise<void>>();
-    std::future<void> done = synced->get_future();
+    auto synced = std::make_shared<std::promise<bool>>();
+    std::future<bool> done = synced->get_future();
     auto shared = std::make_shared<Entries>(std::move(entries));
-    bool started = Run([this, shared, synced] {
+    auto start = Clock::now();
+    bool started = Run([this, shared, synced](bool live) {
+      if (!live) {
+        synced->set_value(false);
+        return;
+      }
       auto* source = new Source();
-      source->proxy =
-          ext_data_control_manager_v1_create_data_source(manager_);
+      source->proxy = ext_data_control_manager_v1_create_data_source(manager_);
       source->entries = std::move(*shared);
       ext_data_control_source_v1_add_listener(source->proxy, &kSourceListener,
                                               this);
@@ -249,16 +278,79 @@ class Client {
     });
     if (!started)
       return false;
-    done.wait_for(kCallTimeout);
-    return true;
+    return done.wait_until(start + kCallTimeout) == std::future_status::ready &&
+           done.get();
   }
 
-  void SetWatching(bool on) { watching_ = on; }
+  void SetWatching(bool on) {
+    watching_ = on;
+  }
 
  private:
   Client() = default;
 
-  bool Connect() {
+  // The connection's thread: connect, then serve until the connection
+  // breaks.
+  void Main() {
+    bool connected = Connect(Clock::now() + kConnectTimeout);
+    {
+      std::lock_guard<std::mutex> lock(connect_mutex_);
+      if (abandoned_ && connected) {
+        // The caller gave up waiting: nobody will use this connection.
+        Teardown();
+        connected = false;
+      }
+      connected_ = connected;
+      ok_ = connected;
+      connect_done_ = true;
+    }
+    connect_cv_.notify_all();
+    if (connected)
+      Loop();
+  }
+
+  // wl_display_roundtrip with a deadline: false when the compositor didn't
+  // answer in time, or the connection broke.
+  bool Roundtrip(Clock::time_point deadline) {
+    bool done = false;
+    wl_callback* cb = wl_display_sync(display_);
+    wl_callback_add_listener(cb, &kRoundtripListener, &done);
+    while (!done) {
+      while (wl_display_prepare_read(display_) != 0) {
+        if (wl_display_dispatch_pending(display_) < 0)
+          break;
+      }
+      if (done) {
+        wl_display_cancel_read(display_);
+        break;
+      }
+      wl_display_flush(display_);
+      auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      deadline - Clock::now())
+                      .count();
+      if (left <= 0 || wl_display_get_error(display_) != 0) {
+        wl_display_cancel_read(display_);
+        break;
+      }
+      pollfd p = {wl_display_get_fd(display_), POLLIN, 0};
+      int n = poll(&p, 1, static_cast<int>(left));
+      if (n > 0 && (p.revents & POLLIN)) {
+        if (wl_display_read_events(display_) < 0)
+          break;
+      } else {
+        wl_display_cancel_read(display_);
+        if (n > 0 || (n < 0 && errno != EINTR))
+          break;  // hung up, or poll failed
+      }
+      if (wl_display_dispatch_pending(display_) < 0)
+        break;
+    }
+    if (!done)
+      wl_callback_destroy(cb);
+    return done && wl_display_get_error(display_) == 0;
+  }
+
+  bool Connect(Clock::time_point deadline) {
     // Only in a Wayland session: without WAYLAND_DISPLAY libwayland would try
     // "wayland-0" anyway.
     const char* name = getenv("WAYLAND_DISPLAY");
@@ -267,43 +359,89 @@ class Client {
     display_ = wl_display_connect(nullptr);
     if (!display_)
       return false;
-    wl_registry* registry = wl_display_get_registry(display_);
-    wl_registry_add_listener(registry, &kRegistryListener, this);
-    wl_display_roundtrip(display_);
-    if (!manager_ || !seat_) {
-      wl_registry_destroy(registry);
-      wl_display_disconnect(display_);
-      display_ = nullptr;
+    registry_ = wl_display_get_registry(display_);
+    wl_registry_add_listener(registry_, &kRegistryListener, this);
+    // The globals, then the seats' capabilities.
+    if (!Roundtrip(deadline) || !manager_ || seats_.empty() ||
+        !Roundtrip(deadline)) {
+      Teardown();
       return false;
     }
+    // The seat whose clipboard we use: the first one with a keyboard (the
+    // selection follows keyboard focus), else the first one. Sessions with
+    // more than one seat are rare; the others are let go.
+    for (const auto& s : seats_) {
+      if (s.caps & WL_SEAT_CAPABILITY_KEYBOARD) {
+        seat_ = s.seat;
+        break;
+      }
+    }
+    if (!seat_)
+      seat_ = seats_.front().seat;
+    for (const auto& s : seats_) {
+      if (s.seat != seat_)
+        wl_seat_destroy(s.seat);
+    }
+    seats_.clear();
     device_ = ext_data_control_manager_v1_get_data_device(manager_, seat_);
     ext_data_control_device_v1_add_listener(device_, &kDeviceListener, this);
     // The current selection (data_offer, offer..., selection).
-    wl_display_roundtrip(display_);
-    wake_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (wake_ < 0 || wl_display_get_error(display_) != 0) {
-      if (wake_ >= 0)
-        close(wake_);
-      wl_display_disconnect(display_);
-      display_ = nullptr;
+    if (!Roundtrip(deadline)) {
+      Teardown();
       return false;
     }
-    ok_ = true;
+    wake_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (wake_ < 0) {
+      Teardown();
+      return false;
+    }
     return true;
   }
 
-  void Start() {
-    std::thread([this] { Loop(); }).detach();
+  // Destroys every proxy and closes the connection (the connection's
+  // thread, or before it served anything).
+  void Teardown() {
+    for (auto& [proxy, offer] : offers_)
+      ext_data_control_offer_v1_destroy(proxy);
+    offers_.clear();
+    selection_ = nullptr;
+    for (auto& [proxy, source] : sources_) {
+      ext_data_control_source_v1_destroy(proxy);
+      delete source;
+    }
+    sources_.clear();
+    if (device_)
+      ext_data_control_device_v1_destroy(device_);
+    device_ = nullptr;
+    for (const auto& s : seats_)
+      wl_seat_destroy(s.seat);
+    seats_.clear();
+    if (seat_)
+      wl_seat_destroy(seat_);
+    seat_ = nullptr;
+    if (manager_)
+      ext_data_control_manager_v1_destroy(manager_);
+    manager_ = nullptr;
+    if (registry_)
+      wl_registry_destroy(registry_);
+    registry_ = nullptr;
+    if (display_)
+      wl_display_disconnect(display_);
+    display_ = nullptr;
   }
 
-  void Post(std::function<void()> task) {
+  void Post(std::function<void(bool)> task) {
     {
       std::lock_guard<std::mutex> lock(tasks_mutex_);
-      tasks_.push_back(std::move(task));
+      if (!dead_) {
+        tasks_.push_back(std::move(task));
+        uint64_t one = 1;
+        ssize_t n = write(wake_, &one, sizeof(one));
+        (void)n;
+        return;
+      }
     }
-    uint64_t one = 1;
-    ssize_t n = write(wake_, &one, sizeof(one));
-    (void)n;
+    task(false);  // the connection is gone: answer at once
   }
 
   void Loop() {
@@ -330,7 +468,7 @@ class Client {
       else
         wl_display_cancel_read(display_);
       wl_display_dispatch_pending(display_);
-      if (wl_display_get_error(display_) != 0 ||
+      if (wl_display_get_error(display_) != 0 || finished_ ||
           (n > 0 && (fds[0].revents & (POLLERR | POLLHUP)))) {
         Fail();
         return;
@@ -346,13 +484,13 @@ class Client {
   }
 
   void RunTasks() {
-    std::deque<std::function<void()>> tasks;
+    std::deque<std::function<void(bool)>> tasks;
     {
       std::lock_guard<std::mutex> lock(tasks_mutex_);
       tasks.swap(tasks_);
     }
     for (auto& t : tasks)
-      t();
+      t(true);
   }
 
   void PumpReads() {
@@ -391,18 +529,33 @@ class Client {
     }
   }
 
-  // The connection broke: answer everything still waiting, refuse the rest.
+  // The connection broke (or the device went away): every read and write
+  // still waiting is answered, every task queued or posted from now on runs
+  // at once with `live` false, and everything the connection held is freed.
   void Fail() {
     ok_ = false;
+    std::deque<std::function<void(bool)>> tasks;
+    {
+      std::lock_guard<std::mutex> lock(tasks_mutex_);
+      dead_ = true;
+      tasks.swap(tasks_);
+    }
+    for (auto& t : tasks)
+      t(false);
     for (auto& r : reads_) {
       close(r.fd);
       r.done->set_value({false, ""});
     }
     reads_.clear();
-    for (auto& [cb, p] : sync_waiters_)
-      p->set_value();
+    for (auto& [cb, p] : sync_waiters_) {
+      wl_callback_destroy(cb);
+      p->set_value(false);
+    }
     sync_waiters_.clear();
-    RunTasks();
+    Teardown();
+    // Post() no longer writes to it (dead_, under the same lock).
+    close(wake_);
+    wake_ = -1;
   }
 
   void DestroyOffer(ext_data_control_offer_v1* proxy) {
@@ -421,17 +574,33 @@ class Client {
       g_mutter = true;
     if (strcmp(interface, ext_data_control_manager_v1_interface.name) == 0 &&
         !self->manager_) {
-      self->manager_ = static_cast<ext_data_control_manager_v1*>(
-          wl_registry_bind(registry, name, &ext_data_control_manager_v1_interface,
-                           1));
-    } else if (strcmp(interface, wl_seat_interface.name) == 0 &&
-               !self->seat_) {
-      self->seat_ = static_cast<wl_seat*>(
+      self->manager_ =
+          static_cast<ext_data_control_manager_v1*>(wl_registry_bind(
+              registry, name, &ext_data_control_manager_v1_interface, 1));
+    } else if (strcmp(interface, wl_seat_interface.name) == 0 && !self->seat_) {
+      // Every seat, until Connect picks one (by its capabilities).
+      auto* seat = static_cast<wl_seat*>(
           wl_registry_bind(registry, name, &wl_seat_interface, 1));
+      self->seats_.push_back({seat, 0});
+      wl_seat_add_listener(seat, &kSeatListener, self);
     }
     (void)version;
   }
   static void OnGlobalRemove(void*, wl_registry*, uint32_t) {}
+
+  static void OnSeatCapabilities(void* data, wl_seat* seat, uint32_t caps) {
+    auto* self = static_cast<Client*>(data);
+    for (auto& s : self->seats_) {
+      if (s.seat == seat)
+        s.caps = caps;
+    }
+  }
+  static void OnSeatName(void*, wl_seat*, const char*) {}
+
+  static void OnRoundtripDone(void* data, wl_callback* cb, uint32_t) {
+    *static_cast<bool*>(data) = true;
+    wl_callback_destroy(cb);
+  }
 
   static void OnDataOffer(void* data, ext_data_control_device_v1*,
                           ext_data_control_offer_v1* id) {
@@ -450,8 +619,9 @@ class Client {
       GtkRunAsync([] { FireClipboardChange(); });
   }
   static void OnFinished(void* data, ext_data_control_device_v1*) {
-    // The device is gone (the seat went away): stop using the protocol.
-    static_cast<Client*>(data)->ok_ = false;
+    // The device is gone (the seat went away): stop using the protocol
+    // (the loop fails the connection after this dispatch).
+    static_cast<Client*>(data)->finished_ = true;
   }
   static void OnPrimarySelection(void* data, ext_data_control_device_v1*,
                                  ext_data_control_offer_v1* id) {
@@ -506,7 +676,7 @@ class Client {
     auto* self = static_cast<Client*>(data);
     auto it = self->sync_waiters_.find(cb);
     if (it != self->sync_waiters_.end()) {
-      it->second->set_value();
+      it->second->set_value(true);
       self->sync_waiters_.erase(it);
     }
     wl_callback_destroy(cb);
@@ -514,6 +684,9 @@ class Client {
 
   static constexpr wl_registry_listener kRegistryListener = {OnGlobal,
                                                              OnGlobalRemove};
+  static constexpr wl_seat_listener kSeatListener = {OnSeatCapabilities,
+                                                     OnSeatName};
+  static constexpr wl_callback_listener kRoundtripListener = {OnRoundtripDone};
   static constexpr ext_data_control_device_v1_listener kDeviceListener = {
       OnDataOffer, OnSelection, OnFinished, OnPrimarySelection};
   static constexpr ext_data_control_offer_v1_listener kOfferListener = {
@@ -522,23 +695,39 @@ class Client {
       OnSend, OnCancelled};
   static constexpr wl_callback_listener kSyncListener = {OnSyncDone};
 
+  struct Seat {
+    wl_seat* seat;
+    uint32_t caps;
+  };
+
   std::atomic<bool> ok_{false};
   std::atomic<bool> watching_{false};
-  wl_display* display_ = nullptr;
-  ext_data_control_manager_v1* manager_ = nullptr;
-  wl_seat* seat_ = nullptr;
-  ext_data_control_device_v1* device_ = nullptr;
-  int wake_ = -1;
+
+  // Connect's outcome, for Get().
+  std::mutex connect_mutex_;
+  std::condition_variable connect_cv_;
+  bool connect_done_ = false;
+  bool connected_ = false;
+  bool abandoned_ = false;
 
   std::mutex tasks_mutex_;
-  std::deque<std::function<void()>> tasks_;
+  std::deque<std::function<void(bool)>> tasks_;
+  bool dead_ = false;  // under tasks_mutex_
+  int wake_ = -1;      // written under tasks_mutex_
 
   // The connection's thread only, from here on.
+  wl_display* display_ = nullptr;
+  wl_registry* registry_ = nullptr;
+  ext_data_control_manager_v1* manager_ = nullptr;
+  std::vector<Seat> seats_;  // while connecting
+  wl_seat* seat_ = nullptr;
+  ext_data_control_device_v1* device_ = nullptr;
+  bool finished_ = false;
   std::map<ext_data_control_offer_v1*, Offer> offers_;
   ext_data_control_offer_v1* selection_ = nullptr;
   std::map<ext_data_control_source_v1*, Source*> sources_;
   std::vector<PendingRead> reads_;
-  std::map<wl_callback*, std::shared_ptr<std::promise<void>>> sync_waiters_;
+  std::map<wl_callback*, std::shared_ptr<std::promise<bool>>> sync_waiters_;
 };
 
 Client* Usable() {

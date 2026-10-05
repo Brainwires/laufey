@@ -9,7 +9,12 @@
 //   - a read larger than its max_bytes is not delivered;
 //   - an owner that never writes: the read gives up after its timeout;
 //   - a peer that asks for our selection again and again and never reads:
-//     at most 8 writer threads at once, each gone after its idle timeout.
+//     at most 8 writer threads at once, each gone after its idle timeout;
+//   - the connection breaking during a read: the read is answered at once,
+//     every later call says "unavailable", no descriptor is left open.
+// And, without any compositor: a "compositor" that accepts the connection
+// and never answers. Connecting gives up after its timeout instead of
+// hanging the caller (the only case run when no compositor is there).
 // No window is shown, so nothing here has keyboard focus: the core Wayland
 // clipboard would refuse every one of these. Exits 77 (skipped) outside a
 // Wayland session or where the compositor has no data-control (GNOME). CI
@@ -19,6 +24,9 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <poll.h>
 #include <signal.h>
+#include <dirent.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -239,6 +247,42 @@ void StartPeer(const char* self, const char* mode, int n, PeerProcess* out) {
   close(out_pipe[0]);
 }
 
+// Open descriptors of this process.
+int CountFds() {
+  int n = 0;
+  DIR* dir = opendir("/proc/self/fd");
+  if (!dir)
+    return -1;
+  while (dirent* e = readdir(dir)) {
+    if (e->d_name[0] != '.')
+      n++;
+  }
+  closedir(dir);
+  return n;
+}
+
+// The data-control connection's socket: the only socket of this process
+// connected to the compositor's (GTK isn't initialized here).
+int WaylandSocket() {
+  int found = -1;
+  DIR* dir = opendir("/proc/self/fd");
+  if (!dir)
+    return -1;
+  while (dirent* e = readdir(dir)) {
+    int fd = atoi(e->d_name);
+    if (e->d_name[0] == '.')
+      continue;
+    sockaddr_un addr = {};
+    socklen_t len = sizeof(addr);
+    if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0 &&
+        addr.sun_family == AF_UNIX &&
+        strstr(addr.sun_path, getenv("WAYLAND_DISPLAY")))
+      found = fd;
+  }
+  closedir(dir);
+  return found;
+}
+
 double SecondsSince(std::chrono::steady_clock::time_point t) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t)
       .count();
@@ -246,9 +290,60 @@ double SecondsSince(std::chrono::steady_clock::time_point t) {
 
 }  // namespace
 
+// A process of its own (the client connects once per process): a socket
+// that accepts the connection and never answers. Exits 0 when connecting
+// gave up in time.
+int SilentCompositorMain() {
+  std::string path = "/tmp/laufey-silent-wayland-" + std::to_string(getpid());
+  int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  EXPECT(listener >= 0);
+  sockaddr_un addr = {};
+  addr.sun_family = AF_UNIX;
+  snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path.c_str());
+  unlink(path.c_str());
+  EXPECT(bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+  EXPECT(listen(listener, 4) == 0);
+  std::thread([listener] {
+    while (accept(listener, nullptr, nullptr) >= 0) {
+    }  // accepted and never answered
+  }).detach();
+  setenv("WAYLAND_DISPLAY", path.c_str(), 1);  // absolute: libwayland 1.15+
+  auto start = std::chrono::steady_clock::now();
+  bool available = data_control::Available();
+  double took = SecondsSince(start);
+  unlink(path.c_str());
+  std::printf("silent compositor: gave up after %.1f s\n", took);
+  EXPECT(!available);
+  EXPECT(took >= 2.5 && took < 6.0);
+  // And at once from then on.
+  start = std::chrono::steady_clock::now();
+  EXPECT(!data_control::Available());
+  EXPECT(SecondsSince(start) < 0.1);
+  std::fflush(stdout);
+  std::_Exit(0);
+}
+
 int main(int argc, char** argv) {
   if (argc >= 3 && strcmp(argv[1], "--peer") == 0)
     return PeerMain(argv[2], argc >= 4 ? atoi(argv[3]) : 0);
+  if (argc >= 2 && strcmp(argv[1], "--silent-compositor") == 0)
+    return SilentCompositorMain();
+
+  // A compositor that never answers (no compositor needed).
+  {
+    PeerProcess child;
+    child.pid = fork();
+    if (child.pid == 0) {
+      execl(argv[0], argv[0], "--silent-compositor",
+            static_cast<char*>(nullptr));
+      _exit(127);
+    }
+    int status = 0;
+    EXPECT(waitpid(child.pid, &status, 0) == child.pid);
+    child.pid = -1;
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  }
+
   const char* wayland = getenv("WAYLAND_DISPLAY");
   if (!wayland || !*wayland || !data_control::Available()) {
     std::printf(
@@ -340,6 +435,59 @@ int main(int argc, char** argv) {
   }
   ClipboardWriteTextLinux("after");
   EXPECT(Take(ClipboardReadTextLinux()) == "after");
+
+  // The connection breaks while a read waits on an owner that never answers:
+  // the read is answered at once (not after its 3 s), every later call says
+  // "unavailable" without waiting, and nothing is left open. Last: the
+  // protocol stays off for this process.
+  {
+    PeerProcess owner;
+    StartPeer(argv[0], "silent-owner", 0, &owner);
+    std::vector<std::string> types;
+    EXPECT(WaitFor([&] {
+      return data_control::Types(&types) && types.size() == 1 &&
+             types[0] == kText;
+    }));
+    int fds_before = CountFds();
+    int sock = WaylandSocket();
+    EXPECT(sock >= 0);
+    std::atomic<bool> read_done{false};
+    std::atomic<bool> read_found{true};
+    std::atomic<double> read_took{0};
+    std::thread reader([&] {
+      auto start = std::chrono::steady_clock::now();
+      std::string data;
+      bool found = true;
+      data_control::Read({kText}, 1024, &data, nullptr, &found);
+      read_found = found;
+      read_took = SecondsSince(start);
+      read_done = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT(!read_done.load());
+    shutdown(sock, SHUT_RDWR);  // as if the compositor went away
+    reader.join();
+    std::printf("broken connection: pending read answered after %.1f s\n",
+                read_took.load());
+    EXPECT(!read_found.load());
+    EXPECT(read_took.load() < 1.5);
+    EXPECT(WaitFor([] { return !data_control::Available(); }));
+    auto start = std::chrono::steady_clock::now();
+    std::string data;
+    bool found = true;
+    EXPECT(!data_control::Read({kText}, 1024, &data, nullptr, &found));
+    EXPECT(!data_control::Types(&types));
+    data_control::Entries entries;
+    entries.push_back({kText, std::make_shared<const std::string>("x")});
+    EXPECT(!data_control::Write(std::move(entries)));
+    EXPECT(SecondsSince(start) < 0.1);
+    // The read's pipe and the connection's socket and wake descriptor are
+    // closed.
+    int fds_after = CountFds();
+    std::printf("broken connection: %d descriptors before, %d after\n",
+                fds_before, fds_after);
+    EXPECT(fds_after <= fds_before - 2);
+  }
 
   std::printf("laufey_clipboard_wayland_test: ok\n");
   std::fflush(stdout);

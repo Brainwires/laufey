@@ -21,7 +21,9 @@ namespace laufey_common {
 namespace data_control {
 
 // Whether the compositor offers ext-data-control-v1 on a seat. Connects on
-// the first call (LAUFEY_CLIPBOARD=gtk turns the protocol off).
+// the first call, on the connection's own thread, waiting for it a few
+// seconds at most (LAUFEY_CLIPBOARD=gtk turns the protocol off). False from
+// then on once the connection breaks.
 bool Available();
 
 // Whether the Wayland compositor is GNOME's mutter (it advertises
@@ -40,7 +42,8 @@ bool Read(const std::vector<std::string>& mimes, size_t max_bytes,
           std::string* out, std::string* mime_out, bool* found);
 
 // Makes us the selection owner, offering each (MIME type, data) entry.
-// False when the protocol is unavailable.
+// False when the protocol is unavailable, or the compositor didn't confirm
+// the new selection within a few seconds.
 using Entries =
     std::vector<std::pair<std::string, std::shared_ptr<const std::string>>>;
 bool Write(Entries entries);
