@@ -46,23 +46,42 @@ void LaufeyOpenExternalURL(const std::string& url) {
 // present it uses KWallet: both are left to Chromium. An explicit
 // --password-store is kept. platform_features() reports the choice as
 // "cookieEncryption". Browser process only.
+//
+// The choice is sticky per profile: it is recorded in the root cache
+// directory (laufey_platform_features.h, kPasswordStoreMarkerName), and a
+// later launch keeps it, so a headless launch can't turn a profile whose
+// cookies use the OS key into a basic one (losing them), or the reverse.
+// Only an explicit --password-store changes it (and is recorded).
+static std::string g_root_cache_path;
+
 static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
-  if (command_line->HasSwitch("password-store")) {
-    std::string store = command_line->GetSwitchValue("password-store");
-    laufey_common::SetCookieEncryption(store == "basic" ? "basic" : "os");
-    return;
+  std::string explicit_store;
+  bool has_explicit = command_line->HasSwitch("password-store");
+  if (has_explicit)
+    explicit_store = command_line->GetSwitchValue("password-store");
+  laufey_common::PasswordStoreChoice choice =
+      laufey_common::ChoosePasswordStore(
+          has_explicit ? &explicit_store : nullptr,
+          laufey_common::ReadPasswordStoreMarker(g_root_cache_path), [] {
+            laufey_common::PlatformFeatures features;
+            laufey_common::ProbeSecretService(&features);
+            return features;
+          });
+  if (choice.append_basic)
+    command_line->AppendSwitchWithValue("password-store", "basic");
+  if (choice.record)
+    laufey_common::WritePasswordStoreMarker(g_root_cache_path, choice.store);
+  laufey_common::SetCookieEncryption(choice.store.c_str());
+  if (choice.append_basic && choice.source == "probe") {
+    std::cerr << "laufey: cookies are stored with --password-store=basic "
+                 "(not encrypted with an OS key): "
+              << choice.reason << std::endl;
+  } else if (choice.append_basic) {
+    std::cerr << "laufey: cookies are stored with --password-store=basic, "
+                 "as this profile chose on an earlier launch (pass "
+                 "--password-store to change it)"
+              << std::endl;
   }
-  laufey_common::PlatformFeatures features;
-  laufey_common::ProbeSecretService(&features);
-  if (!laufey_common::NeedsBasicPasswordStore(features)) {
-    laufey_common::SetCookieEncryption("os");
-    return;
-  }
-  command_line->AppendSwitchWithValue("password-store", "basic");
-  laufey_common::SetCookieEncryption("basic");
-  std::cerr << "laufey: cookies are stored with --password-store=basic "
-               "(not encrypted with an OS key): "
-            << laufey_common::BasicPasswordStoreReason(features) << std::endl;
 }
 
 // --- Native event monitors (Linux / X11) ---
@@ -932,6 +951,9 @@ int main(int argc, char* argv[]) {
     if (!cache_path.empty())
       CefString(&settings.root_cache_path) = cache_path;
   }
+  // Where the profile records its password store (LaufeyApplyPasswordStore,
+  // called from CefInitialize).
+  g_root_cache_path = cache_path;
 
   // No remote debugging while DevTools are off (API 40, inspectable).
   const char* port_env = laufey_common::LaunchInspectable()

@@ -33,7 +33,7 @@ may wait a few seconds for xdg-desktop-portal to start.
 | `secretService`       | Linux: `"available"` (the default collection is unlocked), `"locked"` (locked, or missing: using it means a prompt), `"activatable"` (not running; D-Bus can start it), `"absent"`, `"no-session-bus"`. `"os"` on macOS and Windows.                                                                                  |
 | `secretServicePrompt` | Someone could answer an unlock prompt: `sessionType` is `x11` or `wayland` with a display and, where logind can say, the process's logind session is an active x11 / wayland one; and, where gnome-keyring is the provider, its prompter exists. A display alone (Xvfb, cron, `xvfb-run` under systemd) never counts. |
 | `portalVersions`      | Linux: `{ "Notification": 2, "FileChooser": 4, "GlobalShortcuts": 1, "Settings": 2 }` for the xdg-desktop-portal interfaces the portal offers; an interface it lacks is absent. `{}` elsewhere.                                                                                                                       |
-| `cookieEncryption`    | CEF: `"basic"` when it started Chromium with `--password-store=basic` (see below), otherwise `"os"`: the store was left to Chromium, which keeps the key in the OS keystore when there is one. `null` on the WebView and Winit backends, whose engines don't encrypt cookies with an OS key. |
+| `cookieEncryption`    | CEF: `"basic"` when it started Chromium with `--password-store=basic` (see below), otherwise `"os"`: the store was left to Chromium, which keeps the key in the OS keystore when there is one. `null` on the WebView and Winit backends, whose engines don't encrypt cookies with an OS key.                          |
 
 The probe never starts the Secret Service and never asks it to unlock: it reads
 the default collection's `Locked` property. The tray host is followed live
@@ -59,3 +59,14 @@ keyring, a locked one someone can unlock, KWallet (`org.kde.kwalletd5` /
 Secret Service at all or no session bus, where Chromium finds no keystore and
 falls back to `basic` by itself without waiting. An explicit `--password-store`
 on the command line is kept as given.
+
+The choice is sticky per profile. CEF records it in the profile's root cache
+directory (a `laufey-password-store` file holding `basic` or `os`), and later
+launches keep it without probing again: the profile's cookies are encrypted with
+that store's key, so switching would make them unreadable. A headless launch
+therefore can't turn a profile created in a desktop session (`os`) into a
+`basic` one and lose its cookies, nor the reverse. (Such a launch of an `os`
+profile against a locked keyring no one can unlock waits for the key, as
+Chromium does on its own.) Passing `--password-store` explicitly changes the
+choice, and the new one is recorded. A profile with no data directory (the
+throwaway per-process one) decides on every launch.

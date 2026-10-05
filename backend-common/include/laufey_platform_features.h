@@ -19,6 +19,7 @@
 #define LAUFEY_PLATFORM_FEATURES_H_
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 
@@ -110,6 +111,43 @@ PlatformFeatures ProbePlatformFeatures();
 // by itself, so the choice is left to it; likewise when KWallet is present
 // (Chromium's store on Plasma).
 bool NeedsBasicPasswordStore(const PlatformFeatures& f);
+
+// --- The cookie store, sticky per profile (CEF on Linux)
+// -------------------------------------------------------------------
+
+// The file in a CEF root cache directory that records the password store
+// its profile chose: "basic" or "os" (left to Chromium). A profile's cookies
+// are encrypted with that store's key, so a later launch must not switch:
+// a headless launch would turn an "os" profile into "basic" (its cookies
+// unreadable), and the reverse.
+extern const char kPasswordStoreMarkerName[];
+
+// The recorded store ("basic" / "os"), or "" when there is none or it can't
+// be read (an unknown value counts as none).
+std::string ReadPasswordStoreMarker(const std::string& root_cache_dir);
+
+// Records `store` ("basic" / "os"). False when it can't be written (no
+// directory: a profile kept in memory).
+bool WritePasswordStoreMarker(const std::string& root_cache_dir,
+                              const std::string& store);
+
+struct PasswordStoreChoice {
+  std::string store;          // "basic" or "os"
+  bool append_basic = false;  // add --password-store=basic to the command line
+  bool record = false;        // write `store` to the marker
+  // "explicit" (--password-store on the command line), "profile" (the
+  // marker), "probe" (this launch's platform features).
+  std::string source;
+  std::string reason;  // why basic, when the probe chose it
+};
+
+// Picks the store: an explicit --password-store wins (and is recorded, so
+// the profile keeps it); else the profile's recorded choice; else the probe
+// (NeedsBasicPasswordStore), recorded. `probe` runs only in the last case.
+PasswordStoreChoice ChoosePasswordStore(
+    const std::string* explicit_store,
+    const std::string& marker,
+    const std::function<PlatformFeatures()>& probe);
 
 // Whether a tray icon can be shown, and why not ("" when it can).
 bool TrayAvailable(const PlatformFeatures& f);

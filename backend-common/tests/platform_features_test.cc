@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #define EXPECT(cond)                                                         \
@@ -87,6 +88,72 @@ int main() {
   EXPECT(!NeedsBasicPasswordStore(mac));
   EXPECT(TrayAvailable(mac));
   EXPECT(TrayUnavailableReason(mac).empty());
+
+  // --- The cookie store is sticky per profile ----------------------------
+  {
+    int probes = 0;
+    PlatformFeatures locked = Linux();
+    locked.secret_service = SecretServiceState::kLocked;
+    locked.secret_prompter = false;  // headless: basic
+    auto probe_locked = [&] {
+      ++probes;
+      return locked;
+    };
+    auto probe_unlocked = [&] {
+      ++probes;
+      return Linux();
+    };
+    // A fresh profile: the probe decides, and the choice is recorded.
+    PasswordStoreChoice c = ChoosePasswordStore(nullptr, "", probe_locked);
+    EXPECT(c.store == "basic" && c.append_basic && c.record);
+    EXPECT(c.source == "probe" && Contains(c.reason, "locked"));
+    c = ChoosePasswordStore(nullptr, "", probe_unlocked);
+    EXPECT(c.store == "os" && !c.append_basic && c.record);
+    EXPECT(probes == 2);
+    // A profile that chose "os" stays "os" on a headless launch (its
+    // cookies use the OS key), and one that chose "basic" stays basic in a
+    // desktop session; neither probes.
+    c = ChoosePasswordStore(nullptr, "os", probe_locked);
+    EXPECT(c.store == "os" && !c.append_basic && !c.record);
+    EXPECT(c.source == "profile");
+    c = ChoosePasswordStore(nullptr, "basic", probe_unlocked);
+    EXPECT(c.store == "basic" && c.append_basic && !c.record);
+    EXPECT(probes == 2);
+    // An explicit --password-store wins, is not appended again (Chromium
+    // reads it), and is recorded when it changes the profile's choice.
+    std::string explicit_store = "gnome-libsecret";
+    c = ChoosePasswordStore(&explicit_store, "basic", probe_locked);
+    EXPECT(c.store == "os" && !c.append_basic && c.record);
+    EXPECT(c.source == "explicit");
+    explicit_store = "basic";
+    c = ChoosePasswordStore(&explicit_store, "basic", probe_unlocked);
+    EXPECT(c.store == "basic" && !c.append_basic && !c.record);
+    EXPECT(probes == 2);
+
+    // The marker file round trip.
+    std::filesystem::path dir =
+        std::filesystem::temp_directory_path() /
+        ("laufey-pf-marker-" + std::to_string(std::rand()));
+    std::filesystem::create_directories(dir);
+    EXPECT(ReadPasswordStoreMarker(dir.string()).empty());
+    EXPECT(WritePasswordStoreMarker(dir.string(), "basic"));
+    EXPECT(ReadPasswordStoreMarker(dir.string()) == "basic");
+    EXPECT(WritePasswordStoreMarker(dir.string(), "os"));
+    EXPECT(ReadPasswordStoreMarker(dir.string()) == "os");
+    EXPECT(!WritePasswordStoreMarker(dir.string(), "kwallet"));
+    EXPECT(!WritePasswordStoreMarker("", "basic"));  // a profile in memory
+    EXPECT(ReadPasswordStoreMarker("").empty());
+    // Anything else in the file counts as no choice.
+    {
+      FILE* file =
+          std::fopen((dir / kPasswordStoreMarkerName).string().c_str(), "wb");
+      EXPECT(file);
+      std::fputs("gnome-libsecret\n", file);
+      std::fclose(file);
+    }
+    EXPECT(ReadPasswordStoreMarker(dir.string()).empty());
+    std::filesystem::remove_all(dir);
+  }
 
   // --- The tray
   // ----------------------------------------------------------------

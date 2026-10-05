@@ -182,6 +182,75 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   return out;
 }
 
+const char kPasswordStoreMarkerName[] = "laufey-password-store";
+
+namespace {
+std::string MarkerPath(const std::string& dir) {
+#ifdef _WIN32
+  return dir + "\\" + kPasswordStoreMarkerName;
+#else
+  return dir + "/" + kPasswordStoreMarkerName;
+#endif
+}
+}  // namespace
+
+std::string ReadPasswordStoreMarker(const std::string& root_cache_dir) {
+  if (root_cache_dir.empty())
+    return "";
+  FILE* file = std::fopen(MarkerPath(root_cache_dir).c_str(), "rb");
+  if (!file)
+    return "";
+  char buf[16] = {0};
+  size_t n = std::fread(buf, 1, sizeof(buf) - 1, file);
+  std::fclose(file);
+  std::string value(buf, n);
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
+                            value.back() == ' '))
+    value.pop_back();
+  return value == "basic" || value == "os" ? value : "";
+}
+
+bool WritePasswordStoreMarker(const std::string& root_cache_dir,
+                              const std::string& store) {
+  if (root_cache_dir.empty() || (store != "basic" && store != "os"))
+    return false;
+  FILE* file = std::fopen(MarkerPath(root_cache_dir).c_str(), "wb");
+  if (!file)
+    return false;
+  std::string line = store + "\n";
+  bool ok = std::fwrite(line.data(), 1, line.size(), file) == line.size();
+  return std::fclose(file) == 0 && ok;
+}
+
+PasswordStoreChoice ChoosePasswordStore(
+    const std::string* explicit_store,
+    const std::string& marker,
+    const std::function<PlatformFeatures()>& probe) {
+  PasswordStoreChoice choice;
+  if (explicit_store) {
+    // As given on the command line (Chromium reads the switch itself).
+    choice.store = *explicit_store == "basic" ? "basic" : "os";
+    choice.source = "explicit";
+    choice.record = marker != choice.store;
+    return choice;
+  }
+  if (!marker.empty()) {
+    choice.store = marker;
+    choice.source = "profile";
+    choice.append_basic = marker == "basic";
+    return choice;
+  }
+  PlatformFeatures f = probe();
+  bool basic = NeedsBasicPasswordStore(f);
+  choice.store = basic ? "basic" : "os";
+  choice.source = "probe";
+  choice.append_basic = basic;
+  choice.record = true;
+  if (basic)
+    choice.reason = BasicPasswordStoreReason(f);
+  return choice;
+}
+
 void SetCookieEncryption(const char* value) {
   std::lock_guard<std::mutex> lock(CookieMutex());
   CookieEncryption() = value ? value : "";
