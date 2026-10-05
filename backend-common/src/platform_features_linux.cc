@@ -13,7 +13,12 @@
 //     no unlock, no prompt), and whether anyone could answer an unlock
 //     prompt (a graphical session, and gnome-keyring's prompter where
 //     gnome-keyring is the provider);
-//   - the session type (XDG_SESSION_TYPE, else the display variables);
+//   - the session type: XDG_SESSION_TYPE as set, never guessed from the
+//     display variables (Xvfb, cron and systemd services that run
+//     `xvfb-run` have a $DISPLAY and no one in front of it). A session is
+//     graphical (someone could answer a prompt) only when XDG_SESSION_TYPE
+//     says x11 or wayland and, where logind can say, the process's logind
+//     session is of that type and active;
 //   - the xdg-desktop-portal interface versions.
 //
 // Every D-Bus call is synchronous with a short timeout. The probe never
@@ -21,6 +26,7 @@
 
 #include <gio/gio.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <xcb/xcb.h>
 
 #include <atomic>
@@ -60,14 +66,11 @@ std::string Env(const char* name) {
   return v ? v : "";
 }
 
+// XDG_SESSION_TYPE as set ("unknown" when unset). Never from $DISPLAY or
+// $WAYLAND_DISPLAY: a display alone (Xvfb, xvfb-run under cron or a systemd
+// service, a forwarded X connection) says nothing about who is there.
 std::string SessionType() {
   std::string t = Env("XDG_SESSION_TYPE");
-  if (t == "wayland" || t == "x11" || t == "tty")
-    return t;
-  if (!Env("WAYLAND_DISPLAY").empty())
-    return "wayland";
-  if (!Env("DISPLAY").empty())
-    return "x11";
   return t.empty() ? "unknown" : t;
 }
 
@@ -149,6 +152,101 @@ bool NameHasOwner(GDBusConnection* bus, const char* name) {
   return owned;
 }
 
+// A string or boolean property, read without starting the service. False
+// when it can't be read.
+bool GetProperty(GDBusConnection* bus, const char* dest, const char* path,
+                 const char* iface, const char* prop, const GVariantType* type,
+                 GVariant** out) {
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, dest, path, "org.freedesktop.DBus.Properties", "Get",
+      g_variant_new("(ss)", iface, prop), G_VARIANT_TYPE("(v)"),
+      G_DBUS_CALL_FLAGS_NO_AUTO_START, kCallTimeoutMs, nullptr, nullptr);
+  if (!r)
+    return false;
+  GVariant* inner = nullptr;
+  g_variant_get(r, "(v)", &inner);
+  g_variant_unref(r);
+  if (!inner || !g_variant_is_of_type(inner, type)) {
+    if (inner)
+      g_variant_unref(inner);
+    return false;
+  }
+  *out = inner;
+  return true;
+}
+
+// What logind says about this process's session: 1 a graphical (x11 /
+// wayland) session that is active, 0 not (a tty or ssh session, or an
+// inactive one: someone else's seat is in front), -1 logind can't say (no
+// system bus, no logind, or the process belongs to no session: a systemd
+// user service, a container). The session is XDG_SESSION_ID's, else the
+// process's own. Property reads only, on the system bus, never starting
+// logind.
+int LogindSessionGraphical() {
+  GError* error = nullptr;
+  gchar* address =
+      g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, nullptr, &error);
+  g_clear_error(&error);
+  if (!address)
+    return -1;
+  GDBusConnection* sys = g_dbus_connection_new_for_address_sync(
+      address,
+      static_cast<GDBusConnectionFlags>(
+          G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+          G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+      nullptr, nullptr, &error);
+  g_free(address);
+  g_clear_error(&error);
+  if (!sys)
+    return -1;
+  std::string id = Env("XDG_SESSION_ID");
+  GVariant* r = g_dbus_connection_call_sync(
+      sys, "org.freedesktop.login1", "/org/freedesktop/login1",
+      "org.freedesktop.login1.Manager",
+      id.empty() ? "GetSessionByPID" : "GetSession",
+      id.empty() ? g_variant_new("(u)", static_cast<guint32>(getpid()))
+                 : g_variant_new("(s)", id.c_str()),
+      G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, kCallTimeoutMs,
+      nullptr, nullptr);
+  int result = -1;
+  if (r) {
+    const gchar* path = nullptr;
+    g_variant_get(r, "(&o)", &path);
+    GVariant* type = nullptr;
+    GVariant* active = nullptr;
+    if (GetProperty(sys, "org.freedesktop.login1", path,
+                    "org.freedesktop.login1.Session", "Type",
+                    G_VARIANT_TYPE_STRING, &type) &&
+        GetProperty(sys, "org.freedesktop.login1", path,
+                    "org.freedesktop.login1.Session", "Active",
+                    G_VARIANT_TYPE_BOOLEAN, &active)) {
+      std::string t = g_variant_get_string(type, nullptr);
+      result = (t == "x11" || t == "wayland") && g_variant_get_boolean(active)
+                   ? 1
+                   : 0;
+    }
+    if (type)
+      g_variant_unref(type);
+    if (active)
+      g_variant_unref(active);
+    g_variant_unref(r);
+  }
+  g_dbus_connection_close_sync(sys, nullptr, nullptr);
+  g_object_unref(sys);
+  return result;
+}
+
+// Someone could answer a prompt here: XDG_SESSION_TYPE says x11 or wayland,
+// a display variable is set, and logind (where it can say) agrees that this
+// is an active graphical session.
+bool GraphicalSession(const std::string& session) {
+  if (session != "x11" && session != "wayland")
+    return false;
+  if (!HasDisplay())
+    return false;
+  return LogindSessionGraphical() != 0;
+}
+
 // The default collection's Locked property. -1 when it can't be read (no
 // default collection: creating one is a prompt too).
 int DefaultCollectionLocked(GDBusConnection* bus) {
@@ -173,7 +271,7 @@ int DefaultCollectionLocked(GDBusConnection* bus) {
 
 void ProbeSecretServiceOn(GDBusConnection* bus, const std::string& session,
                           PlatformFeatures* out) {
-  bool graphical = (session == "x11" || session == "wayland") && HasDisplay();
+  bool graphical = GraphicalSession(session);
   if (!bus) {
     out->secret_service = SecretServiceState::kNoSessionBus;
     out->secret_prompter = false;

@@ -42,7 +42,9 @@ const char* SecretServiceStateName(SecretServiceState state);
 // What the probe found. Strings are empty when not applicable.
 struct PlatformFeatures {
   std::string os;            // "linux", "macos", "windows"
-  std::string session_type;  // Linux: "wayland", "x11", "tty", "unknown"
+  std::string session_type;  // Linux: XDG_SESSION_TYPE ("wayland", "x11",
+                             // "tty"), "unknown" when unset; never from
+                             // $DISPLAY / $WAYLAND_DISPLAY
   std::string desktop_hint;  // XDG_CURRENT_DESKTOP, verbatim (a hint only)
   bool session_bus = false;  // Linux: a session bus answered
 
@@ -56,8 +58,10 @@ struct PlatformFeatures {
   bool tray_tooltip = true;   // set_tray_tooltip shows something
 
   SecretServiceState secret_service = SecretServiceState::kNotApplicable;
-  // A person can answer an unlock prompt here: a graphical session, and the
-  // provider's prompter (gnome-keyring's gcr-prompter) exists.
+  // A person can answer an unlock prompt here: a graphical session
+  // (XDG_SESSION_TYPE x11 / wayland with a display and, where logind can
+  // say, an active x11 / wayland logind session), and the provider's
+  // prompter (gnome-keyring's gcr-prompter) exists.
   bool secret_prompter = true;
 
   // xdg-desktop-portal interface -> version ("Notification" -> 2). An

@@ -8,7 +8,12 @@
 //     default collection locked, with and without someone to answer the
 //     unlock prompt, unlocked, and no session bus at all;
 //   - the portal interface versions (an interface the portal lacks is
-//     absent).
+//     absent);
+//   - when a session counts as graphical (someone could answer the unlock
+//     prompt): only with XDG_SESSION_TYPE x11 / wayland, never from $DISPLAY
+//     alone (Xvfb, cron, xvfb-run under systemd), and, where logind answers
+//     (a mock org.freedesktop.login1 on the same bus, standing in for the
+//     system bus), only for an active x11 / wayland logind session.
 // Exits 77 (skipped) without dbus-daemon.
 
 #include <gio/gio.h>
@@ -52,17 +57,39 @@ const char kXml[] =
     " <interface name='org.freedesktop.portal.Settings'>"
     "  <property name='version' type='u' access='read'/>"
     " </interface>"
+    " <interface name='org.freedesktop.login1.Manager'>"
+    "  <method name='GetSession'>"
+    "   <arg type='s' direction='in'/><arg type='o' direction='out'/>"
+    "  </method>"
+    "  <method name='GetSessionByPID'>"
+    "   <arg type='u' direction='in'/><arg type='o' direction='out'/>"
+    "  </method>"
+    " </interface>"
+    " <interface name='org.freedesktop.login1.Session'>"
+    "  <property name='Type' type='s' access='read'/>"
+    "  <property name='Active' type='b' access='read'/>"
+    " </interface>"
     "</node>";
 
 GDBusConnection* g_conn = nullptr;  // the mock services' connection
 GDBusNodeInfo* g_info = nullptr;
 std::atomic<bool> g_locked{true};
+// The mock logind session.
+std::atomic<const char*> g_login_type{"x11"};
+std::atomic<bool> g_login_active{true};
+std::atomic<int> g_login_lookups{0};
+constexpr char kLoginSession[] = "/org/freedesktop/login1/session/c7";
 
 GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
                       const gchar* interface, const gchar* property, GError**,
                       gpointer) {
   if (strcmp(interface, "org.freedesktop.Secret.Collection") == 0)
     return g_variant_new_boolean(g_locked.load());
+  if (strcmp(interface, "org.freedesktop.login1.Session") == 0) {
+    if (strcmp(property, "Type") == 0)
+      return g_variant_new_string(g_login_type.load());
+    return g_variant_new_boolean(g_login_active.load());
+  }
   if (strcmp(property, "version") == 0) {
     if (strcmp(interface, "org.freedesktop.portal.Notification") == 0)
       return g_variant_new_uint32(2);
@@ -73,13 +100,29 @@ GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
   return nullptr;
 }
 
-const GDBusInterfaceVTable kVTable = {nullptr, GetProperty, nullptr, {}};
+// logind's Manager: every session lookup answers the mock session.
+void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
+                const gchar*, GVariant*, GDBusMethodInvocation* invocation,
+                gpointer) {
+  g_login_lookups++;
+  g_dbus_method_invocation_return_value(invocation,
+                                        g_variant_new("(o)", kLoginSession));
+}
+
+const GDBusInterfaceVTable kVTable = {CallMethod, GetProperty, nullptr, {}};
 
 void Register(const char* path, const char* iface) {
   GError* error = nullptr;
   EXPECT(g_dbus_connection_register_object(
              g_conn, path, g_dbus_node_info_lookup_interface(g_info, iface),
              &kVTable, nullptr, nullptr, &error) != 0);
+}
+
+PlatformFeatures SecretServiceProbe() {
+  ResetPlatformFeaturesForTesting();
+  PlatformFeatures s;
+  ProbeSecretService(&s);
+  return s;
 }
 
 void BusCall(const char* method, const char* name) {
@@ -140,6 +183,11 @@ int main() {
   GTestDBus* bus = g_test_dbus_new(G_TEST_DBUS_NONE);
   g_test_dbus_add_service_dir(bus, services);
   g_test_dbus_up(bus);  // sets DBUS_SESSION_BUS_ADDRESS
+  // logind lives on the system bus: the same private bus stands in for it,
+  // so the machine's own logind never answers (no org.freedesktop.login1
+  // until the logind section below owns it).
+  setenv("DBUS_SYSTEM_BUS_ADDRESS", g_test_dbus_get_bus_address(bus), 1);
+  unsetenv("XDG_SESSION_ID");
   // A headless (ssh / CI) session: no display, no graphical session.
   setenv("XDG_SESSION_TYPE", "tty", 1);
   setenv("XDG_CURRENT_DESKTOP", "GNOME", 1);
@@ -169,6 +217,8 @@ int main() {
                               "org.freedesktop.portal.Settings"}) {
       Register("/org/freedesktop/portal/desktop", iface);
     }
+    Register("/org/freedesktop/login1", "org.freedesktop.login1.Manager");
+    Register(kLoginSession, "org.freedesktop.login1.Session");
     ready = true;
     GMainLoop* loop = g_main_loop_new(ctx, FALSE);
     g_main_loop_run(loop);
@@ -230,6 +280,60 @@ int main() {
   EXPECT(s.secret_service == SecretServiceState::kLocked);
   EXPECT(s.secret_prompter);
   EXPECT(!NeedsBasicPasswordStore(s));
+
+  // --- Graphical only by XDG_SESSION_TYPE, confirmed by logind -------------
+  // A display alone is no one in front of it: Xvfb, cron, a systemd service
+  // running xvfb-run. XDG_SESSION_TYPE unset gives an unknown session, and
+  // the locked keyring falls back to basic even with gcr's prompter there.
+  unsetenv("XDG_SESSION_TYPE");
+  s = SecretServiceProbe();
+  EXPECT(s.session_type == "unknown");
+  EXPECT(s.secret_service == SecretServiceState::kLocked);
+  EXPECT(!s.secret_prompter);
+  EXPECT(NeedsBasicPasswordStore(s));
+  setenv("WAYLAND_DISPLAY", "wayland-97", 1);
+  s = SecretServiceProbe();
+  EXPECT(s.session_type == "unknown");
+  EXPECT(!s.secret_prompter);
+  unsetenv("WAYLAND_DISPLAY");
+  // XDG_SESSION_TYPE set but no display at all: no one can see a prompt.
+  setenv("XDG_SESSION_TYPE", "x11", 1);
+  unsetenv("DISPLAY");
+  EXPECT(!SecretServiceProbe().secret_prompter);
+  setenv("DISPLAY", ":97", 1);
+
+  // logind answers (XDG_SESSION_ID's session, else the process's own): it
+  // must be an active x11 / wayland session.
+  BusCall("RequestName", "org.freedesktop.login1");
+  setenv("XDG_SESSION_ID", "c7", 1);
+  g_login_type = "tty";  // an ssh session that exported XDG_SESSION_TYPE
+  g_login_active = true;
+  int lookups = g_login_lookups.load();
+  s = SecretServiceProbe();
+  EXPECT(g_login_lookups.load() > lookups);  // logind was asked
+  EXPECT(s.session_type == "x11");
+  EXPECT(!s.secret_prompter);
+  EXPECT(NeedsBasicPasswordStore(s));
+  g_login_type = "x11";
+  g_login_active = false;  // another seat's session is in front
+  EXPECT(!SecretServiceProbe().secret_prompter);
+  g_login_active = true;
+  s = SecretServiceProbe();
+  EXPECT(s.secret_prompter);
+  EXPECT(!NeedsBasicPasswordStore(s));
+  // No XDG_SESSION_ID: the process's own session (GetSessionByPID).
+  unsetenv("XDG_SESSION_ID");
+  g_login_type = "wayland";
+  setenv("XDG_SESSION_TYPE", "wayland", 1);
+  unsetenv("DISPLAY");
+  setenv("WAYLAND_DISPLAY", "wayland-97", 1);
+  lookups = g_login_lookups.load();
+  EXPECT(SecretServiceProbe().secret_prompter);
+  EXPECT(g_login_lookups.load() > lookups);
+  g_login_type = "tty";
+  EXPECT(!SecretServiceProbe().secret_prompter);
+  unsetenv("WAYLAND_DISPLAY");
+  BusCall("ReleaseName", "org.freedesktop.login1");
 
   // Unlocked: no prompt at all, even headless.
   g_locked = false;

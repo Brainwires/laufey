@@ -104,28 +104,34 @@ impl PlatformFeatures {
   }
 }
 
-/// The session type from the environment: XDG_SESSION_TYPE, else the
-/// display variables.
+/// The session type: XDG_SESSION_TYPE as set, `"unknown"` when unset. Never
+/// guessed from `$DISPLAY` / `$WAYLAND_DISPLAY`: a display alone (Xvfb,
+/// `xvfb-run` under cron or a systemd service, a forwarded X connection)
+/// says nothing about who is in front of it.
 #[cfg(any(target_os = "linux", test))]
-fn session_type(
-  xdg_session_type: Option<&str>,
-  wayland_display: bool,
-  x_display: bool,
-) -> String {
-  match xdg_session_type {
-    Some(t @ ("wayland" | "x11" | "tty")) => t.to_string(),
-    other => {
-      if wayland_display {
-        "wayland".into()
-      } else if x_display {
-        "x11".into()
-      } else {
-        other
-          .filter(|t| !t.is_empty())
-          .unwrap_or("unknown")
-          .to_string()
-      }
-    }
+fn session_type(xdg_session_type: Option<&str>) -> String {
+  xdg_session_type
+    .filter(|t| !t.is_empty())
+    .unwrap_or("unknown")
+    .to_string()
+}
+
+/// Whether someone could answer a prompt (a keyring unlock) here: the
+/// session type is x11 or wayland, a display variable is set, and logind,
+/// where it can say (`logind`: `Some((type, active))` for this process's
+/// session), agrees it is an active x11 / wayland session.
+#[cfg(any(target_os = "linux", test))]
+fn graphical_session(
+  session_type: &str,
+  have_display: bool,
+  logind: Option<(String, bool)>,
+) -> bool {
+  if !matches!(session_type, "x11" | "wayland") || !have_display {
+    return false;
+  }
+  match logind {
+    Some((t, active)) => active && matches!(t.as_str(), "x11" | "wayland"),
+    None => true,
   }
 }
 
@@ -269,11 +275,52 @@ mod linux {
   }
 
   fn session_type() -> String {
-    super::session_type(
-      env("XDG_SESSION_TYPE").as_deref(),
-      env("WAYLAND_DISPLAY").is_some(),
-      env("DISPLAY").is_some(),
-    )
+    super::session_type(env("XDG_SESSION_TYPE").as_deref())
+  }
+
+  /// This process's logind session (XDG_SESSION_ID's, else the process's
+  /// own) as `(Type, Active)`, or `None` when logind can't say (no system
+  /// bus, no logind, no session: a systemd user service, a container).
+  /// Property reads on the system bus; never starts logind.
+  fn logind_session() -> Option<(String, bool)> {
+    let conn = zbus::blocking::connection::Builder::system()
+      .ok()?
+      .method_timeout(TIMEOUT)
+      .build()
+      .ok()?;
+    let manager = "/org/freedesktop/login1";
+    let iface = Some("org.freedesktop.login1.Manager");
+    let dest = Some("org.freedesktop.login1");
+    let reply = match env("XDG_SESSION_ID") {
+      Some(id) => conn.call_method(dest, manager, iface, "GetSession", &(id,)),
+      None => conn.call_method(
+        dest,
+        manager,
+        iface,
+        "GetSessionByPID",
+        &(std::process::id(),),
+      ),
+    }
+    .ok()?;
+    let path: zbus::zvariant::OwnedObjectPath =
+      reply.body().deserialize().ok()?;
+    let get = |prop: &str| {
+      conn
+        .call_method(
+          Some("org.freedesktop.login1"),
+          path.as_str(),
+          Some("org.freedesktop.DBus.Properties"),
+          "Get",
+          &("org.freedesktop.login1.Session", prop),
+        )
+        .ok()?
+        .body()
+        .deserialize::<zbus::zvariant::OwnedValue>()
+        .ok()
+    };
+    let session_type = String::try_from(get("Type")?).ok()?;
+    let active = bool::try_from(get("Active")?).ok()?;
+    Some((session_type, active))
   }
 
   fn xembed_tray() -> bool {
@@ -325,8 +372,17 @@ mod linux {
   pub(super) fn probe() -> PlatformFeatures {
     let mut f = probe_tray();
     let session = f.session_type.clone().unwrap_or_default();
-    let graphical = (session == "x11" || session == "wayland")
-      && (env("WAYLAND_DISPLAY").is_some() || env("DISPLAY").is_some());
+    let have_display =
+      env("WAYLAND_DISPLAY").is_some() || env("DISPLAY").is_some();
+    let graphical = super::graphical_session(
+      &session,
+      have_display,
+      if matches!(session.as_str(), "x11" | "wayland") && have_display {
+        logind_session()
+      } else {
+        None
+      },
+    );
     let Some(conn) = connect() else {
       f.secret_service = "no-session-bus";
       return f;
@@ -376,12 +432,32 @@ mod tests {
 
   #[test]
   fn session_type_from_env() {
-    assert_eq!(session_type(Some("wayland"), false, true), "wayland");
-    assert_eq!(session_type(Some("tty"), false, true), "tty");
-    assert_eq!(session_type(None, true, true), "wayland");
-    assert_eq!(session_type(Some(""), false, true), "x11");
-    assert_eq!(session_type(Some("mir"), false, false), "mir");
-    assert_eq!(session_type(None, false, false), "unknown");
+    assert_eq!(session_type(Some("wayland")), "wayland");
+    assert_eq!(session_type(Some("tty")), "tty");
+    assert_eq!(session_type(Some("mir")), "mir");
+    // Never from the display variables (Xvfb, cron, xvfb-run under
+    // systemd): unset is unknown.
+    assert_eq!(session_type(Some("")), "unknown");
+    assert_eq!(session_type(None), "unknown");
+  }
+
+  #[test]
+  fn graphical_only_by_session_type_and_logind() {
+    // $DISPLAY alone (XDG_SESSION_TYPE unset): no one to answer a prompt.
+    assert!(!graphical_session("unknown", true, None));
+    assert!(!graphical_session("tty", true, None));
+    // x11 / wayland with a display; logind can't say: trusted.
+    assert!(graphical_session("x11", true, None));
+    assert!(graphical_session("wayland", true, None));
+    assert!(!graphical_session("wayland", false, None));
+    // logind says: an active x11 / wayland session only.
+    assert!(graphical_session("x11", true, Some(("x11".into(), true))));
+    assert!(!graphical_session("x11", true, Some(("tty".into(), true))));
+    assert!(!graphical_session(
+      "wayland",
+      true,
+      Some(("wayland".into(), false))
+    ));
   }
 
   #[test]
