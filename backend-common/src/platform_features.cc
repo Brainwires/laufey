@@ -10,6 +10,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 #include <string>
 
 namespace laufey_common {
@@ -252,6 +257,14 @@ std::string MarkerPath(const std::string& dir) {
   return dir + "/" + kPasswordStoreMarkerName;
 #endif
 }
+
+int ProcessId() {
+#ifdef _WIN32
+  return _getpid();
+#else
+  return static_cast<int>(getpid());
+#endif
+}
 }  // namespace
 
 std::string ReadPasswordStoreMarker(const std::string& root_cache_dir) {
@@ -267,19 +280,33 @@ std::string ReadPasswordStoreMarker(const std::string& root_cache_dir) {
   while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
                             value.back() == ' '))
     value.pop_back();
-  return value == "basic" || value == "os" ? value : "";
+  return value == "os" ? value : "";
 }
 
 bool WritePasswordStoreMarker(const std::string& root_cache_dir,
                               const std::string& store) {
-  if (root_cache_dir.empty() || (store != "basic" && store != "os"))
+  if (root_cache_dir.empty() || store != "os")
     return false;
-  FILE* file = std::fopen(MarkerPath(root_cache_dir).c_str(), "wb");
+  // A temporary file renamed over the marker: a crash (or a second
+  // instance) never leaves a half-written one.
+  std::string path = MarkerPath(root_cache_dir);
+  std::string tmp = path + ".tmp" + std::to_string(ProcessId());
+  FILE* file = std::fopen(tmp.c_str(), "wb");
   if (!file)
     return false;
   std::string line = store + "\n";
   bool ok = std::fwrite(line.data(), 1, line.size(), file) == line.size();
-  return std::fclose(file) == 0 && ok;
+  ok = std::fflush(file) == 0 && ok;
+  ok = std::fclose(file) == 0 && ok;
+#ifdef _WIN32
+  // rename() doesn't replace on Windows (the marker is used on Linux).
+  if (ok)
+    std::remove(path.c_str());
+#endif
+  ok = ok && std::rename(tmp.c_str(), path.c_str()) == 0;
+  if (!ok)
+    std::remove(tmp.c_str());
+  return ok;
 }
 
 PasswordStoreChoice ChoosePasswordStore(
@@ -291,23 +318,24 @@ PasswordStoreChoice ChoosePasswordStore(
     // As given on the command line (Chromium reads the switch itself).
     choice.store = *explicit_store == "basic" ? "basic" : "os";
     choice.source = "explicit";
-    choice.record = marker != choice.store;
-    return choice;
-  }
-  if (!marker.empty()) {
-    choice.store = marker;
-    choice.source = "profile";
-    choice.append_basic = marker == "basic";
+    choice.record = choice.store == "os" && marker != "os";
     return choice;
   }
   PlatformFeatures f = probe();
   bool basic = NeedsBasicPasswordStore(f);
   choice.store = basic ? "basic" : "os";
-  choice.source = "probe";
   choice.append_basic = basic;
-  choice.record = true;
   if (basic)
     choice.reason = BasicPasswordStoreReason(f);
+  if (marker == "os") {
+    // The profile keeps the OS key; when it can't be reached now, basic for
+    // this launch only (Chromium would wait for the key forever).
+    choice.source = "profile";
+    choice.os_unavailable = basic;
+    return choice;
+  }
+  choice.source = "probe";
+  choice.record = !basic;
   return choice;
 }
 

@@ -128,69 +128,103 @@ int main() {
   EXPECT(TrayAvailable(mac));
   EXPECT(TrayUnavailableReason(mac).empty());
 
-  // --- The cookie store is sticky per profile ----------------------------
+  // --- The OS key is sticky per profile; basic is never recorded ---------
   {
     int probes = 0;
     PlatformFeatures locked = Linux();
     locked.secret_service = SecretServiceState::kLocked;
     locked.secret_prompter = false;  // headless: basic
+    PlatformFeatures activatable = locked;
+    activatable.secret_service = SecretServiceState::kActivatable;
     auto probe_locked = [&] {
       ++probes;
       return locked;
+    };
+    auto probe_activatable = [&] {
+      ++probes;
+      return activatable;
     };
     auto probe_unlocked = [&] {
       ++probes;
       return Linux();
     };
-    // A fresh profile: the probe decides, and the choice is recorded.
+    // A fresh profile: the probe decides. Basic is not recorded (basic ->
+    // os later is lossless: Chromium reads v10 cookies under os); os is.
     PasswordStoreChoice c = ChoosePasswordStore(nullptr, "", probe_locked);
-    EXPECT(c.store == "basic" && c.append_basic && c.record);
+    EXPECT(c.store == "basic" && c.append_basic && !c.record);
     EXPECT(c.source == "probe" && Contains(c.reason, "locked"));
+    EXPECT(!c.os_unavailable);
     c = ChoosePasswordStore(nullptr, "", probe_unlocked);
     EXPECT(c.store == "os" && !c.append_basic && c.record);
+    EXPECT(c.source == "probe" && !c.os_unavailable);
     EXPECT(probes == 2);
-    // A profile that chose "os" stays "os" on a headless launch (its
-    // cookies use the OS key), and one that chose "basic" stays basic in a
-    // desktop session; neither probes.
-    c = ChoosePasswordStore(nullptr, "os", probe_locked);
+    // An "os" profile in a session that can reach the key: os, nothing
+    // rewritten.
+    c = ChoosePasswordStore(nullptr, "os", probe_unlocked);
     EXPECT(c.store == "os" && !c.append_basic && !c.record);
-    EXPECT(c.source == "profile");
-    c = ChoosePasswordStore(nullptr, "basic", probe_unlocked);
+    EXPECT(c.source == "profile" && !c.os_unavailable);
+    // An "os" profile whose keyring is locked, or not running, with no one
+    // to answer: basic for this launch only, the marker unchanged, and the
+    // warning (os_unavailable) with the reason.
+    c = ChoosePasswordStore(nullptr, "os", probe_locked);
     EXPECT(c.store == "basic" && c.append_basic && !c.record);
-    EXPECT(probes == 2);
-    // An explicit --password-store wins, is not appended again (Chromium
-    // reads it), and is recorded when it changes the profile's choice.
+    EXPECT(c.source == "profile" && c.os_unavailable);
+    EXPECT(Contains(c.reason, "locked"));
+    c = ChoosePasswordStore(nullptr, "os", probe_activatable);
+    EXPECT(c.store == "basic" && c.append_basic && !c.record);
+    EXPECT(c.os_unavailable && Contains(c.reason, "not running"));
+    EXPECT(probes == 5);
+    // An explicit --password-store wins and is not appended again (Chromium
+    // reads it). An OS store is recorded when the profile lacks it; basic
+    // never is, and leaves an "os" marker alone. The probe doesn't run.
     std::string explicit_store = "gnome-libsecret";
-    c = ChoosePasswordStore(&explicit_store, "basic", probe_locked);
+    c = ChoosePasswordStore(&explicit_store, "", probe_locked);
     EXPECT(c.store == "os" && !c.append_basic && c.record);
     EXPECT(c.source == "explicit");
+    c = ChoosePasswordStore(&explicit_store, "os", probe_locked);
+    EXPECT(c.store == "os" && !c.record);
     explicit_store = "basic";
-    c = ChoosePasswordStore(&explicit_store, "basic", probe_unlocked);
+    c = ChoosePasswordStore(&explicit_store, "os", probe_unlocked);
     EXPECT(c.store == "basic" && !c.append_basic && !c.record);
-    EXPECT(probes == 2);
+    c = ChoosePasswordStore(&explicit_store, "", probe_unlocked);
+    EXPECT(c.store == "basic" && !c.record);
+    EXPECT(probes == 5);
 
-    // The marker file round trip.
+    // The marker file round trip: only "os" is written, atomically.
     std::filesystem::path dir =
         std::filesystem::temp_directory_path() /
         ("laufey-pf-marker-" + std::to_string(std::rand()));
     std::filesystem::create_directories(dir);
     EXPECT(ReadPasswordStoreMarker(dir.string()).empty());
-    EXPECT(WritePasswordStoreMarker(dir.string(), "basic"));
-    EXPECT(ReadPasswordStoreMarker(dir.string()) == "basic");
+    EXPECT(!WritePasswordStoreMarker(dir.string(), "basic"));
+    EXPECT(ReadPasswordStoreMarker(dir.string()).empty());
     EXPECT(WritePasswordStoreMarker(dir.string(), "os"));
     EXPECT(ReadPasswordStoreMarker(dir.string()) == "os");
+    EXPECT(WritePasswordStoreMarker(dir.string(), "os"));  // replaces it
+    EXPECT(ReadPasswordStoreMarker(dir.string()) == "os");
     EXPECT(!WritePasswordStoreMarker(dir.string(), "kwallet"));
-    EXPECT(!WritePasswordStoreMarker("", "basic"));  // a profile in memory
+    EXPECT(!WritePasswordStoreMarker("", "os"));  // a profile in memory
     EXPECT(ReadPasswordStoreMarker("").empty());
-    // Anything else in the file counts as no choice.
-    {
+    // Written through a temporary file renamed over it: nothing else is
+    // left in the directory.
+    int entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+      EXPECT(entry.path().filename() == kPasswordStoreMarkerName);
+      ++entries;
+    }
+    EXPECT(entries == 1);
+    // A directory that can't be written to: false, and nothing half done.
+    EXPECT(!WritePasswordStoreMarker((dir / "missing").string(), "os"));
+    // Anything else in the file counts as no choice (an older "basic"
+    // marker included).
+    for (const char* other : {"gnome-libsecret\n", "basic\n"}) {
       FILE* file =
           std::fopen((dir / kPasswordStoreMarkerName).string().c_str(), "wb");
       EXPECT(file);
-      std::fputs("gnome-libsecret\n", file);
+      std::fputs(other, file);
       std::fclose(file);
+      EXPECT(ReadPasswordStoreMarker(dir.string()).empty());
     }
-    EXPECT(ReadPasswordStoreMarker(dir.string()).empty());
     std::filesystem::remove_all(dir);
   }
 

@@ -136,35 +136,44 @@ bool NeedsBasicPasswordStore(const PlatformFeatures& f);
 // --- The cookie store, sticky per profile (CEF on Linux)
 // -------------------------------------------------------------------
 
-// The file in a CEF root cache directory that records the password store
-// its profile chose: "basic" or "os" (left to Chromium). A profile's cookies
-// are encrypted with that store's key, so a later launch must not switch:
-// a headless launch would turn an "os" profile into "basic" (its cookies
-// unreadable), and the reverse.
+// The file in a CEF root cache directory that records that its profile
+// chose the OS key ("os": the store was left to Chromium). Only "os" is
+// recorded: cookies written under basic (v10) stay readable under os, so
+// basic -> os loses nothing, while os -> basic would make the OS-key
+// cookies (v11) unreadable. So a profile that once had the OS key keeps
+// asking for it, and one that never did decides on each launch.
 extern const char kPasswordStoreMarkerName[];
 
-// The recorded store ("basic" / "os"), or "" when there is none or it can't
-// be read (an unknown value counts as none).
+// "os" when the profile recorded it, else "" (none, unreadable, or any
+// other value: an older "basic" marker counts as none).
 std::string ReadPasswordStoreMarker(const std::string& root_cache_dir);
 
-// Records `store` ("basic" / "os"). False when it can't be written (no
-// directory: a profile kept in memory).
+// Records "os", atomically (a temporary file renamed over the marker). Any
+// other store is refused. False when it can't be written (no directory: a
+// profile kept in memory).
 bool WritePasswordStoreMarker(const std::string& root_cache_dir,
                               const std::string& store);
 
 struct PasswordStoreChoice {
-  std::string store;          // "basic" or "os"
+  std::string store;          // "basic" or "os": what this launch uses
   bool append_basic = false;  // add --password-store=basic to the command line
-  bool record = false;        // write `store` to the marker
+  bool record = false;        // write "os" to the marker
   // "explicit" (--password-store on the command line), "profile" (the
   // marker), "probe" (this launch's platform features).
   std::string source;
   std::string reason;  // why basic, when the probe chose it
+  // An "os" profile whose key can't be reached this launch (the keyring is
+  // locked, or not running, and no one can answer its prompt): basic for
+  // this launch only, the marker unchanged. Its OS-key cookies are
+  // unavailable until a launch that can reach the key.
+  bool os_unavailable = false;
 };
 
-// Picks the store: an explicit --password-store wins (and is recorded, so
-// the profile keeps it); else the profile's recorded choice; else the probe
-// (NeedsBasicPasswordStore), recorded. `probe` runs only in the last case.
+// Picks the store: an explicit --password-store wins (recorded when it is an
+// OS store); else probe the session (NeedsBasicPasswordStore): an "os"
+// profile stays "os" unless its key can't be reached, then basic for this
+// launch only (os_unavailable); a profile without a marker gets the probe's
+// answer, and "os" is recorded.
 PasswordStoreChoice ChoosePasswordStore(
     const std::string* explicit_store,
     const std::string& marker,

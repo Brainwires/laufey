@@ -47,11 +47,15 @@ void LaufeyOpenExternalURL(const std::string& url) {
 // --password-store is kept. platform_features() reports the choice as
 // "cookieEncryption". Browser process only.
 //
-// The choice is sticky per profile: it is recorded in the root cache
-// directory (laufey_platform_features.h, kPasswordStoreMarkerName), and a
-// later launch keeps it, so a headless launch can't turn a profile whose
-// cookies use the OS key into a basic one (losing them), or the reverse.
-// Only an explicit --password-store changes it (and is recorded).
+// The OS key is sticky per profile: once a profile gets it, "os" is recorded
+// in the root cache directory (laufey_platform_features.h,
+// kPasswordStoreMarkerName), and later launches keep asking for it. Basic is
+// never recorded: Chromium still reads basic (v10) cookies under the OS key,
+// so a profile that started headless moves to the OS key losslessly the
+// first time a launch can reach it. When an "os" profile's key can't be
+// reached (a headless launch against a locked keyring), this launch alone
+// uses basic, the marker stays, and stderr says that the cookies stored with
+// the OS key are unavailable this run.
 static std::string g_root_cache_path;
 
 static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
@@ -72,15 +76,15 @@ static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
   if (choice.record)
     laufey_common::WritePasswordStoreMarker(g_root_cache_path, choice.store);
   laufey_common::SetCookieEncryption(choice.store.c_str());
-  if (choice.append_basic && choice.source == "probe") {
+  if (choice.os_unavailable) {
+    std::cerr << "laufey: this profile's cookies stored with the OS key are "
+                 "unavailable this run, and new ones are stored with "
+                 "--password-store=basic: "
+              << choice.reason << std::endl;
+  } else if (choice.append_basic) {
     std::cerr << "laufey: cookies are stored with --password-store=basic "
                  "(not encrypted with an OS key): "
               << choice.reason << std::endl;
-  } else if (choice.append_basic) {
-    std::cerr << "laufey: cookies are stored with --password-store=basic, "
-                 "as this profile chose on an earlier launch (pass "
-                 "--password-store to change it)"
-              << std::endl;
   }
 }
 

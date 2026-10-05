@@ -65,13 +65,16 @@ Secret Service at all or no session bus, where Chromium finds no keystore and
 falls back to `basic` by itself without waiting. An explicit `--password-store`
 on the command line is kept as given.
 
-The choice is sticky per profile. CEF records it in the profile's root cache
-directory (a `laufey-password-store` file holding `basic` or `os`), and later
-launches keep it without probing again: the profile's cookies are encrypted with
-that store's key, so switching would make them unreadable. A headless launch
-therefore can't turn a profile created in a desktop session (`os`) into a
-`basic` one and lose its cookies, nor the reverse. (Such a launch of an `os`
-profile against a locked keyring no one can unlock waits for the key, as
-Chromium does on its own.) Passing `--password-store` explicitly changes the
-choice, and the new one is recorded. A profile with no data directory (the
-throwaway per-process one) decides on every launch.
+The OS key is sticky per profile. Once a profile gets it, CEF records `os` in
+the profile's root cache directory (a `laufey-password-store` file, written to a
+temporary file and renamed over it), and later launches keep asking for it.
+`basic` is never recorded: Chromium still reads cookies written under `basic`
+when it has the OS key, so a profile created in a headless session moves to the
+OS key without losing anything the first time a launch can reach it. When an
+`os` profile meets a Secret Service that is locked (or not running) with no one
+to answer its prompt, that launch alone uses `basic` (`"cookieEncryption":
+"basic"`), the marker stays `os`, and stderr says once that the cookies stored
+with the OS key are unavailable this run; the next launch that can reach the key
+reads them again. An explicit `--password-store` is kept as given; an OS store
+given that way is recorded, `basic` is not. A profile with no data directory
+(the throwaway per-process one) decides on every launch.
