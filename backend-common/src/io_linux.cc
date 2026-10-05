@@ -14,8 +14,14 @@
 #include "laufey_io.h"
 #include "laufey_ui_tasks.h"
 
+#include <unistd.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -39,6 +45,49 @@ bool OnGtkThread() {
 }
 
 }  // namespace
+
+namespace {
+
+// What the parked UI thread and the exiting thread share. Leaked on purpose:
+// nothing may be destroyed while exit runs.
+struct ExitPark {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool answered = false;
+};
+
+void ParkUiThreadForExit() {
+  UiTaskDispatcher& dispatcher = UiTaskDispatcher::Get();
+  // The UI thread itself exiting (main returning) has nothing to stop.
+  if (dispatcher.IsUiThread())
+    return;
+  auto* park = new ExitPark();
+  dispatcher.Dispatch(
+      [](void* data, bool ran) {
+        auto* p = static_cast<ExitPark*>(data);
+        {
+          std::lock_guard<std::mutex> lock(p->mutex);
+          p->answered = true;
+        }
+        p->cv.notify_all();
+        if (!ran)
+          return;
+        // The UI thread stays here until the process is gone.
+        for (;;)
+          pause();
+      },
+      park);
+  std::unique_lock<std::mutex> lock(park->mutex);
+  park->cv.wait_for(lock, std::chrono::seconds(1),
+                    [park] { return park->answered; });
+}
+
+}  // namespace
+
+void InstallUiExitGuard() {
+  static std::once_flag once;
+  std::call_once(once, [] { atexit(ParkUiThreadForExit); });
+}
 
 void SetGtkThread(std::function<void(std::function<void()>)> post,
                   std::function<bool()> on_thread) {

@@ -22,6 +22,10 @@
 #include <mach-o/dyld.h>
 #endif
 
+#if defined(__linux__)
+#include "laufey_io.h"
+#endif
+
 #include <iostream>
 #include <cstring>
 #include <vector>
@@ -1581,6 +1585,11 @@ bool RuntimeLoader::Load(const std::string& path) {
           return false;  // a headless worker has no UI thread
         return backend->PostUiTask(task, task_data);
       });
+#if defined(__linux__)
+  // Deno.exit() ends the process from the runtime thread: keep the UI thread
+  // from drawing while exit tears the libraries down.
+  laufey_common::InstallUiExitGuard();
+#endif
 #ifndef _WIN32
   library_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!library_handle_) {

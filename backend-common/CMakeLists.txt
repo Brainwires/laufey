@@ -371,6 +371,14 @@ if(LAUFEY_BUILD_TESTS)
     set_tests_properties(laufey_shortcuts_portal_test PROPERTIES
                          SKIP_RETURN_CODE 77)
 
+    # The UI-thread exit guard: exit() from another thread parks the UI
+    # thread before the libraries' destructors run.
+    add_executable(laufey_exit_guard_test tests/exit_guard_test.cc)
+    target_link_libraries(laufey_exit_guard_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_exit_guard_test COMMAND laufey_exit_guard_test)
+
     # The clipboard through ext-data-control against the session's own
     # compositor (skipped outside a Wayland session with data-control).
     add_executable(laufey_clipboard_wayland_test
