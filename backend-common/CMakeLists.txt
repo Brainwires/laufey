@@ -329,8 +329,11 @@ if(LAUFEY_BUILD_TESTS)
     )
     add_test(NAME laufey_platform_features_dbus_test
              COMMAND laufey_platform_features_dbus_test)
+    # A GLib critical (the watcher subscription made off the thread that
+    # runs the default main context, for one) fails the test.
     set_tests_properties(laufey_platform_features_dbus_test PROPERTIES
-                         SKIP_RETURN_CODE 77)
+                         SKIP_RETURN_CODE 77
+                         ENVIRONMENT "G_DEBUG=fatal-criticals")
 
     # The freedesktop notification client against a mock server on a
     # private D-Bus session bus (GTestDBus; skipped without dbus-daemon).

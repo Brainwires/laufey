@@ -310,17 +310,20 @@ void OnWatcherOwnerChanged(GDBusConnection*, const gchar*, const gchar*,
 }
 
 // The watcher state, subscribing on first use. The subscription delivers on
-// the process's default main context, which every backend's UI loop runs.
+// the calling thread's thread-default main context, which is the process's
+// default context (every backend's UI loop runs it) on any thread that has
+// not pushed one of its own: the callers are the UI thread and the runtime
+// thread, neither of which pushes one. Never push the default context here:
+// that needs to acquire it, which fails (a GLib critical) on any thread
+// while the UI thread runs it.
 bool TrayWatcherLocked(State& s, GDBusConnection* bus) {
   if (!bus)
     return false;
   if (!s.watcher_sub) {
-    g_main_context_push_thread_default(g_main_context_default());
     s.watcher_sub = g_dbus_connection_signal_subscribe(
         bus, "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
         "/org/freedesktop/DBus", kWatcherName, G_DBUS_SIGNAL_FLAGS_NONE,
         OnWatcherOwnerChanged, nullptr, nullptr);
-    g_main_context_pop_thread_default(g_main_context_default());
     // After subscribing, so an owner change in between is not lost.
     g_watcher.store(NameHasOwner(bus, kWatcherName) ? 1 : 0);
   }

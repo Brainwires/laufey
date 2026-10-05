@@ -4,6 +4,10 @@
 // mock services on a private D-Bus session bus (GTestDBus):
 //   - no tray watcher, then a watcher that appears late (the probe follows
 //     NameOwnerChanged), then one that quits;
+//   - the watcher subscription made from a thread that does not own the
+//     default main context while another thread runs it (as the runtime
+//     thread asks while the UI thread runs the loop), under
+//     G_DEBUG=fatal-criticals (ctest sets it; set here too);
 //   - the Secret Service activatable (not running), running with its
 //     default collection locked, with and without someone to answer the
 //     unlock prompt, unlocked, and no session bus at all;
@@ -164,7 +168,44 @@ void WriteService(const std::string& dir, const char* name) {
 
 }  // namespace
 
+// The probe's NameOwnerChanged subscription made from this thread while
+// another thread runs the default main context: no GLib critical (fatal
+// here), and the owner thread delivers the watcher's owner changes.
+void SubscribeOffTheOwnerThread() {
+  ResetPlatformFeaturesForTesting();
+  GMainLoop* loop = g_main_loop_new(nullptr, FALSE);  // the default context
+  std::thread owner([loop] { g_main_loop_run(loop); });
+  for (int i = 0; i < 500 && !g_main_loop_is_running(loop); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT(g_main_loop_is_running(loop));
+  EXPECT(!g_main_context_is_owner(g_main_context_default()));
+  // A third thread, like the runtime's, subscribes first.
+  bool first = true;
+  std::thread([&first] { first = TrayWatcher(); }).join();
+  EXPECT(!first);
+  auto wait = [](bool want) {
+    for (int i = 0; i < 500; ++i) {
+      if (TrayWatcher() == want)
+        return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+  };
+  BusCall("RequestName", "org.kde.StatusNotifierWatcher");
+  EXPECT(wait(true));  // delivered on the owner thread
+  BusCall("ReleaseName", "org.kde.StatusNotifierWatcher");
+  EXPECT(wait(false));
+  g_main_loop_quit(loop);
+  owner.join();
+  g_main_loop_unref(loop);
+  ResetPlatformFeaturesForTesting();
+}
+
 int main() {
+  // Any GLib critical (a failed g_main_context_push_thread_default
+  // included) ends the test.
+  g_log_set_always_fatal(static_cast<GLogLevelFlags>(
+      G_LOG_FATAL_MASK | G_LOG_LEVEL_CRITICAL));
   gchar* daemon = g_find_program_in_path("dbus-daemon");
   if (!daemon) {
     std::printf(
@@ -224,6 +265,9 @@ int main() {
     g_main_loop_run(loop);
   }).detach();
   EXPECT(SpinUntil([&] { return ready.load(); }));
+
+  // --- Subscribing off the thread that runs the default context ----------
+  SubscribeOffTheOwnerThread();
 
   // --- Nothing running ----------------------------------------------------
   PlatformFeatures f = ProbePlatformFeatures();
