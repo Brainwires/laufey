@@ -13,9 +13,10 @@
 #       file pins the app id, and with it the lock and the data directory).
 #       An invalid app id setup warns and runs unlocked; without an app id in
 #       the file, LAUFEY_SINGLE_INSTANCE=0 overrides it. A headless worker
-#       launch (`<exe> run <script>`, how Deno Desktop starts its update
-#       helper) while the primary runs is not forwarded: it runs the runtime
-#       headless and exits.
+#       launch while the primary runs (`<exe> run <script>`, how Deno Desktop
+#       starts its update helper, or `<exe> <script>` with NODE_CHANNEL_FD, a
+#       forked worker) is not forwarded and never reaches the lock: it runs
+#       the runtime headless and exits.
 #   (c) singleInstance off: two instances run side by side (on CEF with
 #       separate data directories: one CEF profile allows one process, see
 #       docs/app-data.md; scripts/storage-e2e-run.sh covers that refusal).
@@ -281,6 +282,22 @@ if wait_for primary '^\[e2e\] ready' 90; then
     pass "worker launch (run <script>) ran headless while the primary holds the lock (${direct_secs}s)"
   else
     fail "worker launch not run headless (exit $direct_rc; see $scratch/logs/worker.log)"
+  fi
+  # A worker launched the env way (spawn(execPath, [script], ipc) in Deno
+  # Desktop: no `run`, only NODE_CHANNEL_FD marks it) runs headless too,
+  # before the single-instance check: not forwarded, and it never reaches the
+  # lock (which would report the LAUFEY_SINGLE_INSTANCE it can't override).
+  direct env-worker "$cwd_dir" NODE_CHANNEL_FD=3 LAUFEY_SINGLE_INSTANCE=0 \
+    -- worker-script.ts env-arg
+  if ! kill -0 "$primary_pid" 2>/dev/null; then
+    fail "the primary exited before the env worker launch finished"
+  elif [ "$direct_rc" = 0 ] &&
+    grep -q '^\[e2e\] headless worker args=\["worker-script.ts", "env-arg"\]' \
+      "$scratch/logs/env-worker.log" &&
+    ! grep -q 'LAUFEY_SINGLE_INSTANCE is ignored' "$scratch/logs/env-worker.log"; then
+    pass "worker launch (NODE_CHANNEL_FD, no run) ran headless without reaching the lock (${direct_secs}s)"
+  else
+    fail "env worker launch not run headless (exit $direct_rc; see $scratch/logs/env-worker.log)"
   fi
 else
   fail "primary never became ready"

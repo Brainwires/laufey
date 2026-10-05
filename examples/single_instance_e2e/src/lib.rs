@@ -26,8 +26,9 @@
 //!       also write the PASS/FAIL lines and the OVERALL line to this file
 //!       (for a launch the OS starts, whose output the driver can't see).
 //!
-//! Started as a headless worker (`<exe> run <script> ...`, which every backend
-//! runs before its single-instance check, with no web engine), it prints
+//! Started as a headless worker (`<exe> run <script> ...`, or with
+//! NODE_CHANNEL_FD / NEXT_PRIVATE_WORKER set: what every backend runs before
+//! its single-instance check, with no web engine), it prints
 //! `[e2e] headless worker args=[...]` and returns at once: no window, no
 //! `laufey::run()`.
 //!
@@ -84,7 +85,12 @@ struct Seen {
 
 fn e2e_main() {
   let args: Vec<String> = std::env::args().skip(1).collect();
-  if args.first().map(String::as_str) == Some("run") {
+  // The backend's classification (laufey_common::IsHeadlessWorkerLaunch),
+  // which an embedder mirrors: the backend started no web engine for it.
+  let forked = ["NODE_CHANNEL_FD", "NEXT_PRIVATE_WORKER"]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some());
+  if args.first().map(String::as_str) == Some("run") || forked {
     eprintln!("[e2e] headless worker args={args:?}");
     let _ = std::io::stderr().flush();
     return;
