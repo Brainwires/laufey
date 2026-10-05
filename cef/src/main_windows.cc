@@ -159,26 +159,6 @@ static int run_headless(const std::string& runtimePath) {
   return 0;
 }
 
-static bool is_forked_worker() {
-  // Windows equivalent of checking NODE_CHANNEL_FD / NEXT_PRIVATE_WORKER
-  char buf[2];
-  return GetEnvironmentVariableA("NODE_CHANNEL_FD", buf, sizeof(buf)) > 0 ||
-         GetEnvironmentVariableA("NEXT_PRIVATE_WORKER", buf, sizeof(buf)) > 0;
-}
-
-static bool is_cli_worker_command(int argc, LPWSTR* argv) {
-  if (argc < 3 || wcscmp(argv[1], L"run") != 0) {
-    return false;
-  }
-  for (int i = 2; i < argc; ++i) {
-    if (argv[i][0] == L'-') {
-      continue;
-    }
-    return true;
-  }
-  return false;
-}
-
 // Combined app that handles both browser and renderer processes (single-exe
 // model)
 class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
@@ -299,33 +279,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   // LAUFEY_RUNTIME_PATH names. The arguments are also kept for the browser
   // process's command line hook, which drops a deep-link launch's Chromium
   // switches (LaufeyStripDeepLinkSwitches). See laufey_launch_args.h.
-  int argc;
-  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  std::vector<std::string> args;
   {
-    std::vector<std::string> args;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; argv && i < argc; ++i)
       args.push_back(laufey_common::WideToUtf8(argv[i]));
-    laufey_common::SetProcessArgs(args);
+    if (argv)
+      LocalFree(argv);
+  }
+  laufey_common::SetProcessArgs(args);
+  {
     laufey_common::RuntimeChoice choice = laufey_common::ResolveRuntimePath(
         args, {LaufeyFindColocatedRuntime()}, {});
     // A packaged app without its runtime exits at once, before CEF starts.
     if (laufey_common::IsMissingPackagedRuntime(choice)) {
       laufey_common::ReportMissingPackagedRuntime();
-      if (argv)
-        LocalFree(argv);
       return laufey_common::kMissingRuntimeExitCode;
     }
     g_runtime_path = choice.path;
   }
 
   // Check for headless / forked worker mode (skip CEF entirely)
-  if (is_forked_worker() || (argv && is_cli_worker_command(argc, argv))) {
-    if (argv)
-      LocalFree(argv);
+  if (laufey_common::IsHeadlessWorkerLaunch(args)) {
     return run_headless(g_runtime_path);
   }
-  if (argv)
-    LocalFree(argv);
 
   // Single-instance mode (docs/deep-links.md): a second launch forwards its
   // command line (GetCommandLineW) to the running instance and exits here,

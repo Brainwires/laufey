@@ -26,6 +26,11 @@
 //!       also write the PASS/FAIL lines and the OVERALL line to this file
 //!       (for a launch the OS starts, whose output the driver can't see).
 //!
+//! Started as a headless worker (`<exe> run <script> ...`, which every backend
+//! runs before its single-instance check, with no web engine), it prints
+//! `[e2e] headless worker args=[...]` and returns at once: no window, no
+//! `laufey::run()`.
+//!
 //! Emits `[e2e] PASS/FAIL <name>` lines and a final `[e2e] OVERALL
 //! PASS|FAIL`, then quits through the backend's normal path.
 
@@ -78,11 +83,17 @@ struct Seen {
 }
 
 fn e2e_main() {
+  let args: Vec<String> = std::env::args().skip(1).collect();
+  if args.first().map(String::as_str) == Some("run") {
+    eprintln!("[e2e] headless worker args={args:?}");
+    let _ = std::io::stderr().flush();
+    return;
+  }
+
   let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
   rt.block_on(async move {
     tokio::spawn(async { laufey::run().await });
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     report(format!("[e2e] pid={} args={args:?}", std::process::id()));
     if let Some(want) = expected_args("LAUFEY_E2E_SI_COLD") {
       check(

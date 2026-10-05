@@ -12,7 +12,10 @@
 #       LAUFEY_SINGLE_INSTANCE=0 and LAUFEY_DATA_DIR in its environment (the
 #       file pins the app id, and with it the lock and the data directory).
 #       An invalid app id setup warns and runs unlocked; without an app id in
-#       the file, LAUFEY_SINGLE_INSTANCE=0 overrides it.
+#       the file, LAUFEY_SINGLE_INSTANCE=0 overrides it. A headless worker
+#       launch (`<exe> run <script>`, how Deno Desktop starts its update
+#       helper) while the primary runs is not forwarded: it runs the runtime
+#       headless and exits.
 #   (c) singleInstance off: two instances run side by side (on CEF with
 #       separate data directories: one CEF profile allows one process, see
 #       docs/app-data.md; scripts/storage-e2e-run.sh covers that refusal).
@@ -246,9 +249,12 @@ while IFS= read -r line; do second_expect+=("$line"); done \
 write_launch_file "$(printf '{ "appId": "%s", "dataDir": "%s", "singleInstance": true }' \
   "$app_id" "$(json_path "$scratch/data-primary")")"
 
+# The primary stays up until released (after the worker launch below), so
+# that launch meets a held lock.
 start primary \
   "${cold_expect[@]}" "${second_expect[@]}" \
-  LAUFEY_E2E_SI_SECOND_CWD="$cwd_native" -- "${cold_args[@]}"
+  LAUFEY_E2E_SI_SECOND_CWD="$cwd_native" \
+  LAUFEY_E2E_SI_HOLD_FILE="$(native "$scratch/release-primary")" -- "${cold_args[@]}"
 primary_pid=$started_pid
 if wait_for primary '^\[e2e\] ready' 90; then
   direct second "$cwd_dir" LAUFEY_SINGLE_INSTANCE=0 \
@@ -264,9 +270,22 @@ if wait_for primary '^\[e2e\] ready' 90; then
   else
     fail "ignored LAUFEY_SINGLE_INSTANCE not reported (see $scratch/logs/second.log)"
   fi
+  # The lock is held: a worker launch must still run (headless, no window),
+  # not be forwarded to the primary as a second instance.
+  direct worker "$cwd_dir" -- run worker-script.ts worker-arg
+  if ! kill -0 "$primary_pid" 2>/dev/null; then
+    fail "the primary exited before the worker launch finished"
+  elif [ "$direct_rc" = 0 ] &&
+    grep -q '^\[e2e\] headless worker args=\["run", "worker-script.ts", "worker-arg"\]' \
+      "$scratch/logs/worker.log"; then
+    pass "worker launch (run <script>) ran headless while the primary holds the lock (${direct_secs}s)"
+  else
+    fail "worker launch not run headless (exit $direct_rc; see $scratch/logs/worker.log)"
+  fi
 else
   fail "primary never became ready"
 fi
+touch "$scratch/release-primary"
 finish primary "$primary_pid" 60
 
 # Without an app id in the file, LAUFEY_SINGLE_INSTANCE=0 wins over its

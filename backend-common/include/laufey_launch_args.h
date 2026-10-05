@@ -142,6 +142,25 @@ RuntimeChoice ResolveRuntimePath(const std::vector<std::string>& args,
 std::vector<std::string> WebView2EnvironmentOverridesToClear(bool packaged,
                                                              bool inspectable);
 
+// Whether a launch is a headless worker rather than the app: the runtime runs
+// a script with no web engine and no window. Two shapes:
+//
+//  * `<exe> run [flags] <script> ...`: the embedder's CLI worker command
+//    (Deno Desktop's update helper is `<exe> run denext-update-helper ...`).
+//    `args` is argv without the program; IsCliWorkerCommand holds when
+//    args[0] is "run" and a non-flag argument follows it.
+//  * a forked Node-style worker: NODE_CHANNEL_FD or NEXT_PRIVATE_WORKER is
+//    set (IsForkedWorkerEnvironment; `is_set` reports whether a variable is
+//    present in the environment).
+//
+// Every host checks IsHeadlessWorkerLaunch before SingleInstanceStartup: a
+// worker is never forwarded to a running instance as a second launch (it
+// would never run) and never takes the single-instance lock itself.
+bool IsCliWorkerCommand(const std::vector<std::string>& args);
+bool IsForkedWorkerEnvironment(const std::function<bool(const char*)>& is_set);
+// Both, for this process's environment.
+bool IsHeadlessWorkerLaunch(const std::vector<std::string>& args);
+
 // The process's own arguments (argv without the program, UTF-8), recorded by
 // the host's main() before anything parses them (SetProcessArgs) and read by
 // the CEF command line hook (ProcessArgs). Not thread-safe to set: main()

@@ -36,7 +36,56 @@ static void ActivateApp(void*) {
     gtk_window_present(target);
 }
 
+// A headless worker (laufey_common::IsHeadlessWorkerLaunch): the runtime runs
+// with no backend, no GTK and no window, then the process exits.
+static int run_headless(const std::string& runtimePath) {
+  RuntimeLoader* loader = RuntimeLoader::GetInstance();
+  loader->SetBackend(nullptr);
+  if (runtimePath.empty()) {
+    std::cerr << "No runtime library found for headless worker." << std::endl;
+    return 1;
+  }
+  if (!loader->Load(runtimePath)) {
+    std::cerr << "Failed to load runtime for headless worker." << std::endl;
+    return 1;
+  }
+  // No UI loop in a headless worker: UI tasks are answered "not run" at
+  // once instead of waiting for a loop that never runs.
+  laufey_common::UiLoopEnded();
+  if (!loader->Start()) {
+    std::cerr << "Failed to start headless worker runtime." << std::endl;
+    return 1;
+  }
+  loader->Shutdown();
+  return 0;
+}
+
 int main(int argc, char* argv[]) {
+  const std::vector<std::string> args(argv + 1, argv + argc);
+
+  // The runtime library: a packaged app (a launch file, or a runtime next to
+  // the executable) loads only the one next to its executable; a development
+  // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH, then the
+  // working directory and system fallbacks. See laufey_launch_args.h.
+  laufey_common::RuntimeChoice runtimeChoice =
+      laufey_common::ResolveRuntimePath(
+          args, {LaufeyFindColocatedRuntime()},
+          {"./libruntime.so", "./target/debug/libhello.so",
+           "./target/release/libhello.so", "/usr/lib/laufey/libruntime.so",
+           "/usr/local/lib/laufey/libruntime.so"});
+  if (laufey_common::IsMissingPackagedRuntime(runtimeChoice)) {
+    laufey_common::ReportMissingPackagedRuntime();
+    return laufey_common::kMissingRuntimeExitCode;
+  }
+  std::string runtimePath = runtimeChoice.path;
+
+  // A headless worker (`<exe> run <script>`, a forked worker) runs before the
+  // single-instance check: forwarded to a running instance it would never
+  // run, and it must not hold the lock the app itself takes.
+  if (laufey_common::IsHeadlessWorkerLaunch(args)) {
+    return run_headless(runtimePath);
+  }
+
   // Single-instance mode (docs/deep-links.md): a second launch forwards its
   // arguments to the running instance and exits here, before any web
   // engine or the runtime starts.
@@ -108,23 +157,6 @@ int main(int argc, char* argv[]) {
       }
     }
   }
-
-  // The runtime library: a packaged app (a launch file, or a runtime next to
-  // the executable) loads only the one next to its executable; a development
-  // host takes --runtime (before "--"), then LAUFEY_RUNTIME_PATH, then the
-  // working directory and system fallbacks. See laufey_launch_args.h.
-  laufey_common::RuntimeChoice runtimeChoice =
-      laufey_common::ResolveRuntimePath(
-          std::vector<std::string>(argv + 1, argv + argc),
-          {LaufeyFindColocatedRuntime()},
-          {"./libruntime.so", "./target/debug/libhello.so",
-           "./target/release/libhello.so", "/usr/lib/laufey/libruntime.so",
-           "/usr/local/lib/laufey/libruntime.so"});
-  if (laufey_common::IsMissingPackagedRuntime(runtimeChoice)) {
-    laufey_common::ReportMissingPackagedRuntime();
-    return laufey_common::kMissingRuntimeExitCode;
-  }
-  std::string runtimePath = runtimeChoice.path;
 
   if (runtimePath.empty()) {
     std::cerr << "No runtime library found. Set LAUFEY_RUNTIME_PATH or use "

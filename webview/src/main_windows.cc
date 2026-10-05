@@ -40,25 +40,32 @@ static void ActivateApp(void*) {
   SetForegroundWindow(target);
 }
 
+// A headless worker (laufey_common::IsHeadlessWorkerLaunch): the runtime runs
+// with no backend, no WebView2 and no window, then the process exits.
+static int run_headless(const std::string& runtimePath) {
+  RuntimeLoader* loader = RuntimeLoader::GetInstance();
+  loader->SetBackend(nullptr);
+  if (runtimePath.empty()) {
+    std::cerr << "No runtime library found for headless worker." << std::endl;
+    return 1;
+  }
+  if (!loader->Load(runtimePath)) {
+    std::cerr << "Failed to load runtime for headless worker." << std::endl;
+    return 1;
+  }
+  // No UI loop in a headless worker: UI tasks are answered "not run" at
+  // once instead of waiting for a loop that never runs.
+  laufey_common::UiLoopEnded();
+  if (!loader->Start()) {
+    std::cerr << "Failed to start headless worker runtime." << std::endl;
+    return 1;
+  }
+  loader->Shutdown();
+  return 0;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
-  // Single-instance mode (docs/deep-links.md): a second launch forwards its
-  // command line to the running instance and exits here, before WebView2 or
-  // the runtime starts. The arguments are read from GetCommandLineW().
-  int single_instance_exit = 0;
-  if (!laufey_common::SingleInstanceStartup(0, nullptr,
-                                            &single_instance_exit)) {
-    return single_instance_exit;
-  }
-  // Notifications (API 41): the Windows toast activator / the Linux
-  // scheduler start before the runtime, so a click on a toast that launched
-  // the app, or a notification scheduled for while it wasn't running, is
-  // delivered.
-  laufey_common::InitNotificationsAtLaunch();
-
-  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
   // laufey's own options end at "--" (a registered URL scheme runs
   // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
   // packaged app (a launch file or a runtime next to the executable) loads
@@ -86,9 +93,33 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   // A packaged app without its runtime exits at once (no dialog to wait on).
   if (laufey_common::IsMissingPackagedRuntime(runtimeChoice)) {
     laufey_common::ReportMissingPackagedRuntime();
-    CoUninitialize();
     return laufey_common::kMissingRuntimeExitCode;
   }
+
+  // A headless worker (`<exe> run <script>`, a forked worker) runs before the
+  // single-instance check: forwarded to a running instance it would never
+  // run, and it must not hold the lock the app itself takes. WinMain has no
+  // argv; `args` comes from GetCommandLineW() above.
+  if (laufey_common::IsHeadlessWorkerLaunch(args)) {
+    return run_headless(runtimePath);
+  }
+
+  // Single-instance mode (docs/deep-links.md): a second launch forwards its
+  // command line to the running instance and exits here, before WebView2 or
+  // the runtime starts. The arguments are read from GetCommandLineW().
+  int single_instance_exit = 0;
+  if (!laufey_common::SingleInstanceStartup(0, nullptr,
+                                            &single_instance_exit)) {
+    return single_instance_exit;
+  }
+  // Notifications (API 41): the Windows toast activator / the Linux
+  // scheduler start before the runtime, so a click on a toast that launched
+  // the app, or a notification scheduled for while it wasn't running, is
+  // delivered.
+  laufey_common::InitNotificationsAtLaunch();
+
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   if (runtimePath.empty()) {
     MessageBoxW(nullptr,

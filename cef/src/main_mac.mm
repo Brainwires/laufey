@@ -301,26 +301,6 @@ static int run_headless(const std::string& path) {
   return 0;
 }
 
-static bool is_cli_worker_command(int argc, char* argv[]) {
-  if (argc < 3 || strcmp(argv[1], "run") != 0) {
-    return false;
-  }
-
-  for (int i = 2; i < argc; ++i) {
-    if (argv[i][0] == '-') {
-      continue;
-    }
-    return true;
-  }
-
-  return false;
-}
-
-static bool is_forked_worker() {
-  return getenv("NODE_CHANNEL_FD") != nullptr ||
-         getenv("NEXT_PRIVATE_WORKER") != nullptr;
-}
-
 int main(int argc, char* argv[]) {
   // The runtime library: a packaged app (a launch file, or a runtime next to
   // the executable) loads only the one next to its executable; a development
@@ -338,7 +318,8 @@ int main(int argc, char* argv[]) {
     g_runtime_path = choice.path;
   }
 
-  if (is_forked_worker() || is_cli_worker_command(argc, argv)) {
+  if (laufey_common::IsHeadlessWorkerLaunch(
+          std::vector<std::string>(argv + 1, argv + argc))) {
     return run_headless(g_runtime_path);
   }
 
