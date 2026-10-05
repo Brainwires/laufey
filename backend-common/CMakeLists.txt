@@ -83,6 +83,7 @@ elseif(UNIX)
     src/clipboard_linux.cc
     src/clipboard_data_control_linux.cc
     src/clipboard_x11_linux.cc
+    src/session_lock_linux.cc
     src/wayland/ext-data-control-v1-protocol.c
     src/keymap_gdk.cc
     src/menu_linux.cc

@@ -28,7 +28,9 @@
 #include "clipboard_x11_linux.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "session_lock_linux.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -172,8 +174,37 @@ void OnOwnerChange(GtkClipboard*, GdkEvent*, gpointer) {
 // ext-data-control where the compositor offers it, else (mutter) the X11
 // CLIPBOARD of Xwayland. Each answers false when it isn't in use here, and
 // the caller then uses GTK's clipboard.
+//
+// Privacy: these paths read the clipboard whatever has focus, so an app in
+// the background reads it while the session is unlocked (as on macOS and
+// Windows, and as Electron does). While the session is locked (logind's
+// LockedHint) every read through them is refused: it answers "nothing
+// there", and the reason is logged once per lock.
+
+bool FreeAvailable() {
+  return data_control::Available() || x11_clipboard::Available();
+}
+
+// True (and the reason logged, once per lock) when a read must be refused.
+bool ReadRefused() {
+  static std::atomic<bool> logged{false};
+  if (!SessionLockedLinux()) {
+    logged = false;
+    return false;
+  }
+  if (!logged.exchange(true)) {
+    g_warning(
+        "laufey: clipboard read refused: the session is locked (reads "
+        "without focus are refused while the screen is locked)");
+  }
+  return true;
+}
 
 bool FreeTypes(std::vector<std::string>* out) {
+  if (FreeAvailable() && ReadRefused()) {
+    out->clear();
+    return true;
+  }
   return data_control::Types(out) || x11_clipboard::Types(out);
 }
 
@@ -182,6 +213,10 @@ bool FreeTypes(std::vector<std::string>* out) {
 bool FreeRead(const std::vector<std::string>& mimes, std::string* out,
               std::string* mime_out, bool* found,
               std::string* type_out = nullptr) {
+  if (FreeAvailable() && ReadRefused()) {
+    *found = false;
+    return true;
+  }
   std::string mime;
   if (data_control::Read(mimes, LAUFEY_CLIPBOARD_MAX_READ_BYTES, out, &mime,
                          found)) {
@@ -379,41 +414,54 @@ bool ClipboardWriteHtmlLinux(const std::string& html,
   return ok;
 }
 
+namespace {
+
+// The image types read, in order of preference: PNG (verbatim), then the
+// formats re-encoded as PNG. Nothing else is handed to an image decoder.
+const std::vector<std::string>& ImageTypes() {
+  static const std::vector<std::string> types = {"image/png", "image/jpeg",
+                                                 "image/bmp", "image/gif"};
+  return types;
+}
+
+// `mime` (one of ImageTypes()) decoded and re-encoded as PNG; GTK thread.
+std::vector<uint8_t> DecodeImage(const std::string& mime, const guchar* bytes,
+                                 size_t len) {
+  std::vector<uint8_t> png;
+  GdkPixbufLoader* loader =
+      gdk_pixbuf_loader_new_with_mime_type(mime.c_str(), nullptr);
+  if (!loader)
+    return png;
+  if (gdk_pixbuf_loader_write(loader, bytes, len, nullptr) &&
+      gdk_pixbuf_loader_close(loader, nullptr)) {
+    png = PixbufToPng(gdk_pixbuf_loader_get_pixbuf(loader));
+  } else {
+    gdk_pixbuf_loader_close(loader, nullptr);
+  }
+  g_object_unref(loader);
+  return png;
+}
+
+}  // namespace
+
 uint8_t* ClipboardReadImageLinux(size_t* len_out) {
   if (len_out)
     *len_out = 0;
   std::vector<uint8_t> png;
-  std::vector<std::string> types;
-  if (FreeTypes(&types)) {
-    // The PNG verbatim when the owner offers it, else the first image type
-    // gdk-pixbuf can decode, re-encoded.
-    std::vector<std::string> wanted = {"image/png"};
-    for (const auto& t : types) {
-      if (t.compare(0, 6, "image/") == 0 && t != "image/png")
-        wanted.push_back(t);
-    }
+  if (FreeAvailable()) {
+    // The PNG verbatim when the owner offers it, else JPEG, BMP or GIF,
+    // re-encoded.
     std::string data, mime;
     bool found = false;
-    FreeRead(wanted, &data, &mime, &found);
+    FreeRead(ImageTypes(), &data, &mime, &found);
     if (found && mime == "image/png") {
       const auto* bytes = reinterpret_cast<const uint8_t*>(data.data());
       if (LooksLikePng(bytes, data.size()))
         png.assign(bytes, bytes + data.size());
     } else if (found) {
       GtkRunSync([&] {
-        GdkPixbufLoader* loader =
-            gdk_pixbuf_loader_new_with_mime_type(mime.c_str(), nullptr);
-        if (!loader)
-          return;
-        if (gdk_pixbuf_loader_write(
-                loader, reinterpret_cast<const guchar*>(data.data()),
-                data.size(), nullptr) &&
-            gdk_pixbuf_loader_close(loader, nullptr)) {
-          png = PixbufToPng(gdk_pixbuf_loader_get_pixbuf(loader));
-        } else {
-          gdk_pixbuf_loader_close(loader, nullptr);
-        }
-        g_object_unref(loader);
+        png = DecodeImage(mime, reinterpret_cast<const guchar*>(data.data()),
+                          data.size());
       });
     }
   } else {
@@ -435,11 +483,19 @@ uint8_t* ClipboardReadImageLinux(size_t* len_out) {
         if (!png.empty())
           return;
       }
-      // Otherwise any image format gdk-pixbuf can decode, re-encoded.
-      GdkPixbuf* pixbuf = gtk_clipboard_wait_for_image(clipboard);
-      if (pixbuf) {
-        png = PixbufToPng(pixbuf);
-        g_object_unref(pixbuf);
+      // Otherwise JPEG, BMP or GIF, re-encoded.
+      for (size_t i = 1; i < ImageTypes().size() && png.empty(); i++) {
+        const std::string& mime = ImageTypes()[i];
+        data = gtk_clipboard_wait_for_contents(
+            clipboard, gdk_atom_intern(mime.c_str(), FALSE));
+        if (!data)
+          continue;
+        gint len = gtk_selection_data_get_length(data);
+        if (len > 0 &&
+            static_cast<size_t>(len) <= LAUFEY_CLIPBOARD_MAX_READ_BYTES)
+          png = DecodeImage(mime, gtk_selection_data_get_data(data),
+                            static_cast<size_t>(len));
+        gtk_selection_data_free(data);
       }
     });
   }
@@ -501,8 +557,9 @@ std::string FormatOf(const std::string& t) {
     return "text/plain";
   if (t == "text/html")
     return "text/html";
-  if (t.compare(0, 6, "image/") == 0)
-    return "image/png";
+  if (t == "image/png" || t == "image/jpeg" || t == "image/bmp" ||
+      t == "image/gif")
+    return "image/png";  // what read_clipboard_image can return
   if (t == "text/uri-list" || t == "x-special/gnome-copied-files")
     return "text/uri-list";
   if (t == "text/rtf" || t == "application/rtf")

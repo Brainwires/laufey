@@ -11,12 +11,19 @@
 //   - hostile peers: an owner that never answers (the read gives up after
 //     its timeout), a requestor that starts 10 INCR transfers and never
 //     takes a chunk (8 run at once, all dropped after their idle timeout,
-//     and the next read still works), a read over max_bytes.
+//     and the next read still works), a read over max_bytes;
+//   - privacy: image reads take PNG, JPEG, BMP or GIF only (a TIFF is never
+//     handed to a decoder), and while the session is locked (a mock logind's
+//     LockedHint, on a private bus standing in for the system bus) every
+//     read answers nothing, writes still work, and reads work again once it
+//     is unlocked. Without dbus-daemon the lock cases are skipped and the
+//     system bus is pointed nowhere (never the host's logind).
 // The process environment is not touched by the code under test. Exits 77
 // (skipped) without Xvfb.
 
 #include <fcntl.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <gio/gio.h>
 #include <glib.h>
 #include <poll.h>
 #include <signal.h>
@@ -406,6 +413,102 @@ void OnChange(void*) {
   g_changes++;
 }
 
+// --- A mock logind on a private bus -----------------------------------------
+
+const char kLogindXml[] =
+    "<node>"
+    " <interface name='org.freedesktop.login1.Manager'>"
+    "  <method name='GetSession'>"
+    "   <arg type='s' name='id' direction='in'/>"
+    "   <arg type='o' name='path' direction='out'/>"
+    "  </method>"
+    " </interface>"
+    " <interface name='org.freedesktop.login1.Session'>"
+    "  <property name='LockedHint' type='b' access='read'/>"
+    " </interface>"
+    "</node>";
+constexpr char kSessionPath[] = "/org/freedesktop/login1/session/_3test";
+
+std::atomic<bool> g_locked{false};
+std::atomic<int> g_lock_queries{0};
+
+void LogindMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
+                  const gchar* method, GVariant*,
+                  GDBusMethodInvocation* invocation, gpointer) {
+  if (strcmp(method, "GetSession") == 0) {
+    g_dbus_method_invocation_return_value(invocation,
+                                          g_variant_new("(o)", kSessionPath));
+    return;
+  }
+  g_dbus_method_invocation_return_dbus_error(
+      invocation, "org.freedesktop.DBus.Error.UnknownMethod", method);
+}
+
+GVariant* LogindProperty(GDBusConnection*, const gchar*, const gchar*,
+                         const gchar*, const gchar* property, GError**,
+                         gpointer) {
+  if (strcmp(property, "LockedHint") == 0) {
+    g_lock_queries++;
+    return g_variant_new_boolean(g_locked.load());
+  }
+  return nullptr;
+}
+
+const GDBusInterfaceVTable kLogindVTable = {
+    LogindMethod, LogindProperty, nullptr, {}};
+
+// Starts the mock and points the system bus at it; false without
+// dbus-daemon (the system bus then points nowhere).
+bool StartMockLogind() {
+  unsetenv("XDG_SESSION_ID");
+  gchar* daemon = g_find_program_in_path("dbus-daemon");
+  if (!daemon) {
+    setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/nonexistent/laufey", 1);
+    return false;
+  }
+  g_free(daemon);
+  GTestDBus* bus = g_test_dbus_new(G_TEST_DBUS_NONE);
+  g_test_dbus_up(bus);
+  setenv("DBUS_SYSTEM_BUS_ADDRESS", g_test_dbus_get_bus_address(bus), 1);
+  std::atomic<bool> ready{false};
+  std::thread([bus, &ready] {
+    GMainContext* ctx = g_main_context_new();
+    g_main_context_push_thread_default(ctx);
+    GError* error = nullptr;
+    GDBusConnection* conn = g_dbus_connection_new_for_address_sync(
+        g_test_dbus_get_bus_address(bus),
+        static_cast<GDBusConnectionFlags>(
+            G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+            G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+        nullptr, nullptr, &error);
+    EXPECT(conn);
+    GDBusNodeInfo* info = g_dbus_node_info_new_for_xml(kLogindXml, &error);
+    EXPECT(info);
+    EXPECT(g_dbus_connection_register_object(
+               conn, "/org/freedesktop/login1",
+               g_dbus_node_info_lookup_interface(
+                   info, "org.freedesktop.login1.Manager"),
+               &kLogindVTable, nullptr, nullptr, &error) != 0);
+    EXPECT(g_dbus_connection_register_object(
+               conn, kSessionPath,
+               g_dbus_node_info_lookup_interface(
+                   info, "org.freedesktop.login1.Session"),
+               &kLogindVTable, nullptr, nullptr, &error) != 0);
+    GVariant* r = g_dbus_connection_call_sync(
+        conn, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "RequestName",
+        g_variant_new("(su)", "org.freedesktop.login1", 0u),
+        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    EXPECT(r);
+    g_variant_unref(r);
+    ready = true;
+    GMainLoop* loop = g_main_loop_new(ctx, FALSE);
+    g_main_loop_run(loop);
+  }).detach();
+  EXPECT(WaitFor([&] { return ready.load(); }));
+  return true;
+}
+
 // Starts a private Xvfb and points DISPLAY at it; its pid, or -1.
 pid_t StartXvfb() {
   gchar* xvfb = g_find_program_in_path("Xvfb");
@@ -442,6 +545,8 @@ pid_t StartXvfb() {
 }  // namespace
 
 int main() {
+  // First: GTestDBus unsets DISPLAY.
+  bool have_logind = StartMockLogind();
   g_xvfb = StartXvfb();
   if (g_xvfb < 0) {
     std::printf("laufey_clipboard_x11_test: Xvfb missing, skipped\n");
@@ -583,6 +688,67 @@ int main() {
   ClipboardWriteTextLinux("back");
   EXPECT(Take(ClipboardReadTextLinux()) == "back");
   EXPECT(peer.Fetch("UTF8_STRING", &data, &type) && data == "back");
+
+  // --- Privacy ------------------------------------------------------------
+
+  // Image reads: PNG, JPEG, BMP or GIF only. A TIFF (the bytes never reach
+  // a decoder; these aren't even a valid one) is not read at all.
+  {
+    Peer owner;
+    owner.Own({{"image/tiff", std::string("II*\0garbage", 11)}}, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    got = ClipboardReadImageLinux(&len);
+    EXPECT(!got && len == 0);
+    EXPECT(Take(ClipboardReadFormatsLinux()).empty());
+    owner.Stop();
+  }
+  {
+    GdkPixbuf* pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 16, 16);
+    gdk_pixbuf_fill(pixbuf, 0x3366ccff);
+    gchar* buf = nullptr;
+    gsize jpeg_len = 0;
+    EXPECT(gdk_pixbuf_save_to_buffer(pixbuf, &buf, &jpeg_len, "jpeg", nullptr,
+                                     nullptr));
+    std::string jpeg(buf, jpeg_len);
+    g_free(buf);
+    g_object_unref(pixbuf);
+    Peer owner;
+    owner.Own(
+        {{"image/tiff", std::string("II*\0garbage", 11)}, {"image/jpeg", jpeg}},
+        false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    got = ClipboardReadImageLinux(&len);
+    EXPECT(got && LooksLikePng(got, len));  // the JPEG, re-encoded
+    free(got);
+    EXPECT(Take(ClipboardReadFormatsLinux()) == "image/png");
+    owner.Stop();
+  }
+
+  if (have_logind) {
+    // Locked: every read answers nothing, at once; writes still work.
+    ClipboardWriteTextLinux("secret");
+    EXPECT(Take(ClipboardReadTextLinux()) == "secret");
+    int queries = g_lock_queries.load();
+    EXPECT(queries > 0);  // asked logind
+    g_locked = true;
+    start = Clock::now();
+    EXPECT(Take(ClipboardReadTextLinux()).empty());
+    EXPECT(Take(ClipboardReadFormatsLinux()).empty());
+    EXPECT(ClipboardWriteHtmlLinux("<i>locked</i>", "locked"));
+    EXPECT(Take(ClipboardReadHtmlLinux()).empty());
+    got = ClipboardReadImageLinux(&len);
+    EXPECT(!got);
+    EXPECT(SecondsSince(start) < 1.0);
+    // The peer still gets what we offer (only our reads are refused).
+    EXPECT(peer.Fetch("text/html", &data, &type) && data == "<i>locked</i>");
+    // Unlocked: reads work again.
+    g_locked = false;
+    EXPECT(Take(ClipboardReadTextLinux()) == "locked");
+    EXPECT(Take(ClipboardReadHtmlLinux()) == "<i>locked</i>");
+    std::printf("lock: reads refused while locked, back once unlocked\n");
+  } else {
+    std::printf("lock: dbus-daemon missing, lock cases skipped\n");
+  }
 
   std::printf("laufey_clipboard_x11_test: ok\n");
   Finish(0);

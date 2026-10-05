@@ -62,8 +62,8 @@ void (*buffer_free)(void* backend_data, void* buffer);
   synthesizes as `CF_DIB` / `CF_BITMAP`), and every format gdk-pixbuf can write
   on Linux. A write that isn't a decodable PNG is refused. A read returns PNG
   bytes: the PNG itself when the source offered one, otherwise the image
-  converted (TIFF and other `NSImage` types on macOS, a DIB on Windows, any
-  pixbuf format on Linux).
+  converted (TIFF and other `NSImage` types on macOS, a DIB on Windows, JPEG,
+  BMP or GIF on Linux).
 - **Formats** are MIME types separated by `\n`: `text/plain`, `text/html`,
   `image/png` (any image), `text/uri-list` (files), `text/rtf`. An empty string
   is an empty clipboard.
@@ -109,6 +109,21 @@ while it is in the background or the session is locked. So, on Wayland:
   used: only while one of the app's windows has focus, and never under CEF.
 
 `LAUFEY_CLIPBOARD=gtk` turns both off (GTK's default display only).
+
+**Privacy (Linux).** The two paths above read the clipboard whatever has focus,
+so an app in the background reads it while the session is unlocked, as on macOS
+and Windows and as Electron does: apps that read the clipboard should do so in
+response to the user. While the session is **locked** (systemd-logind's
+`LockedHint` for the app's session, asked on each read with a 500 ms deadline)
+every read through them is refused: text, HTML and image reads answer `NULL`,
+formats an empty list, and the reason is logged once per lock
+(`laufey: clipboard read refused: the session is locked`). Writes still work.
+Where logind can't be asked (no system bus, not in a session) reads are allowed.
+Image reads, on every Linux path, take `image/png` verbatim and otherwise only
+`image/jpeg`, `image/bmp` or `image/gif` (re-encoded as PNG): no other format
+offered by another app reaches an image decoder, and only those four count as
+`image/png` in the formats list. Apps built on laufey (denext's `clipboard`
+capability, for one) should say both in their own documentation.
 
 The engine-free Winit backend has no web engine bundled, so it shells out to the
 platform's standard clipboard tools instead — `pbcopy` / `pbpaste` on macOS,
