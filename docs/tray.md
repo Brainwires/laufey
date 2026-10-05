@@ -50,4 +50,9 @@ returns `0` instead of an icon no one could see, logs the reason once, and
 `"trayReason"` (see [Platform features](platform-features.md)). A tray-only app
 should show a window instead. The probe follows the watcher's
 `NameOwnerChanged`, so a host that starts later (an extension enabled, the shell
-restarted) counts at once: create the tray again.
+restarted) counts at once, and the platform-features change handler
+(`laufey::on_platform_features_changed`, the C ABI's
+`set_platform_features_changed_handler`, API 45) fires: create the tray again
+when `"trayHost"` becomes `true`. `laufey::tray_unavailable_reason()` (the C
+ABI's `tray_unavailable_reason`) answers the tray part of the probe alone, so it
+never waits for xdg-desktop-portal.

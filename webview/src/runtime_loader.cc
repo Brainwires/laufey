@@ -4,6 +4,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
+#include "laufey_platform_features.h"
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
 
@@ -902,6 +903,18 @@ static char* Backend_PlatformFeatures(void* data) {
   return nullptr;
 }
 
+static char* Backend_TrayUnavailableReason(void* /*data*/) {
+  return laufey_common::TrayUnavailableReasonForAbi();
+}
+
+// On Linux it fires on the GTK main thread (it runs the default GLib main
+// context, where the probe's NameOwnerChanged subscription delivers).
+static void Backend_SetPlatformFeaturesChangedHandler(
+    void* /*data*/, laufey_platform_features_changed_fn handler,
+    void* user_data) {
+  laufey_common::SetPlatformFeaturesChangedHandler(handler, user_data);
+}
+
 static char* Backend_CanonicalizeAccelerator(void* data,
                                              const char* accelerator) {
   if (LaufeyBackend* backend = BackendOf(data))
@@ -1384,6 +1397,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.js_call_respond = Backend_JsCallRespond;
   backend_api_.set_js_call_handler_ex = Backend_SetJsCallHandlerEx;
   backend_api_.platform_features = Backend_PlatformFeatures;
+  backend_api_.tray_unavailable_reason = Backend_TrayUnavailableReason;
+  backend_api_.set_platform_features_changed_handler =
+      Backend_SetPlatformFeaturesChangedHandler;
 
   backend_api_.register_scheme_handler = Backend_RegisterSchemeHandler;
   backend_api_.scheme_request_read_body = Backend_SchemeRequestReadBody;

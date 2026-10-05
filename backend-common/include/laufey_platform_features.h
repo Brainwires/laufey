@@ -183,6 +183,19 @@ void SetCookieEncryption(const char* value);
 // backend's string_free). Any thread.
 char* PlatformFeaturesJsonForAbi();
 
+// The tray reason malloc'd for the C ABI (tray_unavailable_reason), or
+// nullptr when a tray icon can be shown. The tray part of the probe only.
+// Any thread.
+char* TrayUnavailableReasonForAbi();
+
+// The platform-features change handler (set_platform_features_changed_
+// handler, API 45). On Linux it fires when the StatusNotifierWatcher's owner
+// appears or goes away (the probe's NameOwnerChanged subscription, made
+// here if it wasn't yet), on the thread that runs the default GLib main
+// context. A null handler clears it. Any thread.
+void SetPlatformFeaturesChangedHandler(void (*handler)(void* user_data),
+                                       void* user_data);
+
 // Test-only: forget every cached probe result (the next call probes again).
 void ResetPlatformFeaturesForTesting();
 

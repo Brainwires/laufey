@@ -287,7 +287,22 @@ char* PlatformFeaturesJsonForAbi() {
   return out;
 }
 
+char* TrayUnavailableReasonForAbi() {
+  PlatformFeatures f;
+  ProbeTray(&f);
+  std::string reason = TrayUnavailableReason(f);
+  if (reason.empty())
+    return nullptr;
+  char* out = static_cast<char*>(std::malloc(reason.size() + 1));
+  if (out)
+    std::memcpy(out, reason.c_str(), reason.size() + 1);
+  return out;
+}
+
 #if !defined(__linux__) || defined(__ANDROID__)
+
+// Nothing here changes while the app runs.
+void SetPlatformFeaturesChangedHandler(void (*)(void*), void*) {}
 
 // macOS and Windows: the OS keystore never blocks on a prompt the app can't
 // answer, the tray always has a host, and there are no portals.

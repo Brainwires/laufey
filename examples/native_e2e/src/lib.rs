@@ -1470,10 +1470,23 @@ fn e2e_main() {
       .ok()
       .filter(|v| !v.is_empty())
     {
+      // API 45: the change handler fires when the tray host appears.
+      let changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+      {
+        let changed = changed.clone();
+        laufey::on_platform_features_changed(move || {
+          changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+      }
       let refused = TrayIcon::new();
       check(
         "no tray host: create_tray_icon refuses (id 0)",
         refused.id() == 0,
+      );
+      check(
+        "no tray host: tray_unavailable_reason says why (tray part only)",
+        laufey::tray_unavailable_reason()
+          .is_some_and(|r| r.contains("org.kde.StatusNotifierWatcher")),
       );
       let features = laufey::platform_features().unwrap_or_default();
       check(
@@ -1495,6 +1508,20 @@ fn e2e_main() {
       check(
         "a tray watcher that starts later is seen (trayHost true)",
         seen,
+      );
+      let fired = wait_for(
+        || changed.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        200,
+        50,
+      )
+      .await;
+      check(
+        "the platform-features change handler fired when the host appeared",
+        fired,
+      );
+      check(
+        "a tray host: tray_unavailable_reason is none",
+        laufey::tray_unavailable_reason().is_none(),
       );
     }
     let tray = TrayIcon::new();

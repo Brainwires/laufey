@@ -116,6 +116,23 @@ State& S() {
 // -1 unknown (no subscription), 0 no watcher, 1 a watcher.
 std::atomic<int> g_watcher{-1};
 
+// The platform-features change handler (SetPlatformFeaturesChangedHandler).
+std::mutex g_changed_mutex;
+void (*g_changed_handler)(void*) = nullptr;
+void* g_changed_user_data = nullptr;
+
+void FirePlatformFeaturesChanged() {
+  void (*handler)(void*) = nullptr;
+  void* user_data = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_changed_mutex);
+    handler = g_changed_handler;
+    user_data = g_changed_user_data;
+  }
+  if (handler)
+    handler(user_data);
+}
+
 GDBusConnection* SessionBusLocked(State& s) {
   if (s.bus)
     return s.bus;
@@ -315,8 +332,13 @@ void OnWatcherOwnerChanged(GDBusConnection*, const gchar*, const gchar*,
   const gchar* old_owner = nullptr;
   const gchar* new_owner = nullptr;
   g_variant_get(params, "(&s&s&s)", &name, &old_owner, &new_owner);
-  if (name && std::strcmp(name, kWatcherName) == 0)
-    g_watcher.store(new_owner && *new_owner ? 1 : 0);
+  if (!name || std::strcmp(name, kWatcherName) != 0)
+    return;
+  int now = new_owner && *new_owner ? 1 : 0;
+  int before = g_watcher.exchange(now);
+  // The tray host appeared or went away (a restart is two changes).
+  if (before != now)
+    FirePlatformFeaturesChanged();
 }
 
 // The watcher state, subscribing on first use. The subscription delivers on
@@ -526,6 +548,22 @@ PlatformFeatures ProbePlatformFeatures() {
   f.tray_xembed = XEmbedTrayPresent(f.session_type);
   f.tray_library = AppIndicatorLibraryAvailableLinux();
   return f;
+}
+
+void SetPlatformFeaturesChangedHandler(void (*handler)(void* user_data),
+                                       void* user_data) {
+  {
+    std::lock_guard<std::mutex> lock(g_changed_mutex);
+    g_changed_handler = handler;
+    g_changed_user_data = user_data;
+  }
+  if (!handler)
+    return;
+  // Follow the watcher from now on (the subscription the tray probe makes).
+  State& s = S();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  EnsureBaseLocked(s);
+  TrayWatcherLocked(s, s.bus);
 }
 
 int XEmbedProbeCountForTesting() {

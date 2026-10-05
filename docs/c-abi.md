@@ -138,10 +138,13 @@ The pointers group into:
   `set_tray_tooltip`, `set_tray_menu`, click handlers, `get_tray_icon_bounds`.
   On Linux `create_tray_icon` returns 0 when the session has no tray host (no
   `org.kde.StatusNotifierWatcher` and no XEmbed tray, as on stock GNOME); the
-  reason is `platform_features`' `"trayReason"`.
+  reason is `tray_unavailable_reason` (the tray part of the probe only) and
+  `platform_features`' `"trayReason"`.
 - **Platform features** (API ≥ 45) — `platform_features`: what this session
-  provides, as JSON (the tray host, the Secret Service, the session type, the
-  portal versions, CEF's cookie store). See
+  provides, as JSON (the tray host, the Secret Service, the notification server,
+  the session type, the portal versions, CEF's cookie store);
+  `tray_unavailable_reason`; `set_platform_features_changed_handler` (fires when
+  a tray host appears or goes away: create the tray again). See
   [platform-features.md](platform-features.md).
 - **Notifications** — `show_notification`, `close_notification`, and from API 41
   the `"schedule_at"` and `"data"` options, `notification_capabilities`,

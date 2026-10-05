@@ -443,6 +443,13 @@ typedef void (*laufey_window_state_fn)(void* user_data, uint32_t window_id,
 // read the new layout.
 typedef void (*laufey_display_changed_fn)(void* user_data);
 
+// Callback fired when what platform_features reports may have changed
+// (API 45): on Linux, a tray host (StatusNotifierWatcher) appeared or went
+// away. Fires on whichever thread the backend observes the change on (the
+// UI thread on CEF and WebView, a watcher thread on Winit); call
+// platform_features again for the new answer.
+typedef void (*laufey_platform_features_changed_fn)(void* user_data);
+
 typedef struct laufey_backend_api laufey_backend_api_t;
 
 typedef int (*laufey_runtime_init_fn)(const laufey_backend_api_t* api);
@@ -2096,6 +2103,20 @@ struct laufey_backend_api {
   // docs/platform-features.md. Any thread; the first call on Linux may wait
   // up to a few seconds for xdg-desktop-portal to start.
   char* (*platform_features)(void* backend_data);
+
+  // Why a tray icon can't be shown here (the "trayReason" of
+  // platform_features), or NULL when one can: the tray part of the probe
+  // alone, so it never waits for xdg-desktop-portal. Freed with string_free.
+  // Any thread.
+  char* (*tray_unavailable_reason)(void* backend_data);
+
+  // The handler fired when platform_features may answer differently (see
+  // laufey_platform_features_changed_fn): on Linux, when the tray host
+  // appears (create the tray again) or goes away. One handler per process;
+  // NULL clears it. Never fires on macOS and Windows.
+  void (*set_platform_features_changed_handler)(
+      void* backend_data, laufey_platform_features_changed_fn handler,
+      void* user_data);
 };
 
 #ifdef __cplusplus

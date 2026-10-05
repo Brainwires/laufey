@@ -215,6 +215,8 @@ fn vtable_layout_matches_the_header() {
     test_cancel_auth_session,
     auth_session_cancel,
     set_js_call_handler_ex,
-    platform_features
+    platform_features,
+    tray_unavailable_reason,
+    set_platform_features_changed_handler
   );
 }

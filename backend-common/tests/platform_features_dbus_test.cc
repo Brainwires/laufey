@@ -181,9 +181,20 @@ void WriteService(const std::string& dir, const char* name) {
 
 }  // namespace
 
+std::atomic<int> g_changed{0};
+std::atomic<bool> g_changed_on_owner{true};
+void OnChanged(void* user_data) {
+  EXPECT(user_data == &g_changed);
+  // Delivered where the default context runs (the UI thread in a backend).
+  if (!g_main_context_is_owner(g_main_context_default()))
+    g_changed_on_owner = false;
+  g_changed++;
+}
+
 // The probe's NameOwnerChanged subscription made from this thread while
 // another thread runs the default main context: no GLib critical (fatal
-// here), and the owner thread delivers the watcher's owner changes.
+// here), and the owner thread delivers the watcher's owner changes, and the
+// platform-features change handler (API 45) with them.
 void SubscribeOffTheOwnerThread() {
   ResetPlatformFeaturesForTesting();
   GMainLoop* loop = g_main_loop_new(nullptr, FALSE);  // the default context
@@ -192,10 +203,15 @@ void SubscribeOffTheOwnerThread() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   EXPECT(g_main_loop_is_running(loop));
   EXPECT(!g_main_context_is_owner(g_main_context_default()));
-  // A third thread, like the runtime's, subscribes first.
+  // A third thread, like the runtime's, subscribes first: setting the
+  // change handler makes the subscription.
   bool first = true;
-  std::thread([&first] { first = TrayWatcher(); }).join();
+  std::thread([&first] {
+    SetPlatformFeaturesChangedHandler(OnChanged, &g_changed);
+    first = TrayWatcher();
+  }).join();
   EXPECT(!first);
+  EXPECT(g_changed == 0);
   auto wait = [](bool want) {
     for (int i = 0; i < 500; ++i) {
       if (TrayWatcher() == want)
@@ -206,8 +222,21 @@ void SubscribeOffTheOwnerThread() {
   };
   BusCall("RequestName", "org.kde.StatusNotifierWatcher");
   EXPECT(wait(true));  // delivered on the owner thread
+  // A tray host appeared: the handler fired (create the tray again).
+  for (int i = 0; i < 500 && g_changed < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT(g_changed == 1);
+  EXPECT(TrayUnavailableReasonForAbi() == nullptr);  // a host: no reason
   BusCall("ReleaseName", "org.kde.StatusNotifierWatcher");
   EXPECT(wait(false));
+  for (int i = 0; i < 500 && g_changed < 2; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT(g_changed == 2);
+  EXPECT(g_changed_on_owner);
+  char* reason = TrayUnavailableReasonForAbi();
+  EXPECT(reason && strstr(reason, "org.kde.StatusNotifierWatcher"));
+  free(reason);
+  SetPlatformFeaturesChangedHandler(nullptr, nullptr);
   g_main_loop_quit(loop);
   owner.join();
   g_main_loop_unref(loop);

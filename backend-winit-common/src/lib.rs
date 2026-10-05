@@ -858,6 +858,15 @@ pub struct LaufeyBackendApi {
   // --- Platform features (API >= 45) ---
   pub platform_features:
     Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+  pub tray_unavailable_reason:
+    Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+  pub set_platform_features_changed_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(*mut c_void)>,
+      *mut c_void,
+    ),
+  >,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1746,6 +1755,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     set_js_call_handler_ex: Some(set_js_call_handler_ex),
     // API 45: filled in by fill_common_api (freed with its string_free).
     platform_features: None,
+    tray_unavailable_reason: None,
+    set_platform_features_changed_handler: None,
   }
 }
 
@@ -3241,6 +3252,26 @@ macro_rules! define_common_backend_fns {
         .unwrap_or(::std::ptr::null_mut())
     }
 
+    unsafe extern "C" fn backend_tray_unavailable_reason(
+      _data: *mut ::std::ffi::c_void,
+    ) -> *mut ::std::ffi::c_char {
+      // The tray part of the probe only (never the portal).
+      match $crate::platform::tray_unavailable_reason() {
+        Some(reason) => ::std::ffi::CString::new(reason)
+          .map(|c| c.into_raw())
+          .unwrap_or(::std::ptr::null_mut()),
+        None => ::std::ptr::null_mut(),
+      }
+    }
+
+    unsafe extern "C" fn backend_set_platform_features_changed_handler(
+      _data: *mut ::std::ffi::c_void,
+      handler: Option<unsafe extern "C" fn(*mut ::std::ffi::c_void)>,
+      user_data: *mut ::std::ffi::c_void,
+    ) {
+      $crate::platform::set_changed_handler(handler, user_data);
+    }
+
     unsafe extern "C" fn backend_string_free(
       _data: *mut ::std::ffi::c_void,
       s: *mut ::std::ffi::c_char,
@@ -3900,6 +3931,9 @@ macro_rules! fill_common_api {
     $api.show_dialog = Some(backend_show_dialog);
     $api.string_free = Some(backend_string_free);
     $api.platform_features = Some(backend_platform_features);
+    $api.tray_unavailable_reason = Some(backend_tray_unavailable_reason);
+    $api.set_platform_features_changed_handler =
+      Some(backend_set_platform_features_changed_handler);
     $api.set_application_menu = Some(backend_set_application_menu);
     $api.show_context_menu = Some(backend_show_context_menu);
     $api.set_dock_badge = Some(backend_set_dock_badge);

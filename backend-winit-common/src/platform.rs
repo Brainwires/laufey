@@ -225,6 +225,41 @@ pub fn notification_server_usable() -> bool {
   }
 }
 
+/// A C handler and its user data.
+type ChangedHandler = (unsafe extern "C" fn(*mut std::ffi::c_void), usize);
+
+fn changed_handler() -> &'static std::sync::Mutex<Option<ChangedHandler>> {
+  static HANDLER: std::sync::Mutex<Option<ChangedHandler>> =
+    std::sync::Mutex::new(None);
+  &HANDLER
+}
+
+/// Call the platform-features change handler, if one is set.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn fire_changed() {
+  let handler = *changed_handler().lock().unwrap();
+  if let Some((f, user_data)) = handler {
+    // SAFETY: the runtime registered `f` with this user data.
+    unsafe { f(user_data as *mut std::ffi::c_void) };
+  }
+}
+
+/// `set_platform_features_changed_handler` (API 45). On Linux a watcher
+/// thread (started on the first handler) follows the
+/// StatusNotifierWatcher's owner and fires the handler, on that thread,
+/// when a tray host appears or goes away. Never fires elsewhere.
+pub fn set_changed_handler(
+  handler: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+  user_data: *mut std::ffi::c_void,
+) {
+  *changed_handler().lock().unwrap() = handler.map(|f| (f, user_data as usize));
+  #[cfg(target_os = "linux")]
+  if handler.is_some() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(linux::follow_tray_host);
+  }
+}
+
 /// Say once on stderr why a tray icon was refused.
 pub fn log_tray_refused(reason: &str) {
   static ONCE: std::sync::Once = std::sync::Once::new();
@@ -475,6 +510,37 @@ mod linux {
       .is_ok();
     ACTIVATION_FAILED.store(!started, Ordering::Relaxed);
     started
+  }
+
+  /// Follow the StatusNotifierWatcher's owner on a thread of its own (Winit
+  /// runs no GLib loop) and fire the change handler when a tray host
+  /// appears or goes away.
+  pub(super) fn follow_tray_host() {
+    let Some(conn) = connect(TIMEOUT) else {
+      return;
+    };
+    let _ = std::thread::Builder::new()
+      .name("laufey-tray-host".into())
+      .spawn(move || {
+        let Ok(proxy) = zbus::blocking::fdo::DBusProxy::new(&conn) else {
+          return;
+        };
+        let Ok(changes) =
+          proxy.receive_name_owner_changed_with_args(&[(0, WATCHER)])
+        else {
+          return;
+        };
+        // Subscribed first, then read, so no change in between is lost.
+        let mut present = has_owner(&conn, WATCHER);
+        for change in changes {
+          let Ok(args) = change.args() else { continue };
+          let now = args.new_owner().is_some();
+          if now != present {
+            present = now;
+            super::fire_changed();
+          }
+        }
+      });
   }
 
   pub(super) fn probe_tray() -> PlatformFeatures {

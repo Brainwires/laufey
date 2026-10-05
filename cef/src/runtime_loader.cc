@@ -1922,6 +1922,18 @@ static char* Backend_PlatformFeatures(void* /*data*/) {
   return laufey_common::PlatformFeaturesJsonForAbi();
 }
 
+static char* Backend_TrayUnavailableReason(void* /*data*/) {
+  return laufey_common::TrayUnavailableReasonForAbi();
+}
+
+// Fires on the CEF UI thread (it runs the default GLib main context, where
+// the probe's NameOwnerChanged subscription delivers).
+static void Backend_SetPlatformFeaturesChangedHandler(
+    void* /*data*/, laufey_platform_features_changed_fn handler,
+    void* user_data) {
+  laufey_common::SetPlatformFeaturesChangedHandler(handler, user_data);
+}
+
 static char* Backend_CanonicalizeAccelerator(void* /*data*/,
                                              const char* accelerator) {
   return laufey_common::CanonicalizeAccelerator(accelerator);
@@ -3071,6 +3083,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_js_call_handler = Backend_SetJsCallHandler;
   backend_api_.set_js_call_handler_ex = Backend_SetJsCallHandlerEx;
   backend_api_.platform_features = Backend_PlatformFeatures;
+  backend_api_.tray_unavailable_reason = Backend_TrayUnavailableReason;
+  backend_api_.set_platform_features_changed_handler =
+      Backend_SetPlatformFeaturesChangedHandler;
   backend_api_.js_call_respond = Backend_JsCallRespond;
 
   backend_api_.invoke_js_callback = Backend_InvokeJsCallback;
