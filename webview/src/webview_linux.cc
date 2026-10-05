@@ -1719,16 +1719,37 @@ void WebKitGTKBackend::SetWindowSizeConstraints(uint32_t window_id,
     auto* state = GetWindow(window_id);
     if (!state)
       return;
+    // The constraints are for the content. GTK 3 hands geometry hints to
+    // GDK as they are, and GDK's Wayland backend takes them as the size of
+    // the whole client-side-decorated surface (it only subtracts the shadow
+    // margins), so under CSD (GNOME) the title bar and shadows came out of
+    // the content: a maximum of 820x620 left 730x482 of content. Add what the
+    // decorations take (the surface's frame extents less the content size;
+    // zero with server-side decorations, and on X11 where the hints are the
+    // client area's).
+    int extra_w = 0, extra_h = 0;
+    GdkWindow* gw = gtk_widget_get_window(state->window);
+    if (gw && LaufeyIsWaylandDisplay(gdk_window_get_display(gw))) {
+      GdkRectangle frame = {0, 0, 0, 0};
+      gdk_window_get_frame_extents(gw, &frame);
+      int cw = 0, ch = 0;
+      gtk_window_get_size(GTK_WINDOW(state->window), &cw, &ch);
+      if (cw > 0 && ch > 0) {
+        extra_w = std::max(0, frame.width - cw);
+        extra_h = std::max(0, frame.height - ch);
+      }
+    }
     GdkGeometry geometry = {};
     int mask = 0;
     if (c.min_width > 0 || c.min_height > 0) {
-      geometry.min_width = c.min_width;
-      geometry.min_height = c.min_height;
+      geometry.min_width = c.min_width > 0 ? c.min_width + extra_w : 0;
+      geometry.min_height = c.min_height > 0 ? c.min_height + extra_h : 0;
       mask |= GDK_HINT_MIN_SIZE;
     }
     if (c.max_width > 0 || c.max_height > 0) {
-      geometry.max_width = c.max_width > 0 ? c.max_width : G_MAXSHORT;
-      geometry.max_height = c.max_height > 0 ? c.max_height : G_MAXSHORT;
+      geometry.max_width = c.max_width > 0 ? c.max_width + extra_w : G_MAXSHORT;
+      geometry.max_height =
+          c.max_height > 0 ? c.max_height + extra_h : G_MAXSHORT;
       mask |= GDK_HINT_MAX_SIZE;
     }
     gtk_window_set_geometry_hints(GTK_WINDOW(state->window), nullptr,
