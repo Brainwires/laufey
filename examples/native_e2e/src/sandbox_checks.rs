@@ -22,6 +22,10 @@
 //! On Windows the CEF host doesn't enable the sandbox yet (it needs CEF's
 //! bootstrap executable; docs/backends.md), so there the default expectation
 //! is unsandboxed and `LAUFEY_E2E_EXPECT_SANDBOX=1` asks for the sandbox.
+//! On Linux, `LAUFEY_E2E_EXPECT_SANDBOX_MODE=namespace|setuid|off` also names
+//! the layer-1 sandbox the renderers must be in (a user namespace of their
+//! own, or only the helper's PID namespace); native-e2e-run.sh checks the
+//! host's `laufey: sandbox: <mode>` line against it.
 
 use std::time::Duration;
 
@@ -30,13 +34,26 @@ use laufey::{Value, Window};
 use super::{check, na};
 
 /// What the run expects: LAUFEY_E2E_EXPECT_SANDBOX when set, else sandboxed
-/// (unsandboxed on Windows, see above).
+/// (unsandboxed on Windows, see above). LAUFEY_E2E_EXPECT_SANDBOX_MODE=off
+/// expects it off too.
 fn expect_sandboxed() -> bool {
+  if expect_mode().as_deref() == Some("off") {
+    return false;
+  }
   match std::env::var("LAUFEY_E2E_EXPECT_SANDBOX").as_deref() {
     Ok("0") => false,
     Ok("1") => true,
     _ => !cfg!(target_os = "windows"),
   }
+}
+
+/// The Linux layer-1 sandbox the run expects (LAUFEY_E2E_EXPECT_SANDBOX_MODE:
+/// `namespace`, `setuid` or `off`, the mode the host logs as
+/// `laufey: sandbox: <mode>`), when it names one.
+fn expect_mode() -> Option<String> {
+  std::env::var("LAUFEY_E2E_EXPECT_SANDBOX_MODE")
+    .ok()
+    .filter(|m| !m.is_empty())
 }
 
 /// A child process of the backend, as the OS reports it.
@@ -269,6 +286,28 @@ async fn os_checks() {
       ),
       sandboxed == want,
     );
+    // Which layer 1: the namespace sandbox puts the renderer in a user
+    // namespace of its own (another uid_map than the browser's); the setuid
+    // helper only creates PID and network namespaces.
+    if let Some(mode) = expect_mode().filter(|m| m != "off") {
+      let own = std::fs::read_to_string("/proc/self/uid_map").ok();
+      let theirs =
+        std::fs::read_to_string(format!("/proc/{}/uid_map", r.pid)).ok();
+      let layer = match (&own, &theirs) {
+        (Some(a), Some(b)) if a != b => "namespace",
+        (Some(_), Some(_)) => "setuid",
+        _ => "unknown",
+      };
+      check(
+        &format!(
+          "sandbox: renderer {} uses the {mode} sandbox (found {layer}; \
+           uid_map {:?})",
+          r.pid,
+          theirs.as_deref().map(str::trim)
+        ),
+        layer == mode,
+      );
+    }
   }
   let gpu = wait_children("gpu-process").await;
   if gpu.is_empty() {

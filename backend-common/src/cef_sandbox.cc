@@ -7,6 +7,10 @@
 #if defined(__linux__)
 #include <fcntl.h>
 #include <sched.h>
+#include <signal.h>
+#include <sys/prctl.h>
+#include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -25,12 +29,28 @@ LinuxSandboxDecision DecideLinuxSandbox(const LinuxSandboxFacts& facts) {
         "running as root (Chromium does not support its sandbox for root)";
     return decision;
   }
-  if (facts.user_namespaces) {
+  if (facts.user_namespaces == UserNamespaceProbe::kAvailable) {
     decision.mode = LinuxSandboxMode::kNamespace;
+    decision.reason = "unprivileged user namespaces";
     return decision;
   }
   if (facts.helper.usable) {
     decision.mode = LinuxSandboxMode::kSetuid;
+    decision.reason =
+        facts.user_namespaces == UserNamespaceProbe::kFailed
+            ? "the chrome-sandbox helper next to the executable (the "
+              "user-namespace probe failed: " +
+                  facts.probe_problem + ")"
+            : "the chrome-sandbox helper next to the executable";
+    return decision;
+  }
+  if (facts.user_namespaces == UserNamespaceProbe::kFailed) {
+    // Unknown is not "no user namespaces": a transient failure (EAGAIN at
+    // RLIMIT_NPROC) must not turn the sandbox off. Chromium probes again
+    // and chooses.
+    decision.mode = LinuxSandboxMode::kChromium;
+    decision.reason = "the user-namespace probe failed (" +
+                      facts.probe_problem + "); Chromium chooses";
     return decision;
   }
   std::string reason =
@@ -57,6 +77,8 @@ const char* LinuxSandboxModeName(LinuxSandboxMode mode) {
       return "namespace";
     case LinuxSandboxMode::kSetuid:
       return "setuid";
+    case LinuxSandboxMode::kChromium:
+      return "chromium";
     case LinuxSandboxMode::kOff:
       break;
   }
@@ -86,6 +108,22 @@ SetuidHelperState InspectSetuidHelper(const std::string& path) {
   (void)path;
 #endif
   return state;
+}
+
+void ApplySetuidHelperBlockers(SetuidHelperState* helper, bool no_new_privs,
+                               bool nosuid_mount) {
+  if (!helper->usable) {
+    return;
+  }
+  if (no_new_privs) {
+    helper->usable = false;
+    helper->problem =
+        "this process runs with no_new_privs, so a setuid helper can't gain "
+        "root";
+  } else if (nosuid_mount) {
+    helper->usable = false;
+    helper->problem = "the executable's file system is mounted nosuid";
+  }
 }
 
 #if defined(__linux__)
@@ -131,10 +169,10 @@ void FormatIdMap(char* out, size_t size, unsigned id) {
 
 }  // namespace
 
-bool CanCreateUserNamespaces() {
+UserNamespaceProbe ProbeUserNamespaces(std::string* problem) {
   struct stat st;
   if (stat("/proc/self/ns/user", &st) != 0) {
-    return false;
+    return UserNamespaceProbe::kUnavailable;
   }
   const uid_t uid = getuid();
   const gid_t gid = getgid();
@@ -143,18 +181,24 @@ bool CanCreateUserNamespaces() {
   FormatIdMap(uid_map, sizeof(uid_map), static_cast<unsigned>(uid));
   FormatIdMap(gid_map, sizeof(gid_map), static_cast<unsigned>(gid));
 
-  pid_t pid = fork();
+  // What Chromium's probe does: a child in a new user namespace (raw clone,
+  // like Chromium's ForkWithFlags: no glibc atfork handlers run in it), the
+  // caller's ids mapped into it, then a nested one (which AppArmor's
+  // unprivileged_userns profile refuses, as some kernels refuse it by
+  // sysctl).
+  long pid = syscall(SYS_clone, CLONE_NEWUSER | SIGCHLD, 0, 0, 0, 0);
   if (pid < 0) {
-    return false;
+    const int err = errno;
+    // The kernel's answers to "no user namespaces for you".
+    if (err == EPERM || err == EINVAL || err == ENOSPC || err == EUSERS) {
+      return UserNamespaceProbe::kUnavailable;
+    }
+    if (problem) {
+      *problem = std::string("clone: ") + std::strerror(err);
+    }
+    return UserNamespaceProbe::kFailed;
   }
   if (pid == 0) {
-    // What Chromium's probe does: a new user namespace, the caller's ids
-    // mapped into it, then a nested one (which AppArmor's
-    // unprivileged_userns profile refuses, as some kernels refuse it by
-    // sysctl).
-    if (unshare(CLONE_NEWUSER) != 0) {
-      _exit(1);
-    }
     // setgroups must be denied before an unprivileged gid_map write; the
     // file is missing on kernels older than 3.19, where it isn't needed.
     int fd = open("/proc/self/setgroups", O_WRONLY | O_CLOEXEC);
@@ -174,22 +218,34 @@ bool CanCreateUserNamespaces() {
     _exit(0);
   }
   int status = 0;
-  while (waitpid(pid, &status, 0) < 0) {
+  while (waitpid(static_cast<pid_t>(pid), &status, 0) < 0) {
     if (errno != EINTR) {
-      return false;
+      if (problem) {
+        *problem = std::string("waitpid: ") + std::strerror(errno);
+      }
+      return UserNamespaceProbe::kFailed;
     }
   }
-  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  if (WIFEXITED(status)) {
+    return WEXITSTATUS(status) == 0 ? UserNamespaceProbe::kAvailable
+                                    : UserNamespaceProbe::kUnavailable;
+  }
+  if (problem) {
+    *problem = "the probe child was killed by signal " +
+               std::to_string(WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+  }
+  return UserNamespaceProbe::kFailed;
 }
 
 LinuxSandboxFacts ProbeLinuxSandbox(const std::string& exe_dir) {
   LinuxSandboxFacts facts;
-  facts.running_as_root = geteuid() == 0;
+  // Chromium's own check (the real uid, not the effective one).
+  facts.running_as_root = getuid() == 0;
   if (facts.running_as_root) {
     return facts;
   }
-  facts.user_namespaces = CanCreateUserNamespaces();
-  if (!facts.user_namespaces) {
+  facts.user_namespaces = ProbeUserNamespaces(&facts.probe_problem);
+  if (facts.user_namespaces == UserNamespaceProbe::kUnavailable) {
     if (FILE* f = std::fopen(
             "/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "re")) {
       facts.apparmor_restricts_user_namespaces = std::fgetc(f) == '1';
@@ -198,6 +254,11 @@ LinuxSandboxFacts ProbeLinuxSandbox(const std::string& exe_dir) {
   }
   facts.helper = InspectSetuidHelper(
       exe_dir.empty() ? std::string() : exe_dir + "/chrome-sandbox");
+  struct statvfs vfs;
+  const bool nosuid = !exe_dir.empty() && statvfs(exe_dir.c_str(), &vfs) == 0 &&
+                      (vfs.f_flag & ST_NOSUID) != 0;
+  ApplySetuidHelperBlockers(
+      &facts.helper, prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1, nosuid);
   return facts;
 }
 

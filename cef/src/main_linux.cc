@@ -783,8 +783,11 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
 };
 
 // The Chromium sandbox (laufey_cef_sandbox.h): on when this machine has a
-// layer-1 sandbox Chromium can use, else off with a warning. Chromium looks
-// for chrome-sandbox next to the real executable (/proc/self/exe).
+// layer-1 sandbox Chromium can use, else off. One line on stderr says which
+// and why. Chromium looks for chrome-sandbox next to the real executable
+// (/proc/self/exe). CHROME_DEVEL_SANDBOX (Chromium's override of the helper's
+// path) is not consulted: it can only make Chromium pick a helper and abort
+// when that one is unusable, never turn the sandbox off.
 static bool LaufeyChooseSandbox() {
   std::string exe_dir;
   char exe[4096];
@@ -799,11 +802,9 @@ static bool LaufeyChooseSandbox() {
   laufey_common::LinuxSandboxDecision decision =
       laufey_common::DecideLinuxSandbox(
           laufey_common::ProbeLinuxSandbox(exe_dir));
-  if (!decision.enabled()) {
-    std::cerr << "laufey: warning: web content runs without the Chromium "
-                 "sandbox: "
-              << decision.reason << std::endl;
-  }
+  std::cerr << "laufey: sandbox: "
+            << laufey_common::LinuxSandboxModeName(decision.mode) << " ("
+            << decision.reason << ")" << std::endl;
   return decision.enabled();
 }
 

@@ -43,10 +43,10 @@ static void TestDecision() {
   LinuxSandboxFacts facts;
 
   // User namespaces win, with or without a helper (Chromium's order).
-  facts.user_namespaces = true;
+  facts.user_namespaces = UserNamespaceProbe::kAvailable;
   EXPECT(DecideLinuxSandbox(facts).mode == LinuxSandboxMode::kNamespace);
   EXPECT(DecideLinuxSandbox(facts).enabled());
-  EXPECT(DecideLinuxSandbox(facts).reason.empty());
+  EXPECT(Has(DecideLinuxSandbox(facts).reason, "user namespaces"));
   facts.helper = Helper(true, true);
   EXPECT(DecideLinuxSandbox(facts).mode == LinuxSandboxMode::kNamespace);
   // A broken helper doesn't matter while namespaces work.
@@ -54,7 +54,7 @@ static void TestDecision() {
   EXPECT(DecideLinuxSandbox(facts).mode == LinuxSandboxMode::kNamespace);
 
   // Without namespaces: the setuid helper when it is usable ...
-  facts.user_namespaces = false;
+  facts.user_namespaces = UserNamespaceProbe::kUnavailable;
   facts.helper = Helper(true, true);
   EXPECT(DecideLinuxSandbox(facts).mode == LinuxSandboxMode::kSetuid);
   EXPECT(DecideLinuxSandbox(facts).enabled());
@@ -78,12 +78,28 @@ static void TestDecision() {
 
   // Root is always off: Chromium refuses to start sandboxed as root.
   facts.running_as_root = true;
-  facts.user_namespaces = true;
+  facts.user_namespaces = UserNamespaceProbe::kAvailable;
   facts.helper = Helper(true, true);
   off = DecideLinuxSandbox(facts);
   EXPECT(off.mode == LinuxSandboxMode::kOff);
   EXPECT(Has(off.reason, "root"));
 
+  // A probe that couldn't run is not "no user namespaces": the sandbox stays
+  // on and Chromium chooses, unless the helper settles it.
+  facts.running_as_root = false;
+  facts.user_namespaces = UserNamespaceProbe::kFailed;
+  facts.probe_problem = "clone: Resource temporarily unavailable";
+  facts.helper = Helper(false, false);
+  LinuxSandboxDecision unknown = DecideLinuxSandbox(facts);
+  EXPECT(unknown.mode == LinuxSandboxMode::kChromium);
+  EXPECT(unknown.enabled());
+  EXPECT(Has(unknown.reason, "probe failed"));
+  EXPECT(Has(unknown.reason, "Resource temporarily unavailable"));
+  facts.helper = Helper(true, true);
+  EXPECT(DecideLinuxSandbox(facts).mode == LinuxSandboxMode::kSetuid);
+
+  EXPECT(std::string(LinuxSandboxModeName(LinuxSandboxMode::kChromium)) ==
+         "chromium");
   EXPECT(std::string(LinuxSandboxModeName(LinuxSandboxMode::kNamespace)) ==
          "namespace");
   EXPECT(std::string(LinuxSandboxModeName(LinuxSandboxMode::kSetuid)) ==
@@ -118,6 +134,32 @@ static void TestInspectSetuidHelper() {
 #endif
 }
 
+static void TestSetuidHelperBlockers() {
+  // A helper that is root-owned and setuid still can't gain root under
+  // no_new_privs or from a nosuid mount.
+  SetuidHelperState h = Helper(true, true);
+  ApplySetuidHelperBlockers(&h, false, false);
+  EXPECT(h.usable);
+  ApplySetuidHelperBlockers(&h, true, false);
+  EXPECT(!h.usable);
+  EXPECT(Has(h.problem, "no_new_privs"));
+  h = Helper(true, true);
+  ApplySetuidHelperBlockers(&h, false, true);
+  EXPECT(!h.usable);
+  EXPECT(Has(h.problem, "nosuid"));
+  // An unusable helper keeps its own reason.
+  h = Helper(true, false, "not setuid");
+  ApplySetuidHelperBlockers(&h, true, true);
+  EXPECT(h.problem == "not setuid");
+  // With no user namespaces, a blocked helper means off, with the reason.
+  LinuxSandboxFacts facts;
+  facts.helper = Helper(true, true);
+  ApplySetuidHelperBlockers(&facts.helper, false, true);
+  LinuxSandboxDecision off = DecideLinuxSandbox(facts);
+  EXPECT(off.mode == LinuxSandboxMode::kOff);
+  EXPECT(Has(off.reason, "nosuid"));
+}
+
 #if defined(__linux__)
 static void TestProbe() {
   // The probe runs and agrees with the decision it feeds; what it finds
@@ -125,10 +167,14 @@ static void TestProbe() {
   // desktops restrict them).
   LinuxSandboxFacts facts = ProbeLinuxSandbox("/nonexistent");
   EXPECT(!facts.helper.present);
-  EXPECT(facts.running_as_root == (geteuid() == 0));
+  EXPECT(facts.running_as_root == (getuid() == 0));
+  // An idle machine answers the probe.
+  EXPECT(facts.running_as_root ||
+         facts.user_namespaces != UserNamespaceProbe::kFailed);
   LinuxSandboxDecision decision = DecideLinuxSandbox(facts);
   EXPECT(decision.enabled() ==
-         (!facts.running_as_root && facts.user_namespaces));
+         (!facts.running_as_root &&
+          facts.user_namespaces == UserNamespaceProbe::kAvailable));
   std::printf("cef_sandbox_test: this machine: %s%s%s\n",
               LinuxSandboxModeName(decision.mode),
               decision.reason.empty() ? "" : " - ", decision.reason.c_str());
@@ -138,6 +184,7 @@ static void TestProbe() {
 int main() {
   TestDecision();
   TestInspectSetuidHelper();
+  TestSetuidHelperBlockers();
 #if defined(__linux__)
   TestProbe();
 #endif

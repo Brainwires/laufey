@@ -51,7 +51,9 @@
 # elsewhere). Ends with quit().
 # --sandbox runs only the CEF sandbox checks (sandbox_checks.rs): the
 # renderer and GPU processes run in Chromium's sandbox, as the OS reports
-# them (LAUFEY_E2E_EXPECT_SANDBOX=0 expects the host to have turned it off).
+# them (LAUFEY_E2E_EXPECT_SANDBOX=0 expects the host to have turned it off;
+# on Linux LAUFEY_E2E_EXPECT_SANDBOX_MODE=namespace|setuid|off names the
+# layer, checked against the host's `laufey: sandbox:` line too).
 # --launch-visibility runs only the launch checks (launch_checks.rs): the
 # first window of a fresh launch is on screen, its page visible and drawing
 # frames, a non-activating window's page too, and a hidden window stays
@@ -384,6 +386,25 @@ if ! grep -q '^\[e2e\] OVERALL ' "$log"; then
   echo "native e2e exited before reporting an overall result" >&2
   rm -f "$log"
   exit 1
+fi
+# The Linux CEF host logs the sandbox it chose: one `laufey: sandbox: <mode>
+# (<reason>)` line, which must be the mode the run expects.
+if is_linux && [ "$backend" = cef ]; then
+  sandbox_line="$(grep -m1 '^laufey: sandbox: ' "$log" || true)"
+  if [ -z "$sandbox_line" ]; then
+    echo "[e2e] FAIL the CEF host logs its sandbox mode (no 'laufey: sandbox:' line)"
+    status=1
+  elif [ -n "${LAUFEY_E2E_EXPECT_SANDBOX_MODE:-}" ]; then
+    case "$sandbox_line" in
+      "laufey: sandbox: $LAUFEY_E2E_EXPECT_SANDBOX_MODE ("*)
+        echo "[e2e] PASS the host's sandbox mode: $sandbox_line" ;;
+      *)
+        echo "[e2e] FAIL the host's sandbox mode is $LAUFEY_E2E_EXPECT_SANDBOX_MODE: $sandbox_line"
+        status=1 ;;
+    esac
+  else
+    echo "== $sandbox_line =="
+  fi
 fi
 # WebKitGTK window battery: GTK reports a call on a destroyed widget as a
 # critical instead of crashing (the window the user closes in
