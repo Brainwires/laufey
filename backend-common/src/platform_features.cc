@@ -155,6 +155,21 @@ std::string TrayUnavailableReason(const PlatformFeatures& f) {
   return reason;
 }
 
+std::string NotificationUnavailableReason(const PlatformFeatures& f) {
+  if (f.os != "linux" || !f.notification_server.empty())
+    return "";
+  if (!f.session_bus)
+    return "no D-Bus session bus";
+  if (f.notification_activatable) {
+    return "no notification server is running; D-Bus can start one for "
+           "org.freedesktop.Notifications (it is tried when notifications "
+           "are first used)";
+  }
+  return "no notification server: nothing owns org.freedesktop.Notifications "
+         "on the session bus" +
+         DesktopSuffix(f);
+}
+
 std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   std::string out = "{";
   out += "\"os\":" + Quote(f.os);
@@ -168,6 +183,9 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   out += std::string(",\"secretService\":") +
          Quote(SecretServiceStateName(f.secret_service));
   out += std::string(",\"secretServicePrompt\":") + Bool(f.secret_prompter);
+  out += ",\"notificationServer\":" + StringOrNull(f.notification_server);
+  out += ",\"notificationReason\":" +
+         StringOrNull(NotificationUnavailableReason(f));
   out += ",\"portalVersions\":{";
   bool first = true;
   for (const auto& [iface, version] : f.portal_versions) {

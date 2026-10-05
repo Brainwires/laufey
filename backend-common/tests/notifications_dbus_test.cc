@@ -255,7 +255,18 @@ int main() {
   // (inline: the Linux platform answers on the caller's thread).
   UiTaskDispatcher::Get().Bind([](void (*)(void*), void*) { return false; });
 
+  // A notification daemon that is installed (activatable) but can't start
+  // in this session, as on Sway with no daemon of its own: not a server.
+  gchar* services = g_dir_make_tmp("laufey-notif-svc-XXXXXX", nullptr);
+  EXPECT(services);
+  std::string service_file =
+      std::string(services) + "/org.freedesktop.Notifications.service";
+  EXPECT(g_file_set_contents(
+      service_file.c_str(),
+      "[D-BUS Service]\nName=org.freedesktop.Notifications\nExec=/bin/false\n",
+      -1, nullptr));
   GTestDBus* bus = g_test_dbus_new(G_TEST_DBUS_NONE);
+  g_test_dbus_add_service_dir(bus, services);
   g_test_dbus_up(bus);  // sets DBUS_SESSION_BUS_ADDRESS
   char dir_template[] = "/tmp/laufey-notif-test-XXXXXX";
   std::string dir = mkdtemp(dir_template);
@@ -263,9 +274,13 @@ int main() {
   setenv("LAUFEY_APP_ID", "dev.laufey.notiftest", 1);
   std::string file = dir + "/laufey-notifications.json";
 
-  // No server yet: nothing works, and a permission query says so.
+  // No server yet (one is activatable, but it fails to start): nothing
+  // works, and a permission query says so instead of "granted".
   EXPECT(NotificationCapabilities() == 0);
   QueryNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPerm, nullptr);
+  EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
+  RequestNotificationPermission(LAUFEY_PERMISSION_NOTIFICATIONS, OnPerm,
+                                nullptr);
   EXPECT(g_perm == LAUFEY_PERMISSION_STATUS_UNSUPPORTED);
   NotificationOptions none;
   none.title = "nobody listens";
@@ -445,6 +460,9 @@ int main() {
   ListScheduledNotifications(OnList, nullptr);
   EXPECT(g_list == "[]");
 
+  std::remove(service_file.c_str());
+  std::remove(services);
+  g_free(services);
   std::printf("laufey_notifications_dbus_test: ok\n");
   std::fflush(stdout);
   // Threads are detached; skip teardown (see shortcuts_portal_test).

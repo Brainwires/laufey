@@ -20,6 +20,9 @@
 //     graphical (someone could answer a prompt) only when XDG_SESSION_TYPE
 //     says x11 or wayland and, where logind can say, the process's logind
 //     session is of that type and active;
+//   - the notification server: who owns org.freedesktop.Notifications now
+//     (the Notification portal alone is no proof: on Sway with no daemon it
+//     is offered with nothing behind it);
 //   - the xdg-desktop-portal interface versions.
 //
 // Every D-Bus call is synchronous with a short timeout. The probe never
@@ -55,6 +58,7 @@ constexpr char kGnomeKeyringName[] = "org.gnome.keyring";
 constexpr char kGcrPrompterName[] = "org.gnome.keyring.SystemPrompter";
 constexpr const char* kKWalletNames[] = {"org.kde.kwalletd5",
                                          "org.kde.kwalletd6"};
+constexpr char kNotificationsName[] = "org.freedesktop.Notifications";
 constexpr char kPortalName[] = "org.freedesktop.portal.Desktop";
 constexpr char kPortalPath[] = "/org/freedesktop/portal/desktop";
 constexpr const char* kPortalInterfaces[] = {
@@ -372,6 +376,34 @@ bool XEmbedTrayPresent(const std::string& session_type) {
   return present;
 }
 
+// Who owns org.freedesktop.Notifications now (never starting one), and
+// whether D-Bus could start one. Read live: a desktop's server can claim the
+// name after the app starts.
+void ProbeNotificationServer(GDBusConnection* bus, PlatformFeatures* f) {
+  f->notification_server.clear();
+  f->notification_activatable = false;
+  if (!bus)
+    return;
+  if (NameHasOwner(bus, kNotificationsName)) {
+    GVariant* r = g_dbus_connection_call_sync(
+        bus, kNotificationsName, "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications", "GetServerInformation", nullptr,
+        G_VARIANT_TYPE("(ssss)"), G_DBUS_CALL_FLAGS_NO_AUTO_START,
+        kCallTimeoutMs, nullptr, nullptr);
+    std::string name;
+    if (r) {
+      const gchar* n = nullptr;
+      g_variant_get(r, "(&s&s&s&s)", &n, nullptr, nullptr, nullptr);
+      name = n ? n : "";
+      g_variant_unref(r);
+    }
+    f->notification_server = name.empty() ? "unknown" : name;
+    return;
+  }
+  f->notification_activatable =
+      ListNames(bus, "ListActivatableNames").count(kNotificationsName) > 0;
+}
+
 std::map<std::string, uint32_t> ProbePortals(GDBusConnection* bus) {
   std::map<std::string, uint32_t> versions;
   if (!bus)
@@ -488,6 +520,7 @@ PlatformFeatures ProbePlatformFeatures() {
     }
     f.portal_versions = s.portal_versions;
   }
+  ProbeNotificationServer(bus, &f);
   if (bus)
     g_object_unref(bus);
   f.tray_xembed = XEmbedTrayPresent(f.session_type);

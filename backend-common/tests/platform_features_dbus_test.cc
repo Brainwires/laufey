@@ -61,6 +61,12 @@ const char kXml[] =
     " <interface name='org.freedesktop.portal.Settings'>"
     "  <property name='version' type='u' access='read'/>"
     " </interface>"
+    " <interface name='org.freedesktop.Notifications'>"
+    "  <method name='GetServerInformation'>"
+    "   <arg type='s' direction='out'/><arg type='s' direction='out'/>"
+    "   <arg type='s' direction='out'/><arg type='s' direction='out'/>"
+    "  </method>"
+    " </interface>"
     " <interface name='org.freedesktop.login1.Manager'>"
     "  <method name='GetSession'>"
     "   <arg type='s' direction='in'/><arg type='o' direction='out'/>"
@@ -104,10 +110,17 @@ GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
   return nullptr;
 }
 
-// logind's Manager: every session lookup answers the mock session.
+// logind's Manager: every session lookup answers the mock session. The
+// notification server names itself.
 void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
-                const gchar*, GVariant*, GDBusMethodInvocation* invocation,
-                gpointer) {
+                const gchar* method, GVariant*,
+                GDBusMethodInvocation* invocation, gpointer) {
+  if (strcmp(method, "GetServerInformation") == 0) {
+    g_dbus_method_invocation_return_value(
+        invocation, g_variant_new("(ssss)", "mock-notifyd", "laufey", "1",
+                                  "1.2"));
+    return;
+  }
   g_login_lookups++;
   g_dbus_method_invocation_return_value(invocation,
                                         g_variant_new("(o)", kLoginSession));
@@ -259,6 +272,8 @@ int main() {
       Register("/org/freedesktop/portal/desktop", iface);
     }
     Register("/org/freedesktop/login1", "org.freedesktop.login1.Manager");
+    Register("/org/freedesktop/Notifications",
+             "org.freedesktop.Notifications");
     Register(kLoginSession, "org.freedesktop.login1.Session");
     ready = true;
     GMainLoop* loop = g_main_loop_new(ctx, FALSE);
@@ -287,6 +302,22 @@ int main() {
   EXPECT(NeedsBasicPasswordStore(f));
   // The portal isn't running (nor activatable).
   EXPECT(f.portal_versions.empty());
+  // No notification server (Sway with no daemon).
+  EXPECT(f.notification_server.empty());
+  EXPECT(!f.notification_activatable);
+  EXPECT(NotificationUnavailableReason(f).find(
+             "nothing owns org.freedesktop.Notifications") !=
+         std::string::npos);
+  // One claims the name later (plasmashell, say): read live, by name.
+  BusCall("RequestName", "org.freedesktop.Notifications");
+  f = ProbePlatformFeatures();
+  EXPECT(f.notification_server == "mock-notifyd");
+  EXPECT(NotificationUnavailableReason(f).empty());
+  EXPECT(PlatformFeaturesToJson(f).find(
+             "\"notificationServer\":\"mock-notifyd\","
+             "\"notificationReason\":null") != std::string::npos);
+  BusCall("ReleaseName", "org.freedesktop.Notifications");
+  EXPECT(ProbePlatformFeatures().notification_server.empty());
 
   // --- A tray watcher that starts late, then quits ---------------------------
   BusCall("RequestName", "org.kde.StatusNotifierWatcher");

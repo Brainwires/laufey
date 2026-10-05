@@ -17,8 +17,11 @@
 //   while the app wasn't running is delivered at once. Several instances
 //   share the file under a lock, and a due notification is claimed from it
 //   before it is posted, so it fires once.
-// - Permission is "granted" when a notification server owns (or can be
-//   activated for) the name, else "unsupported"; there is no prompt.
+// - Permission is "granted" when a notification server owns the name, or
+//   one can be started for it (D-Bus activation is tried once: an installed
+//   daemon that fails to start in this session doesn't count), else
+//   "unsupported"; there is no prompt. platform_features()'
+//   "notificationServer" names the running server.
 //
 // Everything runs on one thread of laufey's own, with its own GLib main
 // context (the D-Bus connection, the signal subscriptions and the timers),
@@ -384,7 +387,24 @@ class LinuxNotificationPlatform : public NotificationPlatform {
       g_variant_iter_free(iter);
       g_variant_unref(r);
     }
-    return present;
+    if (!present)
+      return false;
+    // Activatable is not proof: an installed daemon may not start in this
+    // session (on Sway with no daemon of its own, a desktop's service file
+    // can be there and fail), and every Notify would then wait for the
+    // activation to time out. Start it once and see; a failure is
+    // remembered for the process.
+    if (activation_failed_)
+      return false;
+    r = g_dbus_connection_call_sync(
+        conn_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "StartServiceByName",
+        g_variant_new("(su)", kName, 0u), G_VARIANT_TYPE("(u)"),
+        G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr, nullptr);
+    if (r)
+      g_variant_unref(r);
+    activation_failed_ = r == nullptr;
+    return r != nullptr;
   }
 
   bool ServerHasActions() {
@@ -645,6 +665,8 @@ class LinuxNotificationPlatform : public NotificationPlatform {
   GMainLoop* loop_ = nullptr;
   GDBusConnection* conn_ = nullptr;
   bool conn_failed_ = false;
+  // An activatable notification server failed to start (ServerPresent).
+  bool activation_failed_ = false;
   std::map<uint32_t, std::string> by_id_;    // server id -> tag
   std::map<std::string, uint32_t> by_tag_;   // tag -> server id
   std::map<std::string, std::string> data_;  // tag -> data

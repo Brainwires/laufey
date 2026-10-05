@@ -25,6 +25,11 @@ pub struct PlatformFeatures {
   pub tray_xembed: bool,
   pub secret_service: &'static str,
   pub secret_prompter: bool,
+  /// The server that owns org.freedesktop.Notifications now (its
+  /// GetServerInformation name, "unknown" when it doesn't say).
+  pub notification_server: Option<String>,
+  /// Nothing owns it, but D-Bus could start one.
+  pub notification_activatable: bool,
   pub portal_versions: BTreeMap<String, u32>,
 }
 
@@ -52,6 +57,32 @@ impl PlatformFeatures {
     reason.push_str(
       "; GNOME shows tray icons only with the AppIndicator extension enabled",
     );
+    Some(reason)
+  }
+
+  /// Why notifications may not show (Linux, no server running).
+  pub fn notification_reason(&self) -> Option<String> {
+    if self.os != "linux" || self.notification_server.is_some() {
+      return None;
+    }
+    if !self.session_bus {
+      return Some("no D-Bus session bus".into());
+    }
+    if self.notification_activatable {
+      return Some(
+        "no notification server is running; D-Bus can start one for \
+         org.freedesktop.Notifications (it is tried when notifications are \
+         first used)"
+          .into(),
+      );
+    }
+    let mut reason = String::from(
+      "no notification server: nothing owns org.freedesktop.Notifications on \
+       the session bus",
+    );
+    if let Some(hint) = &self.desktop_hint {
+      reason.push_str(&format!(" (XDG_CURRENT_DESKTOP={hint})"));
+    }
     Some(reason)
   }
 
@@ -91,6 +122,7 @@ impl PlatformFeatures {
       "{{\"os\":{},\"sessionType\":{},\"desktopHint\":{},\"sessionBus\":{},\
        \"trayHost\":{},\"trayReason\":{},\"trayClicks\":{clicks},\
        \"trayTooltip\":true,\"secretService\":{},\"secretServicePrompt\":{},\
+       \"notificationServer\":{},\"notificationReason\":{},\
        \"portalVersions\":{{{portals}}},\"cookieEncryption\":null}}",
       quote(self.os),
       opt(&self.session_type),
@@ -100,6 +132,8 @@ impl PlatformFeatures {
       opt(&self.tray_reason()),
       quote(self.secret_service),
       self.secret_prompter,
+      opt(&self.notification_server),
+      opt(&self.notification_reason()),
     )
   }
 }
@@ -177,6 +211,20 @@ pub fn tray_unavailable_reason() -> Option<String> {
   }
 }
 
+/// Whether a notification sent now would reach a server (Linux: one owns
+/// org.freedesktop.Notifications, or D-Bus starts one; tried once). Always
+/// true elsewhere.
+pub fn notification_server_usable() -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    linux::notification_server_usable()
+  }
+  #[cfg(not(target_os = "linux"))]
+  {
+    true
+  }
+}
+
 /// Say once on stderr why a tray icon was refused.
 pub fn log_tray_refused(reason: &str) {
   static ONCE: std::sync::Once = std::sync::Once::new();
@@ -213,13 +261,13 @@ mod linux {
       .is_some_and(|m| m.file_type().is_socket())
   }
 
-  fn connect() -> Option<Connection> {
+  fn connect(timeout: Duration) -> Option<Connection> {
     if !has_session_bus_address() {
       return None;
     }
     zbus::blocking::connection::Builder::session()
       .ok()?
-      .method_timeout(TIMEOUT)
+      .method_timeout(timeout)
       .build()
       .ok()
   }
@@ -363,8 +411,74 @@ mod linux {
     owner != x11rb::NONE
   }
 
+  const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
+
+  /// Who owns org.freedesktop.Notifications now (never starting one), and
+  /// whether D-Bus could start one.
+  fn probe_notifications(
+    conn: &Connection,
+    owned: &HashSet<String>,
+    activatable: &HashSet<String>,
+    f: &mut PlatformFeatures,
+  ) {
+    if owned.contains(NOTIFICATIONS) {
+      let name = conn
+        .call_method(
+          Some(NOTIFICATIONS),
+          "/org/freedesktop/Notifications",
+          Some(NOTIFICATIONS),
+          "GetServerInformation",
+          &(),
+        )
+        .ok()
+        .and_then(|m| {
+          m.body()
+            .deserialize::<(String, String, String, String)>()
+            .ok()
+        })
+        .map(|(name, ..)| name)
+        .filter(|n| !n.is_empty());
+      f.notification_server = Some(name.unwrap_or_else(|| "unknown".into()));
+    } else {
+      f.notification_activatable = activatable.contains(NOTIFICATIONS);
+    }
+  }
+
+  /// Whether a notification sent now would reach a server: one owns the
+  /// name, or D-Bus starts one for it. The start is tried once; an
+  /// installed daemon that fails to start in this session (Sway with no
+  /// daemon of its own) is remembered for the process, so no Notify waits
+  /// for an activation that won't come.
+  pub(super) fn notification_server_usable() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ACTIVATION_FAILED: AtomicBool = AtomicBool::new(false);
+    // A daemon may take a few seconds to start.
+    let Some(conn) = connect(Duration::from_secs(5)) else {
+      return false;
+    };
+    if has_owner(&conn, NOTIFICATIONS) {
+      return true;
+    }
+    if ACTIVATION_FAILED.load(Ordering::Relaxed)
+      || !names(&conn, "ListActivatableNames").contains(NOTIFICATIONS)
+    {
+      return false;
+    }
+    let started = conn
+      .call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "StartServiceByName",
+        &(NOTIFICATIONS, 0u32),
+      )
+      .is_ok();
+    ACTIVATION_FAILED.store(!started, Ordering::Relaxed);
+    started
+  }
+
   pub(super) fn probe_tray() -> PlatformFeatures {
-    let conn = connect();
+    let conn = connect(TIMEOUT);
     let session = session_type();
     PlatformFeatures {
       os: "linux",
@@ -375,6 +489,8 @@ mod linux {
       tray_watcher: conn.as_ref().is_some_and(|c| has_owner(c, WATCHER)),
       secret_service: "absent",
       secret_prompter: false,
+      notification_server: None,
+      notification_activatable: false,
       portal_versions: BTreeMap::new(),
     }
   }
@@ -393,7 +509,7 @@ mod linux {
         None
       },
     );
-    let Some(conn) = connect() else {
+    let Some(conn) = connect(TIMEOUT) else {
       f.secret_service = "no-session-bus";
       return f;
     };
@@ -419,6 +535,7 @@ mod linux {
     let needs_gcr = known("org.gnome.keyring");
     f.secret_prompter =
       graphical && (!needs_gcr || known("org.gnome.keyring.SystemPrompter"));
+    probe_notifications(&conn, &owned, &activatable, &mut f);
     if known(PORTAL) {
       for iface in PORTAL_INTERFACES {
         if let Some(v) = get_property::<u32>(
@@ -504,12 +621,14 @@ mod tests {
     f.tray_watcher = true;
     f.portal_versions.insert("Settings".into(), 2);
     f.portal_versions.insert("FileChooser".into(), 4);
+    f.notification_server = Some("mako".into());
     assert_eq!(
       f.to_json(),
       "{\"os\":\"linux\",\"sessionType\":\"x11\",\"desktopHint\":\"GNOME\",\
        \"sessionBus\":true,\"trayHost\":true,\"trayReason\":null,\
        \"trayClicks\":false,\"trayTooltip\":true,\
        \"secretService\":\"available\",\"secretServicePrompt\":true,\
+       \"notificationServer\":\"mako\",\"notificationReason\":null,\
        \"portalVersions\":{\"FileChooser\":4,\"Settings\":2},\
        \"cookieEncryption\":null}"
     );
@@ -522,5 +641,31 @@ mod tests {
     assert!(mac.tray_host());
     assert!(mac.to_json().contains("\"trayClicks\":true"));
     assert!(mac.to_json().contains("\"sessionType\":null"));
+    assert!(mac
+      .to_json()
+      .contains("\"notificationServer\":null,\"notificationReason\":null"));
+  }
+
+  #[test]
+  fn notification_reason() {
+    // Sway with no daemon: the Notification portal is offered all the same,
+    // so only the bus name says whether anything shows notifications.
+    let mut f = PlatformFeatures {
+      os: "linux",
+      session_bus: true,
+      desktop_hint: Some("sway".into()),
+      ..Default::default()
+    };
+    f.portal_versions.insert("Notification".into(), 1);
+    let reason = f.notification_reason().unwrap();
+    assert!(reason.contains("nothing owns org.freedesktop.Notifications"));
+    assert!(reason.contains("XDG_CURRENT_DESKTOP=sway"));
+    assert!(f.to_json().contains("\"notificationServer\":null"));
+    f.notification_activatable = true;
+    assert!(f.notification_reason().unwrap().contains("can start one"));
+    f.session_bus = false;
+    assert_eq!(f.notification_reason().unwrap(), "no D-Bus session bus");
+    f.notification_server = Some("mako".into());
+    assert_eq!(f.notification_reason(), None);
   }
 }

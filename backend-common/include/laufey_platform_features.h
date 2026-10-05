@@ -71,6 +71,14 @@ struct PlatformFeatures {
   // prompter (gnome-keyring's gcr-prompter) exists.
   bool secret_prompter = true;
 
+  // Notifications: the name of the server that owns
+  // org.freedesktop.Notifications right now (GetServerInformation; "unknown"
+  // when it doesn't say), empty when nothing owns it; and whether D-Bus
+  // could start one. The Notification portal's version is no proof: on
+  // Sway with no daemon the portal still offers it, with nothing behind it.
+  std::string notification_server;
+  bool notification_activatable = false;
+
   // xdg-desktop-portal interface -> version ("Notification" -> 2). An
   // interface the portal lacks is absent from the map.
   std::map<std::string, uint32_t> portal_versions;
@@ -157,6 +165,9 @@ std::string TrayUnavailableReason(const PlatformFeatures& f);
 // The secret-service situation in a sentence, for the --password-store=basic
 // warning.
 std::string BasicPasswordStoreReason(const PlatformFeatures& f);
+
+// Why notifications may not show ("" when a server runs; Linux only).
+std::string NotificationUnavailableReason(const PlatformFeatures& f);
 
 // The JSON object platform_features hands out (docs/platform-features.md).
 std::string PlatformFeaturesToJson(const PlatformFeatures& f);

@@ -185,14 +185,33 @@ int main() {
   f.desktop_hint = "KDE";
   f.portal_versions = {{"Notification", 2}, {"Settings", 2}};
   f.cookie_encryption = "os";
+  f.notification_server = "Plasma";
   std::string json = PlatformFeaturesToJson(f);
   EXPECT(json ==
          "{\"os\":\"linux\",\"sessionType\":\"wayland\","
          "\"desktopHint\":\"KDE\",\"sessionBus\":true,\"trayHost\":true,"
          "\"trayReason\":null,\"trayClicks\":false,\"trayTooltip\":true,"
          "\"secretService\":\"available\",\"secretServicePrompt\":true,"
+         "\"notificationServer\":\"Plasma\",\"notificationReason\":null,"
          "\"portalVersions\":{\"Notification\":2,\"Settings\":2},"
          "\"cookieEncryption\":\"os\"}");
+
+  // No notification server (Sway with no daemon): the Notification portal
+  // is no proof; the reason says what is missing.
+  {
+    PlatformFeatures n = f;
+    n.notification_server.clear();
+    std::string reason = NotificationUnavailableReason(n);
+    EXPECT(Contains(reason, "nothing owns org.freedesktop.Notifications"));
+    EXPECT(Contains(PlatformFeaturesToJson(n),
+                    "\"notificationServer\":null,\"notificationReason\":\"no "
+                    "notification server"));
+    n.notification_activatable = true;
+    EXPECT(Contains(NotificationUnavailableReason(n), "can start one"));
+    n.session_bus = false;
+    EXPECT(NotificationUnavailableReason(n) == "no D-Bus session bus");
+    EXPECT(NotificationUnavailableReason(mac).empty());
+  }
 
   f.tray_watcher = false;
   f.desktop_hint = "a\"b\\c\n";
@@ -209,6 +228,7 @@ int main() {
 
   json = PlatformFeaturesToJson(mac);
   EXPECT(Contains(json, "\"sessionType\":null"));
+  EXPECT(Contains(json, "\"notificationServer\":null,\"notificationReason\":null"));
   EXPECT(Contains(json, "\"secretService\":\"os\""));
 
   // The ABI string carries the backend's cookie-store decision.

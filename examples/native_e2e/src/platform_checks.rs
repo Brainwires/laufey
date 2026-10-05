@@ -12,6 +12,8 @@
 //!   LAUFEY_E2E_EXPECT_SECRET_SERVICE=available|locked|activatable|absent
 //!   LAUFEY_E2E_EXPECT_COOKIES=os|basic    (CEF)
 //!   LAUFEY_E2E_EXPECT_PORTALS=Notification,Settings,...  (each present)
+//!   LAUFEY_E2E_EXPECT_NOTIFICATION_SERVER=1|0  a server owns
+//!                                         org.freedesktop.Notifications
 //!
 //! An unset expectation is not checked.
 
@@ -57,6 +59,14 @@ pub(crate) async fn run() {
     check(
       &format!("cookieEncryption is {want}"),
       has(&format!("\"cookieEncryption\":\"{want}\"")),
+    );
+  }
+  if let Some(want) = expect("LAUFEY_E2E_EXPECT_NOTIFICATION_SERVER") {
+    let running = !has("\"notificationServer\":null");
+    check(
+      &format!("a notification server runs: {}", want == "1"),
+      running == (want == "1")
+        && (running || has("\"notificationReason\":\"no ")),
     );
   }
   if let Some(want) = expect("LAUFEY_E2E_EXPECT_PORTALS") {
