@@ -23,6 +23,8 @@ pub struct PlatformFeatures {
   pub session_bus: bool,
   pub tray_watcher: bool,
   pub tray_xembed: bool,
+  /// The appindicator library the tray is drawn with loads (Linux).
+  pub tray_library: bool,
   pub secret_service: &'static str,
   pub secret_prompter: bool,
   /// The server that owns org.freedesktop.Notifications now (its
@@ -36,13 +38,21 @@ pub struct PlatformFeatures {
 impl PlatformFeatures {
   /// Whether a tray icon can be seen here.
   pub fn tray_host(&self) -> bool {
-    self.os != "linux" || self.tray_watcher || self.tray_xembed
+    self.os != "linux"
+      || (self.tray_library && (self.tray_watcher || self.tray_xembed))
   }
 
   /// Why not, when it can't.
   pub fn tray_reason(&self) -> Option<String> {
     if self.tray_host() {
       return None;
+    }
+    if !self.tray_library {
+      return Some(
+        "no tray library: install libayatana-appindicator3 (or \
+         libappindicator3)"
+          .into(),
+      );
     }
     let mut reason = String::from(
       "no tray host: nothing owns org.kde.StatusNotifierWatcher on the \
@@ -175,6 +185,25 @@ fn probes_xembed(session_type: &str, have_display: bool) -> bool {
   session_type == "x11" && have_display
 }
 
+/// Whether the appindicator library tray-icon draws with on Linux loads
+/// (libayatana-appindicator3, else libappindicator3). Loaded once.
+#[cfg(target_os = "linux")]
+fn tray_library() -> bool {
+  static LOADED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+  *LOADED.get_or_init(|| {
+    [
+      "libayatana-appindicator3.so.1",
+      "libappindicator3.so.1",
+      "libayatana-appindicator3.so",
+      "libappindicator3.so",
+    ]
+    .iter()
+    // SAFETY: loading a shared library runs its constructors; these are
+    // the libraries tray-icon itself loads.
+    .any(|name| unsafe { libloading::Library::new(name) }.is_ok())
+  })
+}
+
 /// Probe this session.
 pub fn probe() -> PlatformFeatures {
   #[cfg(target_os = "linux")]
@@ -276,6 +305,8 @@ mod linux {
   use super::PlatformFeatures;
 
   const TIMEOUT: Duration = Duration::from_millis(1000);
+  /// The first portal call may start xdg-desktop-portal.
+  const PORTAL_START_TIMEOUT: Duration = Duration::from_millis(3000);
   const WATCHER: &str = "org.kde.StatusNotifierWatcher";
   const SECRETS: &str = "org.freedesktop.secrets";
   const PORTAL: &str = "org.freedesktop.portal.Desktop";
@@ -543,16 +574,17 @@ mod linux {
       });
   }
 
-  pub(super) fn probe_tray() -> PlatformFeatures {
-    let conn = connect(TIMEOUT);
+  /// The tray part of a probe on one connection (`conn`: the session bus).
+  fn tray_on(conn: Option<&Connection>) -> PlatformFeatures {
     let session = session_type();
     PlatformFeatures {
       os: "linux",
       tray_xembed: xembed_tray(&session),
+      tray_library: super::tray_library(),
       session_type: Some(session),
       desktop_hint: env("XDG_CURRENT_DESKTOP"),
       session_bus: conn.is_some(),
-      tray_watcher: conn.as_ref().is_some_and(|c| has_owner(c, WATCHER)),
+      tray_watcher: conn.is_some_and(|c| has_owner(c, WATCHER)),
       secret_service: "absent",
       secret_prompter: false,
       notification_server: None,
@@ -561,8 +593,82 @@ mod linux {
     }
   }
 
+  pub(super) fn probe_tray() -> PlatformFeatures {
+    tray_on(connect(TIMEOUT).as_ref())
+  }
+
+  /// The xdg-desktop-portal versions, probed once per process (the first
+  /// call may start the portal).
+  fn portal_cache() -> &'static std::sync::Mutex<Option<BTreeMap<String, u32>>>
+  {
+    static CACHE: std::sync::Mutex<Option<BTreeMap<String, u32>>> =
+      std::sync::Mutex::new(None);
+    &CACHE
+  }
+
+  /// One interface's `version`: `Err` when the portal itself doesn't
+  /// answer (it failed to start, or hangs), so the next interface isn't
+  /// asked either; `Ok(None)` when it lacks the interface.
+  fn portal_version(conn: &Connection, iface: &str) -> Result<Option<u32>, ()> {
+    let reply = conn.call_method(
+      Some(PORTAL),
+      "/org/freedesktop/portal/desktop",
+      Some("org.freedesktop.DBus.Properties"),
+      "Get",
+      &(format!("org.freedesktop.portal.{iface}"), "version"),
+    );
+    match reply {
+      Ok(m) => Ok(
+        m.body()
+          .deserialize::<zbus::zvariant::OwnedValue>()
+          .ok()
+          .and_then(|v| u32::try_from(v).ok()),
+      ),
+      Err(zbus::Error::MethodError(name, ..))
+        if !matches!(
+          name.as_str(),
+          "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NoReply"
+            | "org.freedesktop.DBus.Error.TimedOut"
+        ) && !name
+          .as_str()
+          .starts_with("org.freedesktop.DBus.Error.Spawn") =>
+      {
+        Ok(None)
+      }
+      Err(_) => Err(()),
+    }
+  }
+
+  fn probe_portals(conn: &Connection, known: bool) -> BTreeMap<String, u32> {
+    let mut versions = BTreeMap::new();
+    if !known {
+      return versions;
+    }
+    for iface in PORTAL_INTERFACES {
+      match portal_version(conn, iface) {
+        Ok(Some(v)) => {
+          versions.insert(iface.to_string(), v);
+        }
+        Ok(None) => {}
+        Err(()) => break,
+      }
+    }
+    versions
+  }
+
+  /// The full probe on one session-bus connection. Its method timeout is
+  /// 1 s, or 3 s on the first probe, whose first portal call may start
+  /// xdg-desktop-portal (as backend-common does).
   pub(super) fn probe() -> PlatformFeatures {
-    let mut f = probe_tray();
+    let cached = portal_cache().lock().unwrap().clone();
+    let timeout = if cached.is_some() {
+      TIMEOUT
+    } else {
+      PORTAL_START_TIMEOUT
+    };
+    let conn = connect(timeout);
+    let mut f = tray_on(conn.as_ref());
     let session = f.session_type.clone().unwrap_or_default();
     let have_display =
       env("WAYLAND_DISPLAY").is_some() || env("DISPLAY").is_some();
@@ -575,7 +681,7 @@ mod linux {
         None
       },
     );
-    let Some(conn) = connect(TIMEOUT) else {
+    let Some(conn) = conn else {
       f.secret_service = "no-session-bus";
       return f;
     };
@@ -602,19 +708,17 @@ mod linux {
     f.secret_prompter =
       graphical && (!needs_gcr || known("org.gnome.keyring.SystemPrompter"));
     probe_notifications(&conn, &owned, &activatable, &mut f);
-    if known(PORTAL) {
-      for iface in PORTAL_INTERFACES {
-        if let Some(v) = get_property::<u32>(
-          &conn,
-          PORTAL,
-          "/org/freedesktop/portal/desktop",
-          &format!("org.freedesktop.portal.{iface}"),
-          "version",
-        ) {
-          f.portal_versions.insert(iface.to_string(), v);
-        }
+    f.portal_versions = match cached {
+      Some(versions) => versions,
+      None => {
+        let versions = probe_portals(&conn, known(PORTAL));
+        portal_cache()
+          .lock()
+          .unwrap()
+          .get_or_insert(versions)
+          .clone()
       }
-    }
+    };
     f
   }
 }
@@ -672,6 +776,7 @@ mod tests {
       session_bus: true,
       secret_service: "available",
       secret_prompter: true,
+      tray_library: true,
       ..Default::default()
     };
     assert!(!f.tray_host());
@@ -683,6 +788,14 @@ mod tests {
     assert!(f.tray_reason().unwrap().contains("XEmbed"));
     f.tray_xembed = true;
     assert!(f.tray_host() && f.tray_reason().is_none());
+    // The library is required either way.
+    f.tray_library = false;
+    assert!(!f.tray_host());
+    assert!(f
+      .tray_reason()
+      .unwrap()
+      .contains("libayatana-appindicator3"));
+    f.tray_library = true;
     f.tray_xembed = false;
     f.tray_watcher = true;
     f.portal_versions.insert("Settings".into(), 2);
