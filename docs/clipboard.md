@@ -71,16 +71,34 @@ void (*buffer_free)(void* backend_data, void* buffer);
   every change, including this app's own writes. `clipboard_capabilities`
   reports `LAUFEY_CLIPBOARD_CAP_CHANGE_EVENTS` where they work.
 
-| OS      | Text                         | HTML                      | Image                            | Change events                                                                                                                        |
-| ------- | ---------------------------- | ------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| macOS   | `NSPasteboardTypeString`     | `NSPasteboardTypeHTML`    | `NSPasteboardTypePNG` + TIFF     | No OS notification: the pasteboard's `changeCount` is polled twice a second, only while a handler is set.                            |
-| Windows | `CF_UNICODETEXT`             | `HTML Format` (`CF_HTML`) | registered `PNG` + `CF_DIBV5`    | `AddClipboardFormatListener` on laufey's I/O window (`WM_CLIPBOARDUPDATE`).                                                          |
-| Linux   | GTK `CLIPBOARD` text targets | `text/html`               | `image/png` + gdk-pixbuf formats | GTK's `owner-change`: X11 needs the XFixes extension; on Wayland GTK hears of changes only while one of the app's windows has focus. |
-| Winit   | shell tools (below)          | —                         | —                                | —                                                                                                                                    |
+| OS      | Text                         | HTML                      | Image                            | Change events                                                                                                                                                                |
+| ------- | ---------------------------- | ------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS   | `NSPasteboardTypeString`     | `NSPasteboardTypeHTML`    | `NSPasteboardTypePNG` + TIFF     | No OS notification: the pasteboard's `changeCount` is polled twice a second, only while a handler is set.                                                                    |
+| Windows | `CF_UNICODETEXT`             | `HTML Format` (`CF_HTML`) | registered `PNG` + `CF_DIBV5`    | `AddClipboardFormatListener` on laufey's I/O window (`WM_CLIPBOARDUPDATE`).                                                                                                  |
+| Linux   | GTK `CLIPBOARD` text targets | `text/html`               | `image/png` + gdk-pixbuf formats | GTK's `owner-change`: X11 needs the XFixes extension; on Wayland, the data-control device's selection events, or GTK's while one of the app's windows has focus (see below). |
+| Winit   | shell tools (below)          | —                         | —                                | —                                                                                                                                                                            |
 
 The CEF and WebView backends share these implementations. Data written to the
 clipboard on Linux is offered to a running clipboard manager, so it survives the
 app exiting.
+
+**Wayland.** The core protocol lets only the client with keyboard focus set or
+read the clipboard. laufey's GTK connection is never that client under CEF
+(Chromium's own Wayland connection owns the window's surfaces), and no app is
+while it is in the background or the session is locked. So, on Wayland:
+
+- Where the compositor offers `ext-data-control-v1` (KWin 6.2+, wlroots 0.19+
+  compositors such as Sway), every clipboard operation goes through it, on a
+  private Wayland connection: focused or not, both backends.
+- GNOME's mutter has no data-control. Its Xwayland selection bridge copies the
+  clipboard between X11 and Wayland in both directions whatever has focus, so
+  there GTK uses the clipboard of an X11 display (Xwayland, started on demand)
+  instead of its Wayland one. Without Xwayland it falls back to GTK's Wayland
+  clipboard, which works only while one of the app's windows has focus.
+- Elsewhere (another compositor without data-control) GTK's Wayland clipboard is
+  used: only while one of the app's windows has focus, and never under CEF.
+
+`LAUFEY_CLIPBOARD=gtk` turns both off (GTK's default display only).
 
 The engine-free Winit backend has no web engine bundled, so it shells out to the
 platform's standard clipboard tools instead — `pbcopy` / `pbpaste` on macOS,

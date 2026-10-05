@@ -9,15 +9,27 @@
 // GTK is not thread-safe: every call runs on the GLib default main context
 // (GtkRunSync), whichever thread it came from. The gtk_clipboard_wait_*
 // calls spin a nested main loop there until the owning app answers.
+//
+// Wayland: the core protocol lets only the client with keyboard focus set or
+// read the selection, and laufey's GTK connection is never that client under
+// CEF (Chromium's own connection owns the window), nor while the app is in
+// the background. Where the compositor offers ext-data-control-v1 (KWin,
+// wlroots) every operation goes through it instead, focused or not
+// (clipboard_data_control_linux.h). GNOME's mutter has no data-control, but
+// its Xwayland selection bridge copies the clipboard between X11 and Wayland
+// both ways whatever has focus, so there GTK talks to the clipboard through
+// an X11 display (Xwayland; started on demand) instead of its Wayland one.
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gtk/gtk.h>
 
+#include "clipboard_data_control_linux.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -25,7 +37,46 @@ namespace laufey_common {
 
 namespace {
 
+// The Xwayland display the clipboard goes through under mutter, or null
+// (another compositor, an X11 session, no Xwayland). GTK thread.
+GdkDisplay* BridgeDisplay() {
+  static GdkDisplay* bridge = []() -> GdkDisplay* {
+    GdkDisplay* def = gdk_display_get_default();
+    if (!def || !strstr(G_OBJECT_TYPE_NAME(def), "Wayland"))
+      return nullptr;
+    const char* forced = getenv("LAUFEY_CLIPBOARD");
+    if (forced && strcmp(forced, "gtk") == 0)
+      return nullptr;
+    const char* x11 = getenv("DISPLAY");
+    if (!x11 || !*x11 || !data_control::CompositorIsMutter())
+      return nullptr;
+    // The default display is already open: the allowed backends and
+    // GDK_BACKEND only decide what further gdk_display_open calls may use,
+    // and Chromium restricts both to Wayland under CEF. GDK_BACKEND is put
+    // back right after; it already exists then, so glibc only swaps the
+    // value's pointer (a concurrent getenv sees the old or the new string).
+    gdk_set_allowed_backends("x11,wayland");
+    const char* backend_env = getenv("GDK_BACKEND");
+    std::string saved_backend = backend_env ? backend_env : "";
+    bool swap_backend =
+        backend_env && saved_backend.find("x11") == std::string::npos;
+    if (swap_backend)
+      setenv("GDK_BACKEND", "x11", 1);
+    GdkDisplay* display = gdk_display_open(x11);
+    if (swap_backend)
+      setenv("GDK_BACKEND", saved_backend.c_str(), 1);
+    if (display && !strstr(G_OBJECT_TYPE_NAME(display), "X11")) {
+      gdk_display_close(display);
+      display = nullptr;
+    }
+    return display;
+  }();
+  return bridge;
+}
+
 GtkClipboard* Clipboard() {
+  if (GdkDisplay* bridge = BridgeDisplay())
+    return gtk_clipboard_get_for_display(bridge, GDK_SELECTION_CLIPBOARD);
   return gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
 }
 
@@ -153,10 +204,61 @@ void OnOwnerChange(GtkClipboard*, GdkEvent*, gpointer) {
   FireClipboardChange();
 }
 
+// --- ext-data-control (Wayland) -------------------------------------------
+
+// The MIME types text is offered and read as, in order of preference.
+const std::vector<std::string>& TextTypes() {
+  static const std::vector<std::string> types = {
+      "text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "TEXT",
+      "STRING"};
+  return types;
+}
+
+std::shared_ptr<const std::string> Shared(std::string s) {
+  return std::make_shared<const std::string>(std::move(s));
+}
+
+void AddTextEntries(data_control::Entries* entries, const std::string& text) {
+  auto data = Shared(text);
+  for (const auto& t : TextTypes())
+    entries->push_back({t, data});
+}
+
+// The selection as UTF-8 text via data-control; false when unavailable.
+bool DataControlText(char** result) {
+  std::string data, mime;
+  bool found = false;
+  if (!data_control::Read(TextTypes(), LAUFEY_CLIPBOARD_MAX_READ_BYTES, &data,
+                          &mime, &found))
+    return false;
+  *result = nullptr;
+  if (!found)
+    return true;
+  while (!data.empty() && data.back() == '\0')
+    data.pop_back();
+  if (!g_utf8_validate(data.data(), static_cast<gssize>(data.size()),
+                       nullptr)) {
+    // STRING is Latin-1 (ICCCM); anything else invalid is dropped.
+    if (mime != "STRING")
+      return true;
+    gsize written = 0;
+    gchar* utf8 = g_convert(data.data(), static_cast<gssize>(data.size()),
+                            "UTF-8", "ISO-8859-1", nullptr, &written, nullptr);
+    if (!utf8)
+      return true;
+    data.assign(utf8, written);
+    g_free(utf8);
+  }
+  *result = MallocString(data.data(), data.size());
+  return true;
+}
+
 }  // namespace
 
 char* ClipboardReadTextLinux() {
   char* result = nullptr;
+  if (DataControlText(&result))
+    return result;
   GtkRunSync([&] {
     GtkClipboard* clipboard = Clipboard();
     if (!clipboard)
@@ -175,6 +277,10 @@ char* ClipboardReadTextLinux() {
 }
 
 void ClipboardWriteTextLinux(const std::string& text) {
+  data_control::Entries entries;
+  AddTextEntries(&entries, text);
+  if (data_control::Write(std::move(entries)))
+    return;
   GtkRunSync([&] {
     GtkClipboard* clipboard = Clipboard();
     if (!clipboard)
@@ -197,7 +303,8 @@ uint32_t ClipboardCapabilitiesLinux() {
       return;
     }
     // X11 reports selection changes through XFixes; GTK's Wayland backend
-    // reports them from the data device (focused app only).
+    // reports them from the data device (focused app only), ext-data-control
+    // for every selection.
     bool wayland = strstr(G_OBJECT_TYPE_NAME(display), "Wayland") != nullptr;
     if (wayland || gdk_display_supports_selection_notification(display))
       caps |= LAUFEY_CLIPBOARD_CAP_CHANGE_EVENTS;
@@ -207,6 +314,19 @@ uint32_t ClipboardCapabilitiesLinux() {
 
 char* ClipboardReadHtmlLinux() {
   char* result = nullptr;
+  {
+    std::string data;
+    bool found = false;
+    if (data_control::Read({"text/html"}, LAUFEY_CLIPBOARD_MAX_READ_BYTES,
+                           &data, nullptr, &found)) {
+      std::string html;
+      if (found &&
+          DecodeHtml(reinterpret_cast<const guchar*>(data.data()),
+                     static_cast<gint>(data.size()), &html))
+        result = MallocString(html.data(), html.size());
+      return result;
+    }
+  }
   GtkRunSync([&] {
     GtkClipboard* clipboard = Clipboard();
     if (!clipboard)
@@ -226,6 +346,14 @@ char* ClipboardReadHtmlLinux() {
 
 bool ClipboardWriteHtmlLinux(const std::string& html,
                              const char* text_or_null) {
+  {
+    data_control::Entries entries;
+    entries.push_back({"text/html", Shared(html)});
+    if (text_or_null)
+      AddTextEntries(&entries, text_or_null);
+    if (data_control::Write(std::move(entries)))
+      return true;
+  }
   bool ok = false;
   GtkRunSync([&] {
     auto* offer = new Offer();
@@ -247,6 +375,41 @@ uint8_t* ClipboardReadImageLinux(size_t* len_out) {
   if (len_out)
     *len_out = 0;
   std::vector<uint8_t> png;
+  std::vector<std::string> types;
+  if (data_control::Types(&types)) {
+    // The PNG verbatim when the owner offers it, else the first image type
+    // gdk-pixbuf can decode, re-encoded.
+    std::vector<std::string> wanted = {"image/png"};
+    for (const auto& t : types) {
+      if (t.compare(0, 6, "image/") == 0 && t != "image/png")
+        wanted.push_back(t);
+    }
+    std::string data, mime;
+    bool found = false;
+    data_control::Read(wanted, LAUFEY_CLIPBOARD_MAX_READ_BYTES, &data, &mime,
+                       &found);
+    if (found && mime == "image/png") {
+      const auto* bytes = reinterpret_cast<const uint8_t*>(data.data());
+      if (LooksLikePng(bytes, data.size()))
+        png.assign(bytes, bytes + data.size());
+    } else if (found) {
+      GtkRunSync([&] {
+        GdkPixbufLoader* loader =
+            gdk_pixbuf_loader_new_with_mime_type(mime.c_str(), nullptr);
+        if (!loader)
+          return;
+        if (gdk_pixbuf_loader_write(
+                loader, reinterpret_cast<const guchar*>(data.data()),
+                data.size(), nullptr) &&
+            gdk_pixbuf_loader_close(loader, nullptr)) {
+          png = PixbufToPng(gdk_pixbuf_loader_get_pixbuf(loader));
+        } else {
+          gdk_pixbuf_loader_close(loader, nullptr);
+        }
+        g_object_unref(loader);
+      });
+    }
+  } else {
   GtkRunSync([&] {
     GtkClipboard* clipboard = Clipboard();
     if (!clipboard)
@@ -272,6 +435,7 @@ uint8_t* ClipboardReadImageLinux(size_t* len_out) {
       g_object_unref(pixbuf);
     }
   });
+  }
   if (png.empty())
     return nullptr;
   uint8_t* out = MallocCopy(png.data(), png.size());
@@ -283,6 +447,14 @@ uint8_t* ClipboardReadImageLinux(size_t* len_out) {
 bool ClipboardWriteImageLinux(const uint8_t* png, size_t len) {
   if (!LooksLikePng(png, len))
     return false;
+  {
+    data_control::Entries entries;
+    entries.push_back(
+        {"image/png", Shared(std::string(reinterpret_cast<const char*>(png),
+                                         len))});
+    if (data_control::Write(std::move(entries)))
+      return true;
+  }
   bool ok = false;
   GtkRunSync([&] {
     GdkPixbufLoader* loader = gdk_pixbuf_loader_new_with_type("png", nullptr);
@@ -313,8 +485,39 @@ bool ClipboardWriteImageLinux(const uint8_t* png, size_t len) {
   return ok;
 }
 
+namespace {
+
+// A target / MIME type as a clipboard format name, or "".
+std::string FormatOf(const std::string& t) {
+  if (t == "UTF8_STRING" || t == "STRING" || t == "TEXT" ||
+      t == "COMPOUND_TEXT" || t.compare(0, 10, "text/plain") == 0)
+    return "text/plain";
+  if (t == "text/html")
+    return "text/html";
+  if (t.compare(0, 6, "image/") == 0)
+    return "image/png";
+  if (t == "text/uri-list" || t == "x-special/gnome-copied-files")
+    return "text/uri-list";
+  if (t == "text/rtf" || t == "application/rtf")
+    return "text/rtf";
+  return "";
+}
+
+}  // namespace
+
 char* ClipboardReadFormatsLinux() {
   std::vector<std::string> formats;
+  {
+    std::vector<std::string> types;
+    if (data_control::Types(&types)) {
+      for (const auto& t : types) {
+        std::string f = FormatOf(t);
+        if (!f.empty())
+          formats.push_back(f);
+      }
+      return JoinClipboardFormats(formats);
+    }
+  }
   bool ok = true;
   GtkRunSync([&] {
     GtkClipboard* clipboard = Clipboard();
@@ -332,20 +535,10 @@ char* ClipboardReadFormatsLinux() {
       gchar* name = gdk_atom_name(targets[i]);
       if (!name)
         continue;
-      std::string t = name;
+      std::string f = FormatOf(name);
       g_free(name);
-      if (t == "UTF8_STRING" || t == "STRING" || t == "TEXT" ||
-          t == "COMPOUND_TEXT" || t.compare(0, 10, "text/plain") == 0) {
-        formats.push_back("text/plain");
-      } else if (t == "text/html") {
-        formats.push_back("text/html");
-      } else if (t.compare(0, 6, "image/") == 0) {
-        formats.push_back("image/png");
-      } else if (t == "text/uri-list" || t == "x-special/gnome-copied-files") {
-        formats.push_back("text/uri-list");
-      } else if (t == "text/rtf" || t == "application/rtf") {
-        formats.push_back("text/rtf");
-      }
+      if (!f.empty())
+        formats.push_back(f);
     }
     g_free(targets);
   });
@@ -355,6 +548,10 @@ char* ClipboardReadFormatsLinux() {
 }
 
 void ClipboardWatchLinux(bool on) {
+  if (data_control::Available()) {
+    data_control::Watch(on);
+    return;
+  }
   GtkRunAsync([on] {
     GtkClipboard* clipboard = Clipboard();
     if (!clipboard)
