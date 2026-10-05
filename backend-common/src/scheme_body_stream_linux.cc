@@ -313,8 +313,28 @@ static void ReadyFinalize(GSource* source) {
   ready->holder = nullptr;
 }
 
+// g_pollable_source_new_full gives its child source a dummy closure
+// (g_source_set_dummy_callback), which GLib only accepts from a source type
+// with a closure_callback: without one it logged "closure cannot be set on
+// GSource without GSourceFuncs::closure_callback" for every async read of a
+// response body. The same shape as GLib's own sources' closure callbacks.
+static gboolean ReadyClosureCallback(gpointer data) {
+  GValue result = G_VALUE_INIT;
+  g_value_init(&result, G_TYPE_BOOLEAN);
+  g_closure_invoke(static_cast<GClosure*>(data), &result, 0, nullptr,
+                   nullptr);
+  gboolean keep = g_value_get_boolean(&result);
+  g_value_unset(&result);
+  return keep;
+}
+
 static GSourceFuncs kReadySourceFuncs = {
-    ReadyPrepare, ReadyCheck, ReadyDispatch, ReadyFinalize, nullptr, nullptr,
+    ReadyPrepare,
+    ReadyCheck,
+    ReadyDispatch,
+    ReadyFinalize,
+    ReadyClosureCallback,
+    nullptr,
 };
 
 static gboolean PollableCanPoll(GPollableInputStream*) {
