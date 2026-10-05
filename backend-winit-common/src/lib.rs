@@ -3220,12 +3220,18 @@ macro_rules! define_common_backend_fns {
       // rfd) themselves run a nested event loop, so they don't need help
       // from the winit event loop to keep other windows responsive — call
       // them directly.
-      let (status, input) = match $crate::show_native_dialog(
-        dialog_type,
-        &title_str,
-        &message_str,
-        &default_str,
-      ) {
+      // No panic may cross this extern "C" boundary: one in a dialog
+      // provider reads as nothing shown.
+      let outcome = ::std::panic::catch_unwind(|| {
+        $crate::show_native_dialog(
+          dialog_type,
+          &title_str,
+          &message_str,
+          &default_str,
+        )
+      })
+      .unwrap_or($crate::DialogOutcome::Unsupported);
+      let (status, input) = match outcome {
         $crate::DialogOutcome::Confirmed(input) => (1, input),
         $crate::DialogOutcome::Cancelled => (0, None),
         // API 45: nothing was shown (no provider here), not a cancel.
@@ -4594,6 +4600,20 @@ pub fn show_native_dialog(
   message: &str,
   default_value: &str,
 ) -> DialogOutcome {
+  // Linux: every dialog from the first provider the session has (kdialog,
+  // zenity, then GTK in process); src/prompt.rs. rfd's Linux message box
+  // is zenity alone.
+  #[cfg(target_os = "linux")]
+  {
+    let kind = match dialog_type {
+      LAUFEY_DIALOG_ALERT => prompt::Kind::Alert,
+      LAUFEY_DIALOG_CONFIRM => prompt::Kind::Confirm,
+      LAUFEY_DIALOG_PROMPT => prompt::Kind::Prompt,
+      _ => return DialogOutcome::Cancelled,
+    };
+    prompt::show_dialog(kind, title, message, default_value)
+  }
+  #[cfg(not(target_os = "linux"))]
   match dialog_type {
     LAUFEY_DIALOG_ALERT => {
       rfd::MessageDialog::new()
@@ -4615,14 +4635,15 @@ pub fn show_native_dialog(
         DialogOutcome::Cancelled
       }
     }
-    LAUFEY_DIALOG_PROMPT => show_prompt_dialog(title, message, default_value),
+    LAUFEY_DIALOG_PROMPT => {
+      prompt::show_prompt_dialog(title, message, default_value)
+    }
     _ => DialogOutcome::Cancelled,
   }
 }
 
-// show_prompt_dialog: src/prompt.rs (no page text ever reaches a shell or a
+// The dialogs: src/prompt.rs (no page text ever reaches a shell or a
 // script's source).
-use prompt::show_prompt_dialog;
 pub use prompt::DialogOutcome;
 
 // --- Native clipboard implementation ---

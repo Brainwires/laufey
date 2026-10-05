@@ -1882,6 +1882,63 @@ impl Window {
   ) -> Result<Option<String>, DialogUnsupported> {
     prompt_outcome(self.id, title, message, default_value)
   }
+
+  /// [`Window::confirm`] that tells a cancel (`Ok(false)`) from a backend
+  /// that has no way to show the dialog here (`Err(DialogUnsupported)`).
+  pub fn try_confirm(
+    &self,
+    title: &str,
+    message: &str,
+  ) -> Result<bool, DialogUnsupported> {
+    confirm_outcome(self.id, title, message)
+  }
+
+  /// [`Window::alert`] that says when nothing could be shown
+  /// (`Err(DialogUnsupported)`).
+  pub fn try_alert(
+    &self,
+    title: &str,
+    message: &str,
+  ) -> Result<(), DialogUnsupported> {
+    alert_outcome(self.id, title, message)
+  }
+}
+
+fn confirm_outcome(
+  window_id: u32,
+  title: &str,
+  message: &str,
+) -> Result<bool, DialogUnsupported> {
+  confirm_result(
+    show_dialog_blocking(window_id, LAUFEY_DIALOG_CONFIRM, title, message, "")
+      .0,
+  )
+}
+
+fn confirm_result(status: DialogStatus) -> Result<bool, DialogUnsupported> {
+  match status {
+    DialogStatus::Confirmed => Ok(true),
+    DialogStatus::Cancelled => Ok(false),
+    DialogStatus::Unsupported => Err(DialogUnsupported),
+  }
+}
+
+fn alert_outcome(
+  window_id: u32,
+  title: &str,
+  message: &str,
+) -> Result<(), DialogUnsupported> {
+  alert_result(
+    show_dialog_blocking(window_id, LAUFEY_DIALOG_ALERT, title, message, "").0,
+  )
+}
+
+fn alert_result(status: DialogStatus) -> Result<(), DialogUnsupported> {
+  match status {
+    DialogStatus::Unsupported => Err(DialogUnsupported),
+    // Dismissed is seen.
+    DialogStatus::Confirmed | DialogStatus::Cancelled => Ok(()),
+  }
 }
 
 /// The backend can't show the dialog here (API 45); nothing was shown.
@@ -3268,6 +3325,22 @@ pub fn try_prompt(
   prompt_outcome(0, title, message, default_value)
 }
 
+/// [`confirm`] that tells a cancel (`Ok(false)`) from a backend that has no
+/// way to show the dialog here (`Err(DialogUnsupported)`, API 45: Winit on
+/// Linux without kdialog, zenity or a GTK display).
+pub fn try_confirm(
+  title: &str,
+  message: &str,
+) -> Result<bool, DialogUnsupported> {
+  confirm_outcome(0, title, message)
+}
+
+/// [`alert`] that says when nothing could be shown (`Err(DialogUnsupported)`,
+/// API 45).
+pub fn try_alert(title: &str, message: &str) -> Result<(), DialogUnsupported> {
+  alert_outcome(0, title, message)
+}
+
 // --- Notifications ---
 
 pub const LAUFEY_NOTIFICATION_SHOWN: i32 = 0;
@@ -3799,6 +3872,22 @@ mod tests {
   }
   unsafe extern "C" fn fake_dialog_string_free(_: *mut c_void, s: *mut c_char) {
     drop(unsafe { CString::from_raw(s) });
+  }
+
+  #[test]
+  fn confirm_and_alert_tell_unsupported_from_a_cancel() {
+    assert_eq!(confirm_result(DialogStatus::Confirmed), Ok(true));
+    assert_eq!(confirm_result(DialogStatus::Cancelled), Ok(false));
+    assert_eq!(
+      confirm_result(DialogStatus::Unsupported),
+      Err(DialogUnsupported)
+    );
+    assert_eq!(alert_result(DialogStatus::Confirmed), Ok(()));
+    assert_eq!(alert_result(DialogStatus::Cancelled), Ok(()));
+    assert_eq!(
+      alert_result(DialogStatus::Unsupported),
+      Err(DialogUnsupported)
+    );
   }
 
   #[test]
