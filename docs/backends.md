@@ -41,60 +41,93 @@ when launching the host — `--laufey-custom-schemes=myapp` or
 `LAUFEY_CUSTOM_SCHEMES=myapp` (`cef/src/custom_schemes.h`). See
 [Custom URL schemes](custom-schemes.md).
 
-### The Chromium sandbox (off)
+### The Chromium sandbox
 
-The CEF backend runs Chromium **without its sandbox**: every host sets
-`CefSettings::no_sandbox = true` (`main_mac.mm`, `main_linux.cc`,
-`main_windows.cc`) and the Makefile builds `libcef_dll_wrapper` with
-`-DUSE_SANDBOX=OFF`. Renderer, GPU and utility processes therefore run with the
-user's full rights, as the browser process does: a bug that gives a web page
-code execution in its renderer is code execution as the user, where Chrome would
-contain it. The WebView backends are not affected; WKWebView, WebView2 and
-WebKitGTK sandbox their web content processes themselves.
+The CEF backend runs Chromium's renderer, GPU and utility processes in
+Chromium's sandbox on macOS and Linux. On Windows it doesn't yet (see below).
+The WebView backends are not affected: WKWebView, WebView2 and WebKitGTK sandbox
+their web content processes themselves.
 
-Turning it on is per OS, and each needs build, packaging and signing work that
-has to be verified on that OS. What CEF 149 (the version the Makefile pins)
-requires:
+`--no-sandbox` on the host's command line still turns it off for a debugging
+session; a deep-link launch drops that switch with every other Chromium switch
+(see [Deep links](deep-links.md)).
 
-- **macOS.** Build the wrapper with `USE_SANDBOX=ON` (it defines
-  `CEF_USE_SANDBOX`). Only the helper apps are sandboxed, and laufey already
-  ships them as separate executables (`laufey Helper*.app`,
-  `cef/src/helper.cc`): each helper links the distribution's `cef_sandbox`
-  library and initializes it (`CefScopedSandboxContext`) before it loads the
-  framework. Then `no_sandbox = false` in `main_mac.mm`, and the whole bundle
-  (the framework and every helper) code-signed with the hardened runtime and the
-  entitlements Chromium's helpers need (JIT for the renderer helper). The
-  renderer reads the custom-scheme list from `LAUFEY_CUSTOM_SCHEMES` /
-  `laufey-launch.json` in every process (`custom_schemes.cc`); it would have to
-  rely on the `--laufey-custom-schemes` switch the browser process forwards,
-  since a sandboxed process can't be assumed to read files. This is the most
-  direct of the three.
-- **Linux.** `no_sandbox = false` in `main_linux.cc`, plus a working sandbox on
-  the user's machine: either unprivileged user namespaces (on Ubuntu 23.10 and
-  later, AppArmor restricts them, so the package must install an AppArmor
-  profile granting `userns` to the executable), or the setuid `chrome-sandbox`
-  helper the distribution ships (`Release/chrome-sandbox`), installed next to
-  the executable owned by root with mode `4755`. Only a system package (a `.deb`
-  / `.rpm` install step) can do either; a tarball or AppImage run by the user
-  can't, and Chromium refuses to start ("No usable sandbox!") when neither
-  works. So the host would also need to detect that and fall back to
-  `--no-sandbox` with a warning, and that decision must stay out of reach of a
-  deep-link launch's arguments (see [Deep links](deep-links.md)).
-- **Windows.** In CEF 149 the Windows sandbox comes with the bootstrap model
-  (`USE_SANDBOX=ON` defines `CEF_USE_BOOTSTRAP` there): the distribution's
-  `bootstrap.exe` / `bootstrapc.exe` becomes the app's executable and loads the
-  client code as a DLL; per CEF's bootstrap notes, a signed bootstrap executable
-  only loads a client DLL signed with the same certificate (to be confirmed
-  against the 149 distribution's README when this is done). laufey's CEF host is
-  a single executable today (`WinMain` in `main_windows.cc`, which also finds
-  the runtime library next to the executable and runs the headless worker mode);
-  it would have to become that DLL, and the packaging scripts would ship and
-  sign the bootstrap executable with it. Older CEF versions linked a
-  `cef_sandbox.lib` into the client executable instead.
+- **macOS.** Every helper app (`laufey Helper*.app`, `cef/src/helper.cc`) enters
+  the sandbox before it loads the framework: `CefScopedSandboxContext` loads the
+  distribution's `libcef_sandbox.dylib` from the framework's `Libraries`
+  directory and applies the Seatbelt profile the browser process passes for the
+  helper's role (`main_mac.mm` sets `no_sandbox = false`). Nothing changes in
+  packaging or signing: the helpers keep their entitlements
+  (`cef/macos/entitlements-helper.plist`, JIT for V8), and the framework ships
+  `libcef_sandbox.dylib` signed with it.
+- **Linux.** Chromium runs a renderer under seccomp-bpf plus a layer-1 sandbox
+  (its own PID, network and user namespaces), which comes from one of two
+  places:
+  - unprivileged user namespaces, where the kernel allows them. Ubuntu 23.10 and
+    later restrict them with AppArmor
+    (`kernel.apparmor_restrict_unprivileged_userns=1`) unless an AppArmor
+    profile grants `userns` to the executable;
+  - the setuid helper `chrome-sandbox` next to the executable, owned by root
+    with mode 4755. Chromium uses it only when it can't create user namespaces.
+    A system package can install it that way: Deno Desktop's `.deb` and `.rpm`
+    do.
 
-Until then, keep CEF windows on content the app serves itself (its custom
-schemes) and open other sites in the user's browser, as laufey's external-link
-handling does by default.
+  With neither, Chromium refuses to start sandboxed ("No usable sandbox!"), and
+  as root it refuses to start at all. So the host (`main_linux.cc`,
+  `laufey_cef_sandbox.h`) probes the machine the way Chromium will, before
+  `CefInitialize`: a child started in a new user namespace (a raw
+  `clone(CLONE_NEWUSER)`, as Chromium does) that maps its ids and creates a
+  nested one, and the helper's owner and mode. A helper can't gain root, and
+  counts as unusable, when the process runs with `no_new_privs` (a container, a
+  systemd unit with `NoNewPrivileges=`) or the executable sits on a `nosuid`
+  mount. The host turns the sandbox off only when Chromium would have no usable
+  sandbox, or as the root user; when the probe itself can't run (the child can't
+  be started, say at `RLIMIT_NPROC`), it leaves the sandbox on and Chromium
+  chooses. Every launch logs one line, the mode (`namespace`, `setuid`,
+  `chromium` or `off`) and why:
+
+  ```
+  laufey: sandbox: off (unprivileged user namespaces are restricted by AppArmor (kernel.apparmor_restrict_unprivileged_userns=1), and there is no chrome-sandbox helper next to the executable; install the app from its .deb or .rpm package to run web content sandboxed)
+  ```
+
+  That is the case for a tarball or an AppImage (mounted `nosuid`) on Ubuntu
+  23.10 and later. The decision rests on the machine and the installed files
+  only, never on the command line (`CHROME_DEVEL_SANDBOX`, Chromium's override
+  of the helper's path, can only make Chromium abort on a bad helper, never turn
+  the sandbox off). The GPU process's seccomp sandbox is Chromium's own
+  decision: Chromium skips it when the GL driver started threads before the
+  sandbox, as Mesa's llvmpipe (software GL, e.g. under Xvfb) does.
+- **Windows (off).** CEF 149's Windows sandbox comes with the bootstrap model
+  (`USE_SANDBOX=ON` defines `CEF_USE_BOOTSTRAP`): the distribution's
+  `bootstrap.exe` becomes the app's executable, creates the sandbox information
+  (`cef_sandbox_info_create` is linked into it, not into `libcef.dll`), and
+  calls `RunWinMain` in a client DLL named after the executable (`<app>.exe`
+  loads `<app>.dll`). A signed bootstrap executable loads only a client DLL
+  signed with the same certificate. laufey's host is a single `laufey.exe` today
+  (`WinMain` in `main_windows.cc`, which also runs the headless worker mode),
+  and a packaged app already uses `<app>.dll` for its runtime library (laufey
+  loads the runtime named after the executable), so the bootstrap's client DLL
+  and the runtime would need the same name. Turning it on therefore takes,
+  together: the host built as a DLL exporting `RunWinMain` that passes the
+  sandbox information to `CefExecuteProcess` and `CefInitialize`; the runtime
+  renamed (on Windows only) in laufey's co-located runtime lookup and in Deno's
+  packaging, installer and updater; the packaging shipping `bootstrap.exe` as
+  `<app>.exe` with the app's icon and version resources; and signing both
+  executables with one certificate. Until then, keep CEF windows on content the
+  app serves itself (its custom schemes) and open other sites in the user's
+  browser, as laufey's external-link handling does by default.
+
+The native e2e battery checks the result from outside the backend
+(`examples/native_e2e/src/sandbox_checks.rs`,
+`scripts/native-e2e-run.sh
+cef --sandbox`): on Linux every renderer has a
+seccomp-bpf filter (`/proc/<pid>/status` `Seccomp: 2`), `NoNewPrivs: 1` and a
+PID namespace of its own (a nested `NSpid`); on macOS `sandbox_check()` reports
+the renderer and GPU helpers sandboxed; on Windows it reads the children's
+integrity level. `LAUFEY_E2E_EXPECT_SANDBOX=0` asserts the opposite, for a Linux
+run without a usable sandbox. On Linux `LAUFEY_E2E_EXPECT_SANDBOX_MODE` names
+the layer (`namespace`: the renderer has a user namespace of its own; `setuid`:
+it doesn't), checked against the host's `laufey: sandbox:` line too.
 
 ## WebView
 

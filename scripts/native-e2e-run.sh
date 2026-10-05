@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -58,6 +58,11 @@
 # LAUFEY_E2E_EXPECT_* facts given for the session hold. With
 # LAUFEY_E2E_HOST_SESSION=1 (Linux) it runs in the caller's own desktop
 # session instead of Xvfb and a private bus: the per-desktop matrix check.
+# --sandbox runs only the CEF sandbox checks (sandbox_checks.rs): the
+# renderer and GPU processes run in Chromium's sandbox, as the OS reports
+# them (LAUFEY_E2E_EXPECT_SANDBOX=0 expects the host to have turned it off;
+# on Linux LAUFEY_E2E_EXPECT_SANDBOX_MODE=namespace|setuid|off names the
+# layer, checked against the host's `laufey: sandbox:` line too).
 # --launch-visibility runs only the launch checks (launch_checks.rs): the
 # first window of a fresh launch is on screen, its page visible and drawing
 # frames, a non-activating window's page too, and a hidden window stays
@@ -65,7 +70,7 @@
 # (scripts/launch-occluder.swift), as an editor or terminal would.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -120,6 +125,9 @@ fi
 if [ "$mode" = "--devtools-off" ]; then
   export LAUFEY_E2E_ONLY=devtools-off
   export LAUFEY_INSPECTABLE=0
+fi
+if [ "$mode" = "--sandbox" ]; then
+  export LAUFEY_E2E_ONLY=sandbox
 fi
 if [ "$mode" = "--auth-thread" ]; then
   export LAUFEY_E2E_ONLY=auth-thread
@@ -415,6 +423,25 @@ if ! grep -q '^\[e2e\] OVERALL ' "$log"; then
   echo "native e2e exited before reporting an overall result" >&2
   rm -f "$log"
   exit 1
+fi
+# The Linux CEF host logs the sandbox it chose: one `laufey: sandbox: <mode>
+# (<reason>)` line, which must be the mode the run expects.
+if is_linux && [ "$backend" = cef ]; then
+  sandbox_line="$(grep -m1 '^laufey: sandbox: ' "$log" || true)"
+  if [ -z "$sandbox_line" ]; then
+    echo "[e2e] FAIL the CEF host logs its sandbox mode (no 'laufey: sandbox:' line)"
+    status=1
+  elif [ -n "${LAUFEY_E2E_EXPECT_SANDBOX_MODE:-}" ]; then
+    case "$sandbox_line" in
+      "laufey: sandbox: $LAUFEY_E2E_EXPECT_SANDBOX_MODE ("*)
+        echo "[e2e] PASS the host's sandbox mode: $sandbox_line" ;;
+      *)
+        echo "[e2e] FAIL the host's sandbox mode is $LAUFEY_E2E_EXPECT_SANDBOX_MODE: $sandbox_line"
+        status=1 ;;
+    esac
+  else
+    echo "== $sandbox_line =="
+  fi
 fi
 # WebKitGTK window battery: GTK reports a call on a destroyed widget as a
 # critical instead of crashing (the window the user closes in

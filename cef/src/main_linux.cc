@@ -20,6 +20,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_cef_sandbox.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
@@ -859,6 +860,32 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
   IMPLEMENT_REFCOUNTING(LaufeyCombinedApp);
 };
 
+// The Chromium sandbox (laufey_cef_sandbox.h): on when this machine has a
+// layer-1 sandbox Chromium can use, else off. One line on stderr says which
+// and why. Chromium looks for chrome-sandbox next to the real executable
+// (/proc/self/exe). CHROME_DEVEL_SANDBOX (Chromium's override of the helper's
+// path) is not consulted: it can only make Chromium pick a helper and abort
+// when that one is unusable, never turn the sandbox off.
+static bool LaufeyChooseSandbox() {
+  std::string exe_dir;
+  char exe[4096];
+  ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+  if (len > 0) {
+    exe[len] = '\0';
+    exe_dir = exe;
+    size_t slash = exe_dir.find_last_of('/');
+    exe_dir =
+        slash == std::string::npos ? std::string() : exe_dir.substr(0, slash);
+  }
+  laufey_common::LinuxSandboxDecision decision =
+      laufey_common::DecideLinuxSandbox(
+          laufey_common::ProbeLinuxSandbox(exe_dir));
+  std::cerr << "laufey: sandbox: "
+            << laufey_common::LinuxSandboxModeName(decision.mode) << " ("
+            << decision.reason << ")" << std::endl;
+  return decision.enabled();
+}
+
 int main(int argc, char* argv[]) {
   // CEF gets its own copy of argv. Chromium sets the process title by
   // rewriting the argv strings in place (setproctitle), which garbles the
@@ -936,7 +963,7 @@ int main(int argc, char* argv[]) {
   laufey_common::InitNotificationsAtLaunch();
 
   CefSettings settings;
-  settings.no_sandbox = true;
+  settings.no_sandbox = !LaufeyChooseSandbox();
   settings.log_severity = LaufeyCefLogSeverity();
 
   // Set cache path. With a per-app data dir (LAUFEY_DATA_DIR / LAUFEY_APP_ID)

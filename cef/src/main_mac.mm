@@ -377,7 +377,11 @@ int main(int argc, char* argv[]) {
     }
 
     CefSettings settings;
-    settings.no_sandbox = true;
+    // Chromium's sandbox for the renderer, GPU and utility helpers: each
+    // helper enters it itself (helper.cc) with the profile the browser
+    // process passes it. --no-sandbox on the command line still turns it off
+    // (a deep-link launch drops that switch; laufey_launch_args.h).
+    settings.no_sandbox = false;
     settings.log_severity = LaufeyCefLogSeverity();
     // Run [NSApp run] as the message loop (see LaufeyPumpTarget) so the main
     // libdispatch queue is serviced — required for tray/status items.

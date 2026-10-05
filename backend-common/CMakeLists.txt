@@ -41,6 +41,7 @@ set(LAUFEY_COMMON_SRCS
   src/data_dir.cc
   src/launch_config.cc
   src/launch_args.cc
+  src/cef_sandbox.cc
   src/single_instance.cc
   src/passkey.cc
   src/window_state.cc
@@ -225,6 +226,13 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_launch_args_test
            COMMAND laufey_launch_args_test)
+
+  # The CEF Linux sandbox decision (and, on Linux, the user-namespace probe).
+  add_executable(laufey_cef_sandbox_test tests/cef_sandbox_test.cc)
+  target_link_libraries(laufey_cef_sandbox_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_cef_sandbox_test COMMAND laufey_cef_sandbox_test)
 
   # Takes (and releases) real single-instance locks under per-run app ids.
   add_executable(laufey_single_instance_test tests/single_instance_test.cc)
