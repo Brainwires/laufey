@@ -294,6 +294,32 @@ int main() {
   BusCall("ReleaseName", "org.kde.StatusNotifierWatcher");
   EXPECT(SpinUntil([] { return !TrayWatcher(); }));
 
+  // --- The XEmbed tray: X11 sessions only -----------------------------------
+  // In a Wayland session $DISPLAY is Xwayland's: the probe never connects to
+  // it (that can start Xwayland). The display here is a socket-less :97, so
+  // an X11 probe connects, fails and finds no tray.
+  setenv("DISPLAY", ":97", 1);
+  for (const char* session : {"wayland", "tty"}) {
+    setenv("XDG_SESSION_TYPE", session, 1);
+    ResetPlatformFeaturesForTesting();
+    int probes = XEmbedProbeCountForTesting();
+    PlatformFeatures t;
+    ProbeTray(&t);
+    ProbePlatformFeatures();
+    EXPECT(!t.tray_xembed);
+    EXPECT(XEmbedProbeCountForTesting() == probes);
+  }
+  setenv("XDG_SESSION_TYPE", "x11", 1);
+  ResetPlatformFeaturesForTesting();
+  int probes = XEmbedProbeCountForTesting();
+  PlatformFeatures x11;
+  ProbeTray(&x11);
+  EXPECT(XEmbedProbeCountForTesting() == probes + 1);
+  EXPECT(!x11.tray_xembed);
+  EXPECT(TrayUnavailableReason(x11).find("XEmbed") != std::string::npos);
+  setenv("XDG_SESSION_TYPE", "tty", 1);
+  unsetenv("DISPLAY");
+
   // --- The Secret Service running, its keyring locked
   // ---------------------------
   BusCall("RequestName", "org.freedesktop.secrets");

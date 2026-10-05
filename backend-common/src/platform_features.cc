@@ -230,6 +230,10 @@ PlatformFeatures ProbePlatformFeatures() {
 
 void ResetPlatformFeaturesForTesting() {}
 
+int XEmbedProbeCountForTesting() {
+  return 0;
+}
+
 #endif
 
 }  // namespace laufey_common

@@ -52,7 +52,9 @@ struct PlatformFeatures {
   // or, on X11, an XEmbed system tray (_NET_SYSTEM_TRAY_S<n>), and the
   // appindicator library laufey drives them with.
   bool tray_watcher = false;  // org.kde.StatusNotifierWatcher has an owner
-  bool tray_xembed = false;   // X11: a system tray selection owner
+  bool tray_xembed = false;   // X11 sessions only: a system tray selection
+                              // owner (never probed in a Wayland session,
+                              // whose $DISPLAY is Xwayland's)
   bool tray_library = true;   // libayatana-appindicator3 / libappindicator3
   bool tray_clicks = true;    // the icon reports left / double clicks
   bool tray_tooltip = true;   // set_tray_tooltip shows something
@@ -127,6 +129,10 @@ char* PlatformFeaturesJsonForAbi();
 
 // Test-only: forget every cached probe result (the next call probes again).
 void ResetPlatformFeaturesForTesting();
+
+// Test-only: how many times the probe connected to an X server for the
+// XEmbed tray (only ever in an X11 session).
+int XEmbedProbeCountForTesting();
 
 }  // namespace laufey_common
 

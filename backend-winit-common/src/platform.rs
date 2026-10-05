@@ -135,6 +135,12 @@ fn graphical_session(
   }
 }
 
+/// Whether the XEmbed tray is looked for: X11 sessions with a display only.
+#[cfg(any(target_os = "linux", test))]
+fn probes_xembed(session_type: &str, have_display: bool) -> bool {
+  session_type == "x11" && have_display
+}
+
 /// Probe this session.
 pub fn probe() -> PlatformFeatures {
   #[cfg(target_os = "linux")]
@@ -323,10 +329,13 @@ mod linux {
     Some((session_type, active))
   }
 
-  fn xembed_tray() -> bool {
+  /// An XEmbed system tray on the X display. Only in an X11 session
+  /// ([`super::probes_xembed`]): in a Wayland session `$DISPLAY` is
+  /// Xwayland's, and connecting can start an on-demand Xwayland.
+  fn xembed_tray(session_type: &str) -> bool {
     use x11rb::connection::Connection as _;
     use x11rb::protocol::xproto::ConnectionExt as _;
-    if env("DISPLAY").is_none() {
+    if !super::probes_xembed(session_type, env("DISPLAY").is_some()) {
       return false;
     }
     let Ok((conn, screen)) = x11rb::connect(None) else {
@@ -356,13 +365,14 @@ mod linux {
 
   pub(super) fn probe_tray() -> PlatformFeatures {
     let conn = connect();
+    let session = session_type();
     PlatformFeatures {
       os: "linux",
-      session_type: Some(session_type()),
+      tray_xembed: xembed_tray(&session),
+      session_type: Some(session),
       desktop_hint: env("XDG_CURRENT_DESKTOP"),
       session_bus: conn.is_some(),
       tray_watcher: conn.as_ref().is_some_and(|c| has_owner(c, WATCHER)),
-      tray_xembed: xembed_tray(),
       secret_service: "absent",
       secret_prompter: false,
       portal_versions: BTreeMap::new(),
@@ -439,6 +449,16 @@ mod tests {
     // systemd): unset is unknown.
     assert_eq!(session_type(Some("")), "unknown");
     assert_eq!(session_type(None), "unknown");
+  }
+
+  #[test]
+  fn xembed_only_in_x11_sessions() {
+    assert!(probes_xembed("x11", true));
+    assert!(!probes_xembed("x11", false));
+    // Wayland's $DISPLAY is Xwayland's: never connect to it.
+    assert!(!probes_xembed("wayland", true));
+    assert!(!probes_xembed("unknown", true));
+    assert!(!probes_xembed("tty", true));
   }
 
   #[test]

@@ -330,11 +330,17 @@ bool TrayWatcherLocked(State& s, GDBusConnection* bus) {
   return g_watcher.load() == 1;
 }
 
+std::atomic<int> g_xembed_probes{0};
+
 // An XEmbed system tray on the X display (the selection a tray manager
-// owns). appindicator falls back to it when no watcher runs.
-bool XEmbedTrayPresent() {
-  if (Env("DISPLAY").empty())
+// owns). appindicator falls back to it when no watcher runs. Only in an X11
+// session: in a Wayland session $DISPLAY is Xwayland's, and connecting to it
+// can start Xwayland (an on-demand Xwayland, as Mutter and KWin run it) just
+// to find there is no tray.
+bool XEmbedTrayPresent(const std::string& session_type) {
+  if (session_type != "x11" || Env("DISPLAY").empty())
     return false;
+  g_xembed_probes++;
   int screen = 0;
   xcb_connection_t* c = xcb_connect(nullptr, &screen);
   if (!c || xcb_connection_has_error(c)) {
@@ -445,7 +451,7 @@ void ProbeTray(PlatformFeatures* out) {
     out->tray_tooltip = s.base.tray_tooltip;
     out->tray_watcher = TrayWatcherLocked(s, s.bus);
   }
-  out->tray_xembed = XEmbedTrayPresent();
+  out->tray_xembed = XEmbedTrayPresent(out->session_type);
   out->tray_library = AppIndicatorLibraryAvailableLinux();
 }
 
@@ -477,9 +483,13 @@ PlatformFeatures ProbePlatformFeatures() {
   }
   if (bus)
     g_object_unref(bus);
-  f.tray_xembed = XEmbedTrayPresent();
+  f.tray_xembed = XEmbedTrayPresent(f.session_type);
   f.tray_library = AppIndicatorLibraryAvailableLinux();
   return f;
+}
+
+int XEmbedProbeCountForTesting() {
+  return g_xembed_probes.load();
 }
 
 void ResetPlatformFeaturesForTesting() {
