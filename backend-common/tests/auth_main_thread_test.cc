@@ -50,8 +50,7 @@ class FakeLoop {
  public:
   FakeLoop() : thread_([this] { Run(); }) {}
   ~FakeLoop() {
-    Stop();
-    thread_.join();
+    Join();
   }
   // Post a platform task; false once the loop refuses posts.
   bool Post(void (*task)(void*), void* data) {
@@ -100,6 +99,13 @@ class FakeLoop {
     std::lock_guard<std::mutex> lock(mutex_);
     stopped_ = true;
     cv_.notify_all();
+  }
+  // Stop, then wait for the loop thread: a task it had already taken off the
+  // queue has finished running. Idempotent.
+  void Join() {
+    Stop();
+    if (thread_.joinable())
+      thread_.join();
   }
   void RefusePosts() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -294,6 +300,10 @@ static void TestUiTasksConcurrentDispatchAndClose() {
     d.Close();
     for (auto& th : threads)
       th.join();
+    // Close answers what has not run; a task the loop thread took off the
+    // queue just before Stop is still running. Wait for it before reading the
+    // probes (and before they are destroyed under it).
+    loop.Join();
     for (auto& p : probes) {
       // ProbeTask notifies under the probe's lock: once the lock is free it
       // is done with the probe, which may then be destroyed (ThreadSanitizer

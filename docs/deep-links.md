@@ -148,9 +148,9 @@ With it on:
 A headless worker launch is not a launch of the app: `<exe> run <script> ...`
 (how an embedder such as Deno Desktop starts a CLI worker, e.g. its update
 helper) and a forked worker (`NODE_CHANNEL_FD` or `NEXT_PRIVATE_WORKER` set).
-Every backend checks for one first (`laufey_common::IsHeadlessWorkerLaunch`)
-and runs it headless, before the single-instance check: it is never forwarded
-to the primary and never takes the lock.
+Every backend checks for one first (`laufey_common::IsHeadlessWorkerLaunch`) and
+runs it headless, before the single-instance check: it is never forwarded to the
+primary and never takes the lock.
 
 Launches forwarded before the runtime registers a handler are buffered, up to
 `LAUFEY_MAX_PENDING_SECOND_INSTANCES` (16), and delivered when it does, just

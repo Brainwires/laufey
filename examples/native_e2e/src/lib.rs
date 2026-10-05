@@ -2866,9 +2866,16 @@ async fn passkey_checks(window_id: u32) {
     expected.contains(&code),
   );
 
-  // The slot frees once the OS has ended the operation.
+  // The slot frees once the OS has ended the operation. laufey's timeout
+  // cancels it (WebAuthNCancelCurrentOperation) and the slot stays held
+  // until the OS call returns; that is usually at once, but the OS may also
+  // run to its own backstop (the request's 2 s + kOsTimeoutSlackMs, 10 s, in
+  // passkey_win.cc): windows-11-arm once still held it 5 s after the
+  // timeout. Wait past that backstop, so only a slot that never frees fails.
+  let started = std::time::Instant::now();
+  let deadline = std::time::Duration::from_secs(15);
   let mut freed = false;
-  for _ in 0..10 {
+  while started.elapsed() < deadline {
     let env = passkey_answer(
       "passkey get after the first",
       laufey::passkey_get(window_id, &passkey_get_options("example.com", 1000)),
@@ -2880,7 +2887,13 @@ async fn passkey_checks(window_id: u32) {
     }
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
   }
-  check("the passkey slot frees after a request ends", freed);
+  check(
+    &format!(
+      "the passkey slot frees after a request ends (after {} ms)",
+      started.elapsed().as_millis()
+    ),
+    freed,
+  );
 }
 
 /// Report the overall result and exit immediately (see "shutdown" above).
