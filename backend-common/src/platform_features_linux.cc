@@ -1,0 +1,400 @@
+// Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
+//
+// Platform features (API 45), the Linux probe. Everything is read from the
+// session itself, never from the desktop's name:
+//
+//   - the tray host: an owner of org.kde.StatusNotifierWatcher, followed
+//     through NameOwnerChanged so a watcher that starts late (or restarts)
+//     counts at once, or on X11 an XEmbed system tray (the
+//     _NET_SYSTEM_TRAY_S<screen> selection, which appindicator falls back
+//     to);
+//   - the Secret Service: whether org.freedesktop.secrets runs (or can be
+//     started), whether its default collection is locked (a property read:
+//     no unlock, no prompt), and whether anyone could answer an unlock
+//     prompt (a graphical session, and gnome-keyring's prompter where
+//     gnome-keyring is the provider);
+//   - the session type (XDG_SESSION_TYPE, else the display variables);
+//   - the xdg-desktop-portal interface versions.
+//
+// Every D-Bus call is synchronous with a short timeout. The probe never
+// starts the Secret Service (NO_AUTO_START) and never asks it to unlock.
+
+#include <gio/gio.h>
+#include <sys/stat.h>
+#include <xcb/xcb.h>
+
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <set>
+#include <string>
+
+#include "laufey_backend_common.h"
+#include "laufey_platform_features.h"
+
+namespace laufey_common {
+
+namespace {
+
+constexpr int kCallTimeoutMs = 1000;
+// The first portal call may start xdg-desktop-portal.
+constexpr int kPortalStartTimeoutMs = 3000;
+
+constexpr char kWatcherName[] = "org.kde.StatusNotifierWatcher";
+constexpr char kSecretsName[] = "org.freedesktop.secrets";
+constexpr char kGnomeKeyringName[] = "org.gnome.keyring";
+constexpr char kGcrPrompterName[] = "org.gnome.keyring.SystemPrompter";
+constexpr char kPortalName[] = "org.freedesktop.portal.Desktop";
+constexpr char kPortalPath[] = "/org/freedesktop/portal/desktop";
+constexpr const char* kPortalInterfaces[] = {
+    "Notification",
+    "FileChooser",
+    "GlobalShortcuts",
+    "Settings",
+};
+
+std::string Env(const char* name) {
+  const char* v = std::getenv(name);
+  return v ? v : "";
+}
+
+std::string SessionType() {
+  std::string t = Env("XDG_SESSION_TYPE");
+  if (t == "wayland" || t == "x11" || t == "tty")
+    return t;
+  if (!Env("WAYLAND_DISPLAY").empty())
+    return "wayland";
+  if (!Env("DISPLAY").empty())
+    return "x11";
+  return t.empty() ? "unknown" : t;
+}
+
+bool HasDisplay() {
+  return !Env("WAYLAND_DISPLAY").empty() || !Env("DISPLAY").empty();
+}
+
+// A session bus is configured: the address variable, or systemd's per-user
+// socket. Checked first so that GIO never autolaunches a bus through
+// dbus-launch on a bare X display.
+bool HasSessionBusAddress() {
+  if (!Env("DBUS_SESSION_BUS_ADDRESS").empty())
+    return true;
+  std::string runtime = Env("XDG_RUNTIME_DIR");
+  if (runtime.empty())
+    return false;
+  struct stat st;
+  return stat((runtime + "/bus").c_str(), &st) == 0 && S_ISSOCK(st.st_mode);
+}
+
+struct State {
+  std::mutex mutex;
+  bool probed = false;  // session facts + secret service
+  PlatformFeatures base;
+  bool portals_probed = false;
+  std::map<std::string, uint32_t> portal_versions;
+  GDBusConnection* bus = nullptr;  // owned; kept for the watcher subscription
+  guint watcher_sub = 0;
+};
+
+State& S() {
+  static State* s = new State();
+  return *s;
+}
+
+// -1 unknown (no subscription), 0 no watcher, 1 a watcher.
+std::atomic<int> g_watcher{-1};
+
+GDBusConnection* SessionBusLocked(State& s) {
+  if (s.bus)
+    return s.bus;
+  if (!HasSessionBusAddress())
+    return nullptr;
+  GError* error = nullptr;
+  s.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+  g_clear_error(&error);
+  return s.bus;
+}
+
+std::set<std::string> ListNames(GDBusConnection* bus, const char* method) {
+  std::set<std::string> names;
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+      "org.freedesktop.DBus", method, nullptr, G_VARIANT_TYPE("(as)"),
+      G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr, nullptr);
+  if (!r)
+    return names;
+  GVariantIter* iter = nullptr;
+  const gchar* name = nullptr;
+  g_variant_get(r, "(as)", &iter);
+  while (g_variant_iter_next(iter, "&s", &name))
+    names.insert(name);
+  g_variant_iter_free(iter);
+  g_variant_unref(r);
+  return names;
+}
+
+bool NameHasOwner(GDBusConnection* bus, const char* name) {
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+      "org.freedesktop.DBus", "NameHasOwner", g_variant_new("(s)", name),
+      G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr,
+      nullptr);
+  if (!r)
+    return false;
+  gboolean owned = FALSE;
+  g_variant_get(r, "(b)", &owned);
+  g_variant_unref(r);
+  return owned;
+}
+
+// The default collection's Locked property. -1 when it can't be read (no
+// default collection: creating one is a prompt too).
+int DefaultCollectionLocked(GDBusConnection* bus) {
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, kSecretsName, "/org/freedesktop/secrets/aliases/default",
+      "org.freedesktop.DBus.Properties", "Get",
+      g_variant_new("(ss)", "org.freedesktop.Secret.Collection", "Locked"),
+      G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, kCallTimeoutMs,
+      nullptr, nullptr);
+  if (!r)
+    return -1;
+  GVariant* inner = nullptr;
+  g_variant_get(r, "(v)", &inner);
+  int locked = -1;
+  if (inner && g_variant_is_of_type(inner, G_VARIANT_TYPE_BOOLEAN))
+    locked = g_variant_get_boolean(inner) ? 1 : 0;
+  if (inner)
+    g_variant_unref(inner);
+  g_variant_unref(r);
+  return locked;
+}
+
+void ProbeSecretServiceOn(GDBusConnection* bus, const std::string& session,
+                          PlatformFeatures* out) {
+  bool graphical = (session == "x11" || session == "wayland") && HasDisplay();
+  if (!bus) {
+    out->secret_service = SecretServiceState::kNoSessionBus;
+    out->secret_prompter = false;
+    return;
+  }
+  std::set<std::string> owned = ListNames(bus, "ListNames");
+  std::set<std::string> activatable = ListNames(bus, "ListActivatableNames");
+  auto known = [&](const char* name) {
+    return owned.count(name) || activatable.count(name);
+  };
+  if (owned.count(kSecretsName)) {
+    int locked = DefaultCollectionLocked(bus);
+    out->secret_service = locked == 0 ? SecretServiceState::kAvailable
+                                      : SecretServiceState::kLocked;
+  } else if (activatable.count(kSecretsName)) {
+    out->secret_service = SecretServiceState::kActivatable;
+  } else {
+    out->secret_service = SecretServiceState::kAbsent;
+  }
+  // gnome-keyring asks through gcr's prompter (gnome-shell's own, or
+  // gcr-prompter); KWallet's provider prompts by itself.
+  bool needs_gcr = known(kGnomeKeyringName);
+  out->secret_prompter = graphical && (!needs_gcr || known(kGcrPrompterName));
+}
+
+// The watcher's owner changed: a host started, quit or restarted.
+void OnWatcherOwnerChanged(GDBusConnection*, const gchar*, const gchar*,
+                           const gchar*, const gchar*, GVariant* params,
+                           gpointer) {
+  const gchar* name = nullptr;
+  const gchar* old_owner = nullptr;
+  const gchar* new_owner = nullptr;
+  g_variant_get(params, "(&s&s&s)", &name, &old_owner, &new_owner);
+  if (name && std::strcmp(name, kWatcherName) == 0)
+    g_watcher.store(new_owner && *new_owner ? 1 : 0);
+}
+
+// The watcher state, subscribing on first use. The subscription delivers on
+// the process's default main context, which every backend's UI loop runs.
+bool TrayWatcherLocked(State& s, GDBusConnection* bus) {
+  if (!bus)
+    return false;
+  if (!s.watcher_sub) {
+    g_main_context_push_thread_default(g_main_context_default());
+    s.watcher_sub = g_dbus_connection_signal_subscribe(
+        bus, "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+        "/org/freedesktop/DBus", kWatcherName, G_DBUS_SIGNAL_FLAGS_NONE,
+        OnWatcherOwnerChanged, nullptr, nullptr);
+    g_main_context_pop_thread_default(g_main_context_default());
+    // After subscribing, so an owner change in between is not lost.
+    g_watcher.store(NameHasOwner(bus, kWatcherName) ? 1 : 0);
+  }
+  return g_watcher.load() == 1;
+}
+
+// An XEmbed system tray on the X display (the selection a tray manager
+// owns). appindicator falls back to it when no watcher runs.
+bool XEmbedTrayPresent() {
+  if (Env("DISPLAY").empty())
+    return false;
+  int screen = 0;
+  xcb_connection_t* c = xcb_connect(nullptr, &screen);
+  if (!c || xcb_connection_has_error(c)) {
+    if (c)
+      xcb_disconnect(c);
+    return false;
+  }
+  std::string atom_name = "_NET_SYSTEM_TRAY_S" + std::to_string(screen);
+  xcb_intern_atom_reply_t* atom = xcb_intern_atom_reply(
+      c,
+      xcb_intern_atom(c, 1, static_cast<uint16_t>(atom_name.size()),
+                      atom_name.c_str()),
+      nullptr);
+  bool present = false;
+  if (atom && atom->atom != XCB_ATOM_NONE) {
+    xcb_get_selection_owner_reply_t* owner = xcb_get_selection_owner_reply(
+        c, xcb_get_selection_owner(c, atom->atom), nullptr);
+    present = owner && owner->owner != XCB_WINDOW_NONE;
+    free(owner);
+  }
+  free(atom);
+  xcb_disconnect(c);
+  return present;
+}
+
+std::map<std::string, uint32_t> ProbePortals(GDBusConnection* bus) {
+  std::map<std::string, uint32_t> versions;
+  if (!bus)
+    return versions;
+  if (!NameHasOwner(bus, kPortalName) &&
+      !ListNames(bus, "ListActivatableNames").count(kPortalName)) {
+    return versions;
+  }
+  bool first = true;
+  for (const char* iface : kPortalInterfaces) {
+    std::string full = std::string("org.freedesktop.portal.") + iface;
+    GError* error = nullptr;
+    GVariant* r = g_dbus_connection_call_sync(
+        bus, kPortalName, kPortalPath, "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", full.c_str(), "version"), G_VARIANT_TYPE("(v)"),
+        G_DBUS_CALL_FLAGS_NONE, first ? kPortalStartTimeoutMs : kCallTimeoutMs,
+        nullptr, &error);
+    first = false;
+    if (!r) {
+      // A portal that doesn't answer at all (it failed to start, or hangs)
+      // won't answer the next interface either.
+      bool dead =
+          error &&
+          (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
+           g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_SERVICE_UNKNOWN) ||
+           g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_SPAWN_FAILED) ||
+           g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_NO_REPLY));
+      g_clear_error(&error);
+      if (dead)
+        break;
+      continue;
+    }
+    GVariant* inner = nullptr;
+    g_variant_get(r, "(v)", &inner);
+    if (inner && g_variant_is_of_type(inner, G_VARIANT_TYPE_UINT32))
+      versions[iface] = g_variant_get_uint32(inner);
+    if (inner)
+      g_variant_unref(inner);
+    g_variant_unref(r);
+  }
+  return versions;
+}
+
+// The session facts and the secret service, once per process.
+void EnsureBaseLocked(State& s) {
+  if (s.probed)
+    return;
+  s.probed = true;
+  PlatformFeatures& f = s.base;
+  f.os = "linux";
+  f.session_type = SessionType();
+  f.desktop_hint = Env("XDG_CURRENT_DESKTOP");
+  GDBusConnection* bus = SessionBusLocked(s);
+  f.session_bus = bus != nullptr;
+  ProbeSecretServiceOn(bus, f.session_type, &f);
+  // appindicator: no click events, the title is the hover text.
+  f.tray_clicks = false;
+  f.tray_tooltip = true;
+}
+
+}  // namespace
+
+void ProbeSecretService(PlatformFeatures* out) {
+  State& s = S();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  EnsureBaseLocked(s);
+  out->session_type = s.base.session_type;
+  out->session_bus = s.base.session_bus;
+  out->secret_service = s.base.secret_service;
+  out->secret_prompter = s.base.secret_prompter;
+}
+
+void ProbeTray(PlatformFeatures* out) {
+  State& s = S();
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    EnsureBaseLocked(s);
+    out->os = s.base.os;
+    out->session_type = s.base.session_type;
+    out->desktop_hint = s.base.desktop_hint;
+    out->session_bus = s.base.session_bus;
+    out->tray_clicks = s.base.tray_clicks;
+    out->tray_tooltip = s.base.tray_tooltip;
+    out->tray_watcher = TrayWatcherLocked(s, s.bus);
+  }
+  out->tray_xembed = XEmbedTrayPresent();
+  out->tray_library = AppIndicatorLibraryAvailableLinux();
+}
+
+PlatformFeatures ProbePlatformFeatures() {
+  State& s = S();
+  PlatformFeatures f;
+  GDBusConnection* bus = nullptr;
+  bool need_portals = false;
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    EnsureBaseLocked(s);
+    f = s.base;
+    bus = s.bus ? static_cast<GDBusConnection*>(g_object_ref(s.bus)) : nullptr;
+    f.tray_watcher = TrayWatcherLocked(s, bus);
+    need_portals = !s.portals_probed;
+    if (!need_portals)
+      f.portal_versions = s.portal_versions;
+  }
+  // Outside the lock: the first portal call may wait for the portal to
+  // start.
+  if (need_portals) {
+    std::map<std::string, uint32_t> versions = ProbePortals(bus);
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.portals_probed) {
+      s.portals_probed = true;
+      s.portal_versions = versions;
+    }
+    f.portal_versions = s.portal_versions;
+  }
+  if (bus)
+    g_object_unref(bus);
+  f.tray_xembed = XEmbedTrayPresent();
+  f.tray_library = AppIndicatorLibraryAvailableLinux();
+  return f;
+}
+
+void ResetPlatformFeaturesForTesting() {
+  State& s = S();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  if (s.bus && s.watcher_sub)
+    g_dbus_connection_signal_unsubscribe(s.bus, s.watcher_sub);
+  s.watcher_sub = 0;
+  g_watcher.store(-1);
+  if (s.bus)
+    g_object_unref(s.bus);
+  s.bus = nullptr;
+  s.probed = false;
+  s.base = PlatformFeatures();
+  s.portals_probed = false;
+  s.portal_versions.clear();
+}
+
+}  // namespace laufey_common

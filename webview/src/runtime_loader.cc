@@ -896,6 +896,12 @@ static char* Backend_ListShortcuts(void* data) {
   return nullptr;
 }
 
+static char* Backend_PlatformFeatures(void* data) {
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->PlatformFeatures();
+  return nullptr;
+}
+
 static char* Backend_CanonicalizeAccelerator(void* data,
                                              const char* accelerator) {
   if (LaufeyBackend* backend = BackendOf(data))
@@ -1377,6 +1383,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_js_call_handler = Backend_SetJsCallHandler;
   backend_api_.js_call_respond = Backend_JsCallRespond;
   backend_api_.set_js_call_handler_ex = Backend_SetJsCallHandlerEx;
+  backend_api_.platform_features = Backend_PlatformFeatures;
 
   backend_api_.register_scheme_handler = Backend_RegisterSchemeHandler;
   backend_api_.scheme_request_read_body = Backend_SchemeRequestReadBody;

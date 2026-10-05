@@ -445,15 +445,21 @@ bool TestTriggerMenuAcceleratorGtk(GtkWidget* window, const char* accelerator);
 //
 // All functions must be called on the GTK main thread; backends with
 // off-main-thread callers should marshal first (CEF uses CefPostTask).
-// The Ayatana or legacy appindicator library is dlopen()ed at runtime;
-// when neither is present on the system, CreateTrayIconLinux returns 0
-// and all other calls no-op.
+// The Ayatana or legacy appindicator library is dlopen()ed at runtime.
+// CreateTrayIconLinux returns 0, and logs why once, when the icon could not
+// be seen: neither library is present, or the session has no tray host (no
+// org.kde.StatusNotifierWatcher and no XEmbed tray; stock GNOME). The
+// reason is platform_features()' "trayReason". Calls on a 0 id no-op.
 //
 // AppIndicator has no left-click event — a click anywhere pops the
 // indicator's menu — so SetTrayClickHandlerLinux and
 // SetTrayDoubleClickHandlerLinux accept handlers for API symmetry but
-// don't surface clicks back.
+// don't surface clicks back (platform_features() reports "trayClicks":
+// false). The tooltip is the indicator's title, which StatusNotifier hosts
+// show on hover.
 
+// Whether the appindicator library loads (loads it once). Any thread.
+bool AppIndicatorLibraryAvailableLinux();
 uint32_t CreateTrayIconLinux();
 void DestroyTrayIconLinux(uint32_t tray_id);
 void SetTrayIconLinux(uint32_t tray_id, const void* png_bytes, size_t len);

@@ -559,14 +559,31 @@ bool LaufeyHandler::OnJSDialog(CefRefPtr<CefBrowser> browser,
     return true;
   }
 #elif defined(__linux__)
-  // Linux: use GTK dialogs. gtk_dialog_run is a nested loop on TID_UI: let
-  // CEF's tasks run inside it.
+  // Linux: GTK dialogs, modal to the browser's window. Chromium's window is
+  // not a GtkWindow, so GTK's own modality doesn't reach it: the dialog is
+  // made transient for it on X11 (the window manager keeps it above and
+  // centered on its parent; main_linux.cc), and the browser view takes no
+  // input while it is up (both backends' display servers). gtk_dialog_run
+  // is a nested loop on TID_UI: let CEF's tasks run inside it.
   laufey_common::ScopedNativeModalLoop modal_loop;
+  CefRefPtr<CefBrowserView> view = CefBrowserView::GetForBrowser(browser);
+  CefRefPtr<CefWindow> parent = view ? view->GetWindow() : nullptr;
+  unsigned long parent_xid = parent ? parent->GetWindowHandle() : 0;
+  auto run_modal = [&](GtkWidget* dlg) -> gint {
+    LaufeySetDialogTransientFor(dlg, parent_xid);
+    const bool was_enabled = view && view->IsEnabled();
+    if (was_enabled)
+      view->SetEnabled(false);
+    gint result = gtk_dialog_run(GTK_DIALOG(dlg));
+    if (was_enabled)
+      view->SetEnabled(true);
+    return result;
+  };
   if (dialog_type == JSDialogType::JSDIALOGTYPE_ALERT) {
     GtkWidget* dlg =
         gtk_message_dialog_new(nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
                                GTK_BUTTONS_OK, "%s", msg.c_str());
-    gtk_dialog_run(GTK_DIALOG(dlg));
+    run_modal(dlg);
     gtk_widget_destroy(dlg);
     callback->Continue(true, "");
     return true;
@@ -575,7 +592,7 @@ bool LaufeyHandler::OnJSDialog(CefRefPtr<CefBrowser> browser,
     GtkWidget* dlg =
         gtk_message_dialog_new(nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION,
                                GTK_BUTTONS_OK_CANCEL, "%s", msg.c_str());
-    gint result = gtk_dialog_run(GTK_DIALOG(dlg));
+    gint result = run_modal(dlg);
     gtk_widget_destroy(dlg);
     callback->Continue(result == GTK_RESPONSE_OK, "");
     return true;
@@ -588,9 +605,11 @@ bool LaufeyHandler::OnJSDialog(CefRefPtr<CefBrowser> browser,
     GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
     GtkWidget* entry = gtk_entry_new();
     gtk_entry_set_text(GTK_ENTRY(entry), defaultText.c_str());
+    gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+    gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_OK);
     gtk_container_add(GTK_CONTAINER(content), entry);
     gtk_widget_show(entry);
-    gint result = gtk_dialog_run(GTK_DIALOG(dlg));
+    gint result = run_modal(dlg);
     std::string resultText =
         (result == GTK_RESPONSE_OK) ? gtk_entry_get_text(GTK_ENTRY(entry)) : "";
     gtk_widget_destroy(dlg);

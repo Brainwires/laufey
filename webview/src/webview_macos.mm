@@ -10,6 +10,7 @@
 #import <objc/message.h>
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_json.h"
@@ -317,6 +318,9 @@ class WKWebViewBackend : public LaufeyBackend {
   }
   char* ListShortcuts() override {
     return laufey_common::ListShortcuts();
+  }
+  char* PlatformFeatures() override {
+    return laufey_common::PlatformFeaturesJsonForAbi();
   }
   char* CanonicalizeAccelerator(const char* accelerator) override {
     return laufey_common::CanonicalizeAccelerator(accelerator);

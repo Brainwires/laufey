@@ -1,0 +1,129 @@
+// Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
+//
+// Platform features (API 45): what THIS session provides, probed instead of
+// guessed from the desktop's name. Linux desktops differ in what they offer
+// (a tray host, a secret service that can answer without a prompt, which
+// xdg-desktop-portal interfaces at which version), and a feature the session
+// lacks must be reported with a reason, never fail silently.
+//
+//   platform_features.cc        the portable part: the cookie-store decision,
+//                               the tray reason and the JSON the C ABI hands
+//                               out; the static answer on macOS and Windows
+//   platform_features_linux.cc  the probe over the session bus (GDBus) and,
+//                               for the XEmbed tray, the X server (XCB)
+//
+// XDG_CURRENT_DESKTOP is read only as a hint for wording a reason; nothing
+// branches on it. See docs/platform-features.md.
+
+#ifndef LAUFEY_PLATFORM_FEATURES_H_
+#define LAUFEY_PLATFORM_FEATURES_H_
+
+#include <cstdint>
+#include <map>
+#include <string>
+
+namespace laufey_common {
+
+// Whether the Secret Service (org.freedesktop.secrets) can hand out a key.
+enum class SecretServiceState {
+  kAvailable,     // running, its default collection is unlocked
+  kLocked,        // running, the default collection is locked or missing:
+                  // using it means an unlock (or create) prompt
+  kActivatable,   // not running, D-Bus can start it (its state is unknown
+                  // until it runs; starting it is left to its first user)
+  kAbsent,        // no provider on the session bus
+  kNoSessionBus,  // no session bus to ask
+  kNotApplicable  // not Linux: the OS keystore (Keychain, DPAPI) is always
+                  // there and never blocks on a prompt
+};
+
+const char* SecretServiceStateName(SecretServiceState state);
+
+// What the probe found. Strings are empty when not applicable.
+struct PlatformFeatures {
+  std::string os;            // "linux", "macos", "windows"
+  std::string session_type;  // Linux: "wayland", "x11", "tty", "unknown"
+  std::string desktop_hint;  // XDG_CURRENT_DESKTOP, verbatim (a hint only)
+  bool session_bus = false;  // Linux: a session bus answered
+
+  // Tray icons: a StatusNotifierItem host (org.kde.StatusNotifierWatcher)
+  // or, on X11, an XEmbed system tray (_NET_SYSTEM_TRAY_S<n>), and the
+  // appindicator library laufey drives them with.
+  bool tray_watcher = false;  // org.kde.StatusNotifierWatcher has an owner
+  bool tray_xembed = false;   // X11: a system tray selection owner
+  bool tray_library = true;   // libayatana-appindicator3 / libappindicator3
+  bool tray_clicks = true;    // the icon reports left / double clicks
+  bool tray_tooltip = true;   // set_tray_tooltip shows something
+
+  SecretServiceState secret_service = SecretServiceState::kNotApplicable;
+  // A person can answer an unlock prompt here: a graphical session, and the
+  // provider's prompter (gnome-keyring's gcr-prompter) exists.
+  bool secret_prompter = true;
+
+  // xdg-desktop-portal interface -> version ("Notification" -> 2). An
+  // interface the portal lacks is absent from the map.
+  std::map<std::string, uint32_t> portal_versions;
+
+  // CEF only: "os" (OSCrypt keeps its key in the OS keystore) or "basic"
+  // (--password-store=basic: the key is fixed, cookies are only obfuscated).
+  // Empty on engines that don't encrypt with an OS key (WebKit, Winit).
+  std::string cookie_encryption;
+};
+
+// --- The probe
+// ----------------------------------------------------------------
+
+// The secret-service part on its own, for a decision made before the event
+// loop runs (CEF's command line). Synchronous, bounded by short D-Bus
+// timeouts, never starts a service and never shows a prompt. Any thread.
+void ProbeSecretService(PlatformFeatures* out);
+
+// The tray part on its own (session facts plus the tray fields), for
+// create_tray_icon: no portal calls. Any thread.
+void ProbeTray(PlatformFeatures* out);
+
+// The full probe. The session facts and the secret service are probed once
+// per process; the tray host is re-read on every call (a watcher that
+// appears late counts as soon as it does: the Linux probe follows the
+// watcher's NameOwnerChanged); the portal versions are probed once, on the
+// first call. Any thread.
+PlatformFeatures ProbePlatformFeatures();
+
+// --- Decisions (pure; tested without a bus)
+// ------------------------------------
+
+// True when Chromium's cookie store must not use the Secret Service: there
+// is none (or no bus), or reaching its key needs a prompt no one can answer.
+// Chromium would otherwise wait for the key forever, holding every request
+// that carries cookies.
+bool NeedsBasicPasswordStore(const PlatformFeatures& f);
+
+// Whether a tray icon can be shown, and why not ("" when it can).
+bool TrayAvailable(const PlatformFeatures& f);
+
+std::string TrayUnavailableReason(const PlatformFeatures& f);
+
+// The secret-service situation in a sentence, for the --password-store=basic
+// warning.
+std::string BasicPasswordStoreReason(const PlatformFeatures& f);
+
+// The JSON object platform_features hands out (docs/platform-features.md).
+std::string PlatformFeaturesToJson(const PlatformFeatures& f);
+
+// --- Backend hooks
+// ---------------------------------------------------------------
+
+// The cookie-store decision a CEF backend made ("os" / "basic"); reported by
+// PlatformFeaturesJsonForAbi. Any thread.
+void SetCookieEncryption(const char* value);
+
+// ProbePlatformFeatures() as JSON, malloc'd for the C ABI (freed with the
+// backend's string_free). Any thread.
+char* PlatformFeaturesJsonForAbi();
+
+// Test-only: forget every cached probe result (the next call probes again).
+void ResetPlatformFeaturesForTesting();
+
+}  // namespace laufey_common
+
+#endif  // LAUFEY_PLATFORM_FEATURES_H_

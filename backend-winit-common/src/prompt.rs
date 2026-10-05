@@ -9,28 +9,43 @@
 //!   is a control's text.
 //! - macOS: `osascript` runs a fixed script; the strings are its `argv`
 //!   (after `--`, so one starting with `-` is not an option).
-//! - Linux: `zenity --entry`, each string an `--opt=value` argument (never a
-//!   separate argument that could read as an option), escaped for the two
-//!   transformations zenity applies to `--text` (backslash escapes, then a
-//!   mnemonic `_`).
+//! - Linux: the first provider this session has, in order (`mod linux`):
+//!   `kdialog --inputbox` (Plasma's own dialog), `zenity --entry` (GNOME's),
+//!   then an in-process GTK dialog. xdg-desktop-portal has no text-input
+//!   portal, so there is no portal step. The tools run directly (never
+//!   through a shell), each string an `--opt=value` argument or after `--`,
+//!   never a separate argument that could read as an option. With none of
+//!   them (no display, or neither tool nor a GTK display), the result is
+//!   [`DialogOutcome::Unsupported`]: nothing was shown, which is not a cancel.
 //!
-//! Returns `(confirmed, text)`; `text` is `Some` when confirmed.
+//! Returns a [`DialogOutcome`].
+
+/// What a dialog came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogOutcome {
+  /// OK; a prompt's text.
+  Confirmed(Option<String>),
+  /// The user dismissed it.
+  Cancelled,
+  /// No way to show it here; nothing was shown.
+  Unsupported,
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn show_prompt_dialog(
   title: &str,
   message: &str,
   default_value: &str,
-) -> (bool, Option<String>) {
+) -> DialogOutcome {
   match std::process::Command::new("osascript")
     .args(osascript_prompt_args(title, message, default_value))
     .output()
   {
     Ok(output) if output.status.success() => {
       let text = String::from_utf8_lossy(&output.stdout);
-      (true, Some(strip_one_newline(&text).to_string()))
+      DialogOutcome::Confirmed(Some(strip_one_newline(&text).to_string()))
     }
-    _ => (false, None),
+    _ => DialogOutcome::Cancelled,
   }
 }
 
@@ -69,40 +84,185 @@ fn strip_one_newline(s: &str) -> &str {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn show_prompt_dialog(
-  title: &str,
-  message: &str,
-  default_value: &str,
-) -> (bool, Option<String>) {
-  match std::process::Command::new("zenity")
-    .args(zenity_prompt_args(title, message, default_value))
-    .output()
-  {
-    Ok(output) if output.status.success() => {
-      let text = String::from_utf8_lossy(&output.stdout);
-      (true, Some(strip_one_newline(&text).to_string()))
-    }
-    _ => (false, None),
-  }
-}
+pub(crate) use linux::show_prompt_dialog;
 
-/// `zenity --entry` arguments. zenity shows `--text` with
-/// `gtk_label_set_text_with_mnemonic(g_strcompress(text))`, so a literal
-/// backslash is written `\\` and a literal underscore `__`; the title and the
-/// entry text are shown as given.
 #[cfg(any(target_os = "linux", test))]
-fn zenity_prompt_args(
-  title: &str,
-  message: &str,
-  default_value: &str,
-) -> Vec<String> {
-  let text = message.replace('\\', "\\\\").replace('_', "__");
-  vec![
-    "--entry".to_string(),
-    format!("--title={title}"),
-    format!("--text={text}"),
-    format!("--entry-text={default_value}"),
-  ]
+mod linux {
+  use super::{strip_one_newline, DialogOutcome};
+
+  /// An external prompt tool.
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  pub(super) enum Tool {
+    Kdialog,
+    Zenity,
+  }
+
+  impl Tool {
+    pub(super) fn program(self) -> &'static str {
+      match self {
+        Tool::Kdialog => "kdialog",
+        Tool::Zenity => "zenity",
+      }
+    }
+
+    pub(super) fn args(
+      self,
+      title: &str,
+      message: &str,
+      default_value: &str,
+    ) -> Vec<String> {
+      match self {
+        Tool::Kdialog => kdialog_prompt_args(title, message, default_value),
+        Tool::Zenity => zenity_prompt_args(title, message, default_value),
+      }
+    }
+  }
+
+  /// The order the tools are tried in.
+  pub(super) const TOOLS: [Tool; 2] = [Tool::Kdialog, Tool::Zenity];
+
+  /// What running a tool came to.
+  #[derive(Debug, Clone, PartialEq, Eq)]
+  pub(super) enum Run {
+    /// It isn't installed (or couldn't start): try the next provider.
+    Missing,
+    /// It ran: its exit code (None when a signal ended it) and stdout.
+    Exited(Option<i32>, String),
+  }
+
+  /// Try each tool, then the in-process dialog. `run` starts a tool (argv,
+  /// never a shell); `in_process` shows the GTK dialog, or `None` when GTK
+  /// has no display. Exit 0 is OK, 1 is the user cancelling; anything else
+  /// (a crash, no display) moves on to the next provider.
+  pub(super) fn prompt_with(
+    title: &str,
+    message: &str,
+    default_value: &str,
+    have_display: bool,
+    run: impl Fn(Tool, &[String]) -> Run,
+    in_process: impl FnOnce() -> Option<DialogOutcome>,
+  ) -> DialogOutcome {
+    if !have_display {
+      return DialogOutcome::Unsupported;
+    }
+    for tool in TOOLS {
+      match run(tool, &tool.args(title, message, default_value)) {
+        Run::Missing => continue,
+        Run::Exited(Some(0), out) => {
+          return DialogOutcome::Confirmed(Some(
+            strip_one_newline(&out).to_string(),
+          ));
+        }
+        Run::Exited(Some(1), _) => return DialogOutcome::Cancelled,
+        Run::Exited(..) => continue,
+      }
+    }
+    in_process().unwrap_or(DialogOutcome::Unsupported)
+  }
+
+  /// `kdialog --inputbox` arguments: `--title=` and `--inputbox=` carry
+  /// their values in the same argument, and the default text follows `--`,
+  /// so no string can read as an option.
+  pub(super) fn kdialog_prompt_args(
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> Vec<String> {
+    vec![
+      format!("--title={title}"),
+      format!("--inputbox={message}"),
+      "--".to_string(),
+      default_value.to_string(),
+    ]
+  }
+
+  /// `zenity --entry` arguments. zenity shows `--text` with
+  /// `gtk_label_set_text_with_mnemonic(g_strcompress(text))`, so a literal
+  /// backslash is written `\\` and a literal underscore `__`; the title and
+  /// the entry text are shown as given.
+  pub(super) fn zenity_prompt_args(
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> Vec<String> {
+    let text = message.replace('\\', "\\\\").replace('_', "__");
+    vec![
+      "--entry".to_string(),
+      format!("--title={title}"),
+      format!("--text={text}"),
+      format!("--entry-text={default_value}"),
+    ]
+  }
+
+  #[cfg(target_os = "linux")]
+  pub(crate) fn show_prompt_dialog(
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> DialogOutcome {
+    let have_display = std::env::var_os("WAYLAND_DISPLAY")
+      .is_some_and(|v| !v.is_empty())
+      || std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+    prompt_with(
+      title,
+      message,
+      default_value,
+      have_display,
+      |tool, args| match std::process::Command::new(tool.program())
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+      {
+        Ok(output) => Run::Exited(
+          output.status.code(),
+          String::from_utf8_lossy(&output.stdout).into_owned(),
+        ),
+        Err(_) => Run::Missing,
+      },
+      || gtk_prompt(title, message, default_value),
+    )
+  }
+
+  /// The in-process GTK dialog: a message dialog with an entry. `None` when
+  /// GTK can't start (no display it can open, or GTK already running on
+  /// another thread).
+  #[cfg(target_os = "linux")]
+  fn gtk_prompt(
+    title: &str,
+    message: &str,
+    default_value: &str,
+  ) -> Option<DialogOutcome> {
+    use gtk::prelude::*;
+    if gtk::init().is_err() {
+      return None;
+    }
+    let dialog = gtk::MessageDialog::new(
+      None::<&gtk::Window>,
+      gtk::DialogFlags::MODAL,
+      gtk::MessageType::Question,
+      gtk::ButtonsType::OkCancel,
+      message,
+    );
+    dialog.set_title(title);
+    dialog.set_default_response(gtk::ResponseType::Ok);
+    let entry = gtk::Entry::new();
+    entry.set_text(default_value);
+    entry.set_activates_default(true);
+    dialog.content_area().add(&entry);
+    entry.show();
+    let response = dialog.run();
+    let text = entry.text().to_string();
+    // SAFETY: the dialog is ours and no reference to it outlives this call.
+    unsafe { dialog.destroy() };
+    while gtk::events_pending() {
+      gtk::main_iteration();
+    }
+    Some(if response == gtk::ResponseType::Ok {
+      DialogOutcome::Confirmed(Some(text))
+    } else {
+      DialogOutcome::Cancelled
+    })
+  }
 }
 
 #[cfg(not(any(
@@ -114,8 +274,8 @@ pub(crate) fn show_prompt_dialog(
   _title: &str,
   _message: &str,
   default_value: &str,
-) -> (bool, Option<String>) {
-  (true, Some(default_value.to_string()))
+) -> DialogOutcome {
+  DialogOutcome::Confirmed(Some(default_value.to_string()))
 }
 
 #[cfg(target_os = "windows")]
@@ -460,7 +620,7 @@ mod win {
     title: &str,
     message: &str,
     default_value: &str,
-  ) -> (bool, Option<String>) {
+  ) -> super::DialogOutcome {
     let template = Template {
       style: WS_POPUP
         | WS_CAPTION
@@ -496,9 +656,11 @@ mod win {
       )
     };
     if result == IDOK as isize {
-      (true, Some(state.result.take().unwrap_or_default()))
+      super::DialogOutcome::Confirmed(Some(
+        state.result.take().unwrap_or_default(),
+      ))
     } else {
-      (false, None)
+      super::DialogOutcome::Cancelled
     }
   }
 }
@@ -524,7 +686,7 @@ mod tests {
 
   #[test]
   fn zenity_strings_are_option_values() {
-    let args = zenity_prompt_args("--help", HOSTILE, "--x");
+    let args = linux::zenity_prompt_args("--help", HOSTILE, "--x");
     assert_eq!(args.len(), 4);
     assert_eq!(args[0], "--entry");
     assert_eq!(args[1], "--title=--help");
@@ -532,6 +694,100 @@ mod tests {
     // Escaped so g_strcompress + the mnemonic parse give the text back.
     let text = args[2].strip_prefix("--text=").unwrap();
     assert_eq!(unmnemonic(&strcompress(text)), HOSTILE);
+  }
+
+  #[test]
+  fn kdialog_strings_are_option_values_or_after_dashdash() {
+    let args = linux::kdialog_prompt_args("--help", HOSTILE, "--x");
+    assert_eq!(
+      args,
+      vec![
+        "--title=--help".to_string(),
+        format!("--inputbox={HOSTILE}"),
+        "--".to_string(),
+        "--x".to_string(),
+      ]
+    );
+  }
+
+  /// Runs `prompt_with` over scripted tool results, recording the tools tried.
+  fn scripted(
+    have_display: bool,
+    kdialog: linux::Run,
+    zenity: linux::Run,
+    in_process: Option<DialogOutcome>,
+  ) -> (DialogOutcome, Vec<&'static str>, bool) {
+    let tried = std::cell::RefCell::new(Vec::new());
+    let gtk_ran = std::cell::Cell::new(false);
+    let outcome = linux::prompt_with(
+      "T",
+      "M",
+      "D",
+      have_display,
+      |tool, args| {
+        tried.borrow_mut().push(tool.program());
+        // Never a shell: the program is the tool itself, the strings argv.
+        assert!(!args.iter().any(|a| a == "-c"));
+        match tool {
+          linux::Tool::Kdialog => kdialog.clone(),
+          linux::Tool::Zenity => zenity.clone(),
+        }
+      },
+      || {
+        gtk_ran.set(true);
+        in_process
+      },
+    );
+    (outcome, tried.into_inner(), gtk_ran.get())
+  }
+
+  #[test]
+  fn linux_providers_in_order() {
+    use linux::Run::{Exited, Missing};
+    // kdialog first (Plasma); its answer is final, OK or cancel.
+    let (o, tried, gtk) =
+      scripted(true, Exited(Some(0), "typed\n".into()), Missing, None);
+    assert_eq!(o, DialogOutcome::Confirmed(Some("typed".into())));
+    assert_eq!(tried, ["kdialog"]);
+    assert!(!gtk);
+    let (o, tried, _) =
+      scripted(true, Exited(Some(1), String::new()), Missing, None);
+    assert_eq!(o, DialogOutcome::Cancelled);
+    assert_eq!(tried, ["kdialog"]);
+    // No kdialog (stock GNOME): zenity.
+    let (o, tried, _) =
+      scripted(true, Missing, Exited(Some(0), "z\n".into()), None);
+    assert_eq!(o, DialogOutcome::Confirmed(Some("z".into())));
+    assert_eq!(tried, ["kdialog", "zenity"]);
+    // A tool that failed (crashed, couldn't open the display) is not a
+    // cancel: the next provider runs.
+    let (o, tried, gtk) = scripted(
+      true,
+      Exited(None, String::new()),
+      Exited(Some(255), String::new()),
+      Some(DialogOutcome::Confirmed(Some("g".into()))),
+    );
+    assert_eq!(o, DialogOutcome::Confirmed(Some("g".into())));
+    assert_eq!(tried, ["kdialog", "zenity"]);
+    assert!(gtk);
+    // Neither tool (stock Kubuntu has no zenity; minimal sessions neither):
+    // the in-process dialog.
+    let (o, _, gtk) =
+      scripted(true, Missing, Missing, Some(DialogOutcome::Cancelled));
+    assert_eq!(o, DialogOutcome::Cancelled);
+    assert!(gtk);
+    // Nothing can show it: unsupported, never a fake cancel.
+    let (o, _, _) = scripted(true, Missing, Missing, None);
+    assert_eq!(o, DialogOutcome::Unsupported);
+    let (o, tried, gtk) = scripted(
+      false,
+      Exited(Some(0), "x".into()),
+      Missing,
+      Some(DialogOutcome::Cancelled),
+    );
+    assert_eq!(o, DialogOutcome::Unsupported);
+    assert!(tried.is_empty());
+    assert!(!gtk);
   }
 
   #[test]

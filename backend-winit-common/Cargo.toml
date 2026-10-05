@@ -26,6 +26,14 @@ objc2-user-notifications = "0.3"
 block2 = "0.6"
 dispatch2 = "0.3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Platform features (platform.rs): the session bus and the X server. Both are
+# already in the tree (notify-rust / rfd use zbus, winit x11rb).
+zbus = "5"
+x11rb = "0.13"
+# The prompt's in-process dialog (prompt.rs); the gtk tray-icon builds on.
+gtk = "0.18"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_System_Registry",

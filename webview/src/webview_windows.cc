@@ -3,6 +3,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_platform_features.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_system.h"
@@ -530,6 +531,9 @@ class WebView2Backend : public LaufeyBackend {
   }
   char* ListShortcuts() override {
     return laufey_common::ListShortcuts();
+  }
+  char* PlatformFeatures() override {
+    return laufey_common::PlatformFeaturesJsonForAbi();
   }
   char* CanonicalizeAccelerator(const char* accelerator) override {
     return laufey_common::CanonicalizeAccelerator(accelerator);

@@ -11,6 +11,7 @@
 #include "laufey_menu.h"
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
+#include "laufey_platform_features.h"
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_scheme_registry.h"
@@ -1912,6 +1913,15 @@ static char* Backend_ListShortcuts(void* /*data*/) {
   return laufey_common::ListShortcuts();
 }
 
+static char* Backend_PlatformFeatures(void* /*data*/) {
+#if !defined(__linux__)
+  // macOS (Keychain) and Windows (DPAPI): OSCrypt's key is always the OS's.
+  // On Linux main_linux.cc records the --password-store it chose.
+  laufey_common::SetCookieEncryption("os");
+#endif
+  return laufey_common::PlatformFeaturesJsonForAbi();
+}
+
 static char* Backend_CanonicalizeAccelerator(void* /*data*/,
                                              const char* accelerator) {
   return laufey_common::CanonicalizeAccelerator(accelerator);
@@ -3060,6 +3070,7 @@ void RuntimeLoader::InitializeBackendApi() {
 
   backend_api_.set_js_call_handler = Backend_SetJsCallHandler;
   backend_api_.set_js_call_handler_ex = Backend_SetJsCallHandlerEx;
+  backend_api_.platform_features = Backend_PlatformFeatures;
   backend_api_.js_call_respond = Backend_JsCallRespond;
 
   backend_api_.invoke_js_callback = Backend_InvokeJsCallback;

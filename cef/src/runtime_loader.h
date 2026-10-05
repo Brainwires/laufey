@@ -610,6 +610,11 @@ bool IsLinuxWindowClickPassthrough(unsigned long xid);
 // skip taskbar/pager) so the WM treats it as an auxiliary panel that doesn't
 // take part in normal focus/taskbar handling. Implemented in main_linux.cc.
 void ConfigureLinuxWindowAsPanel(unsigned long xid);
+// Make a GTK dialog (a GtkWidget*) transient for the CEF window `parent_xid`
+// on X11, so the window manager keeps it above its parent and treats it as
+// that window's dialog. A no-op under Wayland or for a 0 id. CEF UI thread.
+// Implemented in main_linux.cc.
+void LaufeySetDialogTransientFor(void* dialog, unsigned long parent_xid);
 // gtk_init_check, once (runtime_loader_linux.cc). Call it on the GTK / CEF UI
 // thread before GTK is used.
 void CefEnsureGtkInit();

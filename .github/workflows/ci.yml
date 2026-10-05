@@ -155,6 +155,15 @@ jobs:
             echo "a dialog path calls a shell / process API" >&2
             exit 1
           fi
+          # The winit prompt's Linux half (prompt.rs `mod linux`) runs
+          # kdialog / zenity, but as the program itself with the strings as
+          # argv: never through a shell.
+          awk '/^mod linux \{/,/^}/' backend-winit-common/src/prompt.rs > "$RUNNER_TEMP/prompt_linux.rs"
+          test -s "$RUNNER_TEMP/prompt_linux.rs"
+          if grep -nE '"(/bin/)?(ba|da|z)?sh"|"-c"|popen\(|system\(' "$RUNNER_TEMP/prompt_linux.rs"; then
+            echo "the winit Linux prompt goes through a shell" >&2
+            exit 1
+          fi
           # The winit prompt's Windows half (prompt.rs `mod win`) likewise.
           awk '/^mod win \{/,/^}/' backend-winit-common/src/prompt.rs > "$RUNNER_TEMP/prompt_win.rs"
           test -s "$RUNNER_TEMP/prompt_win.rs"
@@ -481,11 +490,10 @@ jobs:
         if: ${{ !matrix.layer0_excluded }}
         timeout-minutes: 10
         shell: bash
-        env:
-          # On the cef/linux leg the Ayatana runtime lib is installed above, so
-          # a tray id of 0 means the dlopen path regressed to a stub — fail
-          # instead of reporting N/A (issue #63).
-          LAUFEY_E2E_REQUIRE_TRAY: ${{ (runner.os == 'Linux' && matrix.backend == 'cef') && '1' || '' }}
+        # On Linux this session has no tray host (no StatusNotifierWatcher,
+        # no XEmbed tray), so the tray is refused with a reason (API 45). The
+        # appindicator dlopen path is gated by Layer 1 (LAUFEY_E2E_REQUIRE_TRAY,
+        # issue #63).
         run: scripts/native-e2e-run.sh ${{ matrix.backend }}
 
       # POST/PUT/PATCH bodies (text, binary, >1 MB, empty) from the page reach
@@ -526,6 +534,29 @@ jobs:
         env:
           LAUFEY_E2E_REQUIRE_TRAY: "1"
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --layer1
+
+      # API 45 (Linux): platform features in this headless session. No tray
+      # host, so the tray is refused with a reason; CEF picks
+      # --password-store=basic on its own (no one could answer a keyring
+      # prompt here) instead of waiting for the key.
+      - name: Platform features (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        shell: bash
+        env:
+          LAUFEY_E2E_EXPECT_TRAY_HOST: "0"
+          LAUFEY_E2E_EXPECT_COOKIES: ${{ matrix.backend == 'cef' && 'basic' || '' }}
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --platform
+
+      # API 45 (Linux, cef): no tray host at first. The tray is refused with
+      # a reason, then the observer starts a StatusNotifierWatcher, which the
+      # backend must see (it follows NameOwnerChanged) before the Layer 1
+      # checks run on the next tray.
+      - name: Late tray host — refused, then seen (Linux, cef)
+        if: runner.os == 'Linux' && matrix.backend == 'cef'
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --late-tray-host
 
       # Window state, constraints, screens, title bar and backdrops (API 38)
       # on their own, on every leg. On Linux under a window manager

@@ -7,6 +7,7 @@ pub mod file_drop;
 pub mod notification;
 pub mod open_url;
 pub mod permission;
+pub mod platform;
 mod prompt;
 pub mod tray;
 pub mod ui_tasks;
@@ -43,7 +44,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 44;
+pub const LAUFEY_API_VERSION: u32 = 45;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -854,6 +855,9 @@ pub struct LaufeyBackendApi {
   // --- JS calls with their origin (API >= 44) ---
   pub set_js_call_handler_ex:
     Option<unsafe extern "C" fn(*mut c_void, LaufeyJsCallExFn, *mut c_void)>,
+  // --- Platform features (API >= 45) ---
+  pub platform_features:
+    Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1740,6 +1744,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     auth_session_cancel: Some(auth_session_cancel_none),
     // API 44: no web engine, so no call ever arrives.
     set_js_call_handler_ex: Some(set_js_call_handler_ex),
+    // API 45: filled in by fill_common_api (freed with its string_free).
+    platform_features: None,
   }
 }
 
@@ -3203,12 +3209,17 @@ macro_rules! define_common_backend_fns {
       // rfd) themselves run a nested event loop, so they don't need help
       // from the winit event loop to keep other windows responsive — call
       // them directly.
-      let (confirmed, input) = $crate::show_native_dialog(
+      let (status, input) = match $crate::show_native_dialog(
         dialog_type,
         &title_str,
         &message_str,
         &default_str,
-      );
+      ) {
+        $crate::DialogOutcome::Confirmed(input) => (1, input),
+        $crate::DialogOutcome::Cancelled => (0, None),
+        // API 45: nothing was shown (no provider here), not a cancel.
+        $crate::DialogOutcome::Unsupported => (-1, None),
+      };
       if !out_input_value.is_null() {
         if let Some(s) = input {
           if let Ok(c_str) = ::std::ffi::CString::new(s) {
@@ -3218,11 +3229,16 @@ macro_rules! define_common_backend_fns {
           }
         }
       }
-      if confirmed {
-        1
-      } else {
-        0
-      }
+      status
+    }
+
+    unsafe extern "C" fn backend_platform_features(
+      _data: *mut ::std::ffi::c_void,
+    ) -> *mut ::std::ffi::c_char {
+      // Freed by the runtime via the backend's `string_free`.
+      ::std::ffi::CString::new($crate::platform::probe().to_json())
+        .map(|c| c.into_raw())
+        .unwrap_or(::std::ptr::null_mut())
     }
 
     unsafe extern "C" fn backend_string_free(
@@ -3616,6 +3632,12 @@ macro_rules! define_common_backend_fns {
     unsafe extern "C" fn backend_create_tray_icon(
       _data: *mut ::std::ffi::c_void,
     ) -> u32 {
+      // No tray host (stock GNOME): an icon no one could see. Refuse it;
+      // platform_features reports why.
+      if let Some(reason) = $crate::platform::tray_unavailable_reason() {
+        $crate::platform::log_tray_refused(&reason);
+        return 0;
+      }
       let tray_id = $crate::tray::allocate_tray_id();
       $crate::tray::queue_op($crate::tray::TrayOp::Create { tray_id });
       if let Some(state) = <$B as $crate::BackendAccess>::get() {
@@ -3877,6 +3899,7 @@ macro_rules! fill_common_api {
       Some(backend_set_close_requested_handler);
     $api.show_dialog = Some(backend_show_dialog);
     $api.string_free = Some(backend_string_free);
+    $api.platform_features = Some(backend_platform_features);
     $api.set_application_menu = Some(backend_set_application_menu);
     $api.show_context_menu = Some(backend_show_context_menu);
     $api.set_dock_badge = Some(backend_set_dock_badge);
@@ -4536,7 +4559,7 @@ pub fn show_native_dialog(
   title: &str,
   message: &str,
   default_value: &str,
-) -> (bool, Option<String>) {
+) -> DialogOutcome {
   match dialog_type {
     LAUFEY_DIALOG_ALERT => {
       rfd::MessageDialog::new()
@@ -4544,7 +4567,7 @@ pub fn show_native_dialog(
         .set_description(message)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
-      (true, None)
+      DialogOutcome::Confirmed(None)
     }
     LAUFEY_DIALOG_CONFIRM => {
       let result = rfd::MessageDialog::new()
@@ -4552,16 +4575,21 @@ pub fn show_native_dialog(
         .set_description(message)
         .set_buttons(rfd::MessageButtons::OkCancel)
         .show();
-      (result == rfd::MessageDialogResult::Ok, None)
+      if result == rfd::MessageDialogResult::Ok {
+        DialogOutcome::Confirmed(None)
+      } else {
+        DialogOutcome::Cancelled
+      }
     }
     LAUFEY_DIALOG_PROMPT => show_prompt_dialog(title, message, default_value),
-    _ => (false, None),
+    _ => DialogOutcome::Cancelled,
   }
 }
 
 // show_prompt_dialog: src/prompt.rs (no page text ever reaches a shell or a
 // script's source).
 use prompt::show_prompt_dialog;
+pub use prompt::DialogOutcome;
 
 // --- Native clipboard implementation ---
 //

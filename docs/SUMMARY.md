@@ -25,6 +25,7 @@
 - [Launch at login](launch-at-login.md)
 - [DevTools](devtools.md)
 - [Permissions](permissions.md)
+- [Platform features](platform-features.md)
 - [Passkeys](passkeys.md)
 - [Auth session](auth-session.md)
 - [App data & web storage](app-data.md)

@@ -50,6 +50,7 @@ set(LAUFEY_COMMON_SRCS
   src/menu_common.cc
   src/notifications.cc
   src/auth_session.cc
+  src/platform_features.cc
 )
 
 if(WIN32)
@@ -88,6 +89,7 @@ elseif(UNIX)
     src/shortcuts_linux.cc
     src/login_item_linux.cc
     src/scheme_body_stream_linux.cc
+    src/platform_features_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -306,7 +308,30 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_auth_main_thread_test
            COMMAND laufey_auth_main_thread_test)
 
+  # The decisions made from a platform-features probe: the cookie store,
+  # the tray reason, the JSON (no bus).
+  add_executable(laufey_platform_features_test tests/platform_features_test.cc)
+  target_link_libraries(laufey_platform_features_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_platform_features_test
+           COMMAND laufey_platform_features_test)
+
   if(UNIX AND NOT APPLE)
+    # The Linux platform-features probe against mock services (a tray
+    # watcher that comes and goes, a locked / unlocked Secret Service, the
+    # portal versions) on a private D-Bus session bus (GTestDBus; skipped
+    # without dbus-daemon).
+    add_executable(laufey_platform_features_dbus_test
+                   tests/platform_features_dbus_test.cc)
+    target_link_libraries(laufey_platform_features_dbus_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_platform_features_dbus_test
+             COMMAND laufey_platform_features_dbus_test)
+    set_tests_properties(laufey_platform_features_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
     # The freedesktop notification client against a mock server on a
     # private D-Bus session bus (GTestDBus; skipped without dbus-daemon).
     add_executable(laufey_notifications_dbus_test

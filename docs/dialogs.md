@@ -27,4 +27,15 @@ available as the application-scoped free functions `laufey::alert`,
 
 On the CEF and WebView backends, the page's own `alert()`, `confirm()`, and
 `prompt()` calls are routed to these native dialogs. The Winit backend has no
-web engine, so it has no page dialogs to route.
+web engine, so it has no page dialogs to route. On Linux, CEF makes its GTK
+dialog modal to the page's window: the dialog is transient for it on X11, and
+the browser view takes no input while it is open (Chromium's window is not a GTK
+window, so GTK's own modality would not reach it).
+
+The Winit backend's prompt on Linux uses the first provider the session has:
+`kdialog` (Plasma), then `zenity` (GNOME), then an in-process GTK dialog.
+xdg-desktop-portal has no text-input portal, so there is no portal step. The
+tools run as programs with the strings as arguments, never through a shell. When
+none can show it (no display, no tool and no GTK display), `show_dialog` returns
+`-1` (API 45) and `laufey::try_prompt` / `Window::try_prompt` return
+`Err(DialogUnsupported)`; `prompt` returns `None` as for a cancel.

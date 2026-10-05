@@ -24,6 +24,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
+#include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
@@ -32,6 +33,34 @@
 
 void LaufeyOpenExternalURL(const std::string& url) {
   g_app_info_launch_default_for_uri(url.c_str(), nullptr, nullptr);
+}
+
+// Chromium's cookie store encrypts with a key it keeps in the Secret Service
+// (OSCrypt). When the service can't hand that key out without a prompt no
+// one can answer (a locked keyring in a headless or ssh session), or there
+// is no service at all, Chromium waits for the key forever, and every
+// request that carries cookies (navigations, fetches, WebSocket handshakes)
+// waits with it. In that case use --password-store=basic (a fixed key: the
+// cookies are only obfuscated) and say so once. An explicit
+// --password-store is kept. platform_features() reports the choice as
+// "cookieEncryption". Browser process only.
+static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
+  if (command_line->HasSwitch("password-store")) {
+    std::string store = command_line->GetSwitchValue("password-store");
+    laufey_common::SetCookieEncryption(store == "basic" ? "basic" : "os");
+    return;
+  }
+  laufey_common::PlatformFeatures features;
+  laufey_common::ProbeSecretService(&features);
+  if (!laufey_common::NeedsBasicPasswordStore(features)) {
+    laufey_common::SetCookieEncryption("os");
+    return;
+  }
+  command_line->AppendSwitchWithValue("password-store", "basic");
+  laufey_common::SetCookieEncryption("basic");
+  std::cerr << "laufey: cookies are stored with --password-store=basic "
+               "(not encrypted with an OS key): "
+            << laufey_common::BasicPasswordStoreReason(features) << std::endl;
 }
 
 // --- Native event monitors (Linux / X11) ---
@@ -44,6 +73,7 @@ void LaufeyOpenExternalURL(const std::string& url) {
 // into the GLib main loop via g_io_add_watch.
 
 #include <gdk/gdk.h>
+#include <gtk/gtk.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #include <X11/Xlib.h>
@@ -531,6 +561,27 @@ double GetLinuxWindowOpacity(unsigned long xid) {
 #endif
 }
 
+void LaufeySetDialogTransientFor(void* dialog, unsigned long parent_xid) {
+#ifdef GDK_WINDOWING_X11
+  GtkWidget* dlg = static_cast<GtkWidget*>(dialog);
+  GdkDisplay* gdk_display = gdk_display_get_default();
+  if (!dlg || !parent_xid || !gdk_display || !GDK_IS_X11_DISPLAY(gdk_display))
+    return;
+  GdkWindow* parent =
+      gdk_x11_window_foreign_new_for_display(gdk_display, parent_xid);
+  if (!parent)
+    return;
+  gtk_widget_realize(dlg);
+  gdk_window_set_transient_for(gtk_widget_get_window(dlg), parent);
+  // The foreign wrapper lives as long as the dialog.
+  g_object_set_data_full(G_OBJECT(dlg), "laufey-transient-parent", parent,
+                         g_object_unref);
+#else
+  (void)dialog;
+  (void)parent_xid;
+#endif
+}
+
 // X11 has no cheap query for "is the input shape empty", so remember which
 // windows we made click-passthrough. Only touched on the CEF UI thread.
 static std::set<unsigned long> g_click_passthrough_xids;
@@ -692,8 +743,10 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
       CefRefPtr<CefCommandLine> command_line) override {
     // A deep-link launch keeps none of its own command line's Chromium
     // switches. First, so the defaults below see what is left.
-    if (process_type.empty())
+    if (process_type.empty()) {
       LaufeyStripDeepLinkSwitches(command_line);
+      LaufeyApplyPasswordStore(command_line);
+    }
 
     // Native Wayland support. By default CEF/Chromium uses the X11 Ozone
     // backend and runs through XWayland on Wayland sessions. Mirror the

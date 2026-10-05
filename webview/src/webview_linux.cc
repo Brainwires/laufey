@@ -7,6 +7,7 @@
 #include "laufey_window.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_platform_features.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
 #include "laufey_notifications.h"
@@ -709,6 +710,9 @@ class WebKitGTKBackend : public LaufeyBackend {
   }
   char* ListShortcuts() override {
     return laufey_common::ListShortcuts();
+  }
+  char* PlatformFeatures() override {
+    return laufey_common::PlatformFeaturesJsonForAbi();
   }
   char* CanonicalizeAccelerator(const char* accelerator) override {
     return laufey_common::CanonicalizeAccelerator(accelerator);

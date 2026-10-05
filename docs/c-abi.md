@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `44`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `45`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -136,6 +136,13 @@ The pointers group into:
   [launch-at-login.md](launch-at-login.md)).
 - **Tray** — `create_tray_icon`, `destroy_tray_icon`, `set_tray_icon`(`_dark`),
   `set_tray_tooltip`, `set_tray_menu`, click handlers, `get_tray_icon_bounds`.
+  On Linux `create_tray_icon` returns 0 when the session has no tray host (no
+  `org.kde.StatusNotifierWatcher` and no XEmbed tray, as on stock GNOME); the
+  reason is `platform_features`' `"trayReason"`.
+- **Platform features** (API ≥ 45) — `platform_features`: what this session
+  provides, as JSON (the tray host, the Secret Service, the session type, the
+  portal versions, CEF's cookie store). See
+  [platform-features.md](platform-features.md).
 - **Notifications** — `show_notification`, `close_notification`, and from API 41
   the `"schedule_at"` and `"data"` options, `notification_capabilities`,
   `set_notification_response_handler` (clicks no live callback owns, buffered
