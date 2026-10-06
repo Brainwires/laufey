@@ -196,6 +196,10 @@ async fn ui_thread_checks() -> Option<Window> {
   Some(win)
 }
 
+/// Every path the sign-in server was asked for, in order: a session that
+/// never answers says whether the OS ever loaded its page.
+static IDP_HITS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// A loopback "identity provider": `/auth/redirect?state=S` redirects to the
 /// custom-scheme callback, `/auth/wait` is a sign-in page that never does.
 fn start_idp() -> Option<String> {
@@ -222,6 +226,9 @@ fn start_idp() -> Option<String> {
           }
         }
         let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+        if let Ok(mut hits) = IDP_HITS.lock() {
+          hits.push(path.clone());
+        }
         let mut out = stream;
         let response = if let Some(q) = path.strip_prefix("/auth/redirect?") {
           let state = q
@@ -461,6 +468,14 @@ async fn auth_session_checks(anchor: Option<&Window>) {
     ),
     matches!(&next, Some(Ok(url)) if url.ends_with("state=s2")),
   );
+  if next.is_none() {
+    // Say whether the OS ever loaded the page, and free the slot so the
+    // checks below test what they name instead of failing busy.
+    let hits = IDP_HITS.lock().map(|h| h.clone()).unwrap_or_default();
+    eprintln!("[e2e] INFO sign-in server requests so far: {hits:?}");
+    let freed = laufey::auth_session_cancel();
+    eprintln!("[e2e] INFO cancelled the unanswered session: {freed}");
+  }
 
   // The anchor window closing ends the session cancelled.
   let w = Window::new(320, 240).title("native-e2e-auth-anchor");

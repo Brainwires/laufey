@@ -806,7 +806,10 @@ jobs:
           done
           # The exception and the crashed + main threads' backtraces; a
           # whole report is too long for the log.
-          ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -3 |
+          # No report (a check failed without a crash) is not a failure of
+          # this step: under pipefail a bare ls with no match would make it one.
+          { ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null || echo "no crash report" >&2; } |
+            head -3 |
             while read -r f; do python3 scripts/print-crash-report.py "$f"; done
 
   build-webview:
