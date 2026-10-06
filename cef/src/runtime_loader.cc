@@ -126,7 +126,11 @@ std::string LaufeyFindColocatedRuntime() {
       (dot != std::string::npos && dot > file_start) ? exe.substr(0, dot) : exe;
 
 #if defined(_WIN32)
-  std::string candidate = base + ".dll";
+  // Not `<exe>.dll`: the executable is CEF's bootstrap, which loads the host
+  // as `<exe>.dll` (docs/backends.md, "The Chromium sandbox"), so the runtime
+  // takes the next name. The webview host, an executable of its own, keeps
+  // `<exe>.dll`.
+  std::string candidate = base + ".runtime.dll";
 #elif defined(__APPLE__)
   std::string candidate = base + ".dylib";
 #else

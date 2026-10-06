@@ -133,7 +133,9 @@ to the list from `LAUFEY_CUSTOM_SCHEMES` or `customSchemes`.
 A launch file also marks the app as packaged. A packaged app (one with a
 `laufey-launch.json`, or with a runtime library it ships) loads only that
 library: the one next to its executable (`<executable name>.so`, `.dll` or
-`.dylib`), or, on the macOS WebView backend,
+`.dylib`; `<executable name>.runtime.dll` for the Windows CEF backend, whose
+`<executable name>.dll` is the host behind CEF's bootstrap, see
+[Backends](backends.md#the-chromium-sandbox)), or, on the macOS WebView backend,
 `Contents/Frameworks/libruntime.dylib` or `Contents/MacOS/libruntime.dylib` in
 its bundle. It ignores `--runtime` and `LAUFEY_RUNTIME_PATH` (both reported on
 stderr) and never searches the working directory or system directories such as

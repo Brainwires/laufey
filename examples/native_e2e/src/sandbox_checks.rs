@@ -13,15 +13,15 @@
 //!   setuid helper) create.
 //! - macOS: `sandbox_check(pid, NULL, 0)` reports the helper as sandboxed
 //!   (Seatbelt).
-//! - Windows: a child process runs below Medium integrity (the renderer's
-//!   token is lowered to Untrusted).
+//! - Windows: the renderer and GPU processes (told apart by their command
+//!   line's `--type=`) run below Medium integrity (the renderer's token is
+//!   lowered to Untrusted, the GPU process's to Low) or in an AppContainer,
+//!   while the browser process itself does not.
 //!
 //! `LAUFEY_E2E_EXPECT_SANDBOX=0` inverts the checks, for a run where the host
 //! must have turned the sandbox off (a Linux machine with neither user
-//! namespaces nor the setuid helper): web content still renders, unsandboxed.
-//! On Windows the CEF host doesn't enable the sandbox yet (it needs CEF's
-//! bootstrap executable; docs/backends.md), so there the default expectation
-//! is unsandboxed and `LAUFEY_E2E_EXPECT_SANDBOX=1` asks for the sandbox.
+//! namespaces nor the setuid helper, a Windows build with -DUSE_SANDBOX=OFF):
+//! web content still renders, unsandboxed.
 //! On Linux, `LAUFEY_E2E_EXPECT_SANDBOX_MODE=namespace|setuid|off` also names
 //! the layer-1 sandbox the renderers must be in (a user namespace of their
 //! own, or only the helper's PID namespace); native-e2e-run.sh checks the
@@ -33,18 +33,16 @@ use laufey::{Value, Window};
 
 use super::{check, na};
 
-/// What the run expects: LAUFEY_E2E_EXPECT_SANDBOX when set, else sandboxed
-/// (unsandboxed on Windows, see above). LAUFEY_E2E_EXPECT_SANDBOX_MODE=off
-/// expects it off too.
+/// What the run expects: LAUFEY_E2E_EXPECT_SANDBOX when set, else sandboxed.
+/// LAUFEY_E2E_EXPECT_SANDBOX_MODE=off expects it off too.
 fn expect_sandboxed() -> bool {
   if expect_mode().as_deref() == Some("off") {
     return false;
   }
-  match std::env::var("LAUFEY_E2E_EXPECT_SANDBOX").as_deref() {
-    Ok("0") => false,
-    Ok("1") => true,
-    _ => !cfg!(target_os = "windows"),
-  }
+  !matches!(
+    std::env::var("LAUFEY_E2E_EXPECT_SANDBOX").as_deref(),
+    Ok("0")
+  )
 }
 
 /// The Linux layer-1 sandbox the run expects (LAUFEY_E2E_EXPECT_SANDBOX_MODE:
@@ -106,7 +104,6 @@ async fn page_answers(win: &Window) -> bool {
   false
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 /// Waits for at least one child of `kind` (the renderer starts with the page,
 /// the GPU process may come a moment later).
 async fn wait_children(kind: &str) -> Vec<Child> {
@@ -431,6 +428,10 @@ mod win {
   pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
   pub const TOKEN_QUERY: u32 = 0x8;
   pub const TOKEN_INTEGRITY_LEVEL: i32 = 25;
+  pub const TOKEN_IS_APP_CONTAINER: i32 = 29;
+  /// NtQueryInformationProcess: the command line as a UNICODE_STRING
+  /// (Windows 8.1+; PROCESS_QUERY_LIMITED_INFORMATION is enough).
+  pub const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
   pub const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
   #[repr(C)]
@@ -445,6 +446,13 @@ mod win {
     pub pc_pri_class_base: i32,
     pub dw_flags: u32,
     pub sz_exe_file: [u16; 260],
+  }
+
+  #[repr(C)]
+  pub struct UnicodeString {
+    pub length: u16,
+    pub maximum_length: u16,
+    pub buffer: *const u16,
   }
 
   #[link(name = "kernel32")]
@@ -467,6 +475,52 @@ mod win {
     ) -> i32;
     pub fn GetSidSubAuthorityCount(sid: *mut c_void) -> *mut u8;
     pub fn GetSidSubAuthority(sid: *mut c_void, index: u32) -> *mut u32;
+  }
+  #[link(name = "ntdll")]
+  extern "system" {
+    pub fn NtQueryInformationProcess(
+      process: Handle,
+      class: u32,
+      info: *mut c_void,
+      len: u32,
+      ret_len: *mut u32,
+    ) -> i32;
+  }
+}
+
+/// The `--type=` of a child's command line ("" for none or unreadable).
+#[cfg(target_os = "windows")]
+fn process_kind(pid: u32) -> String {
+  use win::*;
+  unsafe {
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if process.is_null() {
+      return String::new();
+    }
+    // A UNICODE_STRING header followed by its buffer.
+    let mut buf = vec![0u64; 8192];
+    let mut len = 0u32;
+    let status = NtQueryInformationProcess(
+      process,
+      PROCESS_COMMAND_LINE_INFORMATION,
+      buf.as_mut_ptr() as *mut _,
+      (buf.len() * 8) as u32,
+      &mut len,
+    );
+    CloseHandle(process);
+    if status < 0 {
+      return String::new();
+    }
+    let us = &*(buf.as_ptr() as *const UnicodeString);
+    if us.buffer.is_null() {
+      return String::new();
+    }
+    let wide = std::slice::from_raw_parts(us.buffer, (us.length / 2) as usize);
+    String::from_utf16_lossy(wide)
+      .split_whitespace()
+      .find_map(|a| a.trim_matches('"').strip_prefix("--type="))
+      .unwrap_or("")
+      .to_string()
   }
 }
 
@@ -495,15 +549,24 @@ fn children() -> Vec<Child> {
     .filter(|(pid, ppid)| *ppid == me && *pid != me)
     .map(|(pid, _)| Child {
       pid,
-      kind: String::new(),
+      kind: process_kind(pid),
     })
     .collect()
 }
 
-/// The process's mandatory integrity level RID (0x0000 untrusted, 0x1000
-/// low, 0x2000 medium, ...), or None when it can't be read.
+/// A process token's sandbox-relevant facts.
 #[cfg(target_os = "windows")]
-fn integrity_of(pid: u32) -> Option<u32> {
+#[derive(Debug, Clone, Copy)]
+struct TokenFacts {
+  /// The mandatory integrity level RID (0x0000 untrusted, 0x1000 low,
+  /// 0x2000 medium, ...).
+  integrity: u32,
+  /// An AppContainer (or less privileged AppContainer) token.
+  app_container: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn token_facts(pid: u32) -> Option<TokenFacts> {
   use win::*;
   unsafe {
     let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -525,6 +588,14 @@ fn integrity_of(pid: u32) -> Option<u32> {
       buf.len() as u32,
       &mut len,
     );
+    let mut is_ac = 0u32;
+    let got_ac = GetTokenInformation(
+      token,
+      TOKEN_IS_APP_CONTAINER,
+      &mut is_ac as *mut u32 as *mut _,
+      4,
+      &mut len,
+    );
     CloseHandle(token);
     if got == 0 {
       return None;
@@ -535,45 +606,71 @@ fn integrity_of(pid: u32) -> Option<u32> {
     if count == 0 {
       return None;
     }
-    Some(*GetSidSubAuthority(sid, (count - 1) as u32))
+    Some(TokenFacts {
+      integrity: *GetSidSubAuthority(sid, (count - 1) as u32),
+      app_container: got_ac != 0 && is_ac != 0,
+    })
   }
+}
+
+/// Sandboxed as Chromium sandboxes a renderer or the GPU process on Windows:
+/// a token lowered below Medium integrity (Low, Untrusted) or an
+/// AppContainer.
+#[cfg(target_os = "windows")]
+fn is_sandboxed(t: &TokenFacts) -> bool {
+  const MEDIUM: u32 = 0x2000;
+  t.integrity < MEDIUM || t.app_container
 }
 
 #[cfg(target_os = "windows")]
 async fn os_checks() {
-  const MEDIUM: u32 = 0x2000;
   let want = expect_sandboxed();
-  let me = integrity_of(std::process::id());
-  // The renderer may take a moment to lower its token after startup.
-  let mut levels: Vec<(u32, Option<u32>)> = Vec::new();
-  for _ in 0..50 {
-    levels = children()
-      .into_iter()
-      .map(|c| (c.pid, integrity_of(c.pid)))
-      .collect();
-    let below = levels
-      .iter()
-      .any(|(_, l)| matches!(l, Some(l) if *l < MEDIUM));
-    if below == want && !levels.is_empty() {
-      break;
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-  }
-  let below = levels
-    .iter()
-    .filter(|(_, l)| matches!(l, Some(l) if *l < MEDIUM))
-    .count();
+  let me = token_facts(std::process::id());
   check(
-    &format!(
-      "sandbox: {} (this process {me:x?}; children {levels:x?})",
-      if want {
-        "a CEF child process runs below Medium integrity"
-      } else {
-        "every CEF child process runs at the browser's integrity"
-      }
-    ),
-    !levels.is_empty() && ((below > 0) == want),
+    &format!("sandbox: the browser process runs unsandboxed ({me:x?})"),
+    me.is_some_and(|t| !is_sandboxed(&t)),
   );
+  // Not every helper is sandboxed by every policy; the renderer and the
+  // GPU process are. A renderer lowers its token a moment after it starts,
+  // so wait for the expected state before judging it, for 10 s at most per
+  // kind: each round can itself wait 5 s for a first child (wait_children),
+  // so a bound on the rounds alone would let a missing kind take minutes.
+  for kind in ["renderer", "gpu-process"] {
+    let mut found: Vec<(u32, Option<TokenFacts>)> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+      found = wait_children(kind)
+        .await
+        .into_iter()
+        .map(|c| (c.pid, token_facts(c.pid)))
+        .collect();
+      let settled = !found.is_empty()
+        && found
+          .iter()
+          .all(|(_, t)| t.is_some_and(|t| is_sandboxed(&t) == want));
+      if settled || std::time::Instant::now() >= deadline {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    check(
+      &format!("sandbox: the backend has {kind} processes ({found:x?})"),
+      !found.is_empty(),
+    );
+    for (pid, facts) in &found {
+      check(
+        &format!(
+          "sandbox: {kind} {pid} {} ({facts:x?})",
+          if want {
+            "runs below Medium integrity or in an AppContainer"
+          } else {
+            "runs at the browser's integrity"
+          }
+        ),
+        facts.is_some_and(|t| is_sandboxed(&t) == want),
+      );
+    }
+  }
 }
 
 #[cfg(not(any(

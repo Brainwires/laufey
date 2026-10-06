@@ -681,6 +681,9 @@ impl App {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+  // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
+  // (cef/src/main_windows.cc); never pass it on to what the app starts.
+  std::env::remove_var("LAUFEY_CWD");
   let event_loop = EventLoop::with_user_event()
     .build()
     .expect("Failed to create EventLoop");

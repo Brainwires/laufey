@@ -95,7 +95,9 @@ esac
 case "$platform" in
   macos) colocated_rt="$bin.dylib" ;;
   linux) colocated_rt="$bin.so" ;;
-  windows) colocated_rt="${bin%.exe}.dll" ;;
+  # Windows CEF: <exe>.dll is the host behind CEF's bootstrap.
+  windows) [ "$backend" = cef ] && colocated_rt="${bin%.exe}.runtime.dll" ||
+    colocated_rt="${bin%.exe}.dll" ;;
 esac
 write_launch_file() { # <json>
   mkdir -p "$(dirname "$launch_file")"

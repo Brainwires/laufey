@@ -38,7 +38,10 @@ if ($Backend -eq "webview") {
   Copy-Item "$src\*" $dir -Recurse
 }
 $exe = Join-Path $dir $exeName
-Copy-Item $runtime ([IO.Path]::ChangeExtension($exe, ".dll"))
+# The CEF executable is CEF's bootstrap and <exe>.dll the host it loads, so
+# the runtime is <exe>.runtime.dll there.
+$rtExt = if ($Backend -eq "cef") { ".runtime.dll" } else { ".dll" }
+Copy-Item $runtime ([IO.Path]::ChangeExtension($exe, $rtExt))
 "{`"appId`": `"$aumid`"}" | Set-Content -Encoding ascii (Join-Path $dir "laufey-launch.json")
 
 $clsid = (Get-ItemProperty "HKCU:\Software\Classes\AppUserModelId\$aumid").CustomActivator

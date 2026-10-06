@@ -66,6 +66,11 @@ int main(int argc, char* argv[]) {
   // the single-instance forwarding nor the runtime sees it.
   laufey_common::SetDBusActivationLaunch(
       laufey_common::StripDBusActivationArg(&argc, argv));
+
+  // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
+  // (cef/src/main_windows.cc); never pass it on to what the app starts.
+  unsetenv("LAUFEY_CWD");
+
   const std::vector<std::string> args(argv + 1, argv + argc);
 
   // A scheduled notification's systemd timer (`<exe> --laufey-notify <id>`,

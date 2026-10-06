@@ -536,8 +536,9 @@ class RuntimeLoader {
 };
 
 // Returns the path to a runtime library co-located with the running executable
-// and sharing its base name (e.g. example.exe -> example.dll, ./foo -> foo.so),
-// or "" if none exists. Lets a renamed single-exe auto-load its runtime without
+// and sharing its base name (e.g. example.exe -> example.runtime.dll, since
+// example.dll is this host behind CEF's bootstrap; ./foo -> foo.so), or "" if
+// none exists. Lets a renamed single-exe auto-load its runtime without
 // a --runtime flag or wrapper script.
 std::string LaufeyFindColocatedRuntime();
 
