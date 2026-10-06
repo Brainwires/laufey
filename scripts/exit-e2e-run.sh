@@ -176,18 +176,7 @@ for ((i = 1; i <= iterations; i++)); do
       echo "[exit-e2e] $path #$i: exit $want, the next launch read $value back"
     else
       bump lost "$path"
-      if { [ "$backend/$platform" = webview/linux ] ||
-        [ "$backend/$platform" = webview/macos ]; } &&
-        grep -q '^\[e2e\] PASS cookie is' "$rlog" &&
-        [ "$(grep -c '^\[e2e\] FAIL' "$rlog")" = 1 ] &&
-        grep -q '^\[e2e\] FAIL localStorage is' "$rlog"; then
-        # Known: WebKit (WebKitGTK, WKWebView) writes localStorage from
-        # another process a moment after the page, and a web view torn down
-        # before then loses the write (the cookie survives). See
-        # docs/backends.md.
-        echo "[exit-e2e] $path #$i: known WebKit loss: localStorage lost" \
-          "the value written just before the end, the cookie kept it"
-      elif [ "$path" = process-exit ]; then
+      if [ "$path" = process-exit ]; then
         echo "[exit-e2e] $path #$i: the next launch didn't read $value back:" \
           "$(grep -E '^\[e2e\] read ' "$rlog" || true)"
       else
