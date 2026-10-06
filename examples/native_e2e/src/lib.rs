@@ -172,24 +172,45 @@ async fn page_number(win: &Window, expr: &str) -> Option<f64> {
 /// The page fills the size set_size asked for: `get_size` is the content
 /// (page) area on every backend, in CSS pixels.
 async fn check_page_size(name: &str, win: &Window, want: (i32, i32)) {
-  // A resize reaches the renderer a frame or two after the native window.
+  // A resize reaches the renderer a frame or two after the native window,
+  // but on a busy machine much later: Chromium sends the renderer a new size
+  // only once it has acknowledged the last one, which waits on a frame. CEF
+  // on a GitHub Windows runner at 1.75x kept the old page size for 3.3 s
+  // after the first resize of a fresh process and had the new one 1 s later
+  // (run 37394870701); WebView2 on windows-ci with both cores busy missed
+  // the 3 s budget too. So the page gets up to 20 s once it answers, and the
+  // check says how long it took and what it saw on the way. A page that
+  // never answers (no web engine) is N/A after 10 s.
+  let near =
+    |(w, h): (i32, i32)| (w - want.0).abs() <= 1 && (h - want.1).abs() <= 1;
+  let asked = std::time::Instant::now();
   let mut got = None;
-  for _ in 0..30 {
-    got = page_inner_size(win).await;
-    match got {
-      // No answer yet (the page may still be loading): ask again.
-      None => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
-      Some((w, h)) if (w - want.0).abs() <= 1 && (h - want.1).abs() <= 1 => {
-        break
+  let mut seen: Vec<(i32, i32)> = Vec::new();
+  loop {
+    got = page_inner_size(win).await.or(got);
+    if let Some(size) = got {
+      if seen.last() != Some(&size) {
+        seen.push(size);
       }
-      _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+      if near(size) {
+        break;
+      }
     }
+    let limit = if got.is_some() { 20 } else { 10 };
+    if asked.elapsed() >= std::time::Duration::from_secs(limit) {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
   }
+  let ms = asked.elapsed().as_millis();
   match got {
     None => na(&format!("{name} (no page to measure on this backend)")),
     Some((w, h)) => check(
-      &format!("{name} (want {}x{}, page {w}x{h})", want.0, want.1),
-      (w - want.0).abs() <= 1 && (h - want.1).abs() <= 1,
+      &format!(
+        "{name} (want {}x{}, page {w}x{h} after {ms} ms; seen {seen:?})",
+        want.0, want.1
+      ),
+      near((w, h)),
     ),
   }
 }
