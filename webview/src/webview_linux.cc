@@ -101,6 +101,82 @@ static void UnregisterWidget(GtkWidget* widget) {
   g_widget_to_laufey_id.erase(widget);
 }
 
+// DevTools: WebKitGTK opens the inspector in two steps.
+// webkit_web_inspector_show() makes the inspector's page at once (so
+// webkit_web_inspector_get_web_view() answers it), asks the inspected page's
+// web process to start, and only when that process answers loads the
+// inspector and opens it ("attach" or "open-window"). A
+// webkit_web_inspector_close() in between drops the page, but the answer
+// still arrives and opens a new one: DevTools closed right after they were
+// opened came back on their own (WebInspectorUIProxy::connect and
+// openLocalInspectorFrontend). So a close while the inspector is still
+// opening is also remembered, and done again once it has opened. GTK thread.
+namespace {
+
+struct InspectorState {
+  // Opened ("attach" / "open-window") and not closed since.
+  bool shown = false;
+  // When a close came while the inspector was still opening (0 = none). A
+  // later open clears it; an inspector that only opens long after (the web
+  // process never answered) isn't closed by a stale one.
+  gint64 close_pending_since = 0;
+};
+
+constexpr gint64 kInspectorClosePendingUsec = 10 * G_USEC_PER_SEC;
+
+InspectorState* InspectorStateOf(WebKitWebInspector* inspector) {
+  return static_cast<InspectorState*>(
+      g_object_get_data(G_OBJECT(inspector), "laufey-inspector-state"));
+}
+
+bool InspectorClosePending(InspectorState* st) {
+  return st && st->close_pending_since != 0 &&
+         g_get_monotonic_time() - st->close_pending_since <
+             kInspectorClosePendingUsec;
+}
+
+gboolean OnInspectorShown(WebKitWebInspector* inspector, gpointer) {
+  InspectorState* st = InspectorStateOf(inspector);
+  if (!st)
+    return FALSE;
+  st->shown = true;
+  if (InspectorClosePending(st)) {
+    // Not from inside WebKit's own open: once it has returned. It reads as
+    // closed meanwhile.
+    g_idle_add(
+        [](gpointer data) -> gboolean {
+          auto* insp = static_cast<WebKitWebInspector*>(data);
+          if (InspectorState* state = InspectorStateOf(insp)) {
+            if (InspectorClosePending(state))
+              webkit_web_inspector_close(insp);
+            state->close_pending_since = 0;
+          }
+          g_object_unref(insp);
+          return G_SOURCE_REMOVE;
+        },
+        g_object_ref(inspector));
+  }
+  return FALSE;  // WebKit attaches it / opens its window as usual.
+}
+
+void OnInspectorClosed(WebKitWebInspector* inspector, gpointer) {
+  if (InspectorState* st = InspectorStateOf(inspector))
+    st->shown = false;
+}
+
+void TrackInspector(WebKitWebView* webview) {
+  WebKitWebInspector* inspector = webkit_web_view_get_inspector(webview);
+  g_object_set_data_full(
+      G_OBJECT(inspector), "laufey-inspector-state", new InspectorState(),
+      [](gpointer data) { delete static_cast<InspectorState*>(data); });
+  g_signal_connect(inspector, "attach", G_CALLBACK(OnInspectorShown), nullptr);
+  g_signal_connect(inspector, "open-window", G_CALLBACK(OnInspectorShown),
+                   nullptr);
+  g_signal_connect(inspector, "closed", G_CALLBACK(OnInspectorClosed), nullptr);
+}
+
+}  // namespace
+
 // Per-window state
 struct LinuxWindowState {
   uint32_t window_id;
@@ -1402,6 +1478,7 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     // LAUFEY_INSPECTABLE / "inspectable" (default on).
     webkit_settings_set_enable_developer_extras(
         wk_settings, laufey_common::LaunchInspectable() ? TRUE : FALSE);
+    TrackInspector(webview);
     DisableByteStreamFetchSource(wk_settings);
 
     if (transparent) {
@@ -2406,6 +2483,8 @@ void WebKitGTKBackend::OpenDevTools(uint32_t window_id) {
     if (state && state->webview) {
       WebKitWebInspector* inspector =
           webkit_web_view_get_inspector(state->webview);
+      if (InspectorState* st = InspectorStateOf(inspector))
+        st->close_pending_since = 0;
       webkit_web_inspector_show(inspector);
     }
   });
@@ -2415,8 +2494,16 @@ void WebKitGTKBackend::CloseDevTools(uint32_t window_id) {
   gtk_invoke_sync([&] {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
-    if (state && state->webview)
-      webkit_web_inspector_close(webkit_web_view_get_inspector(state->webview));
+    if (!state || !state->webview)
+      return;
+    WebKitWebInspector* inspector =
+        webkit_web_view_get_inspector(state->webview);
+    InspectorState* st = InspectorStateOf(inspector);
+    // Still opening (its page exists, it hasn't opened yet): close it again
+    // once it opens.
+    if (st && !st->shown && webkit_web_inspector_get_web_view(inspector))
+      st->close_pending_since = g_get_monotonic_time();
+    webkit_web_inspector_close(inspector);
   });
 }
 
@@ -2428,9 +2515,12 @@ bool WebKitGTKBackend::IsDevToolsOpen(uint32_t window_id) {
     if (!state || !state->webview)
       return;
     // The inspector's own web view exists while it is shown (attached or in
-    // its window) and is dropped when it closes.
-    open = webkit_web_inspector_get_web_view(
-               webkit_web_view_get_inspector(state->webview)) != nullptr;
+    // its window) or opening, and is dropped when it closes. One closed
+    // while still opening reads as closed (see InspectorState).
+    WebKitWebInspector* inspector =
+        webkit_web_view_get_inspector(state->webview);
+    open = webkit_web_inspector_get_web_view(inspector) != nullptr &&
+           !InspectorClosePending(InspectorStateOf(inspector));
   });
   return open;
 }
