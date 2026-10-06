@@ -395,7 +395,17 @@ int main() {
          "\"notificationScheduleWhileClosed\":false,"
          "\"notificationScheduleReason\":null,"
          "\"notificationServerCapabilities\":null,\"badge\":null,"
-         "\"badgeReason\":null}");
+         "\"badgeReason\":null,\"fileChooser\":null,"
+         "\"fileChooserReason\":null}");
+  // The file chooser (L2): the portal's, or GTK's with the reason.
+  {
+    PlatformFeatures c = f;
+    c.file_chooser = "gtk";
+    c.file_chooser_reason = "xdg-desktop-portal offers no FileChooser here";
+    EXPECT(Contains(PlatformFeaturesToJson(c),
+                    "\"fileChooser\":\"gtk\",\"fileChooserReason\":"
+                    "\"xdg-desktop-portal offers no FileChooser here\"}"));
+  }
   // The notification platform's facts and the badge (L1).
   {
     PlatformFeatures l = f;
@@ -463,7 +473,8 @@ int main() {
 
   json = PlatformFeaturesToJson(mac);
   EXPECT(Contains(json, "\"sessionType\":null"));
-  EXPECT(Contains(json, "\"notificationServer\":null,\"notificationReason\":null"));
+  EXPECT(Contains(json,
+                  "\"notificationServer\":null,\"notificationReason\":null"));
   EXPECT(Contains(json, "\"secretService\":\"os\""));
   // Linux-only notification facts are null elsewhere.
   EXPECT(Contains(json, "\"notificationColdStart\":null"));

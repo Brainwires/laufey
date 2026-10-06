@@ -396,6 +396,20 @@ if(LAUFEY_BUILD_TESTS)
                          SKIP_RETURN_CODE 77
                          ENVIRONMENT "G_DEBUG=fatal-criticals")
 
+    # File dialogs through xdg-desktop-portal's FileChooser against a mock
+    # portal (GTestDBus) and GTK's chooser as the fallback, on a private Xvfb
+    # (skipped without dbus-daemon / Xvfb).
+    add_executable(laufey_file_chooser_dbus_test
+                   tests/file_chooser_dbus_test.cc)
+    target_link_libraries(laufey_file_chooser_dbus_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_file_chooser_dbus_test
+             COMMAND laufey_file_chooser_dbus_test)
+    set_tests_properties(laufey_file_chooser_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
     # The Linux platform-features probe against mock services (a tray
     # watcher that comes and goes, a locked / unlocked Secret Service, the
     # portal versions) on a private D-Bus session bus (GTestDBus; skipped

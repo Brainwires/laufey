@@ -2470,11 +2470,26 @@ static uint32_t Backend_ShowFileDialog(
                                           callback, user_data);
 #else
   // GtkFileChooserNative needs a GtkWindow to be modal to; Chromium's X11 /
-  // Wayland windows aren't GTK's, so the dialog is app-level here.
-  (void)window_id;
+  // Wayland windows aren't GTK's, so GTK's chooser is app-level here. The
+  // portal's FileChooser takes the window's X11 id ("x11:<xid>") on X11;
+  // a Chromium Wayland toplevel can't be named to it (no xdg-foreign
+  // export), so there the portal's dialog is app-level too.
   EnsureGtkReady();
+  laufey_common::PortalParentResolver portal_parent;
+  const char* wayland = getenv("WAYLAND_DISPLAY");
+  if (window_id != 0 && !(wayland && *wayland)) {
+    portal_parent = [window_id]() -> std::string {
+      CefRefPtr<CefWindow> window = CefWindowForId(window_id);
+      unsigned long xid = window ? window->GetWindowHandle() : 0;
+      if (!xid)
+        return "";
+      char buf[32];
+      snprintf(buf, sizeof(buf), "x11:%lx", xid);
+      return buf;
+    };
+  }
   return laufey_common::ShowFileDialogLinux(nullptr, options, callback,
-                                            user_data);
+                                            user_data, portal_parent);
 #endif
 }
 

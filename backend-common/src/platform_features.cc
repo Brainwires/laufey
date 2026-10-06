@@ -345,6 +345,8 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   }
   out += ",\"badge\":" + StringOrNull(f.badge);
   out += ",\"badgeReason\":" + StringOrNull(f.badge_reason);
+  out += ",\"fileChooser\":" + StringOrNull(f.file_chooser);
+  out += ",\"fileChooserReason\":" + StringOrNull(f.file_chooser_reason);
   out += "}";
   return out;
 }
@@ -379,8 +381,8 @@ std::string ReadPasswordStoreMarker(const std::string& root_cache_dir) {
   size_t n = std::fread(buf, 1, sizeof(buf) - 1, file);
   std::fclose(file);
   std::string value(buf, n);
-  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
-                            value.back() == ' '))
+  while (!value.empty() &&
+         (value.back() == '\n' || value.back() == '\r' || value.back() == ' '))
     value.pop_back();
   return value == "os" ? value : "";
 }
