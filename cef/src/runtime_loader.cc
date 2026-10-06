@@ -12,6 +12,7 @@
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
 #include "laufey_platform_features.h"
+#include "laufey_title_bar.h"
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_scheme_registry.h"
@@ -1943,6 +1944,18 @@ static void Backend_SetPlatformFeaturesChangedHandler(
   laufey_common::SetPlatformFeaturesChangedHandler(handler, user_data);
 }
 
+// Title bar preferences (API 47). The change handler fires on the
+// watcher's own thread (Linux, Windows) or the main thread (macOS).
+static char* Backend_TitleBarPreferences(void* /*data*/) {
+  return laufey_common::TitleBarPreferencesJsonForAbi();
+}
+
+static void Backend_SetTitleBarPreferencesChangedHandler(
+    void* /*data*/, laufey_title_bar_preferences_changed_fn handler,
+    void* user_data) {
+  laufey_common::SetTitleBarPreferencesChangedHandler(handler, user_data);
+}
+
 static char* Backend_CanonicalizeAccelerator(void* /*data*/,
                                              const char* accelerator) {
   return laufey_common::CanonicalizeAccelerator(accelerator);
@@ -3095,6 +3108,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.tray_unavailable_reason = Backend_TrayUnavailableReason;
   backend_api_.set_platform_features_changed_handler =
       Backend_SetPlatformFeaturesChangedHandler;
+  backend_api_.title_bar_preferences = Backend_TitleBarPreferences;
+  backend_api_.set_title_bar_preferences_changed_handler =
+      Backend_SetTitleBarPreferencesChangedHandler;
   backend_api_.js_call_respond = Backend_JsCallRespond;
 
   backend_api_.invoke_js_callback = Backend_InvokeJsCallback;

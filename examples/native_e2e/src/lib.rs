@@ -41,6 +41,7 @@ mod platform_checks;
 mod sandbox_checks;
 mod stream_checks;
 mod system_checks;
+mod title_bar_checks;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -814,6 +815,11 @@ fn e2e_main() {
       // Menus and notifications (API 41).
       Ok("menus-notifications") => {
         menu_notification_checks::run().await;
+        finish();
+      }
+      // Title bar preferences (API 47).
+      Ok("title-bar") => {
+        title_bar_checks::run().await;
         finish();
       }
       // Platform features (API 45) in the run's own session.

@@ -217,6 +217,8 @@ fn vtable_layout_matches_the_header() {
     set_js_call_handler_ex,
     platform_features,
     tray_unavailable_reason,
-    set_platform_features_changed_handler
+    set_platform_features_changed_handler,
+    title_bar_preferences,
+    set_title_bar_preferences_changed_handler
   );
 }

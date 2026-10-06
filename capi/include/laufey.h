@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 45
+#define LAUFEY_API_VERSION 47
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -453,6 +453,13 @@ typedef void (*laufey_display_changed_fn)(void* user_data);
 // UI thread on CEF and WebView, a watcher thread on Winit); call
 // platform_features again for the new answer.
 typedef void (*laufey_platform_features_changed_fn)(void* user_data);
+
+// Callback fired when what title_bar_preferences reports changed (API 47):
+// the user moved the window buttons, picked another double-click action,
+// colour scheme or accent colour. Fires on a watcher thread (Linux,
+// Windows) or the main thread (macOS); call title_bar_preferences again
+// for the new answer.
+typedef void (*laufey_title_bar_preferences_changed_fn)(void* user_data);
 
 typedef struct laufey_backend_api laufey_backend_api_t;
 
@@ -2122,6 +2129,40 @@ struct laufey_backend_api {
   // NULL clears it. Never fires on macOS and Windows.
   void (*set_platform_features_changed_handler)(
       void* backend_data, laufey_platform_features_changed_fn handler,
+      void* user_data);
+
+  // --- Title bar preferences (API >= 47) -----------------------------------
+  //
+  // (In the denext integration line, exit_app (API 46) comes before this
+  // section.)
+  //
+  // How the user set up title bars, for an app that draws its own (a hidden
+  // title bar with a drag region): a JSON object freed with string_free,
+  //   {"buttons": {"left": [...], "right": [...]},  // "close", "minimize",
+  //                                                 // "maximize", "appmenu",
+  //                                                 // "menu", "icon"
+  //    "side": "left" | "right",                    // the close button's
+  //    "doubleClick": "maximize" | "minimize" | "shade" | "lower" | "menu" |
+  //                   "none",
+  //    "colorScheme": "light" | "dark" | "no-preference",
+  //    "accentColor": "#rrggbb" | null,
+  //    "font": string | null,                       // the title bar font
+  //    "source": "portal" | "gsettings" | "default" | "os"}
+  // Linux reads xdg-desktop-portal's Settings first (the portal's answer wins
+  // over GSettings key by key), then GSettings, then GTK's defaults; macOS:
+  // the buttons on the left, the double click per AppleActionOnDoubleClick;
+  // Windows: the buttons on the right, a double click maximizes. Never a
+  // look of laufey's own: windows with the OS's frame already follow these
+  // (see docs/title-bar.md). Any thread; on Linux the first call may wait a
+  // few seconds for xdg-desktop-portal to start. NULL on backends older than
+  // API version 47.
+  char* (*title_bar_preferences)(void* backend_data);
+
+  // The handler fired when title_bar_preferences answers differently (see
+  // laufey_title_bar_preferences_changed_fn). One handler per process; NULL
+  // clears it. NULL on backends older than API version 47.
+  void (*set_title_bar_preferences_changed_handler)(
+      void* backend_data, laufey_title_bar_preferences_changed_fn handler,
       void* user_data);
 };
 

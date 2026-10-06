@@ -625,6 +625,15 @@ jobs:
           LAUFEY_E2E_EXPECT_COOKIES: ${{ matrix.backend == 'cef' && 'basic' || '' }}
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --platform
 
+      # API 47: title bar preferences on every leg. macOS: the buttons on
+      # the left; Windows: on the right; Linux: the battery serves the
+      # private bus's xdg-desktop-portal Settings and moves the buttons (the
+      # change handler must see it).
+      - name: Title bar preferences
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --title-bar
+
       # API 45 (Linux, cef): no tray host at first. The tray is refused with
       # a reason, then the observer starts a StatusNotifierWatcher, which the
       # backend must see (it follows NameOwnerChanged) before the Layer 1

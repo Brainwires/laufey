@@ -9,6 +9,7 @@ pub mod open_url;
 pub mod permission;
 pub mod platform;
 mod prompt;
+pub mod title_bar;
 pub mod tray;
 pub mod ui_tasks;
 pub mod window_api;
@@ -44,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 45;
+pub const LAUFEY_API_VERSION: u32 = 47;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -861,6 +862,16 @@ pub struct LaufeyBackendApi {
   pub tray_unavailable_reason:
     Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
   pub set_platform_features_changed_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(*mut c_void)>,
+      *mut c_void,
+    ),
+  >,
+  // --- Title bar preferences (API >= 47) ---
+  pub title_bar_preferences:
+    Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+  pub set_title_bar_preferences_changed_handler: Option<
     unsafe extern "C" fn(
       *mut c_void,
       Option<unsafe extern "C" fn(*mut c_void)>,
@@ -1757,6 +1768,10 @@ pub fn create_api_base() -> LaufeyBackendApi {
     platform_features: None,
     tray_unavailable_reason: None,
     set_platform_features_changed_handler: None,
+    // API 47: filled in by fill_common_api on Linux; not reported on macOS
+    // and Windows (title_bar.rs).
+    title_bar_preferences: None,
+    set_title_bar_preferences_changed_handler: None,
   }
 }
 
@@ -3282,6 +3297,25 @@ macro_rules! define_common_backend_fns {
       $crate::platform::set_changed_handler(handler, user_data);
     }
 
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn backend_title_bar_preferences(
+      _data: *mut ::std::ffi::c_void,
+    ) -> *mut ::std::ffi::c_char {
+      // Freed by the runtime via the backend's `string_free`.
+      ::std::ffi::CString::new($crate::title_bar::probe().to_json())
+        .map(|c| c.into_raw())
+        .unwrap_or(::std::ptr::null_mut())
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn backend_set_title_bar_preferences_changed_handler(
+      _data: *mut ::std::ffi::c_void,
+      handler: Option<unsafe extern "C" fn(*mut ::std::ffi::c_void)>,
+      user_data: *mut ::std::ffi::c_void,
+    ) {
+      $crate::title_bar::set_changed_handler(handler, user_data);
+    }
+
     unsafe extern "C" fn backend_string_free(
       _data: *mut ::std::ffi::c_void,
       s: *mut ::std::ffi::c_char,
@@ -3958,6 +3992,12 @@ macro_rules! fill_common_api {
     $api.tray_unavailable_reason = Some(backend_tray_unavailable_reason);
     $api.set_platform_features_changed_handler =
       Some(backend_set_platform_features_changed_handler);
+    #[cfg(target_os = "linux")]
+    {
+      $api.title_bar_preferences = Some(backend_title_bar_preferences);
+      $api.set_title_bar_preferences_changed_handler =
+        Some(backend_set_title_bar_preferences_changed_handler);
+    }
     $api.set_application_menu = Some(backend_set_application_menu);
     $api.show_context_menu = Some(backend_show_context_menu);
     $api.set_dock_badge = Some(backend_set_dock_badge);
