@@ -91,6 +91,7 @@ elseif(UNIX)
     src/login_item_linux.cc
     src/scheme_body_stream_linux.cc
     src/platform_features_linux.cc
+    src/cookie_db_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -342,6 +343,20 @@ if(LAUFEY_BUILD_TESTS)
     set_tests_properties(laufey_platform_features_dbus_test PROPERTIES
                          SKIP_RETURN_CODE 77
                          ENVIRONMENT "G_DEBUG=fatal-criticals")
+
+    # Whether a CEF profile's cookie database holds cookies encrypted with
+    # the OS key (v11 rows), read with the system SQLite (skipped without
+    # libsqlite3).
+    add_executable(laufey_cookie_db_test tests/cookie_db_test.cc)
+    target_include_directories(laufey_cookie_db_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(laufey_cookie_db_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_cookie_db_test COMMAND laufey_cookie_db_test)
+    set_tests_properties(laufey_cookie_db_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
 
     # The freedesktop notification client against a mock server on a
     # private D-Bus session bus (GTestDBus; skipped without dbus-daemon).

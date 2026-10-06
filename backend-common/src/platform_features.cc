@@ -13,6 +13,9 @@
 #ifdef _WIN32
 #include <process.h>
 #else
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 #include <string>
@@ -26,6 +29,10 @@ std::mutex& CookieMutex() {
   return m;
 }
 std::string& CookieEncryption() {
+  static std::string value;
+  return value;
+}
+std::string& CookieEncryptionWait() {
   static std::string value;
   return value;
 }
@@ -90,6 +97,34 @@ bool HintNames(const PlatformFeatures& f, const char* name) {
 
 }  // namespace
 
+const char* KWalletStateName(KWalletState state) {
+  switch (state) {
+    case KWalletState::kNotUsed:
+      return nullptr;
+    case KWalletState::kOpen:
+      return "open";
+    case KWalletState::kClosed:
+      return "closed";
+    case KWalletState::kDisabled:
+      return "disabled";
+    case KWalletState::kNotRunning:
+      return "not-running";
+  }
+  return nullptr;
+}
+
+const char* ProfileCookieKeysName(ProfileCookieKeys keys) {
+  switch (keys) {
+    case ProfileCookieKeys::kNone:
+      return "none";
+    case ProfileCookieKeys::kOsKey:
+      return "os-key";
+    case ProfileCookieKeys::kUnknown:
+      return "unknown";
+  }
+  return "unknown";
+}
+
 const char* SecretServiceStateName(SecretServiceState state) {
   switch (state) {
     case SecretServiceState::kAvailable:
@@ -108,14 +143,21 @@ const char* SecretServiceStateName(SecretServiceState state) {
   return "absent";
 }
 
-bool ChromiumPicksKWallet(const std::function<std::string(const char*)>& env) {
+bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env) {
   // base::nix::GetDesktopEnvironment: XDG_CURRENT_DESKTOP's values in
-  // priority order; the first one Chromium knows decides.
+  // priority order; the first one Chromium knows decides. os_crypt's
+  // SelectBackend maps KDE3 / KDE4 / KDE5 / KDE6 to KWallet.
   static const char* const kKnown[] = {
       "Unity", "Deepin", "GNOME", "X-Cinnamon", "Pantheon",
       "XFCE",  "UKUI",   "LXQt",  "COSMIC",
   };
-  std::string current = env("XDG_CURRENT_DESKTOP");
+  auto value_of = [&env](const char* name) {
+    const char* v = env(name);
+    return std::string(v ? v : "");
+  };
+  // HasVar: set, even to "".
+  auto has = [&env](const char* name) { return env(name) != nullptr; };
+  std::string current = value_of("XDG_CURRENT_DESKTOP");
   size_t start = 0;
   while (start <= current.size()) {
     size_t end = current.find(':', start);
@@ -135,25 +177,24 @@ bool ChromiumPicksKWallet(const std::function<std::string(const char*)>& env) {
     start = end + 1;
   }
   // DESKTOP_SESSION, then the older variables.
-  std::string session = env("DESKTOP_SESSION");
-  bool kde_version = !env("KDE_SESSION_VERSION").empty();
-  if (session == "kde4" || session == "kde-plasma")
-    return true;
-  if (session == "kde")
-    return kde_version;  // KDE3 without it: basic, not KWallet
+  std::string session = value_of("DESKTOP_SESSION");
+  if (session == "kde4" || session == "kde-plasma" || session == "kde")
+    return true;  // "kde" is KDE4 with KDE_SESSION_VERSION, else KDE3
   if (session == "deepin" || session == "gnome" || session == "mate" ||
       session.find("xfce") != std::string::npos || session == "xubuntu" ||
       session == "ukui")
     return false;
-  if (!env("GNOME_DESKTOP_SESSION_ID").empty())
+  if (has("GNOME_DESKTOP_SESSION_ID"))
     return false;
-  return !env("KDE_FULL_SESSION").empty() && kde_version;
+  // KDE_FULL_SESSION: KDE4 with KDE_SESSION_VERSION, else KDE3.
+  return has("KDE_FULL_SESSION");
 }
 
 bool NeedsBasicPasswordStore(const PlatformFeatures& f) {
-  // Chromium would use KWallet, which asks for its own unlock.
+  // Chromium would use KWallet: only an open wallet answers (on Plasma its
+  // request for a closed one is never answered, a person there or not).
   if (f.kwallet)
-    return false;
+    return f.kwallet_state != KWalletState::kOpen;
   switch (f.secret_service) {
     case SecretServiceState::kLocked:
     case SecretServiceState::kActivatable:
@@ -175,6 +216,24 @@ bool NeedsBasicPasswordStore(const PlatformFeatures& f) {
 std::string BasicPasswordStoreReason(const PlatformFeatures& f) {
   std::string session =
       f.session_type.empty() ? std::string("unknown") : f.session_type;
+  if (f.kwallet) {
+    switch (f.kwallet_state) {
+      case KWalletState::kClosed:
+        return "the cookie store uses KWallet here, and its wallet is closed: "
+               "a request for its key is never answered";
+      case KWalletState::kDisabled:
+        return "the cookie store uses KWallet here, and KWallet is disabled";
+      case KWalletState::kNotRunning:
+        return "the cookie store uses KWallet here, and kwalletd is not "
+               "running: a request for its key may never be answered";
+      case KWalletState::kOpen:
+      case KWalletState::kNotUsed:
+        return "";
+    }
+    return "";
+  }
+  if (!NeedsBasicPasswordStore(f))
+    return "";
   switch (f.secret_service) {
     case SecretServiceState::kLocked:
       return "the Secret Service's default keyring is locked and no one can "
@@ -242,6 +301,8 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   out += std::string(",\"secretService\":") +
          Quote(SecretServiceStateName(f.secret_service));
   out += std::string(",\"secretServicePrompt\":") + Bool(f.secret_prompter);
+  const char* kwallet = KWalletStateName(f.kwallet_state);
+  out += ",\"kwallet\":" + (kwallet ? Quote(kwallet) : std::string("null"));
   out += ",\"notificationServer\":" + StringOrNull(f.notification_server);
   out += ",\"notificationReason\":" +
          StringOrNull(NotificationUnavailableReason(f));
@@ -255,6 +316,7 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   }
   out += "}";
   out += ",\"cookieEncryption\":" + StringOrNull(f.cookie_encryption);
+  out += ",\"cookieEncryptionWait\":" + StringOrNull(f.cookie_encryption_wait);
   out += "}";
   return out;
 }
@@ -300,7 +362,9 @@ bool WritePasswordStoreMarker(const std::string& root_cache_dir,
   if (root_cache_dir.empty() || store != "os")
     return false;
   // A temporary file renamed over the marker: a crash (or a second
-  // instance) never leaves a half-written one.
+  // instance) never leaves a half-written one. Synced before the rename,
+  // and the directory after it, so a power loss leaves the old marker or
+  // the new one, never an empty file.
   std::string path = MarkerPath(root_cache_dir);
   std::string tmp = path + ".tmp" + std::to_string(ProcessId());
   FILE* file = std::fopen(tmp.c_str(), "wb");
@@ -309,6 +373,9 @@ bool WritePasswordStoreMarker(const std::string& root_cache_dir,
   std::string line = store + "\n";
   bool ok = std::fwrite(line.data(), 1, line.size(), file) == line.size();
   ok = std::fflush(file) == 0 && ok;
+#ifndef _WIN32
+  ok = ok && fsync(fileno(file)) == 0;
+#endif
   ok = std::fclose(file) == 0 && ok;
 #ifdef _WIN32
   // rename() doesn't replace on Windows (the marker is used on Linux).
@@ -316,44 +383,111 @@ bool WritePasswordStoreMarker(const std::string& root_cache_dir,
     std::remove(path.c_str());
 #endif
   ok = ok && std::rename(tmp.c_str(), path.c_str()) == 0;
-  if (!ok)
+  if (!ok) {
     std::remove(tmp.c_str());
-  return ok;
+    return false;
+  }
+#ifndef _WIN32
+  int dir = open(root_cache_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir >= 0) {
+    fsync(dir);
+    close(dir);
+  }
+#endif
+  return true;
+}
+
+void RemoveStalePasswordStoreTemps(const std::string& root_cache_dir,
+                                   int64_t launched_at) {
+#ifndef _WIN32
+  if (root_cache_dir.empty())
+    return;
+  DIR* dir = opendir(root_cache_dir.c_str());
+  if (!dir)
+    return;
+  std::string prefix = std::string(kPasswordStoreMarkerName) + ".tmp";
+  while (struct dirent* entry = readdir(dir)) {
+    if (std::strncmp(entry->d_name, prefix.c_str(), prefix.size()) != 0)
+      continue;
+    std::string path = root_cache_dir + "/" + entry->d_name;
+    struct stat st;
+    if (lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+        static_cast<int64_t>(st.st_mtime) < launched_at)
+      unlink(path.c_str());
+  }
+  closedir(dir);
+#else
+  (void)root_cache_dir;
+  (void)launched_at;
+#endif
 }
 
 PasswordStoreChoice ChoosePasswordStore(
-    const std::string* explicit_store,
-    const std::string& marker,
-    const std::function<PlatformFeatures()>& probe) {
+    const std::string* explicit_store, const std::string& marker,
+    ProfileCookieKeys cookies, const std::function<PlatformFeatures()>& probe) {
   PasswordStoreChoice choice;
+  bool holds_os_cookies = cookies != ProfileCookieKeys::kNone;
   if (explicit_store) {
-    // As given on the command line (Chromium reads the switch itself).
+    // As given on the command line (Chromium reads the switch itself), even
+    // when basic costs this profile its OS-key cookies: the person asked.
     choice.store = *explicit_store == "basic" ? "basic" : "os";
     choice.source = "explicit";
     choice.record = choice.store == "os" && marker != "os";
+    choice.explicit_basic_deletes = choice.store == "basic" && holds_os_cookies;
     return choice;
   }
   PlatformFeatures f = probe();
-  bool basic = NeedsBasicPasswordStore(f);
-  choice.store = basic ? "basic" : "os";
-  choice.append_basic = basic;
-  if (basic)
+  bool unreachable = NeedsBasicPasswordStore(f);
+  if (unreachable)
     choice.reason = BasicPasswordStoreReason(f);
-  if (marker == "os") {
-    // The profile keeps the OS key; when it can't be reached now, basic for
-    // this launch only (Chromium would wait for the key forever).
-    choice.source = "profile";
-    choice.os_unavailable = basic;
+  if (unreachable && holds_os_cookies) {
+    // Basic would make Chromium delete the OS-key cookies: keep the OS
+    // store and wait for the key.
+    choice.store = "os";
+    choice.source = "cookies";
+    choice.wait = true;
+    choice.record = marker != "os";
     return choice;
   }
-  choice.source = "probe";
-  choice.record = !basic;
+  choice.store = unreachable ? "basic" : "os";
+  choice.append_basic = unreachable;
+  choice.record = !unreachable && marker != "os";
+  choice.source = !unreachable && marker == "os" ? "profile" : "probe";
   return choice;
 }
 
-void SetCookieEncryption(const char* value) {
+std::string PasswordStoreWarning(const PasswordStoreChoice& choice,
+                                 ProfileCookieKeys cookies,
+                                 const std::string& detail) {
+  std::string holds =
+      cookies == ProfileCookieKeys::kUnknown
+          ? "this profile's cookie database can't be read (" + detail +
+                "), so it may hold cookies encrypted with the OS key"
+          : std::string("this profile holds cookies encrypted with the OS key");
+  if (choice.explicit_basic_deletes) {
+    return "laufey: --password-store=basic was given, and " + holds +
+           ": Chromium can't decrypt those under basic and deletes them "
+           "(with every cookie of the same sites)";
+  }
+  if (choice.wait) {
+    return "laufey: " + holds +
+           ", so the cookie store keeps the OS key and waits until it is "
+           "unlocked (requests that carry cookies wait with it); switching to "
+           "--password-store=basic would delete those cookies: " +
+           choice.reason;
+  }
+  if (choice.append_basic) {
+    return "laufey: cookies are stored with --password-store=basic (not "
+           "encrypted with an OS key): " +
+           choice.reason;
+  }
+  return "";
+}
+
+void SetCookieEncryption(const char* value, const char* wait) {
   std::lock_guard<std::mutex> lock(CookieMutex());
   CookieEncryption() = value ? value : "";
+  CookieEncryptionWait() = wait ? wait : "";
 }
 
 char* PlatformFeaturesJsonForAbi() {
@@ -361,6 +495,7 @@ char* PlatformFeaturesJsonForAbi() {
   {
     std::lock_guard<std::mutex> lock(CookieMutex());
     f.cookie_encryption = CookieEncryption();
+    f.cookie_encryption_wait = CookieEncryptionWait();
   }
   std::string json = PlatformFeaturesToJson(f);
   char* out = static_cast<char*>(std::malloc(json.size() + 1));
@@ -391,6 +526,11 @@ void SetPlatformFeaturesChangedHandler(void (*)(void*), void*) {}
 void ProbeSecretService(PlatformFeatures* out) {
   out->secret_service = SecretServiceState::kNotApplicable;
   out->secret_prompter = true;
+}
+
+// The cookie-store choice is made on Linux only.
+ProfileCookieKeys ReadProfileCookieKeys(const std::string&, std::string*) {
+  return ProfileCookieKeys::kNone;
 }
 
 void ProbeTray(PlatformFeatures* out) {

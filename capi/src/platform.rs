@@ -15,8 +15,10 @@ use crate::{api, LaufeyBackendApi};
 ///
 /// On Linux it says whether a tray icon can be seen (`"trayHost"`, and
 /// `"trayReason"` when not), what the Secret Service can do without a
-/// prompt, the session type and the xdg-desktop-portal versions; CEF adds the
-/// cookie store it chose (`"cookieEncryption"`).
+/// prompt (and KWallet's state where Chromium would use it), the session type
+/// and the xdg-desktop-portal versions; CEF adds the cookie store it chose
+/// (`"cookieEncryption"`) and, when it waits for the OS key, why
+/// (`"cookieEncryptionWait"`).
 pub fn platform_features() -> Option<String> {
   platform_features_with(api())
 }

@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <unistd.h>
 #include <map>
 #include <set>
@@ -37,37 +38,49 @@ void LaufeyOpenExternalURL(const std::string& url) {
 }
 
 // Chromium's cookie store encrypts with a key it keeps in the Secret Service
-// (OSCrypt). When the service is locked (or not running and may start
-// locked) and no one can answer its unlock prompt (a headless, ssh or CI
-// session), Chromium waits for the key forever, and every request that
-// carries cookies (navigations, fetches, WebSocket handshakes) waits with
-// it. In that case use --password-store=basic (a fixed key: the cookies are
-// only obfuscated) and say so once. With no Secret Service at all (or no
-// session bus) Chromium falls back to basic by itself, and with KWallet
-// present it uses KWallet: both are left to Chromium. An explicit
-// --password-store is kept. platform_features() reports the choice as
-// "cookieEncryption". Browser process only.
+// or KWallet (OSCrypt). When no one here can hand it out (a Secret Service
+// that is locked, or not running and may start locked, with no one to
+// answer its unlock prompt: a headless, ssh or CI session; a closed KWallet,
+// whose key request Chromium never gets answered), Chromium waits for the
+// key forever, and every request that carries cookies (navigations,
+// fetches, WebSocket handshakes) waits with it. In that case use
+// --password-store=basic (a fixed key: the cookies are only obfuscated) and
+// say so once. With no Secret Service at all (or no session bus) Chromium
+// falls back to basic by itself. An explicit --password-store is kept.
+// platform_features() reports the choice as "cookieEncryption". Browser
+// process only.
 //
-// The OS key is sticky per profile: once a profile gets it, "os" is recorded
-// in the root cache directory (laufey_platform_features.h,
-// kPasswordStoreMarkerName), and later launches keep asking for it. Basic is
-// never recorded: Chromium still reads basic (v10) cookies under the OS key,
-// so a profile that started headless moves to the OS key losslessly the
-// first time a launch can reach it. When an "os" profile's key can't be
-// reached (a headless launch against a locked keyring), this launch alone
-// uses basic, the marker stays, and stderr says that the cookies stored with
-// the OS key are unavailable this run.
+// Never basic on a profile that holds cookies encrypted with the OS key
+// ("v11" rows in its cookie database, read here before CefInitialize):
+// Chromium drops a cookie it can't decrypt and then deletes its whole
+// site's cookies from the database, so one basic launch would lose them for
+// good. Such a profile keeps the OS key even when no one may be able to
+// unlock it: requests that carry cookies wait until the keystore is
+// unlocked, stderr says so, and platform_features() reports the reason as
+// "cookieEncryptionWait". A database that can't be read counts as holding
+// such cookies. An explicit --password-store=basic is honoured, with a
+// warning that those cookies will be deleted. Basic (v10) cookies stay
+// readable under the OS key, so a profile with none of its own moves
+// between the two freely. The profile also records "os" once it has the OS
+// key (laufey_platform_features.h, kPasswordStoreMarkerName): a hint; the
+// database decides.
 static std::string g_root_cache_path;
 
 static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
+  laufey_common::RemoveStalePasswordStoreTemps(
+      g_root_cache_path, static_cast<int64_t>(time(nullptr)));
   std::string explicit_store;
   bool has_explicit = command_line->HasSwitch("password-store");
   if (has_explicit)
     explicit_store = command_line->GetSwitchValue("password-store");
+  std::string detail;
+  laufey_common::ProfileCookieKeys cookies =
+      laufey_common::ReadProfileCookieKeys(g_root_cache_path, &detail);
   laufey_common::PasswordStoreChoice choice =
       laufey_common::ChoosePasswordStore(
           has_explicit ? &explicit_store : nullptr,
-          laufey_common::ReadPasswordStoreMarker(g_root_cache_path), [] {
+          laufey_common::ReadPasswordStoreMarker(g_root_cache_path), cookies,
+          [] {
             laufey_common::PlatformFeatures features;
             laufey_common::ProbeSecretService(&features);
             return features;
@@ -76,17 +89,12 @@ static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
     command_line->AppendSwitchWithValue("password-store", "basic");
   if (choice.record)
     laufey_common::WritePasswordStoreMarker(g_root_cache_path, choice.store);
-  laufey_common::SetCookieEncryption(choice.store.c_str());
-  if (choice.os_unavailable) {
-    std::cerr << "laufey: this profile's cookies stored with the OS key are "
-                 "unavailable this run, and new ones are stored with "
-                 "--password-store=basic: "
-              << choice.reason << std::endl;
-  } else if (choice.append_basic) {
-    std::cerr << "laufey: cookies are stored with --password-store=basic "
-                 "(not encrypted with an OS key): "
-              << choice.reason << std::endl;
-  }
+  laufey_common::SetCookieEncryption(
+      choice.store.c_str(), choice.wait ? choice.reason.c_str() : nullptr);
+  std::string warning =
+      laufey_common::PasswordStoreWarning(choice, cookies, detail);
+  if (!warning.empty())
+    std::cerr << warning << std::endl;
 }
 
 // --- Native event monitors (Linux / X11) ---

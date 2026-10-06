@@ -11,8 +11,11 @@
 //   - the Secret Service activatable (not running), running with its
 //     default collection locked, with and without someone to answer the
 //     unlock prompt, unlocked, and no session bus at all;
-//   - KWallet counted only where Chromium would use it: a KDE desktop, or
-//     kwalletd running (an activatable one on GNOME is not);
+//   - KWallet counted only where Chromium would use it, a KDE desktop
+//     (kwalletd running or activatable on GNOME is not), and there only
+//     an open wallet answers: kwalletd not running, disabled, or its local
+//     wallet closed means no one can hand out the key (mock kwalletd6 /
+//     kwalletd5 objects, read without starting anything);
 //   - the portal interface versions (an interface the portal lacks is
 //     absent);
 //   - when a session counts as graphical (someone could answer the unlock
@@ -81,6 +84,13 @@ const char kXml[] =
     "  <property name='Type' type='s' access='read'/>"
     "  <property name='Active' type='b' access='read'/>"
     " </interface>"
+    " <interface name='org.kde.KWallet'>"
+    "  <method name='isEnabled'><arg type='b' direction='out'/></method>"
+    "  <method name='localWallet'><arg type='s' direction='out'/></method>"
+    "  <method name='isOpen'>"
+    "   <arg type='s' direction='in'/><arg type='b' direction='out'/>"
+    "  </method>"
+    " </interface>"
     "</node>";
 
 GDBusConnection* g_conn = nullptr;  // the mock services' connection
@@ -90,6 +100,10 @@ std::atomic<bool> g_locked{true};
 std::atomic<const char*> g_login_type{"x11"};
 std::atomic<bool> g_login_active{true};
 std::atomic<int> g_login_lookups{0};
+// The mock kwalletd.
+std::atomic<bool> g_kwallet_enabled{true};
+std::atomic<bool> g_kwallet_open{false};
+std::atomic<int> g_kwallet_is_open_calls{0};
 constexpr char kLoginSession[] = "/org/freedesktop/login1/session/c7";
 
 GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
@@ -115,8 +129,27 @@ GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
 // logind's Manager: every session lookup answers the mock session. The
 // notification server names itself.
 void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
-                const gchar* method, GVariant*,
+                const gchar* method, GVariant* params,
                 GDBusMethodInvocation* invocation, gpointer) {
+  if (strcmp(method, "isEnabled") == 0) {
+    g_dbus_method_invocation_return_value(
+        invocation, g_variant_new("(b)", g_kwallet_enabled.load()));
+    return;
+  }
+  if (strcmp(method, "localWallet") == 0) {
+    g_dbus_method_invocation_return_value(invocation,
+                                          g_variant_new("(s)", "kdewallet"));
+    return;
+  }
+  if (strcmp(method, "isOpen") == 0) {
+    g_kwallet_is_open_calls++;
+    const gchar* wallet = nullptr;
+    g_variant_get(params, "(&s)", &wallet);
+    g_dbus_method_invocation_return_value(
+        invocation, g_variant_new("(b)", g_kwallet_open.load() &&
+                                             strcmp(wallet, "kdewallet") == 0));
+    return;
+  }
   if (strcmp(method, "GetServerInformation") == 0) {
     g_dbus_method_invocation_return_value(
         invocation, g_variant_new("(ssss)", "mock-notifyd", "laufey", "1",
@@ -312,6 +345,8 @@ int main() {
     Register("/org/freedesktop/Notifications",
              "org.freedesktop.Notifications");
     Register(kLoginSession, "org.freedesktop.login1.Session");
+    Register("/modules/kwalletd6", "org.kde.KWallet");
+    Register("/modules/kwalletd5", "org.kde.KWallet");
     ready = true;
     GMainLoop* loop = g_main_loop_new(ctx, FALSE);
     g_main_loop_run(loop);
@@ -482,20 +517,81 @@ int main() {
   EXPECT(s.secret_service == SecretServiceState::kLocked);
   EXPECT(!s.secret_prompter);
   EXPECT(!s.kwallet && NeedsBasicPasswordStore(s));
-  // Running kwalletd (it owns its name now): Chromium's KWallet store asks
-  // for its own unlock, so never forced to basic.
+  EXPECT(s.kwallet_state == KWalletState::kNotUsed);
+  // Nor is a running one, open wallet and all: on GNOME Chromium uses the
+  // Secret Service whatever kwalletd does.
+  g_kwallet_open = true;
   for (const char* kwallet : {"org.kde.kwalletd5", "org.kde.kwalletd6"}) {
     BusCall("RequestName", kwallet);
     s = SecretServiceProbe();
-    EXPECT(s.kwallet);
-    EXPECT(!NeedsBasicPasswordStore(s));
+    EXPECT(!s.kwallet);
+    EXPECT(s.kwallet_state == KWalletState::kNotUsed);
+    EXPECT(NeedsBasicPasswordStore(s));
     BusCall("ReleaseName", kwallet);
   }
-  // A KDE desktop (Chromium's rule): KWallet, running or not.
+  g_kwallet_open = false;
+
+  // A KDE desktop (Chromium's rule): KWallet, and only an open wallet
+  // answers. A graphical session with someone in front doesn't change that
+  // (on Plasma a closed wallet's key request is never answered).
   setenv("XDG_CURRENT_DESKTOP", "KDE", 1);
+  setenv("KDE_SESSION_VERSION", "6", 1);
+  setenv("XDG_SESSION_TYPE", "wayland", 1);
+  setenv("WAYLAND_DISPLAY", "wayland-97", 1);
+  BusCall("RequestName", "org.freedesktop.login1");
+  g_login_type = "wayland";
+  g_login_active = true;
+  // kwalletd not running (activatable only): never started by the probe.
   s = SecretServiceProbe();
   EXPECT(s.kwallet);
-  EXPECT(!NeedsBasicPasswordStore(s));
+  EXPECT(s.secret_prompter);  // a person is there; it doesn't matter
+  EXPECT(s.kwallet_state == KWalletState::kNotRunning);
+  EXPECT(NeedsBasicPasswordStore(s));
+  EXPECT(BasicPasswordStoreReason(s).find("kwalletd is not running") !=
+         std::string::npos);
+  for (const char* name : {"org.kde.kwalletd6", "org.kde.kwalletd5"}) {
+    BusCall("RequestName", name);
+    // Running, enabled, its wallet closed.
+    g_kwallet_enabled = true;
+    g_kwallet_open = false;
+    int calls = g_kwallet_is_open_calls.load();
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet_state == KWalletState::kClosed);
+    EXPECT(g_kwallet_is_open_calls.load() > calls);
+    EXPECT(NeedsBasicPasswordStore(s));
+    EXPECT(BasicPasswordStoreReason(s).find("wallet is closed") !=
+           std::string::npos);
+    EXPECT(PlatformFeaturesToJson(s).find("\"kwallet\":\"closed\"") !=
+           std::string::npos);
+    // Open: Chromium gets its key; never basic.
+    g_kwallet_open = true;
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet_state == KWalletState::kOpen);
+    EXPECT(!NeedsBasicPasswordStore(s));
+    // Disabled.
+    g_kwallet_enabled = false;
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet_state == KWalletState::kDisabled);
+    EXPECT(NeedsBasicPasswordStore(s));
+    g_kwallet_enabled = true;
+    g_kwallet_open = false;
+    BusCall("ReleaseName", name);
+  }
+  // The cookie store's choice on KDE with the wallet closed: basic for a
+  // profile without OS-key cookies, the OS store and a wait for one with.
+  {
+    PasswordStoreChoice c = ChoosePasswordStore(
+        nullptr, "", ProfileCookieKeys::kNone, SecretServiceProbe);
+    EXPECT(c.store == "basic" && c.append_basic);
+    c = ChoosePasswordStore(nullptr, "os", ProfileCookieKeys::kOsKey,
+                            SecretServiceProbe);
+    EXPECT(c.store == "os" && !c.append_basic && c.wait);
+    EXPECT(c.reason.find("KWallet") != std::string::npos);
+  }
+  BusCall("ReleaseName", "org.freedesktop.login1");
+  unsetenv("WAYLAND_DISPLAY");
+  unsetenv("KDE_SESSION_VERSION");
+  setenv("XDG_SESSION_TYPE", "tty", 1);
   setenv("XDG_CURRENT_DESKTOP", "GNOME", 1);
 
   // Unlocked: no prompt at all, even headless.

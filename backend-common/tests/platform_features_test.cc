@@ -7,11 +7,15 @@
 
 #include "laufey_platform_features.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <string>
+#include <vector>
 
 #define EXPECT(cond)                                                         \
   do {                                                                       \
@@ -75,21 +79,41 @@ int main() {
     f.session_type = "tty";
     EXPECT(NeedsBasicPasswordStore(f));
     EXPECT(Contains(BasicPasswordStoreReason(f), "tty session"));
-    // KWallet (Chromium's store on Plasma) asks for its own unlock.
-    f.kwallet = true;
-    EXPECT(!NeedsBasicPasswordStore(f));
-    f.kwallet = false;
     f.session_type = "wayland";
   }
+
+  // KWallet (Chromium's store on KDE): only an open wallet answers, whatever
+  // the Secret Service or a prompter (on Plasma a request for a closed
+  // wallet's key is never answered, a person in front or not).
+  f = Linux();
+  f.kwallet = true;
+  f.kwallet_state = KWalletState::kOpen;
+  EXPECT(!NeedsBasicPasswordStore(f));
+  EXPECT(BasicPasswordStoreReason(f).empty());
+  for (KWalletState k : {KWalletState::kClosed, KWalletState::kDisabled,
+                         KWalletState::kNotRunning}) {
+    f.kwallet_state = k;
+    f.secret_prompter = true;  // a graphical session: still no answer
+    EXPECT(NeedsBasicPasswordStore(f));
+    EXPECT(Contains(BasicPasswordStoreReason(f), "KWallet"));
+  }
+  f.kwallet_state = KWalletState::kClosed;
+  EXPECT(Contains(BasicPasswordStoreReason(f), "wallet is closed"));
+  f.kwallet_state = KWalletState::kNotRunning;
+  EXPECT(Contains(BasicPasswordStoreReason(f), "kwalletd is not running"));
+  EXPECT(std::string(KWalletStateName(KWalletState::kNotRunning)) ==
+         "not-running");
+  EXPECT(KWalletStateName(KWalletState::kNotUsed) == nullptr);
 
   // Whether Chromium's cookie store would use KWallet: its own rule over
   // XDG_CURRENT_DESKTOP (the first desktop it knows), then DESKTOP_SESSION
   // and the older variables.
   {
+    // A variable in the map is set (possibly to ""); one not in it is unset.
     auto picks = [](std::map<std::string, std::string> vars) {
-      return ChromiumPicksKWallet([&vars](const char* name) {
+      return ChromiumPicksKWallet([&vars](const char* name) -> const char* {
         auto it = vars.find(name);
-        return it == vars.end() ? std::string() : it->second;
+        return it == vars.end() ? nullptr : it->second.c_str();
       });
     };
     EXPECT(picks({{"XDG_CURRENT_DESKTOP", "KDE"}}));
@@ -111,13 +135,22 @@ int main() {
     EXPECT(picks({{"DESKTOP_SESSION", "kde-plasma"}}));
     EXPECT(picks({{"DESKTOP_SESSION", "kde4"}}));
     EXPECT(picks({{"DESKTOP_SESSION", "kde"}, {"KDE_SESSION_VERSION", "5"}}));
-    EXPECT(!picks({{"DESKTOP_SESSION", "kde"}}));  // KDE 3: basic
+    // KDE 3 (no KDE_SESSION_VERSION) is KWallet too.
+    EXPECT(picks({{"DESKTOP_SESSION", "kde"}}));
     EXPECT(!picks({{"DESKTOP_SESSION", "gnome"}, {"KDE_FULL_SESSION", "1"}}));
+    // The older variables count when set, even empty (HasVar).
     EXPECT(!picks({{"GNOME_DESKTOP_SESSION_ID", "x"},
                    {"KDE_FULL_SESSION", "true"},
                    {"KDE_SESSION_VERSION", "5"}}));
+    EXPECT(!picks(
+        {{"GNOME_DESKTOP_SESSION_ID", ""}, {"KDE_FULL_SESSION", "true"}}));
     EXPECT(picks({{"KDE_FULL_SESSION", "true"}, {"KDE_SESSION_VERSION", "5"}}));
-    EXPECT(!picks({{"KDE_FULL_SESSION", "true"}}));
+    EXPECT(picks({{"KDE_FULL_SESSION", "true"}}));  // KDE 3
+    EXPECT(picks({{"KDE_FULL_SESSION", ""}}));
+    EXPECT(picks({{"KDE_FULL_SESSION", ""}, {"KDE_SESSION_VERSION", ""}}));
+    EXPECT(!picks({{"KDE_SESSION_VERSION", "5"}}));  // not on its own
+    // An unknown DESKTOP_SESSION falls through to the older variables.
+    EXPECT(picks({{"DESKTOP_SESSION", "default"}, {"KDE_FULL_SESSION", ""}}));
   }
 
   // macOS and Windows: the OS keystore.
@@ -128,14 +161,17 @@ int main() {
   EXPECT(TrayAvailable(mac));
   EXPECT(TrayUnavailableReason(mac).empty());
 
-  // --- The OS key is sticky per profile; basic is never recorded ---------
+  // --- The cookie store: never basic on a profile with OS-key cookies ------
   {
     int probes = 0;
     PlatformFeatures locked = Linux();
     locked.secret_service = SecretServiceState::kLocked;
-    locked.secret_prompter = false;  // headless: basic
+    locked.secret_prompter = false;  // headless: no one to unlock it
     PlatformFeatures activatable = locked;
     activatable.secret_service = SecretServiceState::kActivatable;
+    PlatformFeatures kwallet_closed = Linux();
+    kwallet_closed.kwallet = true;
+    kwallet_closed.kwallet_state = KWalletState::kClosed;
     auto probe_locked = [&] {
       ++probes;
       return locked;
@@ -148,47 +184,92 @@ int main() {
       ++probes;
       return Linux();
     };
-    // A fresh profile: the probe decides. Basic is not recorded (basic ->
-    // os later is lossless: Chromium reads v10 cookies under os); os is.
-    PasswordStoreChoice c = ChoosePasswordStore(nullptr, "", probe_locked);
-    EXPECT(c.store == "basic" && c.append_basic && !c.record);
+    auto probe_kwallet_closed = [&] {
+      ++probes;
+      return kwallet_closed;
+    };
+    const ProfileCookieKeys kNone = ProfileCookieKeys::kNone;
+    const ProfileCookieKeys kOsKey = ProfileCookieKeys::kOsKey;
+    const ProfileCookieKeys kUnknown = ProfileCookieKeys::kUnknown;
+    // No OS-key cookies: the probe decides, nothing is lost either way.
+    // Basic is not recorded (basic -> os later is lossless: Chromium reads
+    // v10 cookies under os); os is.
+    PasswordStoreChoice c =
+        ChoosePasswordStore(nullptr, "", kNone, probe_locked);
+    EXPECT(c.store == "basic" && c.append_basic && !c.record && !c.wait);
     EXPECT(c.source == "probe" && Contains(c.reason, "locked"));
-    EXPECT(!c.os_unavailable);
-    c = ChoosePasswordStore(nullptr, "", probe_unlocked);
-    EXPECT(c.store == "os" && !c.append_basic && c.record);
-    EXPECT(c.source == "probe" && !c.os_unavailable);
+    EXPECT(Contains(PasswordStoreWarning(c, kNone, ""),
+                    "--password-store=basic (not encrypted"));
+    c = ChoosePasswordStore(nullptr, "", kNone, probe_unlocked);
+    EXPECT(c.store == "os" && !c.append_basic && c.record && !c.wait);
+    EXPECT(c.source == "probe" && c.reason.empty());
+    EXPECT(PasswordStoreWarning(c, kNone, "").empty());
     EXPECT(probes == 2);
-    // An "os" profile in a session that can reach the key: os, nothing
-    // rewritten.
-    c = ChoosePasswordStore(nullptr, "os", probe_unlocked);
-    EXPECT(c.store == "os" && !c.append_basic && !c.record);
-    EXPECT(c.source == "profile" && !c.os_unavailable);
-    // An "os" profile whose keyring is locked, or not running, with no one
-    // to answer: basic for this launch only, the marker unchanged, and the
-    // warning (os_unavailable) with the reason.
-    c = ChoosePasswordStore(nullptr, "os", probe_locked);
-    EXPECT(c.store == "basic" && c.append_basic && !c.record);
-    EXPECT(c.source == "profile" && c.os_unavailable);
-    EXPECT(Contains(c.reason, "locked"));
-    c = ChoosePasswordStore(nullptr, "os", probe_activatable);
-    EXPECT(c.store == "basic" && c.append_basic && !c.record);
-    EXPECT(c.os_unavailable && Contains(c.reason, "not running"));
-    EXPECT(probes == 5);
+    // An "os" profile whose key is reachable: os, nothing rewritten.
+    c = ChoosePasswordStore(nullptr, "os", kOsKey, probe_unlocked);
+    EXPECT(c.store == "os" && !c.append_basic && !c.record && !c.wait);
+    EXPECT(c.source == "profile");
+    EXPECT(PasswordStoreWarning(c, kOsKey, "").empty());
+    // OS-key cookies (v11 rows) and no one to unlock the key: never basic.
+    // The OS store is kept and the launch waits for the key, with the
+    // reason and one warning. Locked, activatable, a closed KWallet; with
+    // the marker or without it (the database decides).
+    std::vector<std::function<PlatformFeatures()>> unreachable = {
+        probe_locked, probe_activatable, probe_kwallet_closed};
+    for (const auto& probe : unreachable) {
+      for (const char* marker : {"os", ""}) {
+        c = ChoosePasswordStore(nullptr, marker, kOsKey, probe);
+        EXPECT(c.store == "os" && !c.append_basic && c.wait);
+        EXPECT(c.source == "cookies" && !c.reason.empty());
+        EXPECT(c.record == (std::string(marker) != "os"));
+        std::string w = PasswordStoreWarning(c, kOsKey, "");
+        EXPECT(Contains(w, "holds cookies encrypted with the OS key"));
+        EXPECT(Contains(w, "waits until it is unlocked"));
+        EXPECT(Contains(w, "would delete those cookies"));
+        EXPECT(Contains(w, c.reason));
+      }
+    }
+    // A cookie database that can't be read counts as holding them.
+    c = ChoosePasswordStore(nullptr, "", kUnknown, probe_locked);
+    EXPECT(c.store == "os" && !c.append_basic && c.wait);
+    EXPECT(Contains(PasswordStoreWarning(c, kUnknown, "file is not a database"),
+                    "can't be read (file is not a database)"));
+    // The marker alone never forces the wait: an "os" profile with no
+    // OS-key cookies takes basic when the key can't be reached.
+    c = ChoosePasswordStore(nullptr, "os", kNone, probe_activatable);
+    EXPECT(c.store == "basic" && c.append_basic && !c.wait && !c.record);
+    EXPECT(Contains(c.reason, "not running"));
+    // A closed KWallet on a profile without OS-key cookies: basic.
+    c = ChoosePasswordStore(nullptr, "", kNone, probe_kwallet_closed);
+    EXPECT(c.store == "basic" && c.append_basic && !c.wait);
+    EXPECT(Contains(c.reason, "KWallet"));
     // An explicit --password-store wins and is not appended again (Chromium
     // reads it). An OS store is recorded when the profile lacks it; basic
     // never is, and leaves an "os" marker alone. The probe doesn't run.
+    probes = 0;
     std::string explicit_store = "gnome-libsecret";
-    c = ChoosePasswordStore(&explicit_store, "", probe_locked);
-    EXPECT(c.store == "os" && !c.append_basic && c.record);
-    EXPECT(c.source == "explicit");
-    c = ChoosePasswordStore(&explicit_store, "os", probe_locked);
+    c = ChoosePasswordStore(&explicit_store, "", kOsKey, probe_locked);
+    EXPECT(c.store == "os" && !c.append_basic && c.record && !c.wait);
+    EXPECT(c.source == "explicit" && !c.explicit_basic_deletes);
+    c = ChoosePasswordStore(&explicit_store, "os", kNone, probe_locked);
     EXPECT(c.store == "os" && !c.record);
     explicit_store = "basic";
-    c = ChoosePasswordStore(&explicit_store, "os", probe_unlocked);
+    c = ChoosePasswordStore(&explicit_store, "os", kNone, probe_unlocked);
     EXPECT(c.store == "basic" && !c.append_basic && !c.record);
-    c = ChoosePasswordStore(&explicit_store, "", probe_unlocked);
-    EXPECT(c.store == "basic" && !c.record);
-    EXPECT(probes == 5);
+    EXPECT(!c.explicit_basic_deletes);
+    EXPECT(PasswordStoreWarning(c, kNone, "").empty());
+    // Basic asked for on a profile with OS-key cookies: honoured, with the
+    // warning that they will be deleted.
+    for (ProfileCookieKeys keys : {kOsKey, kUnknown}) {
+      c = ChoosePasswordStore(&explicit_store, "os", keys, probe_unlocked);
+      EXPECT(c.store == "basic" && !c.append_basic && !c.wait);
+      EXPECT(c.explicit_basic_deletes);
+      std::string w = PasswordStoreWarning(c, keys, "locked");
+      EXPECT(Contains(w, "--password-store=basic was given"));
+      EXPECT(Contains(w, "deletes them"));
+    }
+    EXPECT(probes == 0);
+    EXPECT(std::string(ProfileCookieKeysName(kOsKey)) == "os-key");
 
     // The marker file round trip: only "os" is written, atomically.
     std::filesystem::path dir =
@@ -225,6 +306,29 @@ int main() {
       std::fclose(file);
       EXPECT(ReadPasswordStoreMarker(dir.string()).empty());
     }
+#ifndef _WIN32
+    // Temporary files a crashed write left: those older than this launch
+    // go; a newer one (another instance writing now) and the marker stay.
+    {
+      std::string marker = (dir / kPasswordStoreMarkerName).string();
+      std::string stale = marker + ".tmp4242";
+      std::string fresh = marker + ".tmp4343";
+      for (const std::string& p : {stale, fresh}) {
+        FILE* file = std::fopen(p.c_str(), "wb");
+        EXPECT(file);
+        std::fclose(file);
+      }
+      auto now = std::filesystem::last_write_time(fresh);
+      std::filesystem::last_write_time(stale, now - std::chrono::hours(1));
+      int64_t launched_at = static_cast<int64_t>(std::time(nullptr)) - 60;
+      RemoveStalePasswordStoreTemps(dir.string(), launched_at);
+      EXPECT(!std::filesystem::exists(stale));
+      EXPECT(std::filesystem::exists(fresh));
+      EXPECT(std::filesystem::exists(marker));
+      RemoveStalePasswordStoreTemps("", launched_at);  // a profile in memory
+      std::filesystem::remove(fresh);
+    }
+#endif
     std::filesystem::remove_all(dir);
   }
 
@@ -282,9 +386,19 @@ int main() {
          "\"desktopHint\":\"KDE\",\"sessionBus\":true,\"trayHost\":true,"
          "\"trayReason\":null,\"trayClicks\":false,\"trayTooltip\":true,"
          "\"secretService\":\"available\",\"secretServicePrompt\":true,"
+         "\"kwallet\":null,"
          "\"notificationServer\":\"Plasma\",\"notificationReason\":null,"
          "\"portalVersions\":{\"Notification\":2,\"Settings\":2},"
-         "\"cookieEncryption\":\"os\"}");
+         "\"cookieEncryption\":\"os\",\"cookieEncryptionWait\":null}");
+  {
+    PlatformFeatures k = f;
+    k.kwallet = true;
+    k.kwallet_state = KWalletState::kClosed;
+    k.cookie_encryption_wait = "the wallet is closed";
+    std::string kj = PlatformFeaturesToJson(k);
+    EXPECT(Contains(kj, "\"kwallet\":\"closed\""));
+    EXPECT(Contains(kj, "\"cookieEncryptionWait\":\"the wallet is closed\""));
+  }
 
   // No notification server (Sway with no daemon): the Notification portal
   // is no proof; the reason says what is missing.
@@ -329,7 +443,17 @@ int main() {
   SetCookieEncryption(nullptr);
   abi = PlatformFeaturesJsonForAbi();
   EXPECT(abi && Contains(abi, "\"cookieEncryption\":null"));
+  EXPECT(abi && Contains(abi, "\"cookieEncryptionWait\":null"));
   std::free(abi);
+  // A launch that waits for the OS key says why.
+  SetCookieEncryption("os", "the keyring is locked");
+  abi = PlatformFeaturesJsonForAbi();
+  EXPECT(abi && Contains(abi,
+                         "\"cookieEncryption\":\"os\","
+                         "\"cookieEncryptionWait\":\"the keyring is "
+                         "locked\""));
+  std::free(abi);
+  SetCookieEncryption(nullptr);
 
   std::printf("laufey_platform_features_test: OK\n");
   return 0;

@@ -14,8 +14,9 @@
 //     no unlock, no prompt), and whether anyone could answer an unlock
 //     prompt (a graphical session, and gnome-keyring's prompter where
 //     gnome-keyring is the provider); and whether Chromium would use
-//     KWallet instead (a KDE desktop by Chromium's own rule, or
-//     org.kde.kwalletd5 / 6 running now);
+//     KWallet instead (a KDE desktop by Chromium's own rule), and then
+//     whether its wallet is open (kwalletd's isEnabled / localWallet /
+//     isOpen: only an open wallet answers Chromium);
 //   - the session type: XDG_SESSION_TYPE as set, never guessed from the
 //     display variables (Xvfb, cron and systemd services that run
 //     `xvfb-run` have a $DISPLAY and no one in front of it). A session is
@@ -28,7 +29,8 @@
 //   - the xdg-desktop-portal interface versions.
 //
 // Every D-Bus call is synchronous with a short timeout. The probe never
-// starts the Secret Service (NO_AUTO_START) and never asks it to unlock.
+// starts the Secret Service or kwalletd (NO_AUTO_START) and never asks
+// either to unlock.
 
 #include <gio/gio.h>
 #include <sys/stat.h>
@@ -58,8 +60,14 @@ constexpr char kWatcherName[] = "org.kde.StatusNotifierWatcher";
 constexpr char kSecretsName[] = "org.freedesktop.secrets";
 constexpr char kGnomeKeyringName[] = "org.gnome.keyring";
 constexpr char kGcrPrompterName[] = "org.gnome.keyring.SystemPrompter";
-constexpr const char* kKWalletNames[] = {"org.kde.kwalletd5",
-                                         "org.kde.kwalletd6"};
+// kwalletd's names and object paths, newest first (Plasma 6 runs
+// kwalletd6, Plasma 5 kwalletd5, KDE 4 kwalletd).
+constexpr const char* kKWalletServices[][2] = {
+    {"org.kde.kwalletd6", "/modules/kwalletd6"},
+    {"org.kde.kwalletd5", "/modules/kwalletd5"},
+    {"org.kde.kwalletd", "/modules/kwalletd"},
+};
+constexpr char kKWalletInterface[] = "org.kde.KWallet";
 constexpr char kNotificationsName[] = "org.freedesktop.Notifications";
 constexpr char kPortalName[] = "org.freedesktop.portal.Desktop";
 constexpr char kPortalPath[] = "/org/freedesktop/portal/desktop";
@@ -320,6 +328,56 @@ bool GraphicalSession(const std::string& session) {
   return LogindSessionGraphical() != 0;
 }
 
+// A method of kwalletd's org.kde.KWallet returning one value of `type`,
+// never starting it. Null when it fails.
+GVariant* KWalletCall(GDBusConnection* bus, const char* name, const char* path,
+                      const char* method, GVariant* args, const char* type) {
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, name, path, kKWalletInterface, method, args, G_VARIANT_TYPE(type),
+      G_DBUS_CALL_FLAGS_NO_AUTO_START, kCallTimeoutMs, nullptr, nullptr);
+  return r;
+}
+
+// KWallet's state, from the first kwalletd that runs: enabled, and whether
+// its local wallet (the one Chromium uses) is open. Reads only: nothing is
+// opened, nothing prompts.
+KWalletState ProbeKWallet(GDBusConnection* bus,
+                          const std::set<std::string>& owned) {
+  for (const auto& service : kKWalletServices) {
+    const char* name = service[0];
+    const char* path = service[1];
+    if (!owned.count(name))
+      continue;
+    GVariant* r = KWalletCall(bus, name, path, "isEnabled", nullptr, "(b)");
+    gboolean enabled = FALSE;
+    if (r) {
+      g_variant_get(r, "(b)", &enabled);
+      g_variant_unref(r);
+    }
+    if (!enabled)
+      return KWalletState::kDisabled;
+    std::string wallet;
+    r = KWalletCall(bus, name, path, "localWallet", nullptr, "(s)");
+    if (r) {
+      const gchar* w = nullptr;
+      g_variant_get(r, "(&s)", &w);
+      wallet = w ? w : "";
+      g_variant_unref(r);
+    }
+    gboolean open = FALSE;
+    if (!wallet.empty()) {
+      r = KWalletCall(bus, name, path, "isOpen",
+                      g_variant_new("(s)", wallet.c_str()), "(b)");
+      if (r) {
+        g_variant_get(r, "(b)", &open);
+        g_variant_unref(r);
+      }
+    }
+    return open ? KWalletState::kOpen : KWalletState::kClosed;
+  }
+  return KWalletState::kNotRunning;
+}
+
 // The default collection's Locked property. -1 when it can't be read (no
 // default collection: creating one is a prompt too).
 int DefaultCollectionLocked(GDBusConnection* bus) {
@@ -364,13 +422,13 @@ void ProbeSecretServiceOn(GDBusConnection* bus, const std::string& session,
   } else {
     out->secret_service = SecretServiceState::kAbsent;
   }
-  // KWallet only where Chromium would pick it: a KDE desktop (Chromium's
-  // own rule), or kwalletd running now. One that is merely activatable on
-  // GNOME (KDE apps installed) is not Chromium's store there.
-  out->kwallet =
-      ChromiumPicksKWallet([](const char* name) { return Env(name); });
-  for (const char* name : kKWalletNames)
-    out->kwallet = out->kwallet || owned.count(name) > 0;
+  // KWallet only where Chromium would pick it: a KDE desktop by Chromium's
+  // own rule (GetDesktopEnvironment). On any other desktop it uses the
+  // Secret Service, with kwalletd running or not.
+  out->kwallet = ChromiumPicksKWallet(
+      [](const char* name) -> const char* { return std::getenv(name); });
+  out->kwallet_state =
+      out->kwallet ? ProbeKWallet(bus, owned) : KWalletState::kNotUsed;
   // gnome-keyring asks through gcr's prompter (gnome-shell's own, or
   // gcr-prompter); KWallet's provider prompts by itself.
   bool needs_gcr = known(kGnomeKeyringName);
@@ -550,6 +608,7 @@ void ProbeSecretService(PlatformFeatures* out) {
   out->secret_service = s.base.secret_service;
   out->secret_prompter = s.base.secret_prompter;
   out->kwallet = s.base.kwallet;
+  out->kwallet_state = s.base.kwallet_state;
 }
 
 void ProbeTray(PlatformFeatures* out) {

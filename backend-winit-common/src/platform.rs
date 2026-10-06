@@ -6,7 +6,8 @@
 //! Linux it reads the session bus (zbus) and, for the XEmbed tray, the X
 //! server (x11rb); nothing branches on `XDG_CURRENT_DESKTOP`, which is only
 //! a hint for a reason's wording. Winit has no web engine, so
-//! `cookieEncryption` is always `null`.
+//! `cookieEncryption` and `cookieEncryptionWait` are always `null`, and
+//! `kwallet` (which only Chromium's cookie store would use) too.
 //!
 //! The tray host is read live on every call (Winit runs no GLib loop to
 //! follow NameOwnerChanged with), so a watcher that starts late counts on the
@@ -139,8 +140,9 @@ impl PlatformFeatures {
       "{{\"os\":{},\"sessionType\":{},\"desktopHint\":{},\"sessionBus\":{},\
        \"trayHost\":{},\"trayReason\":{},\"trayClicks\":{clicks},\
        \"trayTooltip\":true,\"secretService\":{},\"secretServicePrompt\":{},\
-       \"notificationServer\":{},\"notificationReason\":{},\
-       \"portalVersions\":{{{portals}}},\"cookieEncryption\":null}}",
+       \"kwallet\":null,\"notificationServer\":{},\"notificationReason\":{},\
+       \"portalVersions\":{{{portals}}},\"cookieEncryption\":null,\
+       \"cookieEncryptionWait\":null}}",
       quote(self.os),
       opt(&self.session_type),
       opt(&self.desktop_hint),
@@ -589,16 +591,46 @@ mod linux {
   }
 
   /// One session-bus connection for every permission query, made on the
-  /// first (and again after a failed attempt). Its method timeout is 5 s: a
-  /// daemon may take a few seconds to start.
+  /// first, and again after a failed attempt or once the cached one died
+  /// (the bus went away: it no longer answers a Ping). Its method timeout
+  /// is 5 s: a daemon may take a few seconds to start. The lock is never
+  /// held across the connect or the Ping, so a slow bus holds up only the
+  /// query that waits for it.
   fn notification_connection() -> Option<Connection> {
     static CONN: std::sync::Mutex<Option<Connection>> =
       std::sync::Mutex::new(None);
-    let mut conn = CONN.lock().unwrap();
-    if conn.is_none() {
-      *conn = connect(Duration::from_secs(5));
+    let cached = CONN.lock().unwrap().clone();
+    if let Some(conn) = cached {
+      if alive(&conn) {
+        return Some(conn);
+      }
+      // Dead: drop it, unless another query already replaced it.
+      let mut slot = CONN.lock().unwrap();
+      if slot
+        .as_ref()
+        .is_some_and(|c| c.unique_name() == conn.unique_name())
+      {
+        *slot = None;
+      }
     }
-    conn.clone()
+    let fresh = connect(Duration::from_secs(5))?;
+    let mut slot = CONN.lock().unwrap();
+    // A query that connected meanwhile keeps its connection.
+    Some(slot.get_or_insert(fresh).clone())
+  }
+
+  /// The bus still answers on `conn` (org.freedesktop.DBus.Peer.Ping to the
+  /// bus itself; a closed connection fails at once).
+  fn alive(conn: &Connection) -> bool {
+    conn
+      .call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus.Peer"),
+        "Ping",
+        &(),
+      )
+      .is_ok()
   }
 
   /// Follow the StatusNotifierWatcher's owner on a thread of its own (Winit
@@ -884,9 +916,10 @@ mod tests {
        \"sessionBus\":true,\"trayHost\":true,\"trayReason\":null,\
        \"trayClicks\":false,\"trayTooltip\":true,\
        \"secretService\":\"available\",\"secretServicePrompt\":true,\
+       \"kwallet\":null,\
        \"notificationServer\":\"mako\",\"notificationReason\":null,\
        \"portalVersions\":{\"FileChooser\":4,\"Settings\":2},\
-       \"cookieEncryption\":null}"
+       \"cookieEncryption\":null,\"cookieEncryptionWait\":null}"
     );
     let mac = PlatformFeatures {
       os: "macos",
