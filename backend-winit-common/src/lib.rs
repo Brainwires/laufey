@@ -2246,6 +2246,10 @@ pub fn poll_menu_events() {
   while let Ok(event) = MenuEvent::receiver().try_recv() {
     dispatch_menu_click_by_id(&event.id().0);
   }
+  // Linux: a tray menu's events, from the GTK thread (tray.rs).
+  for event in tray::take_forwarded_menu_events() {
+    dispatch_menu_click_by_id(&event.id().0);
+  }
 }
 
 /// Invoke the registered `on_click` handler for `item_id` (app menu, tray menu,
@@ -3669,6 +3673,18 @@ macro_rules! define_common_backend_fns {
     unsafe extern "C" fn backend_create_tray_icon(
       _data: *mut ::std::ffi::c_void,
     ) -> u32 {
+      // A tray menu's click wakes the loop (Linux: it arrives on the GTK
+      // thread).
+      fn wake_for_tray() {
+        if let Some(state) = <$B as $crate::BackendAccess>::get() {
+          let _ = state.proxy().send_event(
+            <$B as $crate::BackendAccess>::common_event(
+              $crate::CommonEvent::TrayTask,
+            ),
+          );
+        }
+      }
+      $crate::tray::set_waker(wake_for_tray);
       // No tray host (stock GNOME): an icon no one could see. Refuse it;
       // platform_features reports why.
       if let Some(reason) = $crate::platform::tray_unavailable_reason() {

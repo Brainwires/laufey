@@ -35,8 +35,10 @@ struct TrayEntry {
   dark_png: Option<Vec<u8>>,
 }
 
-// SAFETY: `tray_icon::TrayIcon` is only touched on the main thread, which
-// we guarantee by dispatching all tray ops through `CommonEvent::TrayTask`.
+// SAFETY: `tray_icon::TrayIcon` is only touched on one thread: the main
+// thread, which we guarantee by dispatching all tray ops through
+// `CommonEvent::TrayTask`, and on Linux the GTK thread those ops are handed
+// to (`drain_and_apply`). Other threads read only the plain fields.
 unsafe impl Send for TrayEntry {}
 
 static TRAYS: Mutex<Option<HashMap<u32, TrayEntry>>> = Mutex::new(None);
@@ -148,15 +150,89 @@ pub fn queue_op(op: TrayOp) {
   TRAY_QUEUE.lock().unwrap().push(op);
 }
 
-/// Drain queued ops and apply them on the main thread.
+/// Wakes the backend's event loop; set by the backend
+/// (`define_common_backend_fns`). On Linux a tray menu's click arrives on
+/// the GTK thread, while the loop that dispatches it may be asleep.
+static WAKER: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Set the function that wakes the backend's event loop (first call wins).
+pub fn set_waker(wake: fn()) {
+  let _ = WAKER.set(wake);
+}
+
+/// Drain queued ops and apply them: on the main thread, and on Linux on the
+/// GTK thread. There libappindicator and the menus muda builds for it are
+/// GTK objects, which need GTK initialized on the thread that uses them and
+/// a GLib loop on it to register with the tray host and serve the menus;
+/// the winit loop runs neither.
 pub fn drain_and_apply() {
   let ops: Vec<TrayOp> = {
     let mut q = TRAY_QUEUE.lock().unwrap();
     std::mem::take(&mut *q)
   };
+  if ops.is_empty() {
+    return;
+  }
+  #[cfg(target_os = "linux")]
+  {
+    forward_menu_events();
+    crate::prompt::gtk_thread::spawn(move |gtk_ok| {
+      if !gtk_ok {
+        log_no_gtk();
+        return;
+      }
+      for op in ops {
+        apply(op);
+      }
+    });
+  }
+  #[cfg(not(target_os = "linux"))]
   for op in ops {
     apply(op);
   }
+}
+
+/// Say once on stderr that the tray can't be shown: GTK didn't start.
+#[cfg(target_os = "linux")]
+fn log_no_gtk() {
+  static ONCE: std::sync::Once = std::sync::Once::new();
+  ONCE.call_once(|| {
+    eprintln!("laufey: tray icon not shown: GTK could not start (no display)")
+  });
+}
+
+/// The menu events muda delivered on the GTK thread, for
+/// `crate::poll_menu_events` to dispatch on the main thread.
+#[cfg(target_os = "linux")]
+static FORWARDED_MENU_EVENTS: Mutex<Vec<tray_icon::menu::MenuEvent>> =
+  Mutex::new(Vec::new());
+
+/// Route muda's menu events through [`FORWARDED_MENU_EVENTS`] and wake the
+/// event loop for each (once per process): the loop polls them only when it
+/// wakes.
+#[cfg(target_os = "linux")]
+fn forward_menu_events() {
+  static ONCE: std::sync::Once = std::sync::Once::new();
+  ONCE.call_once(|| {
+    tray_icon::menu::MenuEvent::set_event_handler(Some(
+      |event: tray_icon::menu::MenuEvent| {
+        FORWARDED_MENU_EVENTS.lock().unwrap().push(event);
+        if let Some(wake) = WAKER.get() {
+          wake();
+        }
+      },
+    ));
+  });
+}
+
+/// Take the menu events forwarded from the GTK thread (none elsewhere).
+pub fn take_forwarded_menu_events() -> Vec<tray_icon::menu::MenuEvent> {
+  #[cfg(target_os = "linux")]
+  {
+    std::mem::take(&mut *FORWARDED_MENU_EVENTS.lock().unwrap())
+  }
+  #[cfg(not(target_os = "linux"))]
+  Vec::new()
 }
 
 fn apply(op: TrayOp) {
