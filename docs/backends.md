@@ -300,11 +300,12 @@ failed. Nothing an app relies on runs in that code: the profile is on disk after
 `scripts/exit-e2e-run.sh` checks each path (see
 [e2e-testing.md](e2e-testing.md)).
 
-Known gap: the WebKitGTK backend (Linux) can lose a `localStorage` write made
-just before any of these ends (cookies survive): WebKitGTK writes it from its
-network process a moment after the page, and the web view is torn down before
-then. `exit-e2e-run.sh` reports it as known on that backend; pause briefly after
-a last write you need kept.
+Known gap: the WebKit backends (WebKitGTK on Linux, WKWebView on macOS) can lose
+a `localStorage` write made just before any of these ends (cookies survive; on
+CI 1 of 9 ends on macOS, 2 of 5 on Linux): WebKit writes it from another process
+a moment after the page, and the web view is torn down before then.
+`exit-e2e-run.sh` reports it as known there; pause briefly after a last write
+that must be kept.
 
 ## Exit and shutdown (Linux)
 
