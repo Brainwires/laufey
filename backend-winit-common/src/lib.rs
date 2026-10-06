@@ -878,6 +878,37 @@ pub struct LaufeyBackendApi {
       *mut c_void,
     ),
   >,
+  // --- Secure store (API >= 47) ---
+  pub secret_lookup: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      *const c_char,
+      *const c_char,
+      u32,
+      *mut *mut c_char,
+      *mut *mut c_char,
+    ) -> c_int,
+  >,
+  pub secret_store: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      *const c_char,
+      *const c_char,
+      *const c_char,
+      *const c_char,
+      u32,
+      *mut *mut c_char,
+    ) -> c_int,
+  >,
+  pub secret_delete: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      *const c_char,
+      *const c_char,
+      u32,
+      *mut *mut c_char,
+    ) -> c_int,
+  >,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1772,6 +1803,10 @@ pub fn create_api_base() -> LaufeyBackendApi {
     // and Windows (title_bar.rs).
     title_bar_preferences: None,
     set_title_bar_preferences_changed_handler: None,
+    // API 47: no secure store on Winit.
+    secret_lookup: None,
+    secret_store: None,
+    secret_delete: None,
   }
 }
 

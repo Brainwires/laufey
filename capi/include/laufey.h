@@ -461,6 +461,12 @@ typedef void (*laufey_platform_features_changed_fn)(void* user_data);
 // for the new answer.
 typedef void (*laufey_title_bar_preferences_changed_fn)(void* user_data);
 
+// Statuses of secret_lookup / secret_store / secret_delete (API 47).
+#define LAUFEY_SECRET_OK 0
+#define LAUFEY_SECRET_NOT_FOUND 1
+#define LAUFEY_SECRET_UNAVAILABLE 2
+#define LAUFEY_SECRET_FAILED 3
+
 typedef struct laufey_backend_api laufey_backend_api_t;
 
 typedef int (*laufey_runtime_init_fn)(const laufey_backend_api_t* api);
@@ -2164,6 +2170,39 @@ struct laufey_backend_api {
   void (*set_title_bar_preferences_changed_handler)(
       void* backend_data, laufey_title_bar_preferences_changed_fn handler,
       void* user_data);
+
+  // --- Secure store (API >= 47) --------------------------------------------
+  //
+  // A small secret per (service, account) in the OS's secret store: on Linux
+  // the Secret Service (gnome-keyring, KWallet's Secret Service, KeePassXC)
+  // through libsecret. Items carry the attributes `service` and `account`
+  // (as `secret-tool store … service S account A` writes them, so either
+  // reads the other's); a store replaces what is there. Each call BLOCKS the
+  // calling thread for at most about `timeout_ms` (0: 20 s) and must not be
+  // made on the UI thread. Returns a LAUFEY_SECRET_* status:
+  //   OK           lookup: `*value` is the secret; store / delete: done
+  //                (deleting nothing is OK)
+  //   NOT_FOUND    lookup: no such item (nothing locked matched either)
+  //   UNAVAILABLE  the store can't answer: no session bus, no provider
+  //                ("install gnome-keyring", "enable KWallet's Secret
+  //                Service"), libsecret missing, or a locked keyring whose
+  //                unlock prompt no one can answer here (refused at once) or
+  //                no one answered within `timeout_ms`. Never a plaintext
+  //                fallback, and a locked item is never "not found".
+  //   FAILED       bad arguments (empty or non-UTF-8 strings)
+  // `*value` and `*reason` (why, for UNAVAILABLE / FAILED; may be NULL) are
+  // freed with string_free; either out pointer may be NULL. Strings are
+  // UTF-8; the value is text. Linux CEF and WebView backends; NULL elsewhere
+  // (macOS and Windows keep their own keychain / credential APIs) and on
+  // backends older than API version 47. See docs/secure-store.md.
+  int (*secret_lookup)(void* backend_data, const char* service,
+                       const char* account, uint32_t timeout_ms, char** value,
+                       char** reason);
+  int (*secret_store)(void* backend_data, const char* service,
+                      const char* account, const char* label, const char* value,
+                      uint32_t timeout_ms, char** reason);
+  int (*secret_delete)(void* backend_data, const char* service,
+                       const char* account, uint32_t timeout_ms, char** reason);
 };
 
 #ifdef __cplusplus

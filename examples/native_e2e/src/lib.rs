@@ -40,6 +40,7 @@ mod network_quiet_checks;
 mod os_view;
 mod platform_checks;
 mod sandbox_checks;
+mod secret_checks;
 mod stream_checks;
 mod system_checks;
 mod title_bar_checks;
@@ -821,6 +822,11 @@ fn e2e_main() {
       // Which file chooser Linux dialogs use (API 47).
       Ok("file-chooser") => {
         file_chooser_checks::run().await;
+        finish();
+      }
+      // The secure store (API 47).
+      Ok("secret-store") => {
+        secret_checks::run().await;
         finish();
       }
       // Title bar preferences (API 47).

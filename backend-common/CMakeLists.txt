@@ -101,6 +101,7 @@ elseif(UNIX)
     src/platform_features_linux.cc
     src/cookie_db_linux.cc
     src/title_bar_linux.cc
+    src/secret_store_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -408,6 +409,21 @@ if(LAUFEY_BUILD_TESTS)
     add_test(NAME laufey_file_chooser_dbus_test
              COMMAND laufey_file_chooser_dbus_test)
     set_tests_properties(laufey_file_chooser_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # The secure store: no provider, KWallet without the Secret Service, a
+    # provider that never answers, a locked keyring (refused, never "not
+    # found"), and a real gnome-keyring-daemon round trip on a private bus
+    # (GTestDBus; skipped without dbus-daemon / libsecret).
+    add_executable(laufey_secret_store_dbus_test
+                   tests/secret_store_dbus_test.cc)
+    target_link_libraries(laufey_secret_store_dbus_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_secret_store_dbus_test
+             COMMAND laufey_secret_store_dbus_test)
+    set_tests_properties(laufey_secret_store_dbus_test PROPERTIES
                          SKIP_RETURN_CODE 77)
 
     # The Linux platform-features probe against mock services (a tray

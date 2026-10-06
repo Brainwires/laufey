@@ -48,6 +48,9 @@ pub use platform::*;
 mod title_bar;
 pub use title_bar::*;
 
+mod secret;
+pub use secret::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
