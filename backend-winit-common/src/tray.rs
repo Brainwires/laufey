@@ -35,10 +35,14 @@ struct TrayEntry {
   dark_png: Option<Vec<u8>>,
 }
 
-// SAFETY: `tray_icon::TrayIcon` is only touched on one thread: the main
-// thread, which we guarantee by dispatching all tray ops through
-// `CommonEvent::TrayTask`, and on Linux the GTK thread those ops are handed
-// to (`drain_and_apply`). Other threads read only the plain fields.
+// SAFETY: `tray_icon::TrayIcon` is only touched on one thread. On macOS and
+// Windows that is the main thread: every tray op is applied there
+// (`CommonEvent::TrayTask` -> `drain_and_apply`), and so are the rect refresh
+// and the theme re-apply in `poll_tray_events`. On Linux it is the GTK
+// thread, where `drain_and_apply` hands every op; the main thread never
+// touches an icon there (the rect refresh is compiled out, and the theme
+// re-apply never fires: `is_dark_mode` is constant). Other threads read only
+// the plain fields, under `TRAYS`' lock.
 unsafe impl Send for TrayEntry {}
 
 static TRAYS: Mutex<Option<HashMap<u32, TrayEntry>>> = Mutex::new(None);
@@ -48,8 +52,9 @@ type TrayRect = (i32, i32, i32, i32);
 /// Tray icon bounds in logical, top-left screen coordinates (the same space
 /// the winit backend uses for window positions), keyed by tray id. Refreshed
 /// on the main thread by [`poll_tray_events`]; read from any thread by the
-/// `get_tray_icon_bounds` trampoline. Empty on platforms where `tray-icon`
-/// can't report geometry (Linux).
+/// `get_tray_icon_bounds` trampoline. Always empty on Linux, where
+/// `tray-icon` can't report geometry (`rect()` is always `None`).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 static TRAY_RECTS: Mutex<Option<HashMap<u32, TrayRect>>> = Mutex::new(None);
 
 fn trays() -> std::sync::MutexGuard<'static, Option<HashMap<u32, TrayEntry>>> {
@@ -73,7 +78,9 @@ pub fn tray_bounds(tray_id: u32) -> Option<(i32, i32, i32, i32)> {
 /// Refresh [`TRAY_RECTS`] from each tray's current screen rect. `tray-icon`
 /// reports a top-left-origin rect in physical pixels; we divide by the
 /// primary monitor's `scale_factor` to land in the logical space used for
-/// window positions. Must run on the main thread.
+/// window positions. Must run on the main thread. Not on Linux: there the
+/// icons belong to the GTK thread, and `rect()` is always `None` anyway.
+#[cfg(not(target_os = "linux"))]
 fn refresh_tray_rects(scale_factor: f64) {
   let s = if scale_factor > 0.0 {
     scale_factor
@@ -150,14 +157,21 @@ pub fn queue_op(op: TrayOp) {
   TRAY_QUEUE.lock().unwrap().push(op);
 }
 
-/// Wakes the backend's event loop; set by the backend
-/// (`define_common_backend_fns`). On Linux a tray menu's click arrives on
-/// the GTK thread, while the loop that dispatches it may be asleep.
+/// Wakes the backend's event loop; set at backend init ([`init`]). On Linux
+/// a tray menu's click arrives on the GTK thread, while the loop that
+/// dispatches it may be asleep.
 static WAKER: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
-/// Set the function that wakes the backend's event loop (first call wins).
-pub fn set_waker(wake: fn()) {
+/// Install the tray's event routing at backend init (`fill_common_api`),
+/// before any menu exists: the function that wakes the backend's event loop
+/// (first call wins) and, on Linux, muda's menu event handler. muda (0.17)
+/// keeps that handler in a `OnceCell` that its first menu event fills with
+/// "no handler" when none is set yet, after which setting one silently does
+/// nothing, so it cannot be installed lazily.
+pub fn init(wake: fn()) {
   let _ = WAKER.set(wake);
+  #[cfg(target_os = "linux")]
+  forward_menu_events();
 }
 
 /// Drain queued ops and apply them: on the main thread, and on Linux on the
@@ -175,7 +189,6 @@ pub fn drain_and_apply() {
   }
   #[cfg(target_os = "linux")]
   {
-    forward_menu_events();
     crate::prompt::gtk_thread::spawn(move |gtk_ok| {
       if !gtk_ok {
         log_no_gtk();
@@ -208,8 +221,8 @@ static FORWARDED_MENU_EVENTS: Mutex<Vec<tray_icon::menu::MenuEvent>> =
   Mutex::new(Vec::new());
 
 /// Route muda's menu events through [`FORWARDED_MENU_EVENTS`] and wake the
-/// event loop for each (once per process): the loop polls them only when it
-/// wakes.
+/// event loop for each (once per process, from [`init`]): the loop polls
+/// them only when it wakes.
 #[cfg(target_os = "linux")]
 fn forward_menu_events() {
   static ONCE: std::sync::Once = std::sync::Once::new();
@@ -561,7 +574,10 @@ fn is_dark_mode() -> bool {
 pub fn poll_tray_events(scale_factor: f64) {
   // Keep cached tray bounds current so get_tray_icon_bounds can be answered
   // synchronously from the Deno runtime thread.
+  #[cfg(not(target_os = "linux"))]
   refresh_tray_rects(scale_factor);
+  #[cfg(target_os = "linux")]
+  let _ = scale_factor;
 
   // Detect theme changes between ticks and re-apply every tray's icon.
   // `is_dark_mode` is a cheap call (KVO lookup on macOS, single registry

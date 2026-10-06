@@ -349,7 +349,7 @@ mod linux {
 pub(crate) mod gtk_thread {
   use std::panic::{catch_unwind, AssertUnwindSafe};
   use std::sync::mpsc;
-  use std::sync::Mutex;
+  use std::sync::{Condvar, Mutex};
 
   type Job = Box<dyn FnOnce(bool) + Send>;
 
@@ -392,8 +392,20 @@ pub(crate) mod gtk_thread {
   #[cfg(not(target_os = "linux"))]
   fn iterate() {}
 
+  /// Whether GTK started on the GTK thread, once the thread has tried.
+  fn started() -> &'static (Mutex<Option<bool>>, Condvar) {
+    static STARTED: (Mutex<Option<bool>>, Condvar) =
+      (Mutex::new(None), Condvar::new());
+    &STARTED
+  }
+
   fn serve(rx: mpsc::Receiver<Job>) {
     let gtk_ok = init_gtk();
+    {
+      let (state, cv) = started();
+      *state.lock().unwrap_or_else(|e| e.into_inner()) = Some(gtk_ok);
+      cv.notify_all();
+    }
     let run_job = |job: Job| {
       // A panicking job drops its result sender: a `run` caller sees None,
       // and the thread serves the next one.
@@ -433,6 +445,24 @@ pub(crate) mod gtk_thread {
     let sent = sender.send(Box::new(job)).is_ok();
     wake();
     sent
+  }
+
+  /// Whether GTK is usable on the GTK thread, starting the thread if it
+  /// hasn't been. Waits only for GTK's initialization, never behind a queued
+  /// job (a modal dialog).
+  pub(crate) fn usable() -> bool {
+    let (state, cv) = started();
+    if let Some(ok) = *state.lock().unwrap_or_else(|e| e.into_inner()) {
+      return ok;
+    }
+    if !spawn(|_| {}) {
+      return false;
+    }
+    let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = cv
+      .wait_while(guard, |s| s.is_none())
+      .unwrap_or_else(|e| e.into_inner());
+    guard.unwrap_or(false)
   }
 
   /// Run `job` on the GTK thread (its argument: GTK is usable there) and

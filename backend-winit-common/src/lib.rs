@@ -3670,23 +3670,23 @@ macro_rules! define_common_backend_fns {
       }
     }
 
+    // A tray menu's click wakes the loop (Linux: it arrives on the GTK
+    // thread). Installed at backend init by `fill_common_api`.
+    fn backend_wake_for_tray() {
+      if let Some(state) = <$B as $crate::BackendAccess>::get() {
+        let _ = state.proxy().send_event(
+          <$B as $crate::BackendAccess>::common_event(
+            $crate::CommonEvent::TrayTask,
+          ),
+        );
+      }
+    }
+
     unsafe extern "C" fn backend_create_tray_icon(
       _data: *mut ::std::ffi::c_void,
     ) -> u32 {
-      // A tray menu's click wakes the loop (Linux: it arrives on the GTK
-      // thread).
-      fn wake_for_tray() {
-        if let Some(state) = <$B as $crate::BackendAccess>::get() {
-          let _ = state.proxy().send_event(
-            <$B as $crate::BackendAccess>::common_event(
-              $crate::CommonEvent::TrayTask,
-            ),
-          );
-        }
-      }
-      $crate::tray::set_waker(wake_for_tray);
-      // No tray host (stock GNOME): an icon no one could see. Refuse it;
-      // platform_features reports why.
+      // No tray host (stock GNOME), or (Linux) no GTK to draw it with: an
+      // icon no one could see. Refuse it; platform_features reports why.
       if let Some(reason) = $crate::platform::tray_unavailable_reason() {
         $crate::platform::log_tray_refused(&reason);
         return 0;
@@ -3911,6 +3911,8 @@ macro_rules! define_common_backend_fns {
 #[macro_export]
 macro_rules! fill_common_api {
   ($api:expr) => {
+    // The tray's event routing, before any menu exists (tray.rs).
+    $crate::tray::init(backend_wake_for_tray);
     $api.create_window = Some(backend_create_window);
     $api.create_window_ex = Some(backend_create_window_ex);
     $api.close_window = Some(backend_close_window);

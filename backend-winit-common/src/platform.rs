@@ -9,9 +9,10 @@
 //! `cookieEncryption` and `cookieEncryptionWait` are always `null`, and
 //! `kwallet` (which only Chromium's cookie store would use) too.
 //!
-//! The tray host is read live on every call (Winit runs no GLib loop to
-//! follow NameOwnerChanged with), so a watcher that starts late counts on the
-//! next call.
+//! The tray host is read live on every call (the winit event loop doesn't
+//! iterate GLib, and the GTK thread's GLib loop, which serves the tray, isn't
+//! used to follow NameOwnerChanged), so a watcher that starts late counts on
+//! the next call.
 
 use std::collections::BTreeMap;
 
@@ -249,7 +250,14 @@ pub fn probe() -> PlatformFeatures {
 pub fn tray_unavailable_reason() -> Option<String> {
   #[cfg(target_os = "linux")]
   {
-    linux::probe_tray().tray_reason()
+    // The tray is drawn with GTK on the GTK thread (tray.rs): without GTK
+    // there, an icon would be accepted and never shown.
+    linux::probe_tray().tray_reason().or_else(|| {
+      (!crate::prompt::gtk_thread::usable()).then(|| {
+        "GTK could not start on the tray's thread (no display it can open)"
+          .to_string()
+      })
+    })
   }
   #[cfg(not(target_os = "linux"))]
   {
@@ -633,9 +641,10 @@ mod linux {
       .is_ok()
   }
 
-  /// Follow the StatusNotifierWatcher's owner on a thread of its own (Winit
-  /// runs no GLib loop) and fire the change handler when a tray host
-  /// appears or goes away.
+  /// Follow the StatusNotifierWatcher's owner on a thread of its own (the
+  /// winit event loop doesn't iterate GLib, and zbus needs no GLib loop, so
+  /// the GTK thread's isn't used) and fire the change handler when a tray
+  /// host appears or goes away.
   pub(super) fn follow_tray_host() {
     let Some(conn) = connect(TIMEOUT) else {
       return;
