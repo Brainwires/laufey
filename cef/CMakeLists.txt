@@ -215,6 +215,7 @@ elseif(OS_WINDOWS)
   set(LAUFEY_SRCS_WIN
     src/drag_paths_win.cc
     src/main_windows.cc
+    src/modal_loop_input_win.cc
     ${LAUFEY_RENDERER_SRCS}
   )
 

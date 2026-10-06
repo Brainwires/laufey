@@ -218,6 +218,13 @@ std::vector<std::string> LaufeyNativeDragFilePaths();
 // files of an OLE drag over it are recorded for LaufeyNativeDragFilePaths
 // (cef/src/drag_paths_win.cc). Once per window; UI thread.
 void LaufeyHookWindowDropTarget(HWND hwnd);
+
+// Windows: while a native modal loop runs on the UI thread (a context or tray
+// menu's TrackPopupMenu), keeps the keys and clicks waiting for it from being
+// taken by Chromium's message pump, which would hand them to the page
+// instead (cef/src/modal_loop_input_win.cc). Told about the outermost loop's
+// start (true) and end (false) by the native modal loop hook; UI thread.
+void LaufeyGuardModalLoopInput(bool entering);
 #endif
 
 class LaufeyHandler : public CefClient,

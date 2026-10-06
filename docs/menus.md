@@ -124,6 +124,15 @@ the UI thread:
   blocked on one stopped altogether; the CEF backend allows nestable tasks for
   the length of the loop (`CefSetNestableTasksAllowed`). WebView2 delivers its
   work as window messages, which the loop dispatches anyway.
+- The menu keeps its own input on CEF. Each time Chromium's message pump gets a
+  slice inside the loop (its `kMsgHaveWork` message), it takes the next message
+  of the thread's queue, whatever it is, and dispatches it itself; a key press
+  or click waiting for the menu went to the page that way, and the menu never
+  saw it (an Escape, arrow or Return was lost about one time in five while a
+  page was busy). While the menu is open the CEF backend's `WH_MSGFILTER` hook
+  holds that message back whenever input is waiting and posts it again from a
+  timer, which Windows delivers only after the input
+  (`cef/src/modal_loop_input_win.cc`).
 
 ## Test hooks
 
