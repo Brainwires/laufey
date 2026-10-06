@@ -13,9 +13,15 @@
 //     unlock prompt, unlocked, and no session bus at all;
 //   - KWallet counted only where Chromium would use it, a KDE desktop
 //     (kwalletd running or activatable on GNOME is not), and there only
-//     an open wallet answers: kwalletd not running, disabled, or its local
-//     wallet closed means no one can hand out the key (mock kwalletd6 /
-//     kwalletd5 objects, read without starting anything);
+//     an open wallet answers: kwalletd not running, disabled, or its
+//     network wallet closed means no one can hand out the key (mock
+//     kwalletd6 / kwalletd5 objects, read without starting anything); the
+//     daemon asked is Chromium's own pick (KDE_SESSION_VERSION 6 / 5 /
+//     unset), counted only where it answers at its object path (kwalletd6
+//     owns org.kde.kwalletd with no /modules/kwalletd), else the one that
+//     answers, and the cookie store is pinned to it (--password-store=
+//     kwallet6 / kwallet5): a v11 profile started without
+//     KDE_SESSION_VERSION is never left to Chromium's failing pick;
 //   - the portal interface versions (an interface the portal lacks is
 //     absent);
 //   - when a session counts as graphical (someone could answer the unlock
@@ -34,6 +40,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -86,7 +93,7 @@ const char kXml[] =
     " </interface>"
     " <interface name='org.kde.KWallet'>"
     "  <method name='isEnabled'><arg type='b' direction='out'/></method>"
-    "  <method name='localWallet'><arg type='s' direction='out'/></method>"
+    "  <method name='networkWallet'><arg type='s' direction='out'/></method>"
     "  <method name='isOpen'>"
     "   <arg type='s' direction='in'/><arg type='b' direction='out'/>"
     "  </method>"
@@ -104,6 +111,9 @@ std::atomic<int> g_login_lookups{0};
 std::atomic<bool> g_kwallet_enabled{true};
 std::atomic<bool> g_kwallet_open{false};
 std::atomic<int> g_kwallet_is_open_calls{0};
+// The object path the last isOpen was asked at (which daemon answered).
+std::mutex g_kwallet_path_mutex;
+std::string g_kwallet_path;
 constexpr char kLoginSession[] = "/org/freedesktop/login1/session/c7";
 
 GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
@@ -128,21 +138,25 @@ GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
 
 // logind's Manager: every session lookup answers the mock session. The
 // notification server names itself.
-void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
-                const gchar* method, GVariant* params,
+void CallMethod(GDBusConnection*, const gchar*, const gchar* object_path,
+                const gchar*, const gchar* method, GVariant* params,
                 GDBusMethodInvocation* invocation, gpointer) {
   if (strcmp(method, "isEnabled") == 0) {
     g_dbus_method_invocation_return_value(
         invocation, g_variant_new("(b)", g_kwallet_enabled.load()));
     return;
   }
-  if (strcmp(method, "localWallet") == 0) {
+  if (strcmp(method, "networkWallet") == 0) {
     g_dbus_method_invocation_return_value(invocation,
                                           g_variant_new("(s)", "kdewallet"));
     return;
   }
   if (strcmp(method, "isOpen") == 0) {
     g_kwallet_is_open_calls++;
+    {
+      std::lock_guard<std::mutex> lock(g_kwallet_path_mutex);
+      g_kwallet_path = object_path;
+    }
     const gchar* wallet = nullptr;
     g_variant_get(params, "(&s)", &wallet);
     g_dbus_method_invocation_return_value(
@@ -152,8 +166,8 @@ void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
   }
   if (strcmp(method, "GetServerInformation") == 0) {
     g_dbus_method_invocation_return_value(
-        invocation, g_variant_new("(ssss)", "mock-notifyd", "laufey", "1",
-                                  "1.2"));
+        invocation,
+        g_variant_new("(ssss)", "mock-notifyd", "laufey", "1", "1.2"));
     return;
   }
   g_login_lookups++;
@@ -175,6 +189,13 @@ PlatformFeatures SecretServiceProbe() {
   PlatformFeatures s;
   ProbeSecretService(&s);
   return s;
+}
+
+std::string KWalletPathAsked() {
+  std::lock_guard<std::mutex> lock(g_kwallet_path_mutex);
+  std::string path = g_kwallet_path;
+  g_kwallet_path.clear();
+  return path;
 }
 
 void BusCall(const char* method, const char* name) {
@@ -292,8 +313,8 @@ void SubscribeOffTheOwnerThread() {
 int main() {
   // Any GLib critical (a failed g_main_context_push_thread_default
   // included) ends the test.
-  g_log_set_always_fatal(static_cast<GLogLevelFlags>(
-      G_LOG_FATAL_MASK | G_LOG_LEVEL_CRITICAL));
+  g_log_set_always_fatal(
+      static_cast<GLogLevelFlags>(G_LOG_FATAL_MASK | G_LOG_LEVEL_CRITICAL));
   gchar* daemon = g_find_program_in_path("dbus-daemon");
   if (!daemon) {
     std::printf(
@@ -353,8 +374,7 @@ int main() {
       Register("/org/freedesktop/portal/desktop", iface);
     }
     Register("/org/freedesktop/login1", "org.freedesktop.login1.Manager");
-    Register("/org/freedesktop/Notifications",
-             "org.freedesktop.Notifications");
+    Register("/org/freedesktop/Notifications", "org.freedesktop.Notifications");
     Register(kLoginSession, "org.freedesktop.login1.Session");
     Register("/modules/kwalletd6", "org.kde.KWallet");
     Register("/modules/kwalletd5", "org.kde.KWallet");
@@ -541,6 +561,7 @@ int main() {
     s = SecretServiceProbe();
     EXPECT(!s.kwallet);
     EXPECT(s.kwallet_state == KWalletState::kNotUsed);
+    EXPECT(s.kwallet_service == KWalletService::kNone);
     EXPECT(NeedsBasicPasswordStore(s));
     BusCall("ReleaseName", kwallet);
   }
@@ -573,6 +594,11 @@ int main() {
     s = SecretServiceProbe();
     EXPECT(s.kwallet_state == KWalletState::kClosed);
     EXPECT(g_kwallet_is_open_calls.load() > calls);
+    // The daemon that runs: Chromium's own (kwalletd6) or, without it, the
+    // one that answers (the cookie store is pinned to it).
+    EXPECT(s.kwallet_service == (strcmp(name, "org.kde.kwalletd6") == 0
+                                     ? KWalletService::kKWalletd6
+                                     : KWalletService::kKWalletd5));
     EXPECT(NeedsBasicPasswordStore(s));
     EXPECT(BasicPasswordStoreReason(s).find("wallet is closed") !=
            std::string::npos);
@@ -602,6 +628,105 @@ int main() {
                             SecretServiceProbe);
     EXPECT(c.store == "os" && !c.append_basic && c.wait);
     EXPECT(c.reason.find("KWallet") != std::string::npos);
+  }
+
+  // Which kwalletd Chromium asks: KDE_SESSION_VERSION "6" is kwalletd6, "5"
+  // kwalletd5, unset KDE 4's org.kde.kwalletd at /modules/kwalletd. Plasma
+  // 6's kwalletd6 owns that name too, with no object there: the mock owns
+  // org.kde.kwalletd and has no /modules/kwalletd (calls there fail, as
+  // with the real daemon). The probe asks Chromium's daemon first, counts a
+  // daemon only where it answers at its own path, and the cookie store is
+  // pinned to the one that answered.
+  {
+    g_kwallet_enabled = true;
+    g_kwallet_open = true;
+    auto probe = [] { return SecretServiceProbe(); };
+    // Both kwalletd6 and kwalletd5 run: KDE_SESSION_VERSION picks.
+    BusCall("RequestName", "org.kde.kwalletd6");
+    BusCall("RequestName", "org.kde.kwalletd5");
+    setenv("KDE_SESSION_VERSION", "6", 1);
+    KWalletPathAsked();
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet && s.kwallet_state == KWalletState::kOpen);
+    EXPECT(s.kwallet_service == KWalletService::kKWalletd6);
+    EXPECT(KWalletPathAsked() == "/modules/kwalletd6");
+    PasswordStoreChoice c =
+        ChoosePasswordStore(nullptr, "", ProfileCookieKeys::kNone, probe);
+    EXPECT(c.store == "os" && !c.append_basic && c.append_store == "kwallet6");
+    setenv("KDE_SESSION_VERSION", "5", 1);
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet_state == KWalletState::kOpen);
+    EXPECT(s.kwallet_service == KWalletService::kKWalletd5);
+    EXPECT(KWalletPathAsked() == "/modules/kwalletd5");
+    c = ChoosePasswordStore(nullptr, "", ProfileCookieKeys::kNone, probe);
+    EXPECT(c.store == "os" && c.append_store == "kwallet5");
+    BusCall("ReleaseName", "org.kde.kwalletd5");
+
+    // Plasma 6 started without KDE_SESSION_VERSION (ssh, a systemd unit, a
+    // wrapper): Chromium would ask org.kde.kwalletd at /modules/kwalletd,
+    // which kwalletd6 owns with nothing behind it. That is no daemon; the
+    // one that answers is kwalletd6, and Chromium is pinned to it.
+    unsetenv("KDE_SESSION_VERSION");
+    BusCall("RequestName", "org.kde.kwalletd");
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet && s.kwallet_state == KWalletState::kOpen);
+    EXPECT(s.kwallet_service == KWalletService::kKWalletd6);
+    EXPECT(KWalletPathAsked() == "/modules/kwalletd6");
+    EXPECT(!NeedsBasicPasswordStore(s));
+    c = ChoosePasswordStore(nullptr, "", ProfileCookieKeys::kNone, probe);
+    EXPECT(c.store == "os" && !c.append_basic && c.append_store == "kwallet6");
+    // The negative control (the bug): a profile holding OS-key (v11)
+    // cookies, KDE_SESSION_VERSION missing. Never basic, and the OS store
+    // goes to kwalletd6, so Chromium finds the key it wrote them with
+    // instead of falling back to basic and deleting them.
+    for (ProfileCookieKeys keys :
+         {ProfileCookieKeys::kOsKey, ProfileCookieKeys::kUnknown}) {
+      c = ChoosePasswordStore(nullptr, "os", keys, probe);
+      EXPECT(c.store == "os" && !c.append_basic && !c.wait);
+      EXPECT(c.append_store == "kwallet6");
+      EXPECT(PasswordStoreWarning(c, keys, "").empty());
+    }
+    // Its wallet closed: a v11 profile still waits on kwalletd6 (a pinned
+    // OS store), never basic; a profile without v11 rows takes basic.
+    g_kwallet_open = false;
+    c = ChoosePasswordStore(nullptr, "os", ProfileCookieKeys::kOsKey, probe);
+    EXPECT(c.store == "os" && !c.append_basic && c.wait);
+    EXPECT(c.append_store == "kwallet6");
+    c = ChoosePasswordStore(nullptr, "", ProfileCookieKeys::kNone, probe);
+    EXPECT(c.store == "basic" && c.append_basic && c.append_store.empty());
+    g_kwallet_open = true;
+
+    // Only the name, no daemon behind it: nothing answers. Not usable, so
+    // no OS store is claimed for a fresh profile, and a v11 profile keeps
+    // the OS store (never basic) without a pin.
+    BusCall("ReleaseName", "org.kde.kwalletd6");
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet && s.kwallet_state == KWalletState::kNotRunning);
+    EXPECT(s.kwallet_service == KWalletService::kNone);
+    EXPECT(NeedsBasicPasswordStore(s));
+    c = ChoosePasswordStore(nullptr, "", ProfileCookieKeys::kNone, probe);
+    EXPECT(c.store == "basic" && c.append_basic && c.append_store.empty());
+    c = ChoosePasswordStore(nullptr, "os", ProfileCookieKeys::kOsKey, probe);
+    EXPECT(c.store == "os" && !c.append_basic && c.wait);
+    EXPECT(c.append_store.empty());
+    BusCall("ReleaseName", "org.kde.kwalletd");
+
+    // KDE_SESSION_VERSION=5 on a Plasma 6 session (a stale environment):
+    // kwalletd5 isn't there, kwalletd6 answers and is pinned.
+    setenv("KDE_SESSION_VERSION", "5", 1);
+    BusCall("RequestName", "org.kde.kwalletd6");
+    s = SecretServiceProbe();
+    EXPECT(s.kwallet_service == KWalletService::kKWalletd6);
+    c = ChoosePasswordStore(nullptr, "", ProfileCookieKeys::kNone, probe);
+    EXPECT(c.store == "os" && c.append_store == "kwallet6");
+    // An explicit --password-store is Chromium's to read: nothing added.
+    std::string explicit_store = "kwallet5";
+    c = ChoosePasswordStore(&explicit_store, "", ProfileCookieKeys::kOsKey,
+                            probe);
+    EXPECT(c.store == "os" && c.append_store.empty() && !c.append_basic);
+    BusCall("ReleaseName", "org.kde.kwalletd6");
+    setenv("KDE_SESSION_VERSION", "6", 1);
+    g_kwallet_open = false;
   }
   BusCall("ReleaseName", "org.freedesktop.login1");
   unsetenv("WAYLAND_DISPLAY");

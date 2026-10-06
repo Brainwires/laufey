@@ -53,11 +53,29 @@ enum class KWalletState {
   kOpen,        // kwalletd runs, enabled, its local wallet is open
   kClosed,      // kwalletd runs, enabled, its local wallet is closed
   kDisabled,    // kwalletd runs, KWallet is disabled
-  kNotRunning,  // no kwalletd (kwalletd6 / kwalletd5 / kwalletd) is running
+  kNotRunning,  // no kwalletd (kwalletd6 / kwalletd5 / kwalletd) answers
+                // at its own object path (none runs, or only a name with no
+                // object behind it, as kwalletd6's org.kde.kwalletd)
 };
 
 // "open", "closed", "disabled", "not-running"; nullptr for kNotUsed.
 const char* KWalletStateName(KWalletState state);
+
+// A kwalletd as Chromium's cookie store addresses it: one D-Bus name and
+// one object path (FreedesktopSecretKeyProvider::InitializeKWallet). A
+// daemon answers only at its own path: Plasma 6's kwalletd6 also owns
+// org.kde.kwalletd but has no /modules/kwalletd object, so Chromium's
+// KDE 4 choice reaches nothing there.
+enum class KWalletService {
+  kNone,       // not KWallet: the Secret Service
+  kKWalletd,   // org.kde.kwalletd   /modules/kwalletd   (KDE 3 / KDE 4)
+  kKWalletd5,  // org.kde.kwalletd5  /modules/kwalletd5  (KDE 5)
+  kKWalletd6,  // org.kde.kwalletd6  /modules/kwalletd6  (KDE 6)
+};
+
+// The --password-store value that makes Chromium use exactly this daemon
+// ("kwallet", "kwallet5", "kwallet6"); nullptr for kNone.
+const char* KWalletPasswordStore(KWalletService service);
 
 // What the probe found. Strings are empty when not applicable.
 struct PlatformFeatures {
@@ -85,8 +103,16 @@ struct PlatformFeatures {
   // the desktop decides, as in Chromium: on GNOME (or any other desktop)
   // it uses the Secret Service even with kwalletd running.
   bool kwallet = false;
-  // KWallet's state when `kwallet` (kNotUsed otherwise).
+  // KWallet's state when `kwallet` (kNotUsed otherwise): the state of the
+  // daemon in `kwallet_service`.
   KWalletState kwallet_state = KWalletState::kNotUsed;
+  // When `kwallet`: the kwalletd that answered at its own object path, the
+  // one Chromium's choice names (ChromiumKWalletService) when it answers,
+  // else another that runs (Plasma 6's kwalletd6 when KDE_SESSION_VERSION
+  // is missing). The cookie store is pinned to it (--password-store=
+  // KWalletPasswordStore), so Chromium asks the daemon probed here. kNone
+  // when none answers (kNotRunning) or KWallet isn't used.
+  KWalletService kwallet_service = KWalletService::kNone;
   // A person can answer an unlock prompt here: a graphical session
   // (XDG_SESSION_TYPE x11 / wayland with a display and, where logind can
   // say, an active x11 / wayland logind session), and the provider's
@@ -157,15 +183,24 @@ PlatformFeatures ProbePlatformFeatures();
 // --- Decisions (pure; tested without a bus)
 // ------------------------------------
 
-// Whether Chromium's password-store selection (os_crypt SelectBackend over
-// base::nix::GetDesktopEnvironment) lands on KWallet, i.e. the desktop is
-// KDE 3, 4, 5 or 6 as Chromium reads it: the first desktop
-// XDG_CURRENT_DESKTOP names that Chromium knows is KDE; with none it knows,
-// DESKTOP_SESSION kde4 / kde-plasma / kde; else (no GNOME_DESKTOP_SESSION_ID
-// set) KDE_FULL_SESSION set. A variable counts as set even when empty, as
-// Chromium's HasVar does. `env` returns a variable's value, nullptr when
-// unset. The one place the desktop's name decides anything: it is
-// Chromium's own rule.
+// The kwalletd Chromium's cookie store asks when no --password-store is
+// given (M149 os_crypt_async FreedesktopSecretKeyProvider::GetKey over
+// base::nix::GetDesktopEnvironment), kNone where it uses the Secret
+// Service. The desktop is the first one XDG_CURRENT_DESKTOP names that
+// Chromium knows; "KDE" is KDE 5 with KDE_SESSION_VERSION "5", KDE 6 with
+// "6", and KDE 4 otherwise (unset included: ssh, a systemd unit, a wrapper
+// that copies part of the environment). With none it knows, DESKTOP_SESSION
+// kde4 / kde-plasma / kde (KDE 4 or 3); else (no GNOME_DESKTOP_SESSION_ID
+// set) KDE_FULL_SESSION set (KDE 4 or 3). KDE 3 / 4 is org.kde.kwalletd at
+// /modules/kwalletd, KDE 5 kwalletd5, KDE 6 kwalletd6. A variable counts as
+// set even when empty, as Chromium's HasVar does. `env` returns a
+// variable's value, nullptr when unset. The one place the desktop's name
+// decides anything: it is Chromium's own rule.
+KWalletService ChromiumKWalletService(
+    const std::function<const char*(const char*)>& env);
+
+// Whether Chromium's cookie store would use KWallet at all
+// (ChromiumKWalletService is not kNone).
 bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env);
 
 // True when no one here can hand Chromium's cookie store its OS key: the
@@ -247,6 +282,13 @@ struct PasswordStoreChoice {
   // An explicit --password-store=basic on a profile that holds OS-key
   // cookies: honoured, but Chromium deletes them.
   bool explicit_basic_deletes = false;
+  // The --password-store value to add ("kwallet", "kwallet5", "kwallet6"),
+  // "" for none: the OS store on KWallet, pinned to the kwalletd the probe
+  // found (PlatformFeatures::kwallet_service). Without it Chromium picks
+  // its daemon from the environment alone and, where that one doesn't
+  // answer, gives up on the OS key: it falls back to basic, and drops a
+  // profile's OS-key cookies, while laufey reports "os".
+  std::string append_store;
 };
 
 // Picks the store: an explicit --password-store wins (an OS store is
@@ -255,7 +297,10 @@ struct PasswordStoreChoice {
 // with the key reachable, os (recorded); without, basic, unless `cookies`
 // is kOsKey or kUnknown: then os and `wait`, never basic. The marker never
 // overrides the database: an "os" profile without OS-key cookies still gets
-// basic when the key can't be reached (nothing is lost).
+// basic when the key can't be reached (nothing is lost). An OS store on
+// KWallet is pinned to the daemon the probe found (append_store), the wait
+// included: Chromium then waits on that daemon instead of picking one from
+// the environment that may not answer.
 PasswordStoreChoice ChoosePasswordStore(
     const std::string* explicit_store, const std::string& marker,
     ProfileCookieKeys cookies, const std::function<PlatformFeatures()>& probe);

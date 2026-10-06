@@ -47,6 +47,16 @@ void LaufeyOpenExternalURL(const std::string& url) {
 // --password-store=basic (a fixed key: the cookies are only obfuscated) and
 // say so once. With no Secret Service at all (or no session bus) Chromium
 // falls back to basic by itself. An explicit --password-store is kept.
+//
+// On KDE the OS store is pinned to the kwalletd the probe asked
+// (--password-store=kwallet6 / kwallet5 / kwallet). Left to itself
+// Chromium picks its daemon from the environment alone: XDG_CURRENT_DESKTOP
+// =KDE without KDE_SESSION_VERSION (ssh, a systemd unit, a wrapper that
+// copies part of the environment) is KDE 4's org.kde.kwalletd at
+// /modules/kwalletd, a name Plasma 6's kwalletd6 owns with no object behind
+// it. Chromium's KWallet start then fails, and it falls back to basic,
+// dropping every OS-key cookie, while the probe (which asked kwalletd6)
+// reported the OS key.
 // platform_features() reports the choice as "cookieEncryption". Browser
 // process only.
 //
@@ -87,6 +97,8 @@ static void LaufeyApplyPasswordStore(CefRefPtr<CefCommandLine> command_line) {
           });
   if (choice.append_basic)
     command_line->AppendSwitchWithValue("password-store", "basic");
+  else if (!choice.append_store.empty())
+    command_line->AppendSwitchWithValue("password-store", choice.append_store);
   if (choice.record)
     laufey_common::WritePasswordStoreMarker(g_root_cache_path, choice.store);
   laufey_common::SetCookieEncryption(
