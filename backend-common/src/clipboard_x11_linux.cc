@@ -31,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #include "laufey_io.h"
@@ -65,6 +66,14 @@ constexpr int kMaxTransfers = 8;
 constexpr auto kReplyTimeout = std::chrono::seconds(3);
 // The most TARGETS atoms looked at (names resolved) from one owner.
 constexpr size_t kMaxTargets = 256;
+// Conversions land in a property of a small pool (LAUFEY_CLIPBOARD_<n>), a
+// different one each time: an owner whose conversion we abandoned (a timeout,
+// data over max_bytes) may still write into its property, a late answer or
+// the next INCR chunk, and that must never be taken for the next conversion's
+// data. A property is reused only after it has been quiet this long (GTK's own
+// INCR transfers give up after 30 s; ours after kTransferIdleTimeout).
+constexpr int kPropertyPool = 8;
+constexpr auto kPropertyQuarantine = std::chrono::seconds(30);
 // After the connection fails (or connecting timed out), one more connect,
 // no sooner than this after the failure; then none.
 constexpr auto kReconnectBackoff = std::chrono::seconds(30);
@@ -128,13 +137,16 @@ bool XfixesSetUp(xcb_connection_t* conn, xcb_window_t window,
   return true;
 }
 
-// A conversion of the CLIPBOARD selection to one target, into our window's
-// transfer property.
+// A conversion of the CLIPBOARD selection to one target, into one of our
+// window's transfer properties (a pool slot of its own).
 struct Conversion {
   xcb_atom_t target = XCB_NONE;
+  int slot = -1;
+  xcb_atom_t property = XCB_NONE;
   size_t max_bytes = 0;
   bool incr = false;
   bool started = false;
+  bool refused = false;  // the owner answered with no property
   std::string data;
   xcb_atom_t type = XCB_NONE;
   Clock::time_point step_deadline;
@@ -385,12 +397,18 @@ class Bridge {
     timestamp_ = Atom("TIMESTAMP");
     multiple_ = Atom("MULTIPLE");
     incr_ = Atom("INCR");
-    transfer_prop_ = Atom("LAUFEY_CLIPBOARD");
     time_prop_ = Atom("LAUFEY_CLIPBOARD_TIME");
     if (clipboard_ == XCB_NONE || targets_ == XCB_NONE || incr_ == XCB_NONE ||
-        transfer_prop_ == XCB_NONE || time_prop_ == XCB_NONE) {
+        time_prop_ == XCB_NONE) {
       Teardown();
       return false;
+    }
+    for (int i = 0; i < kPropertyPool; i++) {
+      slots_[i].property = Atom("LAUFEY_CLIPBOARD_" + std::to_string(i));
+      if (slots_[i].property == XCB_NONE) {
+        Teardown();
+        return false;
+      }
     }
     xfixes_ = XfixesSetUp(conn_, window_, clipboard_, &xfixes_event_);
     wake_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -633,7 +651,7 @@ class Bridge {
         });
   }
 
-  // Queues a conversion; one runs at a time (they share our property).
+  // Queues a conversion; one runs at a time.
   void Convert(xcb_atom_t target, size_t max_bytes,
                std::function<void(bool, std::string, xcb_atom_t)> done) {
     Conversion c;
@@ -652,30 +670,69 @@ class Bridge {
     auto now = Clock::now();
     c.step_deadline = now + kStepTimeout;
     c.deadline = now + kConversionTimeout;
-    xcb_delete_property(conn_, window_, transfer_prop_);
-    xcb_convert_selection(conn_, window_, clipboard_, c.target, transfer_prop_,
+    c.slot = TakeSlot(now);
+    c.property = slots_[c.slot].property;
+    xcb_delete_property(conn_, window_, c.property);
+    xcb_convert_selection(conn_, window_, clipboard_, c.target, c.property,
                           XCB_CURRENT_TIME);
     xcb_flush(conn_);
+  }
+
+  // A pool slot for a new conversion: the next one round the pool that is
+  // quiet; when none is (every one abandoned within the quarantine), the one
+  // quiet the longest.
+  int TakeSlot(Clock::time_point now) {
+    int pick = -1;
+    for (int i = 0; i < kPropertyPool; i++) {
+      int n = (next_slot_ + i) % kPropertyPool;
+      if (slots_[n].quiet_until <= now) {
+        pick = n;
+        break;
+      }
+      if (pick < 0 || slots_[n].quiet_until < slots_[pick].quiet_until)
+        pick = n;
+    }
+    next_slot_ = (pick + 1) % kPropertyPool;
+    slots_[pick].in_use = true;
+    return pick;
+  }
+
+  // The slot of the conversion running now; -1 when none is.
+  int CurrentSlot() const {
+    if (conversions_.empty() || !conversions_.front().started)
+      return -1;
+    return conversions_.front().slot;
   }
 
   void FinishConversion(bool ok) {
     Conversion c = std::move(conversions_.front());
     conversions_.pop_front();
     if (c.incr || ok)
-      xcb_delete_property(conn_, window_, transfer_prop_);
+      xcb_delete_property(conn_, window_, c.property);
+    if (c.slot >= 0) {
+      Slot& slot = slots_[c.slot];
+      slot.in_use = false;
+      // Done with it (the data, the last empty INCR chunk, or a refusal: the
+      // owner writes nothing more): free now. Abandoned (a timeout, too much
+      // data): the owner may still write into it, so it rests.
+      bool owner_done = ok || c.refused;
+      slot.quiet_until =
+          owner_done ? Clock::time_point{} : Clock::now() + kPropertyQuarantine;
+    }
     c.done(ok, ok ? std::move(c.data) : "", c.type);
     StartConversion();
   }
 
-  // Reads our transfer property whole (in chunks), deleting it unless
-  // `keep`. False when it is unreadable or larger than `max_bytes`.
+  // Reads the running conversion's property whole (in chunks), deleting it
+  // unless `keep`. False when it is unreadable or larger than `max_bytes`.
   bool TakeProperty(size_t max_bytes, std::string* out, xcb_atom_t* type,
                     bool keep = false) {
+    xcb_atom_t property = conversions_.front().property;
     out->clear();
     uint32_t offset = 0;  // in 32-bit units
     while (true) {
       auto* reply = static_cast<xcb_get_property_reply_t*>(WaitReply(
-          xcb_get_property(conn_, 0, window_, transfer_prop_,
+          xcb_get_property(conn_, 0, window_, property,
                            XCB_GET_PROPERTY_TYPE_ANY, offset, kChunk / 4)
               .sequence));
       if (!reply)
@@ -695,7 +752,7 @@ class Bridge {
       offset += static_cast<uint32_t>(len) / 4;
     }
     if (!keep)
-      xcb_delete_property(conn_, window_, transfer_prop_);
+      xcb_delete_property(conn_, window_, property);
     return true;
   }
 
@@ -704,9 +761,11 @@ class Bridge {
         !conversions_.front().started || conversions_.front().incr)
       return;
     Conversion& c = conversions_.front();
-    if (e->target != c.target)
+    if (e->target != c.target ||
+        (e->property != XCB_NONE && e->property != c.property))
       return;  // a late answer to an earlier conversion
     if (e->property == XCB_NONE) {
+      c.refused = true;
       FinishConversion(false);  // refused, or no owner
       return;
     }
@@ -729,12 +788,12 @@ class Bridge {
       }
       // INCR: the owner sends chunks, each once we deleted the last one,
       // ending with an empty one.
-      xcb_delete_property(conn_, window_, transfer_prop_);
+      xcb_delete_property(conn_, window_, c.property);
       c.incr = true;
       c.step_deadline = Clock::now() + kStepTimeout;
       return;
     }
-    xcb_delete_property(conn_, window_, transfer_prop_);
+    xcb_delete_property(conn_, window_, c.property);
     c.data = std::move(data);
     c.type = type;
     FinishConversion(true);
@@ -761,6 +820,21 @@ class Bridge {
       return;
     }
     c.step_deadline = Clock::now() + kStepTimeout;
+  }
+
+  // A pool property of ours got a value: a chunk of the running conversion,
+  // or a write into a slot no conversion holds now (an abandoned owner still
+  // sending), which is never read and keeps that slot resting.
+  void OnSlotNewValue(xcb_atom_t atom) {
+    for (int i = 0; i < kPropertyPool; i++) {
+      if (slots_[i].property != atom)
+        continue;
+      if (i == CurrentSlot())
+        OnOurPropertyNewValue();
+      else if (!slots_[i].in_use)
+        slots_[i].quiet_until = Clock::now() + kPropertyQuarantine;
+      return;
+    }
   }
 
   // --- Owning -----------------------------------------------------------
@@ -957,9 +1031,8 @@ class Bridge {
             OnRequestorPropertyDeleted(e->window, e->atom);
           if (e->atom == time_prop_ && e->state == XCB_PROPERTY_NEW_VALUE)
             OnTimestamp(e->time);
-          else if (e->atom == transfer_prop_ &&
-                   e->state == XCB_PROPERTY_NEW_VALUE)
-            OnOurPropertyNewValue();
+          else if (e->state == XCB_PROPERTY_NEW_VALUE)
+            OnSlotNewValue(e->atom);
         } else if (e->state == XCB_PROPERTY_DELETE) {
           OnRequestorPropertyDeleted(e->window, e->atom);
         }
@@ -992,8 +1065,17 @@ class Bridge {
   xcb_window_t root_ = XCB_NONE;
   xcb_window_t window_ = XCB_NONE;
   xcb_atom_t clipboard_ = XCB_NONE, targets_ = XCB_NONE, timestamp_ = XCB_NONE,
-             multiple_ = XCB_NONE, incr_ = XCB_NONE, transfer_prop_ = XCB_NONE,
-             time_prop_ = XCB_NONE;
+             multiple_ = XCB_NONE, incr_ = XCB_NONE, time_prop_ = XCB_NONE;
+  // The conversions' properties.
+  struct Slot {
+    xcb_atom_t property = XCB_NONE;
+    bool in_use = false;
+    // Not handed out before this (an abandoned conversion's owner may still
+    // write into it); the epoch when free.
+    Clock::time_point quiet_until;
+  };
+  Slot slots_[kPropertyPool];
+  int next_slot_ = 0;
   bool xfixes_ = false;
   uint8_t xfixes_event_ = 0;
   bool hung_ = false;  // a reply didn't come in time (WaitReply)

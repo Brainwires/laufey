@@ -13,7 +13,8 @@
 //     a step's timeout), an INCR announced over max_bytes (refused at once),
 //     a requestor that starts 10 INCR transfers and never takes a chunk (8
 //     run at once, all dropped after their idle timeout, and the next read
-//     still works), a read over max_bytes;
+//     still works), a read over max_bytes, an owner that keeps writing chunks
+//     after we abandoned its transfer (never read into a later conversion);
 //   - the connection killed mid-read (the read ends at once, the bridge is
 //     gone, one reconnect after the backoff, and none after that);
 //   - privacy: image reads take PNG, JPEG, BMP or GIF only (a TIFF is never
@@ -311,14 +312,22 @@ class Peer {
     return last_requestor_.load();
   }
 
+  // Chunks a flooding owner has written.
+  int Flooded() const {
+    return flooded_.load();
+  }
+
   // Owns CLIPBOARD with `entries` and serves requests on a thread of its own
   // until destroyed; `silent` answers nothing; an INCR transfer stops after
-  // `stall_after` chunks (never, when negative).
+  // `stall_after` chunks (never, when negative); `flood` sends an INCR
+  // transfer's chunks back to back, never waiting for the requestor to take
+  // one, until stopped.
   void Own(std::map<std::string, std::string> entries, bool silent,
-           int stall_after = -1) {
+           int stall_after = -1, bool flood = false) {
     entries_ = std::move(entries);
     silent_ = silent;
     stall_after_ = stall_after;
+    flood_ = flood;
     for (const auto& [name, data] : entries_)
       atoms_[Atom(name)] = name;
     targets_ = Atom("TARGETS");
@@ -398,6 +407,20 @@ class Peer {
     xcb_change_property(conn_, XCB_PROP_MODE_REPLACE, r.requestor, r.property,
                         incr_, 32, 1, &size);
     Notify(r, r.property);
+    if (flood_) {
+      // Chunks into the requestor's property, one per round trip, whatever
+      // the requestor does with them.
+      std::string chunk(kPeerChunk, 'S');
+      while (serving_) {
+        xcb_change_property(conn_, XCB_PROP_MODE_REPLACE, r.requestor,
+                            r.property, r.target, 8,
+                            static_cast<uint32_t>(chunk.size()), chunk.data());
+        free(xcb_get_input_focus_reply(conn_, xcb_get_input_focus(conn_),
+                                       nullptr));
+        flooded_++;
+      }
+      return;
+    }
     size_t off = 0;
     for (int chunks = 0;; chunks++) {
       if (stall_after_ >= 0 && chunks == stall_after_)
@@ -429,6 +452,8 @@ class Peer {
   std::map<xcb_atom_t, std::string> atoms_;
   bool silent_ = false;
   int stall_after_ = -1;
+  bool flood_ = false;
+  std::atomic<int> flooded_{0};
   std::atomic<xcb_window_t> last_requestor_{0};
   std::atomic<bool> serving_{false};
   std::thread thread_;
@@ -747,6 +772,36 @@ int main() {
     EXPECT(!found);
     EXPECT(SecondsSince(start) < 1.0);
     owner.Stop();
+  }
+
+  // An owner that keeps writing chunks into the property of a transfer we
+  // abandoned (refused here: announced over max_bytes), still at it while
+  // another client owns the clipboard and we read from that one: every read
+  // gets the new owner's data, never a stale chunk (each conversion has a
+  // property of its own, and an abandoned one rests).
+  {
+    Peer stale;
+    stale.Own({{"text/html", html}}, false, /*stall_after=*/-1,
+              /*flood=*/true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    bool found = true;
+    EXPECT(x11_clipboard::Read({"text/html"}, 1000, &data, nullptr, &found));
+    EXPECT(!found);
+    EXPECT(WaitFor([&] { return stale.Flooded() > 50; }));
+    Peer fresh;
+    fresh.Own({{"UTF8_STRING", "fresh"}, {"text/html", "<i>fresh</i>"}}, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    int flooded = stale.Flooded();
+    for (int i = 0; i < 10; i++) {
+      EXPECT(Take(ClipboardReadTextLinux()) == "fresh");
+      EXPECT(Take(ClipboardReadHtmlLinux()) == "<i>fresh</i>");
+    }
+    std::printf(
+        "stale INCR owner: %d chunks written during the reads, none read\n",
+        stale.Flooded() - flooded);
+    EXPECT(stale.Flooded() > flooded);  // it really was still writing
+    fresh.Stop();
+    stale.Stop();
   }
 
   // And we can take the clipboard back.
