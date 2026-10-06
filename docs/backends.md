@@ -303,8 +303,8 @@ failed. Nothing an app relies on runs in that code: the profile is on disk after
 The WebKit backends (WebKitGTK on Linux, WKWebView on macOS) also flush
 `localStorage` before the process ends. WebKit writes it from its network
 process, in an SQLite transaction committed 500 ms after the first write
-(`SQLiteStorageArea`); a host that ended within that time lost the write now
-and then (on CI 1 of 9 ends on macOS, 2 of 5 on Linux; cookies survived). The
+(`SQLiteStorageArea`); a host that ended within that time lost the write now and
+then (on CI 1 of 9 ends on macOS, 2 of 5 on Linux; cookies survived). The
 network process commits when the host's connection closes, but only after the
 host is gone, so a launch right after could still read the previous value. Once
 the runtime has shut down, the backend (`FlushWebStorage`, at most 2 s):
