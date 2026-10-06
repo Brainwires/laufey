@@ -694,6 +694,41 @@ fn e2e_main() {
     if std::env::args().any(|a| a.eq_ignore_ascii_case("-ToastActivated")) {
       menu_notification_checks::cold_start().await;
     }
+    // Linux: started by D-Bus activation (the app's `<app id>.service`) for
+    // a click on one of its portal notifications while it wasn't running
+    // (scripts/notification-coldstart-e2e.sh). The service file's Exec sets
+    // LAUFEY_E2E_COLDSTART: the host takes `--laufey-dbus-activated` out of
+    // argv before the runtime loads (cold_start reports that it did).
+    if std::env::var_os("LAUFEY_E2E_COLDSTART").is_some() {
+      menu_notification_checks::cold_start().await;
+    }
+    // The script's other steps: post the notification it clicks, or
+    // schedule one for the app's systemd timer, then quit.
+    // LAUFEY_E2E_BADGE=<text>: set the dock badge with a window open (a
+    // launcher to badge), print where it shows, keep it for a few seconds
+    // and quit (a by-hand check on a desktop; docs/dock-taskbar.md).
+    if let Ok(badge) = std::env::var("LAUFEY_E2E_BADGE") {
+      let w = Window::new(320, 200).title("native-e2e-badge");
+      w.show();
+      tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+      laufey::set_dock_badge(Some(&badge));
+      if let Some(json) = laufey::platform_features() {
+        eprintln!("[e2e-badge] platform features = {json}");
+      }
+      let secs = std::env::var("LAUFEY_E2E_BADGE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+      tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+      laufey::set_dock_badge(None);
+      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+      unsafe { libc_exit(0) }
+    }
+    if std::env::var("LAUFEY_E2E_NOTIFY_POST").is_ok()
+      || std::env::var("LAUFEY_E2E_NOTIFY_SCHEDULE_MS").is_ok()
+    {
+      menu_notification_checks::post_and_quit().await;
+    }
 
     // ---- C. custom scheme registration -----------------------------------
     // Registered BEFORE the first window: the engines read their scheme

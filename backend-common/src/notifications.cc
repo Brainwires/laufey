@@ -496,6 +496,186 @@ bool DecodeToastArguments(const std::string& args, std::string* tag,
   return ours && has_tag && !tag->empty();
 }
 
+// --- Linux activation and scheduled launches (portable) ---
+
+const char kDBusActivationArg[] = "--laufey-dbus-activated";
+const char kNotifyLaunchArg[] = "--laufey-notify";
+const char kNotificationActionName[] = "laufey-notification";
+
+std::string NotificationTagId(const std::string& tag) {
+  uint64_t h = 14695981039346656037ULL;  // FNV-1a 64 offset basis
+  for (unsigned char c : tag) {
+    h ^= c;
+    h *= 1099511628211ULL;  // FNV-1a 64 prime
+  }
+  char buf[17];
+  std::snprintf(buf, sizeof(buf), "%016llx",
+                static_cast<unsigned long long>(h));
+  return buf;
+}
+
+bool ParseNotifyLaunch(const std::vector<std::string>& args, std::string* id) {
+  if (args.size() != 2 || args[0] != kNotifyLaunchArg || args[1].size() != 16)
+    return false;
+  for (char c : args[1]) {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+      return false;
+  }
+  *id = args[1];
+  return true;
+}
+
+bool HasDBusActivationArg(const std::vector<std::string>& args) {
+  for (const std::string& arg : args) {
+    if (arg == "--")
+      return false;
+    if (arg == kDBusActivationArg)
+      return true;
+  }
+  return false;
+}
+
+bool IsValidApplicationId(const std::string& app_id) {
+  if (app_id.empty() || app_id.size() > 255)
+    return false;
+  int elements = 0;
+  size_t start = 0;
+  while (start <= app_id.size()) {
+    size_t dot = app_id.find('.', start);
+    size_t end = dot == std::string::npos ? app_id.size() : dot;
+    if (end == start)
+      return false;  // empty element (or a leading / trailing '.')
+    if (app_id[start] >= '0' && app_id[start] <= '9')
+      return false;
+    for (size_t i = start; i < end; ++i) {
+      char c = app_id[i];
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-'))
+        return false;
+    }
+    ++elements;
+    if (dot == std::string::npos)
+      break;
+    start = dot + 1;
+  }
+  return elements >= 2;
+}
+
+bool StripDBusActivationArg(int* argc, char** argv) {
+  if (!argc || !argv)
+    return false;
+  for (int i = 1; i < *argc && argv[i]; ++i) {
+    if (std::strcmp(argv[i], "--") == 0)
+      return false;
+    if (std::strcmp(argv[i], kDBusActivationArg) != 0)
+      continue;
+    for (int j = i; j + 1 < *argc; ++j)
+      argv[j] = argv[j + 1];
+    --*argc;
+    argv[*argc] = nullptr;
+    return true;
+  }
+  return false;
+}
+
+std::string ApplicationObjectPath(const std::string& app_id) {
+  std::string path = "/";
+  for (char c : app_id)
+    path += c == '.' ? '/' : c == '-' ? '_' : c;
+  return path;
+}
+
+std::string NotificationTimerAppPart(const std::string& app_id) {
+  std::string out;
+  for (char c : app_id) {
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-' ||
+              c == ':';
+    out += ok ? c : '_';
+  }
+  if (out.size() > kTimerUnitAppIdMax) {
+    out.resize(kTimerUnitAppIdMax - 9);
+    out += "_" + NotificationTagId(app_id).substr(0, 8);
+  }
+  return out;
+}
+
+std::string NotificationTimerUnit(const std::string& app_id,
+                                  const std::string& tag) {
+  return "laufey-" + NotificationTimerAppPart(app_id) + "-" +
+         NotificationTagId(tag);
+}
+
+std::string NotificationTimerGlob(const std::string& app_id) {
+  std::string out = "laufey-" + NotificationTimerAppPart(app_id) + "-";
+  for (int i = 0; i < 16; ++i)
+    out += "[0-9a-f]";
+  return out + ".timer";
+}
+
+std::string SystemdCalendarUtc(int64_t at_ms) {
+  int64_t secs = at_ms / 1000 + (at_ms % 1000 > 0 ? 1 : 0);
+  // Civil date from days since the epoch (Howard Hinnant's algorithm), so
+  // no gmtime_r / _gmtime64_s difference between the platforms.
+  int64_t days = secs / 86400;
+  int64_t rem = secs % 86400;
+  if (rem < 0) {
+    rem += 86400;
+    --days;
+  }
+  days += 719468;
+  int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+  int64_t doe = days - era * 146097;
+  int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  int64_t y = yoe + era * 400;
+  int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  int64_t mp = (5 * doy + 2) / 153;
+  int64_t d = doy - (153 * mp + 2) / 5 + 1;
+  int64_t m = mp < 10 ? mp + 3 : mp - 9;
+  if (m <= 2)
+    ++y;
+  char buf[48];
+  std::snprintf(buf, sizeof(buf),
+                "%04lld-%02lld-%02lld %02lld:%02lld:%02lld UTC",
+                static_cast<long long>(y), static_cast<long long>(m),
+                static_cast<long long>(d), static_cast<long long>(rem / 3600),
+                static_cast<long long>(rem % 3600 / 60),
+                static_cast<long long>(rem % 60));
+  return buf;
+}
+
+std::string EscapeNotificationMarkup(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text) {
+    switch (c) {
+      case '&':
+        out += "&amp;";
+        break;
+      case '<':
+        out += "&lt;";
+        break;
+      case '>':
+        out += "&gt;";
+        break;
+      default:
+        out += c;
+    }
+  }
+  return out;
+}
+
+#if !defined(__linux__) || defined(__ANDROID__)
+NotificationFacts LinuxNotificationFacts() {
+  return NotificationFacts();
+}
+int RunNotifyLaunch(const std::string&) {
+  return 0;
+}
+void SetDBusActivationLaunch(bool) {}
+void SetDBusActivationLaunchForTesting(bool) {}
+#endif
+
 // --- Entry points
 // ----------------------------------------------------------------
 

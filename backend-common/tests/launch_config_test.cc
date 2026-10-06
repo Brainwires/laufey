@@ -436,6 +436,53 @@ static void TestPaths() {
   EXPECT(LaunchConfigPathForExecutable("") == "");
 }
 
+// $APPIMAGE names what a relaunch runs only from inside the AppImage's
+// mount ($APPDIR), as Deno's scheme registration does.
+static void TestTrustedAppImage() {
+  // A fake filesystem: what exists, resolved.
+  auto canonical = [](const std::string& p) -> std::string {
+    if (p == "/tmp/.mount_abc" || p == "/tmp/.mount_abc/")
+      return "/tmp/.mount_abc";
+    if (p == "/tmp/link-to-mount")
+      return "/tmp/.mount_abc";
+    if (p == "/home/u/My.AppImage" || p == "/home/u/./My.AppImage")
+      return "/home/u/My.AppImage";
+    if (p == "/tmp/.mount_ab")
+      return "/tmp/.mount_ab";
+    return "";
+  };
+  const std::string inside = "/tmp/.mount_abc/usr/bin/app";
+  EXPECT(TrustedAppImagePath(inside, "/home/u/My.AppImage", "/tmp/.mount_abc",
+                             canonical) == "/home/u/My.AppImage");
+  // Resolved: the image path and the mount (a link to it, a trailing '/').
+  EXPECT(TrustedAppImagePath(inside, "/home/u/./My.AppImage",
+                             "/tmp/link-to-mount", canonical) ==
+         "/home/u/My.AppImage");
+  EXPECT(TrustedAppImagePath(inside, "/home/u/My.AppImage", "/tmp/.mount_abc/",
+                             canonical) == "/home/u/My.AppImage");
+  // Not from inside the mount: an installed executable with $APPIMAGE /
+  // $APPDIR set by someone else, or a sibling sharing the mount's prefix.
+  EXPECT(TrustedAppImagePath("/usr/bin/app", "/home/u/My.AppImage",
+                             "/tmp/.mount_abc", canonical) == "");
+  EXPECT(TrustedAppImagePath("/tmp/.mount_abcd/usr/bin/app",
+                             "/home/u/My.AppImage", "/tmp/.mount_abc",
+                             canonical) == "");
+  EXPECT(TrustedAppImagePath("/tmp/.mount_abc/usr/bin/app",
+                             "/home/u/My.AppImage", "/tmp/.mount_ab",
+                             canonical) == "");
+  // No $APPDIR, a relative or missing $APPIMAGE, a mount that doesn't exist.
+  EXPECT(TrustedAppImagePath(inside, "/home/u/My.AppImage", "", canonical) ==
+         "");
+  EXPECT(TrustedAppImagePath(inside, "My.AppImage", "/tmp/.mount_abc",
+                             canonical) == "");
+  EXPECT(TrustedAppImagePath(inside, "/home/u/Gone.AppImage",
+                             "/tmp/.mount_abc", canonical) == "");
+  EXPECT(TrustedAppImagePath(inside, "/home/u/My.AppImage", "/tmp/.mount_x",
+                             canonical) == "");
+  EXPECT(TrustedAppImagePath("", "/home/u/My.AppImage", "/tmp/.mount_abc",
+                             canonical) == "");
+}
+
 static void SetEnv(const char* name, const char* value) {
 #ifdef _WIN32
   SetEnvironmentVariableW(Utf8ToWide(name).c_str(),
@@ -521,6 +568,7 @@ int main() {
   TestInspectable();
   TestPasskeyRpIds();
   TestPaths();
+  TestTrustedAppImage();
   TestProcessLaunchConfig();
   if (g_failures) {
     std::fprintf(stderr, "%d expectation(s) failed\n", g_failures);

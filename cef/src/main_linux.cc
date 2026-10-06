@@ -895,6 +895,13 @@ static bool LaufeyChooseSandbox() {
 }
 
 int main(int argc, char* argv[]) {
+  // D-Bus activation for a notification click (`<app id>.service` passes
+  // --laufey-dbus-activated): noted, and taken out of argv before Chromium,
+  // the single-instance forwarding or the runtime sees it. (A CEF
+  // subprocess never has it.)
+  laufey_common::SetDBusActivationLaunch(
+      laufey_common::StripDBusActivationArg(&argc, argv));
+
   // CEF gets its own copy of argv. Chromium sets the process title by
   // rewriting the argv strings in place (setproctitle), which garbles the
   // arguments the runtime later reads with std::env::args() or its
@@ -911,6 +918,17 @@ int main(int argc, char* argv[]) {
   int exit_code = CefExecuteProcess(main_args, app, nullptr);
   if (exit_code >= 0) {
     return exit_code;
+  }
+
+  // A scheduled notification's systemd timer (`<exe> --laufey-notify <id>`,
+  // docs/notifications.md): post it and exit before CEF or the runtime
+  // starts.
+  {
+    std::string notify_id;
+    if (laufey_common::ParseNotifyLaunch(
+            std::vector<std::string>(argv + (argc > 0 ? 1 : 0), argv + argc),
+            &notify_id))
+      return laufey_common::RunNotifyLaunch(notify_id);
   }
 
   // The browser process's command line hook drops every Chromium switch of a

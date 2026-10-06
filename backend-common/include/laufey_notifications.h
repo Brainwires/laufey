@@ -166,6 +166,113 @@ bool DecodeToastArguments(const std::string& args, std::string* tag,
 std::string Base64Encode(const std::vector<uint8_t>& bytes);
 bool Base64Decode(const std::string& text, std::vector<uint8_t>* out);
 
+// --- Linux: activation and scheduled launches (portable helpers, tested) ---
+//
+// A click on a notification posted through the xdg-desktop-portal reaches
+// the app as org.freedesktop.Application.ActivateAction on its D-Bus name
+// (the app id). When the app isn't running, D-Bus starts it from the
+// service file a .deb / .rpm installs (<app id>.service), whose Exec line
+// carries kDBusActivationArg: the click that arrives next is the launch.
+// A notification scheduled for while the app is closed is a transient
+// systemd user timer that runs `<exe> kNotifyLaunchArg <id>`: the host
+// posts the stored notification and exits, before any web engine or the
+// runtime loads (RunNotifyLaunch). See docs/notifications.md.
+
+extern const char kDBusActivationArg[];  // "--laufey-dbus-activated"
+extern const char kNotifyLaunchArg[];    // "--laufey-notify"
+
+// The GApplication action every notification click is sent as ("app." +
+// this on the portal), its target the EncodeToastArguments string.
+extern const char kNotificationActionName[];  // "laufey-notification"
+
+// Whether `args` (argv without the program) are a scheduled-notification
+// launch: exactly kNotifyLaunchArg and a NotificationTagId. Sets `id`.
+bool ParseNotifyLaunch(const std::vector<std::string>& args, std::string* id);
+
+// Whether `args` (argv without the program) carry kDBusActivationArg before
+// any "--".
+bool HasDBusActivationArg(const std::vector<std::string>& args);
+
+// Removes kDBusActivationArg (before any "--") from `argv` in place, so
+// neither the web engine nor the runtime sees it: the later entries move
+// down, `*argc` drops by one and argv[*argc] becomes NULL (the runtime reads
+// the process's argv up to the first NULL, as after gtk_init). Returns
+// whether it was there. The host's main() calls it first and passes the
+// answer to SetDBusActivationLaunch.
+bool StripDBusActivationArg(int* argc, char** argv);
+
+// Whether `app_id` can be the app's D-Bus name and GApplication id: at most
+// 255 bytes, at least two '.'-separated elements of [A-Za-z0-9_-], none
+// empty or starting with a digit.
+bool IsValidApplicationId(const std::string& app_id);
+
+// "/" + app_id with '.' as '/' and '-' as '_': where the shell and the
+// portals call org.freedesktop.Application (GApplication's rule).
+std::string ApplicationObjectPath(const std::string& app_id);
+
+// 16 lowercase hex digits (FNV-1a 64) of a notification tag: the id a
+// scheduled launch and its timer unit name carry instead of the tag itself.
+std::string NotificationTagId(const std::string& tag);
+
+// The app id as a timer unit name carries it: characters a unit name can't
+// hold become '_', and an id longer than kTimerUnitAppIdMax keeps its first
+// kTimerUnitAppIdMax - 9 characters plus '_' and 8 hex digits of its own
+// NotificationTagId, so "laufey-<this>-<tag id>.service" stays within
+// systemd's 255 characters. Deterministic: a package's removal script
+// computes the same.
+constexpr size_t kTimerUnitAppIdMax = 200;
+std::string NotificationTimerAppPart(const std::string& app_id);
+
+// "laufey-<NotificationTimerAppPart>-<NotificationTagId>": the systemd unit
+// name (without ".timer" / ".service") of the tag's timer.
+std::string NotificationTimerUnit(const std::string& app_id,
+                                  const std::string& tag);
+
+// The systemd glob that matches every one of the app's notification timers
+// and no other app's: "laufey-<app part>-" then exactly 16 "[0-9a-f]" and
+// ".timer" (an app whose id extends this one's, "<id>-extra", has more
+// before its tag id). What a package's removal stops.
+std::string NotificationTimerGlob(const std::string& app_id);
+
+// The OnCalendar= value for the first whole second at or after `at_ms` (Unix
+// time, ms), in UTC: "2026-10-06 14:03:07 UTC".
+std::string SystemdCalendarUtc(int64_t at_ms);
+
+// `text` with '&', '<' and '>' escaped, for a notification server that
+// reads the body as markup ("body-markup").
+std::string EscapeNotificationMarkup(const std::string& text);
+
+// What the Linux notification platform can do in this session, with the
+// reason for each "no" (platform_features). Empty transport: no server.
+struct NotificationFacts {
+  std::string transport;  // "portal", "freedesktop", or "" (no server)
+  bool cold_start = false;
+  std::string cold_start_reason;
+  bool schedule_while_closed = false;
+  std::string schedule_reason;
+  bool server_caps_known = false;
+  std::vector<std::string> server_caps;  // the server's GetCapabilities
+};
+
+// Linux: the facts above, read from the notification platform (created on
+// first use). Elsewhere: empty.
+NotificationFacts LinuxNotificationFacts();
+
+// Linux: runs a scheduled-notification launch (ParseNotifyLaunch): when the
+// app isn't running, posts the stored notification `id` (claimed from the
+// schedule file, so it is posted once) and returns; the host then exits
+// with the result. Never loads a web engine or the runtime. 0 elsewhere.
+int RunNotifyLaunch(const std::string& id);
+
+// Linux: this process was started by D-Bus activation (its arguments
+// carried kDBusActivationArg, which StripDBusActivationArg removed). The
+// host's main() calls it before InitNotificationsAtLaunch.
+void SetDBusActivationLaunch(bool activated);
+
+// Test-only: treat this process as started by D-Bus activation (as if its
+// arguments carried kDBusActivationArg) before InitNotificationsAtLaunch.
+void SetDBusActivationLaunchForTesting(bool activated);
+
 // Test-only: forget every live notification, buffered response and the
 // handler (between test cases).
 void ResetNotificationsForTest();

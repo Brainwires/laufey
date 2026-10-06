@@ -23,6 +23,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace laufey_common {
 
@@ -99,6 +100,25 @@ struct PlatformFeatures {
   // Sway with no daemon the portal still offers it, with nothing behind it.
   std::string notification_server;
   bool notification_activatable = false;
+  // Linux, from the notification platform (LinuxNotificationFacts): how
+  // notifications are sent ("portal" or "freedesktop"; empty with no
+  // server), whether a click starts the app when it isn't running, whether
+  // a scheduled one is posted while it is closed (a systemd user timer),
+  // each with why not, and the server's GetCapabilities.
+  std::string notification_transport;
+  bool notification_cold_start = false;
+  std::string notification_cold_start_reason;
+  bool notification_schedule_while_closed = false;
+  std::string notification_schedule_reason;
+  bool notification_caps_known = false;
+  std::vector<std::string> notification_server_caps;
+
+  // How the dock badge shows: "dock" (macOS), "launcher-entry" (Linux, a
+  // dock reads com.canonical.Unity.LauncherEntry), "title" (a "(N) "
+  // prefix on the window titles: Windows, and Linux without such a dock),
+  // and why not a launcher (Linux).
+  std::string badge;
+  std::string badge_reason;
 
   // xdg-desktop-portal interface -> version ("Notification" -> 2). An
   // interface the portal lacks is absent from the map.

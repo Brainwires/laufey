@@ -61,7 +61,19 @@ static int run_headless(const std::string& runtimePath) {
 }
 
 int main(int argc, char* argv[]) {
+  // D-Bus activation for a notification click (`<app id>.service` passes
+  // --laufey-dbus-activated): noted, and taken out of argv so neither GTK,
+  // the single-instance forwarding nor the runtime sees it.
+  laufey_common::SetDBusActivationLaunch(
+      laufey_common::StripDBusActivationArg(&argc, argv));
   const std::vector<std::string> args(argv + 1, argv + argc);
+
+  // A scheduled notification's systemd timer (`<exe> --laufey-notify <id>`,
+  // docs/notifications.md): post it and exit, with no GTK, no web engine and
+  // no runtime.
+  std::string notify_id;
+  if (laufey_common::ParseNotifyLaunch(args, &notify_id))
+    return laufey_common::RunNotifyLaunch(notify_id);
 
   // The runtime library: a packaged app (a launch file, or a runtime next to
   // the executable) loads only the one next to its executable; a development

@@ -687,6 +687,24 @@ jobs:
         shell: pwsh
         run: scripts/notification-coldstart-e2e.ps1 ${{ matrix.backend }}
 
+      # The cold-start notification click on Linux: D-Bus starts the app from
+      # its service file for org.freedesktop.Application.ActivateAction (what
+      # gnome-shell and KDE's portal send for a click) and the click reaches
+      # the response handler as the launch. Under Xvfb and a private session
+      # bus with the stand-in notification server (no portal there: the
+      # freedesktop transport; real desktops: docs/notifications.md).
+      - name: Notifications — cold-start click (Linux)
+        if: runner.os == 'Linux' && matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          mock="$(ls webview/build/backend-common/laufey_mock_notification_server \
+            cef/build/backend-common/laufey_mock_notification_server \
+            cef/build/laufey_mock_notification_server 2>/dev/null | head -1)"
+          export XDG_DATA_HOME="$(mktemp -d)" LAUFEY_E2E_ENTRY_WAIT=0
+          xvfb-run -a dbus-run-session -- bash -c \
+            "$mock & sleep 1; scripts/notification-coldstart-e2e.sh ${{ matrix.backend }}"
+
       # Per-app web storage (LAUFEY_APP_ID / LAUFEY_DATA_DIR): persistence
       # across relaunches, isolation between apps, unchanged defaults. See
       # docs/app-data.md.

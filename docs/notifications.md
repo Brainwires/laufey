@@ -39,11 +39,11 @@ body, time, data, actions; soonest first) and `cancel_notification(tag)` cancels
 one (and removes a delivered one with that tag from the notification center).
 Give a scheduled notification a tag; without one the crate makes one up.
 
-| Platform | Scheduler                                                                                                                                                  | Delivered while the app is not running |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| macOS    | `UNTimeIntervalNotificationTrigger` (under a minute away) or `UNCalendarNotificationTrigger` (the wall-clock date, so a sleep in between doesn't shift it) | yes (the system holds it)              |
-| Windows  | `ScheduledToastNotification`                                                                                                                               | yes (the system holds it)              |
-| Linux    | laufey's own timer: the freedesktop protocol has no scheduler                                                                                              | no — see below                         |
+| Platform | Scheduler                                                                                                                                                  | Delivered while the app is not running  |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| macOS    | `UNTimeIntervalNotificationTrigger` (under a minute away) or `UNCalendarNotificationTrigger` (the wall-clock date, so a sleep in between doesn't shift it) | yes (the system holds it)               |
+| Windows  | `ScheduledToastNotification`                                                                                                                               | yes (the system holds it)               |
+| Linux    | laufey's own timer (the freedesktop protocol has no scheduler), plus a systemd user timer per notification where a systemd user manager runs               | with a systemd user manager — see below |
 
 On Linux the schedule is persisted in the app data directory
 (`laufey-notifications.json`, see [app-data.md](app-data.md)) and re-armed at
@@ -54,7 +54,35 @@ instances share the file under a lock and a due notification is claimed from it
 before it is posted, so it fires once. With no notification server on the
 session bus (yet), a due notification waits and is retried every 30 seconds.
 
-`notification_capabilities()` reports `schedule()` and `schedule_persists()`.
+Where a systemd user manager answers on the session bus
+(`org.freedesktop.systemd1`), each scheduled notification also gets a transient
+timer, `laufey-<app id>-<tag id>.timer` (the tag id is 16 hex digits of the
+tag's FNV-1a hash), created with `StartTransientUnit` the way
+`systemd-run --user
+--on-calendar=` creates one. At the notification's time
+(`OnCalendar=`, UTC, to the second) it runs `<exe> --laufey-notify <tag id>`
+with `LAUFEY_APP_ID` (and `LAUFEY_DATA_DIR` when set) in its environment. That
+launch posts the stored notification and exits, before any web engine or the
+runtime loads. When the app runs (another process owns the app's D-Bus name) it
+first asks it to post the notification itself, with
+`ActivateAction("laufey-schedule-due", [<tag id>])` on that name: the app
+re-reads the schedule, posts what is due (an entry it never armed too, such as
+one another instance scheduled) and then answers. The launch posts the entry
+itself only if it is still in the file after that, or after two seconds without
+an answer, so a process that took the app's name without being the app can't
+make it vanish; either way the entry is claimed from the file under its lock, so
+it is posted once. The app also re-reads the schedule each time one of its own
+timers fires. A notification less than two seconds away gets no timer.
+Cancelling one stops its timer. Transient timers last until the user manager
+stops (a logout without lingering, a reboot); each launch of the app re-creates
+them for the pending notifications. An AppImage's timer runs `$APPIMAGE`,
+trusted only while the running executable is inside the AppImage's mount
+(`$APPDIR`). The unit name keeps at most 200 characters of the app id (a longer
+one is cut, with 8 hex digits of its hash), so it stays within systemd's limit.
+Without a systemd user manager the app's own timer is the only scheduler.
+
+`notification_capabilities()` reports `schedule()` and `schedule_persists()` (on
+Linux: the systemd timers are available).
 
 ## Clicks, actions and responses
 
@@ -70,17 +98,19 @@ oldest dropped first) and delivered, with `launch: true`, when one registers:
 that is how the click that launched the app reaches it, like the cold-start
 deep-link buffer ([deep-links.md](deep-links.md)).
 
-| Platform | Mechanism                                                                                                              | Cold-start click |
-| -------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| macOS    | `UNUserNotificationCenter` delegate, installed before AppKit finishes launching; actions are `UNNotificationCategory`s | yes              |
-| Windows  | toast activation through the app's COM activator (`INotificationActivationCallback`), registered at launch             | yes              |
-| Linux    | `org.freedesktop.Notifications` `ActionInvoked` (the body click is the `default` action)                               | no — see below   |
+| Platform | Mechanism                                                                                                              | Cold-start click                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| macOS    | `UNUserNotificationCenter` delegate, installed before AppKit finishes launching; actions are `UNNotificationCategory`s | yes                                                    |
+| Windows  | toast activation through the app's COM activator (`INotificationActivationCallback`), registered at launch             | yes                                                    |
+| Linux    | the xdg-desktop-portal Notification interface: `org.freedesktop.Application.ActivateAction` on the app's D-Bus name    | with the portal and the D-Bus service file — see below |
 
-On Linux the server sends `ActionInvoked` to the connection that posted the
-notification, so a click after that process exited can't reach the app. The
-notification carries the `desktop-entry` hint (`LAUFEY_APP_ID`), which lets a
-shell such as GNOME launch the app for it, but the click itself is not
-delivered.
+On Linux a click reaches a quit app only through the portal path (below): the
+desktop calls `ActivateAction` on the app's D-Bus name, and D-Bus starts the app
+from the service file a `.deb` or `.rpm` installs. Through
+`org.freedesktop.Notifications` itself, the server sends `ActionInvoked` to the
+connection that posted the notification, so a click after that process exited
+can't reach the app. `notification_capabilities()` reports `cold_start()` when
+the click would start it.
 
 ## Platforms
 
@@ -141,17 +171,92 @@ Permission: Windows has no prompt; the status is the user's setting for the app
 
 ### Linux
 
-The freedesktop.org Desktop Notifications protocol over D-Bus
-(`org.freedesktop.Notifications`): `Notify` with the actions plus `default` (the
-body click), the `desktop-entry`, `urgency` (critical for `require_interaction`,
-which also never expires), `suppress-sound` and `image-data` (the icon) hints,
-and the server's id of a notification with the same tag as `replaces_id`.
-`ActionInvoked` and `NotificationClosed` become the events. Everything runs on a
-thread of laufey's own (its own GLib main context), under WebKitGTK and CEF
-alike.
+Two transports, chosen once per process.
+
+**The portal** (`org.freedesktop.portal.Notification`, version 1) when all of
+these hold: xdg-desktop-portal registers the app's id for this host app
+(`org.freedesktop.host.portal.Registry.Register`, xdg-desktop-portal 1.19 or
+later; it is the first portal call on laufey's own connection), the portal has
+the Notification interface, and `<app id>.desktop` is installed in an XDG data
+directory (the shell names the app by it). `AddNotification` takes the tag as
+its id, the title, the body, the priority (`urgent` for `require_interaction`,
+else `normal`), the icon (a serialized `GBytesIcon`), and every click as the
+GApplication action `app.laufey-notification` with a target string holding the
+tag, the action and the data (the toast-argument encoding). Version 1 has no
+sound setting (`silent` is ignored) and reports no closes. Closing removes the
+notification (`RemoveNotification`).
+
+While it runs, the app owns its D-Bus name (the app id, never queued: a second
+instance doesn't take it) and exports `org.freedesktop.Application` at the app
+id's path (`/` and the id with `.` as `/`, `-` as `_`). A click becomes
+`ActivateAction("laufey-notification", [target])` there: gnome-shell sends it
+for xdg-desktop-portal-gnome, KDE's portal for Plasma. When the app isn't
+running, D-Bus starts it from `<app id>.service` in `dbus-1/services` (the
+`.deb` and `.rpm` install it; its `Exec` line passes `--laufey-dbus-activated`),
+and the click is delivered to the response handler with `launch: true`, as on
+Windows. The host takes `--laufey-dbus-activated` out of its arguments first:
+neither the web engine nor the runtime sees it. Where a portal also sends
+`ActionInvoked` for the click, the first of the two wins for five seconds.
+`Open(uris)` on the running app is a second launch with those links (files as
+paths) as its arguments, and `Activate` a second launch with none: what a
+desktop sends when it launches an app whose desktop entry says
+`DBusActivatable=true`. Any process of the same user on the session bus can call
+these methods, as with the Windows COM activator.
+
+Tested on Ubuntu 26.04 with GNOME 50 (xdg-desktop-portal 1.21,
+xdg-desktop-portal-gnome 50) and Plasma 6.6 (xdg-desktop-portal-kde 6.6), with
+the WebKitGTK and CEF backends: a click after the app quit starts it (the body
+on both, a button on Plasma), and so does a click on a notification a systemd
+timer posted while the app was closed (`scripts/notification-coldstart-e2e.sh`).
+Neither desktop needs `DBusActivatable=true` in the desktop entry for that; the
+service file is enough. gnome-shell refuses notifications for a desktop entry it
+hasn't loaded yet (a few seconds after it is installed) while the portal still
+reports success.
+
+**`org.freedesktop.Notifications`** otherwise (an AppImage or a tarball, which
+install no desktop entry; an older portal; no portal): `Notify` with the actions
+plus `default` (the body click), the `desktop-entry`, `urgency` (critical for
+`require_interaction`, which also never expires), `suppress-sound` and
+`image-data` (the icon) hints, and the server's id of a notification with the
+same tag as `replaces_id`. `ActionInvoked` and `NotificationClosed` become the
+events.
+
+Both follow the server's `GetCapabilities`, read once per server: without
+`actions` no button (and no `default`) is sent, and `clicks()`, `actions()` and
+`cold_start()` are false. The body is escaped, since it is text, unless the
+server is known not to read markup (its capabilities were read and lack
+`body-markup`). `platform_features` reports the transport, the cold start and
+the scheduled-launch timers with the reason for each "no", and the server's
+capabilities ([platform-features.md](platform-features.md)).
+
+Everything runs on a thread of laufey's own (its own GLib main context and its
+own session-bus connection), under WebKitGTK and CEF alike.
 
 Permission: granted when a notification server owns the name (or D-Bus can start
 one), else unsupported; there is no prompt.
+
+Packagers: install `<app id>.desktop` in `/usr/share/applications` and
+`/usr/share/dbus-1/services/<app id>.service`:
+
+```ini
+[D-BUS Service]
+Name=<app id>
+Exec=/usr/bin/env LAUFEY_APP_ID=<app id> /usr/bin/<app> --laufey-dbus-activated
+```
+
+and on removal stop the users' scheduled-notification timers, matching exactly
+16 hex digits after the app id so that another app whose id starts with this
+one's (`<app id>-extra`) keeps its timers:
+
+```sh
+timeout 10 systemctl --user --machine="$user"@ --no-block \
+  stop 'laufey-<app id>-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].timer' || :
+```
+
+for each user `loginctl list-users` knows (`NotificationTimerGlob` builds the
+pattern; an app id over 200 characters is cut as in the unit names).
+`--no-block` and the timeout keep a user manager that doesn't answer from
+stalling the package manager.
 
 ### Winit
 

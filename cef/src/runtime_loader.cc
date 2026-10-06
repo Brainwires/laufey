@@ -1644,6 +1644,11 @@ static void Backend_SetDockBadge_TitlePrefix(void* data,
                                              const char* badge_or_null) {
   std::string badge =
       (badge_or_null && *badge_or_null) ? std::string(badge_or_null) : "";
+#if defined(__linux__)
+  // A dock that reads LauncherEntry shows the count instead of the prefix.
+  if (laufey_common::SetLauncherEntryBadge(badge))
+    badge.clear();
+#endif
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
 
   loader->ForEachBrowserWithId([&badge](uint32_t wid,

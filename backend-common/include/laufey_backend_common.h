@@ -147,6 +147,21 @@ std::string ApplyTitlePrefixBadge(uint64_t window_key,
 // the map doesn't grow unbounded).
 void ForgetTitlePrefixBadge(uint64_t window_key);
 
+// Linux: the badge as the launcher count of the com.canonical.Unity.
+// LauncherEntry API (Update on the session bus, for application://<app
+// id>.desktop), where a dock reads it: one owns com.canonical.Unity (Ubuntu's
+// dock, Dash to Dock) or org.kde.plasmashell runs (Plasma's task manager).
+// `badge` empty clears it; a badge of digits is the count. Returns true when
+// a launcher shows it (the caller then drops its title prefix); false when
+// none can (no consumer, no installed `<app id>.desktop`, or a badge that
+// isn't a number), after clearing any count shown before: the caller falls
+// back to the title prefix. Any thread. Linux only (launcher_entry_linux.cc).
+bool SetLauncherEntryBadge(const std::string& badge);
+
+// Linux: whether SetLauncherEntryBadge can show a count here, and why not
+// ("" when it can). Any thread.
+bool LauncherEntryAvailable(std::string* reason);
+
 // ---------------------------------------------------------------------------
 // Dialogs (alert / confirm / prompt)
 // ---------------------------------------------------------------------------

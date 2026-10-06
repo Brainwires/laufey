@@ -43,6 +43,7 @@
 #ifndef LAUFEY_LAUNCH_CONFIG_H_
 #define LAUFEY_LAUNCH_CONFIG_H_
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -103,6 +104,23 @@ std::string LaunchConfigPathForExecutable(const std::string& exe_path);
 // The running executable's real path (symlinks resolved where the platform
 // allows), or "" if it can't be determined.
 std::string ExecutablePath();
+
+// The AppImage file a launch of this app runs instead of `exe` (the running
+// executable): `appimage` ($APPIMAGE) resolved, only when it is absolute and
+// `exe` is inside `appdir` ($APPDIR, the AppImage's mount), else "". Any
+// process can set $APPIMAGE, so outside the mount it is not trusted to name
+// what a timer, an autostart entry or a link starts. `canonical` resolves a
+// path (symlinks and "..") or returns "" when it doesn't exist; `exe` is
+// already resolved. Pure apart from `canonical`.
+std::string TrustedAppImagePath(
+    const std::string& exe, const std::string& appimage,
+    const std::string& appdir,
+    const std::function<std::string(const std::string&)>& canonical);
+
+// What a launch of this app (a scheduled notification's timer, an autostart
+// entry) runs: TrustedAppImagePath from $APPIMAGE / $APPDIR, else
+// ExecutablePath(). "" if neither is known.
+std::string RelaunchExecutablePath();
 
 // This process's launch file, read and validated once (thread-safe); problems
 // are reported on stderr the first time. Empty when there is no file.
