@@ -4,9 +4,9 @@
 //! OS's secret store. On Linux the CEF and WebView backends use the Secret
 //! Service through libsecret; elsewhere (and on Winit) the entry points are
 //! NULL and every call answers [`SecretError::NotSupported`]. Each call
-//! blocks the calling thread for at most about `timeout` (call it off the
-//! UI thread and off an async runtime's workers). See
-//! `docs/secure-store.md`.
+//! blocks the calling thread for at most about `timeout` (`Duration::ZERO`:
+//! the backend's default, 20 s); call it off the UI thread and off an async
+//! runtime's workers. See `docs/secure-store.md`.
 
 use std::ffi::{c_char, CString};
 use std::time::Duration;
@@ -49,9 +49,10 @@ fn c(s: &str, what: &str) -> Result<CString, SecretError> {
     .map_err(|_| SecretError::Failed(format!("the {what} contains a NUL byte")))
 }
 
+/// The timeout in milliseconds; `Duration::ZERO` asks the backend for its
+/// default (20 s).
 fn millis(timeout: Duration) -> u32 {
-  // 0 asks the backend for its default; keep a real request above it.
-  timeout.as_millis().clamp(1, u32::MAX as u128) as u32
+  timeout.as_millis().min(u32::MAX as u128) as u32
 }
 
 fn error_of(
