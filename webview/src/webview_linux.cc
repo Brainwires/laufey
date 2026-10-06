@@ -606,6 +606,40 @@ static WebKitWebContext* LaufeyWebContext() {
   return ctx;
 }
 
+// A streamed fetch() body must reach the page as it arrives. WebKitGTK reads
+// a custom-scheme response in 8 KiB pieces (WebKitURISchemeRequest.cpp,
+// gReadBufferSize), one didReceiveData each, and with WebCore's byte-stream
+// fetch source (the ReadableByteStreamFetchSource feature, on by default)
+// a piece that arrives while the page isn't pulling is stashed in the body's
+// consumer (FetchResponse::Loader::didReceiveData), and the next pull doesn't
+// take it (FetchBodySource::pull only marks the source pulling): it waits for
+// the NEXT piece or the end of the body. So a write of 8201 bytes reached the
+// page as 8192, the 9-byte tail only with the following write. WebKit fixed
+// this upstream (https://bugs.webkit.org/show_bug.cgi?id=322545, 319981@main:
+// pull() calls feedStream()), in no WebKitGTK release yet. The non-byte
+// source does feed the stream on pull, so turn the byte source off. The same
+// change set removed the feature flag, so this does nothing on a WebKit that
+// has the fix. The cost: a fetch body is not a byte stream, so
+// res.body.getReader({ mode: "byob" }) throws (default readers, text(),
+// arrayBuffer() etc. are unaffected; new ReadableStream({ type: "bytes" })
+// still works).
+static void DisableByteStreamFetchSource(WebKitSettings* settings) {
+#if WEBKIT_CHECK_VERSION(2, 42, 0)
+  WebKitFeatureList* features = webkit_settings_get_all_features();
+  for (gsize i = 0; i < webkit_feature_list_get_length(features); ++i) {
+    WebKitFeature* feature = webkit_feature_list_get(features, i);
+    const char* id = webkit_feature_get_identifier(feature);
+    if (id && std::strcmp(id, "ReadableByteStreamFetchSource") == 0) {
+      webkit_settings_set_feature_enabled(settings, feature, FALSE);
+      break;
+    }
+  }
+  webkit_feature_list_unref(features);
+#else
+  (void)settings;
+#endif
+}
+
 // Fired as a navigation progresses through its load states. We only care about
 // WEBKIT_LOAD_FINISHED, which signals the document and subresources have loaded
 // (and the web process has content to composite). The window_id is passed
@@ -1363,6 +1397,7 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     // LAUFEY_INSPECTABLE / "inspectable" (default on).
     webkit_settings_set_enable_developer_extras(
         wk_settings, laufey_common::LaunchInspectable() ? TRUE : FALSE);
+    DisableByteStreamFetchSource(wk_settings);
 
     if (transparent) {
       // Let the page's own alpha show through the webview (any region the

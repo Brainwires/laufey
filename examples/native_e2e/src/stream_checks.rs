@@ -17,9 +17,15 @@
 //! more than a page that isn't reading yet holds: once the backend holds its
 //! high-water mark (4 MiB) a write takes nothing and returns 0 (API 44), the
 //! writer retries, and the page, reading later, gets the whole body intact.
+//!
+//! `paced` writes lines a little over 8 KiB, each only once the page has
+//! acknowledged reading the previous one: every write must reach the page
+//! whole while the writer waits, not only with the next write (WebKitGTK's
+//! byte-stream fetch source held a body's tail past its 8 KiB read buffer
+//! until more data came; see DisableByteStreamFetchSource, webview_linux.cc).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -42,9 +48,17 @@ const UI_BUSY_MS: u64 = 1500;
 /// Bytes `backpressure` writes: well over the high-water mark and WebView2's
 /// credit window together.
 const BP_LEN: usize = 16 * 1024 * 1024 + 5;
+/// `paced`: lines of this many bytes (newline included), just over the 8 KiB
+/// a WebKitGTK custom-scheme read takes at a time.
+const PACED_LINE: usize = 8 * 1024 + 9;
+/// `paced`: lines written.
+const PACED_LINES: usize = 4;
+/// `paced`: how long the writer waits for the page to acknowledge a line
+/// before writing the next anyway (the line then counts as unacknowledged).
+const PACED_ACK_MS: u64 = 3000;
 
 /// The scenarios the page runs; each reports once.
-const LABELS: [&str; 9] = [
+const LABELS: [&str; 10] = [
   "fetch",
   "abort",
   "sse",
@@ -54,6 +68,7 @@ const LABELS: [&str; 9] = [
   "slow",
   "backpressure",
   "nohead",
+  "paced",
 ];
 /// Labels whose never-ending route must see its write fail (the engine
 /// cancelled the request) once the page is done with it.
@@ -72,6 +87,11 @@ pub struct State {
   slow_write: Arc<Mutex<Option<(u128, bool)>>>,
   /// `backpressure`: what the writer saw.
   bp_write: Arc<Mutex<Option<Retried>>>,
+  /// `paced`: lines the page acknowledged having read.
+  paced_acks: Arc<AtomicUsize>,
+  /// `paced`: the lines written without the page acknowledging them within
+  /// PACED_ACK_MS, once the body was written.
+  paced_unacked: Arc<Mutex<Option<Vec<usize>>>>,
 }
 
 /// A body written with retries on backpressure (`write_retrying`).
@@ -320,6 +340,23 @@ const scenarios = {{
       return [e && e.name === 'TypeError', 'rejected with ' + (e && e.name) + ': ' + (e && e.message)];
     }}
   }},
+  // Lines written one at a time, each once the page acknowledged the one
+  // before: every line must arrive while the writer waits for it.
+  async paced() {{
+    const res = await fetch('/paced', {{ cache: 'no-store' }});
+    const reader = res.body.getReader();
+    let bytes = 0, lines = 0, acked = 0, reads = 0;
+    for (;;) {{
+      const {{ value, done }} = await reader.read();
+      if (done) break;
+      reads++;
+      bytes += value.length;
+      for (const b of value) if (b === 10) lines++;
+      for (; acked < lines; acked++) await fetch('/paced-ack', {{ cache: 'no-store' }});
+    }}
+    return [lines === {paced_lines} && bytes === {paced_lines} * {paced_line},
+            lines + ' lines, ' + bytes + ' bytes in ' + reads + ' reads'];
+  }},
   // A response the page doesn't read at first: the backend holds its
   // high-water mark and takes nothing more (the writer retries), then the
   // page reads the whole body, intact.
@@ -357,6 +394,8 @@ const scenarios = {{
     slow_len = SLOW_LEN,
     busy_ms = UI_BUSY_MS,
     bp_len = BP_LEN,
+    paced_line = PACED_LINE,
+    paced_lines = PACED_LINES,
   )
 }
 
@@ -493,6 +532,37 @@ pub fn serve(req: SchemeRequest, state: &State) -> Option<SchemeRequest> {
       req.exchange.write(b"fast body");
       req.exchange.finish();
     }
+    "paced" => {
+      begin(&req, 200, "text/plain");
+      let mut unacked = Vec::new();
+      for i in 0..PACED_LINES {
+        let mut line = format!("line {i} ").into_bytes();
+        line.resize(PACED_LINE - 1, b'x');
+        line.push(b'\n');
+        if req.exchange.write(&line) < 0 {
+          break;
+        }
+        let start = Instant::now();
+        while state.paced_acks.load(Ordering::SeqCst) <= i {
+          if start.elapsed() > Duration::from_millis(PACED_ACK_MS) {
+            // The page didn't get it: write on, so the body still ends.
+            if i + 1 < PACED_LINES {
+              unacked.push(i);
+            }
+            break;
+          }
+          std::thread::sleep(Duration::from_millis(10));
+        }
+      }
+      *state.paced_unacked.lock().unwrap() = Some(unacked);
+      req.exchange.finish();
+    }
+    "paced-ack" => {
+      state.paced_acks.fetch_add(1, Ordering::SeqCst);
+      begin(&req, 200, "text/plain");
+      req.exchange.write(b"ok");
+      req.exchange.finish();
+    }
     // Finished without a head (scheme_response_begin never called).
     "nohead" => req.exchange.finish(),
     "slow" => {
@@ -591,6 +661,7 @@ pub async fn run(state: &State) -> Option<Window> {
     "slow" => "a big body written while the UI thread is busy arrives intact to a slow reader, and another request completes meanwhile",
     "backpressure" => "a body far larger than the backend holds reaches a page that starts reading late, intact",
     "nohead" => "a response finished without a head fails the request instead of leaving it pending",
+    "paced" => "a body written a line at a time arrives whole",
     _ => "a response complete at once is unaffected",
   }
   };
@@ -634,6 +705,15 @@ pub async fn run(state: &State) -> Option<Window> {
       "writes taking nothing at the high-water mark (WKWebView hands every write to WebKit; {bp:?})"
     ));
   }
+  // Each `paced` line (8 KiB + 9 bytes) reached the page while the writer
+  // waited for it, not only with the next write or the end of the body.
+  let unacked = state.paced_unacked.lock().unwrap().clone();
+  check(
+    &format!(
+      "each {PACED_LINE}-byte write reaches a reading page before the next one is written (lines the page never acknowledged within {PACED_ACK_MS} ms: {unacked:?})"
+    ),
+    matches!(&unacked, Some(u) if u.is_empty()),
+  );
   // The engine's cancellation must reach the handler: its next write fails.
   let all_cancelled = wait_for(
     || {

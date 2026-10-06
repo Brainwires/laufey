@@ -172,7 +172,16 @@ backend takes the bytes and hands them on as the engine reads:
   which WebKit reads from the GTK main loop (a pollable stream: no thread waits
   on it). Before API 42 the body went through a pipe whose `write` blocked once
   64 KiB were unread, which stalled the runtime whenever the GTK thread was
-  busy.
+  busy. WebKit reads it 8 KiB at a time, and WebKitGTK 2.52's byte-stream
+  `fetch` body held a piece that arrived while the page was busy until the next
+  one (or the end) came
+  ([WebKit bug 322545](https://bugs.webkit.org/show_bug.cgi?id=322545), fixed
+  upstream in 319981@main, in no release yet): the 9-byte tail of an 8201-byte
+  write reached the page only with the following write. The backend turns that
+  source off (the `ReadableByteStreamFetchSource` feature), so every write
+  reaches the page as it arrives; the cost is that a `fetch` body there has no
+  BYOB reader (`res.body.getReader({ mode: "byob" })` throws). Once WebKitGTK
+  ships the fix the feature no longer exists and this does nothing.
 - **CEF** queues it for Chromium's next `Read` (Chromium stops reading while the
   page doesn't consume).
 - **WebView2** streams through the page (below).
