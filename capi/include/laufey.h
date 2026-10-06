@@ -368,14 +368,18 @@ typedef void (*laufey_menu_closed_fn)(void* user_data, uint32_t window_id);
   (1u << 1)  // "schedule_at" delivers at that time, at least while running
 #define LAUFEY_NOTIFICATION_CAP_SCHEDULE_PERSISTS \
   (1u << 2)  // the OS delivers a scheduled notification even if the app is
-             // not running then (macOS, Windows; not Linux, where laufey's
-             // own timer re-arms the schedule at the next launch)
+             // not running then (macOS, Windows; Linux with a systemd user
+             // manager, whose transient timers run the app's
+             // `--laufey-notify` launch; without one laufey's own timer
+             // re-arms the schedule at the next launch)
 #define LAUFEY_NOTIFICATION_CAP_ACTIONS (1u << 3)  // action buttons are shown
 #define LAUFEY_NOTIFICATION_CAP_CLICKS \
   (1u << 4)  // clicks (body and actions) are reported
 #define LAUFEY_NOTIFICATION_CAP_COLD_START \
   (1u << 5)  // a click while the app is not running launches it and the
-             // response reaches set_notification_response_handler
+             // response reaches set_notification_response_handler (Linux:
+             // the portal transport plus the app's D-Bus service file;
+             // docs/notifications.md)
 
 // Most responses held while no response handler is registered (a cold-start
 // click is the usual one); beyond that the oldest are dropped.
@@ -1089,7 +1093,9 @@ struct laufey_backend_api {
   // Set or clear a short text badge on the app's dock / taskbar icon.
   // Pass NULL or "" to clear. macOS: NSDockTile badgeLabel. Windows: renders
   // text to a small overlay icon via GDI+ + ITaskbarList3::SetOverlayIcon.
-  // Linux: prepends "(text) " to the focused window's title.
+  // Linux: the count on the app's launcher where a dock reads
+  // com.canonical.Unity.LauncherEntry (a badge of digits), else "(text) "
+  // before the window titles (docs/dock-taskbar.md).
   void (*set_dock_badge)(void* backend_data, const char* badge_or_null);
 
   // Request the user's attention by bouncing the dock icon (macOS) or

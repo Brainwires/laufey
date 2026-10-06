@@ -112,6 +112,48 @@ pub async fn cold_start() -> ! {
   unsafe { super::libc_exit(0) }
 }
 
+/// A step of scripts/notification-coldstart-e2e.sh: post the notification
+/// the script then clicks (LAUFEY_E2E_NOTIFY_POST: tag "cold-tag", data
+/// {"c":1}, the action "cold-action"), or schedule "sched-tag" that many
+/// milliseconds ahead (LAUFEY_E2E_NOTIFY_SCHEDULE_MS), print the
+/// capabilities and platform features, and quit. Ends the process.
+pub async fn post_and_quit() -> ! {
+  let caps = laufey::notification_capabilities();
+  eprintln!("[e2e-notify] notification capabilities = {:#x}", caps.bits);
+  if let Some(json) = laufey::platform_features() {
+    eprintln!("[e2e-notify] platform features = {json}");
+  }
+  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+  if let Ok(ms) = std::env::var("LAUFEY_E2E_NOTIFY_SCHEDULE_MS") {
+    let ms: i64 = ms.parse().unwrap_or(10_000);
+    let now = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_millis() as i64)
+      .unwrap_or(0);
+    let _handle = Notification::new("laufey scheduled e2e")
+      .body("posted by the app's systemd timer")
+      .tag("sched-tag")
+      .data(r#"{"s":1}"#)
+      .action("sched-action", "Open")
+      .schedule_at_ms(now + ms)
+      .show();
+    eprintln!("[e2e-notify] scheduled sched-tag {ms} ms ahead");
+  } else {
+    let _handle = Notification::new("laufey cold-start e2e")
+      .body("click me after the app quit")
+      .tag("cold-tag")
+      .data(r#"{"c":1}"#)
+      .action("cold-action", "Act")
+      .on_event(move |e| {
+        let _ = tx.send(format!("{e:?}"));
+      });
+    let shown = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
+    eprintln!("[e2e-notify] posted cold-tag: {shown:?}");
+  }
+  let _ = std::io::Write::flush(&mut std::io::stderr());
+  unsafe { super::libc_exit(0) }
+}
+
 // ---------------------------------------------------------------------------
 // Menus
 // ---------------------------------------------------------------------------

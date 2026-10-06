@@ -913,6 +913,17 @@ int main(int argc, char* argv[]) {
     return exit_code;
   }
 
+  // A scheduled notification's systemd timer (`<exe> --laufey-notify <id>`,
+  // docs/notifications.md): post it and exit before CEF or the runtime
+  // starts.
+  {
+    std::string notify_id;
+    if (laufey_common::ParseNotifyLaunch(
+            std::vector<std::string>(argv + (argc > 0 ? 1 : 0), argv + argc),
+            &notify_id))
+      return laufey_common::RunNotifyLaunch(notify_id);
+  }
+
   // The browser process's command line hook drops every Chromium switch of a
   // deep-link launch (LaufeyStripDeepLinkSwitches): a link handed to the app
   // by its .desktop entry's %u can't pass switches through, as on Windows.

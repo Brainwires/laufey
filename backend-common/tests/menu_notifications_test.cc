@@ -560,6 +560,59 @@ void TestPermissionCallbacksOnUiThread() {
   EXPECT(g_perm_thread == std::this_thread::get_id());
 }
 
+// The Linux activation and scheduled-launch helpers (portable).
+void TestLinuxActivationHelpers() {
+  std::string id;
+  std::string tag_id = NotificationTagId("daily");
+  EXPECT(tag_id.size() == 16);
+  EXPECT(tag_id == NotificationTagId("daily"));
+  EXPECT(tag_id != NotificationTagId("daily2"));
+  EXPECT(ParseNotifyLaunch({"--laufey-notify", tag_id}, &id) && id == tag_id);
+  // Only exactly that shape: no extra argument, a 16-hex id, the flag first.
+  EXPECT(!ParseNotifyLaunch({"--laufey-notify"}, &id));
+  EXPECT(!ParseNotifyLaunch({"--laufey-notify", tag_id, "x"}, &id));
+  EXPECT(!ParseNotifyLaunch({"--laufey-notify", "daily"}, &id));
+  EXPECT(!ParseNotifyLaunch({"--laufey-notify", "0123456789ABCDEF"}, &id));
+  EXPECT(!ParseNotifyLaunch({"x", "--laufey-notify", tag_id}, &id));
+
+  EXPECT(HasDBusActivationArg({"--laufey-dbus-activated"}));
+  EXPECT(HasDBusActivationArg({"--foo", "--laufey-dbus-activated"}));
+  // After "--" it is a positional argument (a link), not the marker.
+  EXPECT(!HasDBusActivationArg({"--", "--laufey-dbus-activated"}));
+  EXPECT(!HasDBusActivationArg({"acme://x"}));
+
+  EXPECT(IsValidApplicationId("dev.denext.kitchen-sink"));
+  EXPECT(IsValidApplicationId("org.example.App_2"));
+  EXPECT(!IsValidApplicationId("app"));     // one element
+  EXPECT(!IsValidApplicationId("dev..x"));  // an empty element
+  EXPECT(!IsValidApplicationId(".dev.x"));
+  EXPECT(!IsValidApplicationId("dev.x."));
+  EXPECT(!IsValidApplicationId("dev.2x"));  // starts with a digit
+  EXPECT(!IsValidApplicationId("dev.x y"));
+  EXPECT(!IsValidApplicationId(""));
+  EXPECT(!IsValidApplicationId("a." + std::string(260, 'b')));
+
+  EXPECT(ApplicationObjectPath("dev.denext.kitchen-sink") ==
+         "/dev/denext/kitchen_sink");
+
+  EXPECT(NotificationTimerUnit("dev.denext.kitchen-sink", "daily") ==
+         "laufey-dev.denext.kitchen-sink-" + tag_id);
+  EXPECT(NotificationTimerUnit("a.b c/d", "t").rfind("laufey-a.b_c_d-", 0) ==
+         0);
+
+  // UTC, rounded up to the next whole second.
+  EXPECT(SystemdCalendarUtc(0) == "1970-01-01 00:00:00 UTC");
+  EXPECT(SystemdCalendarUtc(1) == "1970-01-01 00:00:01 UTC");
+  EXPECT(SystemdCalendarUtc(1000) == "1970-01-01 00:00:01 UTC");
+  EXPECT(SystemdCalendarUtc(951782400000LL) == "2000-02-29 00:00:00 UTC");
+  EXPECT(SystemdCalendarUtc(1791252750676LL) == "2026-10-06 02:12:31 UTC");
+  EXPECT(SystemdCalendarUtc(4102444799000LL) == "2099-12-31 23:59:59 UTC");
+
+  EXPECT(EscapeNotificationMarkup("a < b && c > d") ==
+         "a &lt; b &amp;&amp; c &gt; d");
+  EXPECT(EscapeNotificationMarkup("plain") == "plain");
+}
+
 }  // namespace
 
 int main() {
@@ -579,6 +632,7 @@ int main() {
   TestRouting();
   TestFormats();
   TestPermissionCallbacksOnUiThread();
+  TestLinuxActivationHelpers();
   std::printf("menu_notifications_test: OK\n");
   return 0;
 }

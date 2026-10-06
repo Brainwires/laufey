@@ -389,7 +389,38 @@ int main() {
          "\"kwallet\":null,"
          "\"notificationServer\":\"Plasma\",\"notificationReason\":null,"
          "\"portalVersions\":{\"Notification\":2,\"Settings\":2},"
-         "\"cookieEncryption\":\"os\",\"cookieEncryptionWait\":null}");
+         "\"cookieEncryption\":\"os\",\"cookieEncryptionWait\":null,"
+         "\"notificationTransport\":null,\"notificationColdStart\":false,"
+         "\"notificationColdStartReason\":null,"
+         "\"notificationScheduleWhileClosed\":false,"
+         "\"notificationScheduleReason\":null,"
+         "\"notificationServerCapabilities\":null,\"badge\":null,"
+         "\"badgeReason\":null}");
+  // The notification platform's facts and the badge (L1).
+  {
+    PlatformFeatures l = f;
+    l.notification_transport = "portal";
+    l.notification_cold_start = true;
+    l.notification_cold_start_reason = "ignored when it can";
+    l.notification_schedule_reason = "no systemd user manager";
+    l.notification_caps_known = true;
+    l.notification_server_caps = {"actions", "body-markup"};
+    l.badge = "title";
+    l.badge_reason = "no dock reads launcher badges";
+    std::string lj = PlatformFeaturesToJson(l);
+    EXPECT(Contains(lj, "\"notificationTransport\":\"portal\""));
+    EXPECT(Contains(lj,
+                    "\"notificationColdStart\":true,"
+                    "\"notificationColdStartReason\":null"));
+    EXPECT(Contains(lj,
+                    "\"notificationScheduleWhileClosed\":false,"
+                    "\"notificationScheduleReason\":\"no systemd user "
+                    "manager\""));
+    EXPECT(Contains(lj,
+                    "\"notificationServerCapabilities\":[\"actions\","
+                    "\"body-markup\"]"));
+    EXPECT(Contains(lj, "\"badge\":\"title\",\"badgeReason\":\"no dock"));
+  }
   {
     PlatformFeatures k = f;
     k.kwallet = true;
@@ -434,6 +465,10 @@ int main() {
   EXPECT(Contains(json, "\"sessionType\":null"));
   EXPECT(Contains(json, "\"notificationServer\":null,\"notificationReason\":null"));
   EXPECT(Contains(json, "\"secretService\":\"os\""));
+  // Linux-only notification facts are null elsewhere.
+  EXPECT(Contains(json, "\"notificationColdStart\":null"));
+  EXPECT(Contains(json, "\"notificationScheduleWhileClosed\":null"));
+  EXPECT(Contains(json, "\"notificationServerCapabilities\":null"));
 
   // The ABI string carries the backend's cookie-store decision.
   SetCookieEncryption("basic");

@@ -2572,11 +2572,14 @@ void WebKitGTKBackend::BounceDock(int /*type*/) {
   });
 }
 
-// Badge via title prefix. Saved-titles map lives in
-// laufey_common::ApplyTitlePrefixBadge.
+// Badge: the launcher's count where a dock reads LauncherEntry
+// (laufey_common::SetLauncherEntryBadge), else a title prefix (the
+// saved-titles map lives in laufey_common::ApplyTitlePrefixBadge).
 void WebKitGTKBackend::SetDockBadge(const char* badge_or_null) {
   std::string badge =
       (badge_or_null && *badge_or_null) ? std::string(badge_or_null) : "";
+  if (laufey_common::SetLauncherEntryBadge(badge))
+    badge.clear();  // the launcher shows it: no title prefix
   gtk_invoke_sync([&] {
     std::lock_guard<std::mutex> wlock(windows_mutex_);
     for (auto& [wid, state] : windows_) {

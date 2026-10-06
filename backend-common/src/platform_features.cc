@@ -317,6 +317,34 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   out += "}";
   out += ",\"cookieEncryption\":" + StringOrNull(f.cookie_encryption);
   out += ",\"cookieEncryptionWait\":" + StringOrNull(f.cookie_encryption_wait);
+  bool on_linux = f.os == "linux";
+  out += ",\"notificationTransport\":" + StringOrNull(f.notification_transport);
+  out += ",\"notificationColdStart\":" +
+         std::string(on_linux ? Bool(f.notification_cold_start) : "null");
+  out += ",\"notificationColdStartReason\":" +
+         StringOrNull(on_linux && !f.notification_cold_start
+                          ? f.notification_cold_start_reason
+                          : std::string());
+  out += ",\"notificationScheduleWhileClosed\":" +
+         std::string(on_linux ? Bool(f.notification_schedule_while_closed)
+                              : "null");
+  out += ",\"notificationScheduleReason\":" +
+         StringOrNull(on_linux && !f.notification_schedule_while_closed
+                          ? f.notification_schedule_reason
+                          : std::string());
+  if (on_linux && f.notification_caps_known) {
+    out += ",\"notificationServerCapabilities\":[";
+    for (size_t i = 0; i < f.notification_server_caps.size(); ++i) {
+      if (i)
+        out += ",";
+      out += Quote(f.notification_server_caps[i]);
+    }
+    out += "]";
+  } else {
+    out += ",\"notificationServerCapabilities\":null";
+  }
+  out += ",\"badge\":" + StringOrNull(f.badge);
+  out += ",\"badgeReason\":" + StringOrNull(f.badge_reason);
   out += "}";
   return out;
 }
@@ -541,8 +569,10 @@ PlatformFeatures ProbePlatformFeatures() {
   PlatformFeatures f;
 #if defined(__APPLE__)
   f.os = "macos";
+  f.badge = "dock";
 #elif defined(_WIN32)
   f.os = "windows";
+  f.badge = "title";
 #else
   f.os = "unknown";
 #endif

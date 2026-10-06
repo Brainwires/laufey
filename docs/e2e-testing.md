@@ -964,13 +964,29 @@ that it says so). See [menus.md](menus.md) and
   `-ToastActivated -Embedding`; the runtime's cold-start mode writes the
   response it received, and the script checks its tag, action, data and
   `launch: true`.
+- **Linux cold start** (`scripts/notification-coldstart-e2e.sh <backend>`): the
+  script copies the backend with the runtime colocated and a launch file naming
+  `dev.laufey.e2e.coldstart`, installs that app's `.desktop` entry and D-Bus
+  service file (`--laufey-dbus-activated`) under `$XDG_DATA_HOME`, runs the app
+  once to post a notification (through the portal where the session has one) and
+  lets it quit, then sends what the shell sends for a click,
+  `org.freedesktop.Application.ActivateAction` on the app's name: D-Bus starts
+  the copy and its cold-start mode writes the response, checked as on Windows.
+  With `--schedule` the app schedules the notification ten seconds ahead and
+  quits; the script checks the app's systemd user timer, that the timer's launch
+  posted and claimed it, then clicks. `LAUFEY_E2E_CLICK_CMD` (a desktop's own
+  click hook) or `LAUFEY_E2E_CLICK=manual` clicks the real notification instead.
 
 The portable pieces are unit-tested in
 `backend-common/tests/menu_notifications_test.cc` (template parsing and
 accelerators, the context-menu session, the notification core over a fake
 platform, the schedule file, toast arguments) and the Linux D-Bus client in
 `notifications_dbus_test.cc` against a mock server (Notify arguments, signals,
-the scheduler and its persisted re-arm); the capi parsing in
+the scheduler and its persisted re-arm), `notifications_portal_dbus_test.cc`
+(the portal transport, `ActivateAction` on the app's name, the cold-start
+launch, scheduled launches and systemd timers against mock services),
+`notifications_caps_dbus_test.cc` (a server without actions, with body markup)
+and `launcher_entry_dbus_test.cc` (the launcher badge); the capi parsing in
 `capi/src/menus_notifications.rs`.
 
 Under `--window-api` (and the main battery), the fullscreen check also reads

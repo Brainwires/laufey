@@ -18,10 +18,18 @@ laufey::on_dock_reopen(|has_visible_windows| {
 ```
 
 On macOS the badge is a native red overlay drawn on the dock tile, and on
-Windows it is a small overlay icon composited onto the taskbar button. Linux has
-no icon overlay, so every backend falls back to prefixing the focused window's
-title with `"(N) "`, the convention used by applications such as Slack, Discord,
-and Telegram; taskbars and window-manager overviews surface that title.
-Requesting attention bounces the dock icon on macOS, flashes the taskbar button
-on Windows, and sets the window's urgency hint on Linux. The dock menu, the
-ability to hide the dock icon, and the reopen callback exist only on macOS.
+Windows it is a small overlay icon composited onto the taskbar button. On Linux
+a badge of digits is the count on the app's launcher where a dock reads the
+`com.canonical.Unity.LauncherEntry` API: one owns `com.canonical.Unity`
+(Ubuntu's dock, Dash to Dock) or `org.kde.plasmashell` runs (Plasma's task
+manager), and `<app id>.desktop` is installed for the dock to match
+`application://<app
+id>.desktop` against. Otherwise (no such dock, no installed
+desktop entry, or a badge that isn't a number) every backend falls back to
+prefixing the window titles with `"(N) "`, the convention used by applications
+such as Slack, Discord, and Telegram; taskbars and window-manager overviews
+surface that title. `platform_features` reports which one applies (`badge`,
+`badgeReason`). Requesting attention bounces the dock icon on macOS, flashes the
+taskbar button on Windows, and sets the window's urgency hint on Linux. The dock
+menu, the ability to hide the dock icon, and the reopen callback exist only on
+macOS.

@@ -81,6 +81,7 @@ if(APPLE)
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
     src/notifications_linux.cc
+    src/launcher_entry_linux.cc
     src/dialog_linux.cc
     src/clipboard_linux.cc
     src/clipboard_data_control_linux.cc
@@ -378,6 +379,44 @@ if(LAUFEY_BUILD_TESTS)
     )
     add_test(NAME laufey_notifications_dbus_test
              COMMAND laufey_notifications_dbus_test)
+
+    # The portal transport, D-Bus activation (org.freedesktop.Application
+    # on the app's name), scheduled launches and systemd user timers
+    # against a mock notification server, xdg-desktop-portal and systemd
+    # user manager (GTestDBus; skipped without dbus-daemon).
+    add_executable(laufey_notifications_portal_dbus_test
+                   tests/notifications_portal_dbus_test.cc)
+    target_link_libraries(laufey_notifications_portal_dbus_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_notifications_portal_dbus_test
+             COMMAND laufey_notifications_portal_dbus_test)
+    set_tests_properties(laufey_notifications_portal_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # What is sent and reported follows the server's GetCapabilities (no
+    # "actions", "body-markup"), and the facts' reasons (GTestDBus).
+    add_executable(laufey_notifications_caps_dbus_test
+                   tests/notifications_caps_dbus_test.cc)
+    target_link_libraries(laufey_notifications_caps_dbus_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_notifications_caps_dbus_test
+             COMMAND laufey_notifications_caps_dbus_test)
+    set_tests_properties(laufey_notifications_caps_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # The launcher badge (com.canonical.Unity.LauncherEntry) against a mock
+    # dock (GTestDBus; skipped without dbus-daemon).
+    add_executable(laufey_launcher_entry_dbus_test
+                   tests/launcher_entry_dbus_test.cc)
+    target_link_libraries(laufey_launcher_entry_dbus_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_launcher_entry_dbus_test
+             COMMAND laufey_launcher_entry_dbus_test)
+    set_tests_properties(laufey_launcher_entry_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
 
     # The WebKitGTK custom-scheme response body: writes never block, a
     # pollable reader on a GMainContext, the queued-bytes cap, a reader that

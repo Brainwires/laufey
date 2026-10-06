@@ -46,6 +46,7 @@
 #include <string>
 
 #include "laufey_backend_common.h"
+#include "laufey_notifications.h"
 #include "laufey_platform_features.h"
 
 namespace laufey_common {
@@ -657,6 +658,18 @@ PlatformFeatures ProbePlatformFeatures() {
   ProbeNotificationServer(bus, &f);
   if (bus)
     g_object_unref(bus);
+  // The notification platform's own view (its transport, the cold start,
+  // timers, the server's capabilities), and the launcher badge.
+  NotificationFacts facts = LinuxNotificationFacts();
+  f.notification_transport = facts.transport;
+  f.notification_cold_start = facts.cold_start;
+  f.notification_cold_start_reason = facts.cold_start_reason;
+  f.notification_schedule_while_closed = facts.schedule_while_closed;
+  f.notification_schedule_reason = facts.schedule_reason;
+  f.notification_caps_known = facts.server_caps_known;
+  f.notification_server_caps = facts.server_caps;
+  f.badge =
+      LauncherEntryAvailable(&f.badge_reason) ? "launcher-entry" : "title";
   f.tray_xembed = XEmbedTrayPresent(f.session_type);
   f.tray_library = AppIndicatorLibraryAvailableLinux();
   return f;
