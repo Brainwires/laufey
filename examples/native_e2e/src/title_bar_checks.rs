@@ -13,13 +13,15 @@
 //! - In a real desktop session (LAUFEY_E2E_HOST_SESSION=1) the session's
 //!   own portal answers. Expectations:
 //!
-//!     LAUFEY_E2E_EXPECT_TITLEBAR_SOURCE=portal|gsettings|default
-//!     LAUFEY_E2E_EXPECT_TITLEBAR_SIDE=left|right
-//!     LAUFEY_E2E_TITLEBAR_SET_CMD="…"       changes a setting (sh -c), e.g.
-//!                                           `gsettings set … button-layout`
-//!     LAUFEY_E2E_TITLEBAR_EXPECT_AFTER="…"  a substring of the new answer
-//!     LAUFEY_E2E_TITLEBAR_RESTORE_CMD="…"   puts it back (the change
-//!                                           handler must fire again)
+//! ```text
+//! LAUFEY_E2E_EXPECT_TITLEBAR_SOURCE=portal|gsettings|default
+//! LAUFEY_E2E_EXPECT_TITLEBAR_SIDE=left|right
+//! LAUFEY_E2E_TITLEBAR_SET_CMD="…"       changes a setting (sh -c), e.g.
+//!                                       `gsettings set … button-layout`
+//! LAUFEY_E2E_TITLEBAR_EXPECT_AFTER="…"  a substring of the new answer
+//! LAUFEY_E2E_TITLEBAR_RESTORE_CMD="…"   puts it back (the change
+//!                                       handler must fire again)
+//! ```
 //!
 //! An unset expectation is not checked.
 
