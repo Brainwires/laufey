@@ -642,28 +642,41 @@ void TestLinuxActivationHelpers() {
 #endif
   }
 
-  // D-Bus activation's argument leaves argv (before any "--"), the rest
-  // moves down and the array stays NULL-terminated.
+  // D-Bus activation's argument (before any "--") is left out of a
+  // NULL-terminated copy of argv; argv itself is never changed.
   {
     std::string a0 = "app", a1 = "--x", a2 = "--laufey-dbus-activated",
                 a3 = "--", a4 = "acme://y";
     char* argv[] = {&a0[0], &a1[0], &a2[0], &a3[0], &a4[0], nullptr};
-    int argc = 5;
-    EXPECT(StripDBusActivationArg(&argc, argv));
-    EXPECT(argc == 4 && argv[4] == nullptr);
-    EXPECT(std::strcmp(argv[1], "--x") == 0 && std::strcmp(argv[2], "--") == 0 &&
-           std::strcmp(argv[3], "acme://y") == 0);
-    EXPECT(!StripDBusActivationArg(&argc, argv));
+    const std::vector<char*> before(argv, argv + 6);
+    std::vector<char*> out = {&a4[0]};  // replaced, not appended to
+    EXPECT(CopyArgvWithoutDBusActivationArg(5, argv, &out));
+    EXPECT((out == std::vector<char*>{&a0[0], &a1[0], &a3[0], &a4[0],
+                                      nullptr}));
+    EXPECT(std::vector<char*>(argv, argv + 6) == before);
+    // Only the first one: a second is an argument of the app's.
+    std::string d0 = "app", d1 = "--laufey-dbus-activated",
+                d2 = "--laufey-dbus-activated";
+    char* argv4[] = {&d0[0], &d1[0], &d2[0], nullptr};
+    EXPECT(CopyArgvWithoutDBusActivationArg(3, argv4, &out));
+    EXPECT((out == std::vector<char*>{&d0[0], &d2[0], nullptr}));
     std::string b0 = "app", b1 = "--", b2 = "--laufey-dbus-activated";
     char* argv2[] = {&b0[0], &b1[0], &b2[0], nullptr};
-    int argc2 = 3;
-    EXPECT(!StripDBusActivationArg(&argc2, argv2));  // a link after "--"
-    EXPECT(argc2 == 3 && argv2[2] == &b2[0]);
-    std::string c0 = "app", c1 = "--laufey-dbus-activated";
-    char* argv3[] = {&c0[0], &c1[0], nullptr};
-    int argc3 = 2;
-    EXPECT(StripDBusActivationArg(&argc3, argv3));
-    EXPECT(argc3 == 1 && argv3[1] == nullptr);
+    // A link after "--" is the app's.
+    EXPECT(!CopyArgvWithoutDBusActivationArg(3, argv2, &out));
+    EXPECT((out == std::vector<char*>{&b0[0], &b1[0], &b2[0], nullptr}));
+    std::string c0 = "--laufey-dbus-activated";
+    char* argv3[] = {&c0[0], nullptr};
+    // argv[0] is the program, never the argument.
+    EXPECT(!CopyArgvWithoutDBusActivationArg(1, argv3, &out));
+    EXPECT((out == std::vector<char*>{&c0[0], nullptr}));
+    // A NULL entry ends argv even where argc counts further; no argv at
+    // all is an empty copy.
+    char* argv5[] = {&a0[0], nullptr, &a2[0], nullptr};
+    EXPECT(!CopyArgvWithoutDBusActivationArg(3, argv5, &out));
+    EXPECT((out == std::vector<char*>{&a0[0], nullptr}));
+    EXPECT(!CopyArgvWithoutDBusActivationArg(0, nullptr, &out));
+    EXPECT((out == std::vector<char*>{nullptr}));
   }
 
   // UTC, rounded up to the next whole second.

@@ -194,9 +194,12 @@ for xdg-desktop-portal-gnome, KDE's portal for Plasma. When the app isn't
 running, D-Bus starts it from `<app id>.service` in `dbus-1/services` (the
 `.deb` and `.rpm` install it; its `Exec` line passes `--laufey-dbus-activated`),
 and the click is delivered to the response handler with `launch: true`, as on
-Windows. The host takes `--laufey-dbus-activated` out of its arguments first:
-neither the web engine nor the runtime sees it. Where a portal also sends
-`ActionInvoked` for the click, the first of the two wins for five seconds.
+Windows. The host leaves `--laufey-dbus-activated` out of the arguments it hands
+the web engine and GTK, but never changes the process's own `argv`: the C
+runtime passes it to the `.init_array` functions of the runtime library as it
+loads. A runtime reads its arguments with `laufey::args_os()`, which leaves the
+argument out (the first one before any `--`, Linux only). Where a portal also
+sends `ActionInvoked` for the click, the first of the two wins for five seconds.
 `Open(uris)` on the running app is a second launch with those links (files as
 paths) as its arguments, and `Activate` a second launch with none: what a
 desktop sends when it launches an app whose desktop entry says

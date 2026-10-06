@@ -86,8 +86,10 @@ pub async fn run() {
 /// The process COM started for a toast click (its command line has
 /// "-ToastActivated"): the click reaches the response handler, as the
 /// launch, and is written to `%TEMP%\laufey-coldstart-result.txt`
-/// ("tag\naction\ndata\nlaunch") for the script that clicked. Ends the
-/// process.
+/// ("tag\naction\ndata\nlaunch\nargs\nargv") for the script that clicked:
+/// `args` whether the runtime's arguments are free of D-Bus activation's,
+/// `argv` what this library's `.init_array` function saw (`argv_at_load`).
+/// Linux D-Bus activation runs it too. Ends the process.
 pub async fn cold_start() -> ! {
   let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
   laufey::set_notification_response_handler(move |r| {
@@ -95,21 +97,25 @@ pub async fn cold_start() -> ! {
   });
   let out = std::env::temp_dir().join("laufey-coldstart-result.txt");
   let got = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await;
-  // The host took D-Bus activation's argument out of argv: the runtime
-  // never sees it.
-  let args = if std::env::args().any(|a| a == "--laufey-dbus-activated") {
+  // D-Bus activation's argument is the host's: the runtime's arguments
+  // (laufey::args_os) leave it out.
+  let args = if laufey::args_os()
+    .iter()
+    .any(|a| a == laufey::DBUS_ACTIVATION_ARG)
+  {
     "args-leaked"
   } else {
     "args-clean"
   };
   let text = match got {
     Ok(Some(r)) => format!(
-      "{}\n{}\n{}\n{}\n{}\n",
+      "{}\n{}\n{}\n{}\n{}\n{}\n",
       r.tag,
       r.action.unwrap_or_default(),
       r.data.unwrap_or_default(),
       r.launch,
-      args
+      args,
+      super::argv_at_load()
     ),
     _ => "timeout\n".to_string(),
   };

@@ -317,6 +317,31 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_menu_notifications_test
            COMMAND laufey_menu_notifications_test)
 
+  # Linux: a library the host loads after main() starts (the runtime) gets
+  # the process's argc and argv in its .init_array functions; the host must
+  # never change argv (CopyArgvWithoutDBusActivationArg). The probe library
+  # reads argv there as Deno's does; the control copy is for the test's
+  # negative control.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    foreach(probe laufey_argv_probe laufey_argv_probe_control)
+      add_library(${probe} MODULE tests/argv_probe_lib.cc)
+    endforeach()
+    add_executable(laufey_argv_init_array_test tests/argv_init_array_test.cc)
+    target_link_libraries(laufey_argv_init_array_test PRIVATE
+      laufey_backend_common
+      ${CMAKE_DL_LIBS}
+    )
+    target_compile_definitions(laufey_argv_init_array_test PRIVATE
+      LAUFEY_ARGV_PROBE_LIB="$<TARGET_FILE:laufey_argv_probe>"
+      LAUFEY_ARGV_PROBE_CONTROL_LIB="$<TARGET_FILE:laufey_argv_probe_control>"
+    )
+    add_dependencies(laufey_argv_init_array_test
+      laufey_argv_probe laufey_argv_probe_control)
+    add_test(NAME laufey_argv_init_array_test
+             COMMAND laufey_argv_init_array_test
+                     --x --laufey-dbus-activated --y)
+  endif()
+
   # UI-thread task dispatch (the delivery guarantee, over a fake queue) and
   # the auth session core: argument validation, the one-session slot and
   # the exactly-once result (no OS API).

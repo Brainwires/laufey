@@ -972,12 +972,14 @@ that it says so). See [menus.md](menus.md) and
   lets it quit, then sends what the shell sends for a click,
   `org.freedesktop.Application.ActivateAction` on the app's name: D-Bus starts
   the copy and its cold-start mode (`LAUFEY_E2E_COLDSTART`, set by the service
-  file's `Exec`) writes the response, checked as on Windows, and that the
-  runtime never saw `--laufey-dbus-activated` (the host strips it). With
-  `--schedule` the app schedules the notification ten seconds ahead and quits;
-  the script checks the app's systemd user timer, that the timer's launch posted
-  and claimed it, then clicks. `LAUFEY_E2E_CLICK_CMD` (a desktop's own click
-  hook) or `LAUFEY_E2E_CLICK=manual` clicks the real notification instead.
+  file's `Exec`) writes the response, checked as on Windows, that the runtime's
+  arguments (`laufey::args_os()`) leave `--laufey-dbus-activated` out, and that
+  the runtime library's `.init_array` function found the process's `argv` intact
+  (no NULL below `argc`, which crashed Deno's runtime). With `--schedule` the
+  app schedules the notification ten seconds ahead and quits; the script checks
+  the app's systemd user timer, that the timer's launch posted and claimed it,
+  then clicks. `LAUFEY_E2E_CLICK_CMD` (a desktop's own click hook) or
+  `LAUFEY_E2E_CLICK=manual` clicks the real notification instead.
 
 The portable pieces are unit-tested in
 `backend-common/tests/menu_notifications_test.cc` (template parsing and

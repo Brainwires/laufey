@@ -14,8 +14,8 @@
 # backend and the runtime (as its colocated runtime, with a launch file
 # naming dev.laufey.e2e.coldstart) to a temporary folder, installs
 # `<app id>.desktop` and `<app id>.service` (Exec: the copy with
-# --laufey-dbus-activated, and LAUFEY_E2E_COLDSTART=1 for the runtime, which
-# never sees that argument) under $XDG_DATA_HOME, runs the app once to post
+# --laufey-dbus-activated, and LAUFEY_E2E_COLDSTART=1 for the runtime, whose
+# arguments (laufey::args_os) leave it out) under $XDG_DATA_HOME, runs the app once to post
 # (or schedule) the notification, and lets it quit. The click is then what
 # the desktop's shell sends for a click (gnome-shell and KDE's portal):
 # org.freedesktop.Application.ActivateAction("laufey-notification",
@@ -162,4 +162,8 @@ fi
 [ "${lines[3]}" = "true" ] || fail "launch ${lines[3]}, expected true"
 [ "${lines[4]}" = "args-clean" ] ||
   fail "the runtime saw --laufey-dbus-activated (${lines[4]})"
+# The host leaves the process's argv as it is: the runtime library's
+# .init_array function saw no NULL below argc (Deno's crashed on one).
+[ "${lines[5]}" = "argv-intact" ] ||
+  fail "the runtime library loaded with a changed argv (${lines[5]})"
 echo "PASS: the click started the app and reached its response handler as the launch"

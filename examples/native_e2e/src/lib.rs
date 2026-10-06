@@ -697,8 +697,9 @@ fn e2e_main() {
     // Linux: started by D-Bus activation (the app's `<app id>.service`) for
     // a click on one of its portal notifications while it wasn't running
     // (scripts/notification-coldstart-e2e.sh). The service file's Exec sets
-    // LAUFEY_E2E_COLDSTART: the host takes `--laufey-dbus-activated` out of
-    // argv before the runtime loads (cold_start reports that it did).
+    // LAUFEY_E2E_COLDSTART. cold_start reports that the runtime's arguments
+    // (laufey::args_os) leave `--laufey-dbus-activated` out and that the host
+    // left the process's argv as it was when this library loaded.
     if std::env::var_os("LAUFEY_E2E_COLDSTART").is_some() {
       menu_notification_checks::cold_start().await;
     }
@@ -3085,6 +3086,53 @@ fn finish() -> ! {
 extern "C" {
   #[link_name = "_exit"]
   fn libc_exit(code: i32) -> !;
+}
+
+// What this library's `.init_array` function saw of argv (Linux): the C
+// runtime passes it the process's own argc and argv, as to Deno's runtime
+// library, whose initializer takes strlen(argv[argc - 1]). A host that took
+// an argument out of argv in place left NULL below argc there, and Deno's
+// runtime crashed while it loaded. 0: not run, 1: every entry set, 2: a NULL
+// entry below argc.
+static ARGV_AT_LOAD: std::sync::atomic::AtomicU8 =
+  std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(target_os = "linux")]
+#[used]
+#[link_section = ".init_array"]
+static READ_ARGV_AT_LOAD: extern "C" fn(
+  i32,
+  *const *const std::ffi::c_char,
+  *const *const std::ffi::c_char,
+) = {
+  extern "C" fn read_argv(
+    argc: i32,
+    argv: *const *const std::ffi::c_char,
+    _envp: *const *const std::ffi::c_char,
+  ) {
+    if argv.is_null() {
+      return;
+    }
+    // SAFETY: the C runtime passes the process's argv, argc entries long and
+    // NULL-terminated; the loop stops at the first NULL.
+    let intact =
+      (0..argc.max(0) as usize).all(|i| !unsafe { *argv.add(i) }.is_null());
+    ARGV_AT_LOAD.store(
+      if intact { 1 } else { 2 },
+      std::sync::atomic::Ordering::SeqCst,
+    );
+  }
+  read_argv
+};
+
+/// "argv-intact", "argv-holes" (a NULL entry below argc when this library
+/// loaded) or "argv-unchecked" (not Linux).
+pub(crate) fn argv_at_load() -> &'static str {
+  match ARGV_AT_LOAD.load(std::sync::atomic::Ordering::SeqCst) {
+    1 => "argv-intact",
+    2 => "argv-holes",
+    _ => "argv-unchecked",
+  }
 }
 
 // laufey::main!(e2e_main), with the lifetime checks' bookkeeping: how often
