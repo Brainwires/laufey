@@ -91,7 +91,10 @@ stop working. `native_e2e --devtools-off` checks that they still do.
   open while that window exists. DevTools the user opened with F12 or the
   context menu are found the same way when the app has a single window; with
   several windows sharing a browser process they can't be attributed to a
-  window, and `is_devtools_open` reports only those opened through the API.
+  window, and `is_devtools_open` reports only those opened through the API. The
+  window appears a moment after `OpenDevToolsWindow`; a `close_devtools` before
+  that closes it as soon as it is found (and the DevTools read as closed
+  meanwhile), instead of finding nothing to close.
 - **WebKitGTK:** `webkit_web_inspector_show` / `_close`; a window's inspector is
   open while it has an inspector web view. `show` makes that web view at once
   but opens the inspector only when the page's web process answers, and that

@@ -118,6 +118,12 @@ struct WinWindowState {
   // open, so the window open_devtools brought up is tracked.
   UINT32 browser_pid = 0;
   HWND devtools_hwnd = nullptr;
+  // open_devtools calls whose DevTools window hasn't been found yet (it
+  // appears asynchronously), and whether a close_devtools came meanwhile:
+  // that window is closed as soon as it is found, and the DevTools read as
+  // closed until then. UI thread / the finder threads, under windows_mutex_.
+  int devtools_opening = 0;
+  bool devtools_close_pending = false;
 };
 
 // Custom window message for UI tasks
@@ -2591,6 +2597,8 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
     return;
   DWORD pid = static_cast<DWORD>(state->browser_pid);
   std::vector<HWND> before = DevToolsWindowsOf(pid);
+  state->devtools_opening++;
+  state->devtools_close_pending = false;
   state->webview->OpenDevToolsWindow();
   // The window appears asynchronously (or, when this view's DevTools are
   // already open, the existing one comes to the front): find it and remember
@@ -2611,11 +2619,24 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
           found = fg;
       }
     }
-    if (!found)
-      return;
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
-    if (auto* st = GetWindow(window_id))
-      st->devtools_hwnd = found;
+    auto* st = GetWindow(window_id);
+    if (!st)
+      return;
+    st->devtools_opening--;
+    if (!found) {
+      if (st->devtools_opening == 0)
+        st->devtools_close_pending = false;
+      return;
+    }
+    if (st->devtools_close_pending) {
+      // Closed while still opening: close what has now opened.
+      st->devtools_close_pending = false;
+      st->devtools_hwnd = nullptr;
+      PostMessageW(found, WM_CLOSE, 0, 0);
+      return;
+    }
+    st->devtools_hwnd = found;
   }).detach();
 }
 
@@ -2642,19 +2663,38 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
 }
 
 void WebView2Backend::CloseDevTools(uint32_t window_id) {
-  HWND hwnd = FindDevToolsWindow(window_id);
-  if (!hwnd)
+  // After an open_devtools queued before it.
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    RunOnUiThread([this, window_id] { CloseDevTools(window_id); });
     return;
+  }
+  HWND hwnd = FindDevToolsWindow(window_id);
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  auto* state = GetWindow(window_id);
+  if (!hwnd) {
+    // Still opening: the window doesn't exist yet and would open after this
+    // close. Close it once it has been found.
+    if (state && state->devtools_opening > 0)
+      state->devtools_close_pending = true;
+    return;
+  }
   // The DevTools window belongs to the browser process; closing it is what
   // its own close button does.
   PostMessageW(hwnd, WM_CLOSE, 0, 0);
-  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
-  if (auto* state = GetWindow(window_id))
+  if (state)
     state->devtools_hwnd = nullptr;
 }
 
 bool WebView2Backend::IsDevToolsOpen(uint32_t window_id) {
-  return FindDevToolsWindow(window_id) != nullptr;
+  bool open = false;
+  // After the open / close calls queued before it.
+  RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    open = FindDevToolsWindow(window_id) != nullptr &&
+           !(state && state->devtools_close_pending);
+  });
+  return open;
 }
 
 bool WebView2Backend::IsDevToolsEnabled(uint32_t window_id) {
