@@ -901,11 +901,14 @@ int main(int argc, char* argv[]) {
   // has it.) The process's argv is never changed: the runtime library's
   // .init_array functions still get its original argc and argv. The runtime
   // leaves the argument out itself (laufey::args_os).
-  static std::vector<char*> host_argv;
+  // Deliberately leaked: whatever keeps a pointer into the copy (the
+  // toolkit, at-exit handlers) can still read it during exit, whatever the
+  // order static destructors run in.
+  static auto* host_argv = new std::vector<char*>;
   laufey_common::SetDBusActivationLaunch(
-      laufey_common::CopyArgvWithoutDBusActivationArg(argc, argv, &host_argv));
-  argc = static_cast<int>(host_argv.size()) - 1;
-  argv = host_argv.data();
+      laufey_common::CopyArgvWithoutDBusActivationArg(argc, argv, host_argv));
+  argc = static_cast<int>(host_argv->size()) - 1;
+  argv = host_argv->data();
 
   // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
   // (cef/src/main_windows.cc); never pass it on to what the app starts.
