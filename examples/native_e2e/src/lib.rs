@@ -696,8 +696,10 @@ fn e2e_main() {
     }
     // Linux: started by D-Bus activation (the app's `<app id>.service`) for
     // a click on one of its portal notifications while it wasn't running
-    // (scripts/notification-coldstart-e2e.sh).
-    if std::env::args().any(|a| a == "--laufey-dbus-activated") {
+    // (scripts/notification-coldstart-e2e.sh). The service file's Exec sets
+    // LAUFEY_E2E_COLDSTART: the host takes `--laufey-dbus-activated` out of
+    // argv before the runtime loads (cold_start reports that it did).
+    if std::env::var_os("LAUFEY_E2E_COLDSTART").is_some() {
       menu_notification_checks::cold_start().await;
     }
     // The script's other steps: post the notification it clicks, or

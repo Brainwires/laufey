@@ -4,7 +4,8 @@
 // $XDG_CONFIG_HOME/autostart/<name>.desktop (~/.config/autostart by
 // default), per the XDG Autostart specification, which GNOME, KDE, Xfce and
 // most other desktops honor. It starts the running executable ($APPIMAGE for
-// an AppImage). An entry the user turned off (Hidden=true, or GNOME's
+// an AppImage, trusted only while this executable is inside its mount,
+// $APPDIR). An entry the user turned off (Hidden=true, or GNOME's
 // X-GNOME-Autostart-enabled=false) reports DISABLED; enabling rewrites it.
 
 #include <fcntl.h>
@@ -44,12 +45,10 @@ std::string EntryPath() {
 }
 
 // What the entry starts: the AppImage (the mounted executable disappears
-// when it exits), else this executable.
+// when it exits), trusted only from inside its mount, else this executable
+// (RelaunchExecutablePath).
 std::string ExecPath() {
-  std::string appimage = GetEnvUtf8("APPIMAGE");
-  if (!appimage.empty() && appimage[0] == '/')
-    return appimage;
-  return ExecutablePath();
+  return RelaunchExecutablePath();
 }
 
 bool ReadFile(const std::string& path, std::string* out) {

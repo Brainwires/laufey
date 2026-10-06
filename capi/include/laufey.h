@@ -1091,11 +1091,11 @@ struct laufey_backend_api {
   // on a given platform leave the function pointer NULL.
 
   // Set or clear a short text badge on the app's dock / taskbar icon.
-  // Pass NULL or "" to clear. macOS: NSDockTile badgeLabel. Windows: renders
-  // text to a small overlay icon via GDI+ + ITaskbarList3::SetOverlayIcon.
-  // Linux: the count on the app's launcher where a dock reads
-  // com.canonical.Unity.LauncherEntry (a badge of digits), else "(text) "
-  // before the window titles (docs/dock-taskbar.md).
+  // Pass NULL or "" to clear. macOS: NSDockTile badgeLabel. Windows: "(text) "
+  // before the window titles. Linux: the count on the app's launcher where a
+  // dock reads com.canonical.Unity.LauncherEntry (a badge of digits; the CEF
+  // and WebKitGTK backends), else "(text) " before the window titles
+  // (docs/dock-taskbar.md).
   void (*set_dock_badge)(void* backend_data, const char* badge_or_null);
 
   // Request the user's attention by bouncing the dock icon (macOS) or

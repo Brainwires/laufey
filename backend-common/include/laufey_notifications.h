@@ -193,6 +193,14 @@ bool ParseNotifyLaunch(const std::vector<std::string>& args, std::string* id);
 // any "--".
 bool HasDBusActivationArg(const std::vector<std::string>& args);
 
+// Removes kDBusActivationArg (before any "--") from `argv` in place, so
+// neither the web engine nor the runtime sees it: the later entries move
+// down, `*argc` drops by one and argv[*argc] becomes NULL (the runtime reads
+// the process's argv up to the first NULL, as after gtk_init). Returns
+// whether it was there. The host's main() calls it first and passes the
+// answer to SetDBusActivationLaunch.
+bool StripDBusActivationArg(int* argc, char** argv);
+
 // Whether `app_id` can be the app's D-Bus name and GApplication id: at most
 // 255 bytes, at least two '.'-separated elements of [A-Za-z0-9_-], none
 // empty or starting with a digit.
@@ -206,11 +214,25 @@ std::string ApplicationObjectPath(const std::string& app_id);
 // scheduled launch and its timer unit name carry instead of the tag itself.
 std::string NotificationTagId(const std::string& tag);
 
-// "laufey-<app id>-<NotificationTagId>": the systemd unit name (without
-// ".timer" / ".service") of the tag's timer. Characters a unit name can't
-// hold become '_'.
+// The app id as a timer unit name carries it: characters a unit name can't
+// hold become '_', and an id longer than kTimerUnitAppIdMax keeps its first
+// kTimerUnitAppIdMax - 9 characters plus '_' and 8 hex digits of its own
+// NotificationTagId, so "laufey-<this>-<tag id>.service" stays within
+// systemd's 255 characters. Deterministic: a package's removal script
+// computes the same.
+constexpr size_t kTimerUnitAppIdMax = 200;
+std::string NotificationTimerAppPart(const std::string& app_id);
+
+// "laufey-<NotificationTimerAppPart>-<NotificationTagId>": the systemd unit
+// name (without ".timer" / ".service") of the tag's timer.
 std::string NotificationTimerUnit(const std::string& app_id,
                                   const std::string& tag);
+
+// The systemd glob that matches every one of the app's notification timers
+// and no other app's: "laufey-<app part>-" then exactly 16 "[0-9a-f]" and
+// ".timer" (an app whose id extends this one's, "<id>-extra", has more
+// before its tag id). What a package's removal stops.
+std::string NotificationTimerGlob(const std::string& app_id);
 
 // The OnCalendar= value for the first whole second at or after `at_ms` (Unix
 // time, ms), in UTC: "2026-10-06 14:03:07 UTC".
@@ -241,6 +263,11 @@ NotificationFacts LinuxNotificationFacts();
 // schedule file, so it is posted once) and returns; the host then exits
 // with the result. Never loads a web engine or the runtime. 0 elsewhere.
 int RunNotifyLaunch(const std::string& id);
+
+// Linux: this process was started by D-Bus activation (its arguments
+// carried kDBusActivationArg, which StripDBusActivationArg removed). The
+// host's main() calls it before InitNotificationsAtLaunch.
+void SetDBusActivationLaunch(bool activated);
 
 // Test-only: treat this process as started by D-Bus activation (as if its
 // arguments carried kDBusActivationArg) before InitNotificationsAtLaunch.

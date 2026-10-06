@@ -95,13 +95,21 @@ pub async fn cold_start() -> ! {
   });
   let out = std::env::temp_dir().join("laufey-coldstart-result.txt");
   let got = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await;
+  // The host took D-Bus activation's argument out of argv: the runtime
+  // never sees it.
+  let args = if std::env::args().any(|a| a == "--laufey-dbus-activated") {
+    "args-leaked"
+  } else {
+    "args-clean"
+  };
   let text = match got {
     Ok(Some(r)) => format!(
-      "{}\n{}\n{}\n{}\n",
+      "{}\n{}\n{}\n{}\n{}\n",
       r.tag,
       r.action.unwrap_or_default(),
       r.data.unwrap_or_default(),
-      r.launch
+      r.launch,
+      args
     ),
     _ => "timeout\n".to_string(),
   };

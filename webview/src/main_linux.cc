@@ -61,6 +61,11 @@ static int run_headless(const std::string& runtimePath) {
 }
 
 int main(int argc, char* argv[]) {
+  // D-Bus activation for a notification click (`<app id>.service` passes
+  // --laufey-dbus-activated): noted, and taken out of argv so neither GTK,
+  // the single-instance forwarding nor the runtime sees it.
+  laufey_common::SetDBusActivationLaunch(
+      laufey_common::StripDBusActivationArg(&argc, argv));
   const std::vector<std::string> args(argv + 1, argv + argc);
 
   // A scheduled notification's systemd timer (`<exe> --laufey-notify <id>`,

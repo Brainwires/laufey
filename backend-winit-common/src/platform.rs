@@ -7,7 +7,9 @@
 //! server (x11rb); nothing branches on `XDG_CURRENT_DESKTOP`, which is only
 //! a hint for a reason's wording. Winit has no web engine, so
 //! `cookieEncryption` and `cookieEncryptionWait` are always `null`, and
-//! `kwallet` (which only Chromium's cookie store would use) too.
+//! `kwallet` (which only Chromium's cookie store would use) too. Its badge is
+//! the Dock tile's on macOS and a window-title prefix elsewhere: it never
+//! sends a Linux launcher badge, so `badge` is never `"launcher-entry"`.
 //!
 //! The tray host is read live on every call (Winit runs no GLib loop to
 //! follow NameOwnerChanged with), so a watcher that starts late counts on the
@@ -35,6 +37,11 @@ pub struct PlatformFeatures {
   pub notification_activatable: bool,
   pub portal_versions: BTreeMap<String, u32>,
 }
+
+/// Why the Winit backend's badge is a title prefix on Linux.
+const BADGE_TITLE_REASON: &str =
+  "the Winit backend shows the badge as a window-title prefix (it sends no \
+   launcher badge)";
 
 impl PlatformFeatures {
   /// Whether a tray icon can be seen here.
@@ -136,13 +143,20 @@ impl PlatformFeatures {
     // tray-icon on Linux (libappindicator) reports no clicks; elsewhere it
     // does. Its tooltip is the indicator's title on Linux.
     let clicks = self.os != "linux";
+    // dock.rs: the Dock tile on macOS, a "(N) " title prefix elsewhere.
+    let badge = if self.os == "macos" { "dock" } else { "title" };
+    let badge_reason = if self.os == "linux" {
+      quote(BADGE_TITLE_REASON)
+    } else {
+      "null".into()
+    };
     format!(
       "{{\"os\":{},\"sessionType\":{},\"desktopHint\":{},\"sessionBus\":{},\
        \"trayHost\":{},\"trayReason\":{},\"trayClicks\":{clicks},\
        \"trayTooltip\":true,\"secretService\":{},\"secretServicePrompt\":{},\
        \"kwallet\":null,\"notificationServer\":{},\"notificationReason\":{},\
        \"portalVersions\":{{{portals}}},\"cookieEncryption\":null,\
-       \"cookieEncryptionWait\":null}}",
+       \"cookieEncryptionWait\":null,\"badge\":{},\"badgeReason\":{}}}",
       quote(self.os),
       opt(&self.session_type),
       opt(&self.desktop_hint),
@@ -153,6 +167,8 @@ impl PlatformFeatures {
       self.secret_prompter,
       opt(&self.notification_server),
       opt(&self.notification_reason()),
+      quote(badge),
+      badge_reason,
     )
   }
 }
@@ -919,7 +935,9 @@ mod tests {
        \"kwallet\":null,\
        \"notificationServer\":\"mako\",\"notificationReason\":null,\
        \"portalVersions\":{\"FileChooser\":4,\"Settings\":2},\
-       \"cookieEncryption\":null,\"cookieEncryptionWait\":null}"
+       \"cookieEncryption\":null,\"cookieEncryptionWait\":null,\
+       \"badge\":\"title\",\"badgeReason\":\"the Winit backend shows the \
+       badge as a window-title prefix (it sends no launcher badge)\"}"
     );
     let mac = PlatformFeatures {
       os: "macos",
@@ -929,6 +947,18 @@ mod tests {
     };
     assert!(mac.tray_host());
     assert!(mac.to_json().contains("\"trayClicks\":true"));
+    // Never "launcher-entry": the Dock tile on macOS, a title prefix
+    // elsewhere.
+    assert!(mac
+      .to_json()
+      .ends_with("\"badge\":\"dock\",\"badgeReason\":null}"));
+    let windows = PlatformFeatures {
+      os: "windows",
+      ..Default::default()
+    };
+    assert!(windows
+      .to_json()
+      .ends_with("\"badge\":\"title\",\"badgeReason\":null}"));
     assert!(mac.to_json().contains("\"sessionType\":null"));
     assert!(mac
       .to_json()

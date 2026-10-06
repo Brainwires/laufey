@@ -63,14 +63,23 @@ tag's FNV-1a hash), created with `StartTransientUnit` the way
 (`OnCalendar=`, UTC, to the second) it runs `<exe> --laufey-notify <tag id>`
 with `LAUFEY_APP_ID` (and `LAUFEY_DATA_DIR` when set) in its environment. That
 launch posts the stored notification and exits, before any web engine or the
-runtime loads: when the app runs (another process owns the app's D-Bus name) it
-leaves the notification to the app's own timer; otherwise it claims the entry
-from the file, so it is posted once. A notification less than two seconds away
-gets no timer. Cancelling one stops its timer. Transient timers last until the
-user manager stops (a logout without lingering, a reboot); each launch of the
-app re-creates them for the pending notifications. An AppImage's timer runs
-`$APPIMAGE`. Without a systemd user manager the app's own timer is the only
-scheduler.
+runtime loads. When the app runs (another process owns the app's D-Bus name) it
+first asks it to post the notification itself, with
+`ActivateAction("laufey-schedule-due", [<tag id>])` on that name: the app
+re-reads the schedule, posts what is due (an entry it never armed too, such as
+one another instance scheduled) and then answers. The launch posts the entry
+itself only if it is still in the file after that, or after two seconds without
+an answer, so a process that took the app's name without being the app can't
+make it vanish; either way the entry is claimed from the file under its lock, so
+it is posted once. The app also re-reads the schedule each time one of its own
+timers fires. A notification less than two seconds away gets no timer.
+Cancelling one stops its timer. Transient timers last until the user manager
+stops (a logout without lingering, a reboot); each launch of the app re-creates
+them for the pending notifications. An AppImage's timer runs `$APPIMAGE`,
+trusted only while the running executable is inside the AppImage's mount
+(`$APPDIR`). The unit name keeps at most 200 characters of the app id (a longer
+one is cut, with 8 hex digits of its hash), so it stays within systemd's limit.
+Without a systemd user manager the app's own timer is the only scheduler.
 
 `notification_capabilities()` reports `schedule()` and `schedule_persists()` (on
 Linux: the systemd timers are available).
@@ -185,12 +194,14 @@ for xdg-desktop-portal-gnome, KDE's portal for Plasma. When the app isn't
 running, D-Bus starts it from `<app id>.service` in `dbus-1/services` (the
 `.deb` and `.rpm` install it; its `Exec` line passes `--laufey-dbus-activated`),
 and the click is delivered to the response handler with `launch: true`, as on
-Windows. Where a portal also sends `ActionInvoked` for the click, the first of
-the two wins for five seconds. `Open(uris)` on the running app is a second
-launch with those links (files as paths) as its arguments, and `Activate` a
-second launch with none: what a desktop sends when it launches an app whose
-desktop entry says `DBusActivatable=true`. Any process of the same user on the
-session bus can call these methods, as with the Windows COM activator.
+Windows. The host takes `--laufey-dbus-activated` out of its arguments first:
+neither the web engine nor the runtime sees it. Where a portal also sends
+`ActionInvoked` for the click, the first of the two wins for five seconds.
+`Open(uris)` on the running app is a second launch with those links (files as
+paths) as its arguments, and `Activate` a second launch with none: what a
+desktop sends when it launches an app whose desktop entry says
+`DBusActivatable=true`. Any process of the same user on the session bus can call
+these methods, as with the Windows COM activator.
 
 Tested on Ubuntu 26.04 with GNOME 50 (xdg-desktop-portal 1.21,
 xdg-desktop-portal-gnome 50) and Plasma 6.6 (xdg-desktop-portal-kde 6.6), with
@@ -212,9 +223,10 @@ events.
 
 Both follow the server's `GetCapabilities`, read once per server: without
 `actions` no button (and no `default`) is sent, and `clicks()`, `actions()` and
-`cold_start()` are false; with `body-markup` the body is escaped, since it is
-text. `platform_features` reports the transport, the cold start and the
-scheduled-launch timers with the reason for each "no", and the server's
+`cold_start()` are false. The body is escaped, since it is text, unless the
+server is known not to read markup (its capabilities were read and lack
+`body-markup`). `platform_features` reports the transport, the cold start and
+the scheduled-launch timers with the reason for each "no", and the server's
 capabilities ([platform-features.md](platform-features.md)).
 
 Everything runs on a thread of laufey's own (its own GLib main context and its
@@ -232,8 +244,19 @@ Name=<app id>
 Exec=/usr/bin/env LAUFEY_APP_ID=<app id> /usr/bin/<app> --laufey-dbus-activated
 ```
 
-and on removal stop the users' scheduled-notification timers
-(`systemctl --user --machine=<user>@ stop 'laufey-<app id>-*.timer'`).
+and on removal stop the users' scheduled-notification timers, matching exactly
+16 hex digits after the app id so that another app whose id starts with this
+one's (`<app id>-extra`) keeps its timers:
+
+```sh
+timeout 10 systemctl --user --machine="$user"@ --no-block \
+  stop 'laufey-<app id>-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].timer' || :
+```
+
+for each user `loginctl list-users` knows (`NotificationTimerGlob` builds the
+pattern; an app id over 200 characters is cut as in the unit names).
+`--no-block` and the timeout keep a user manager that doesn't answer from
+stalling the package manager.
 
 ### Winit
 

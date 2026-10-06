@@ -561,6 +561,23 @@ bool IsValidApplicationId(const std::string& app_id) {
   return elements >= 2;
 }
 
+bool StripDBusActivationArg(int* argc, char** argv) {
+  if (!argc || !argv)
+    return false;
+  for (int i = 1; i < *argc && argv[i]; ++i) {
+    if (std::strcmp(argv[i], "--") == 0)
+      return false;
+    if (std::strcmp(argv[i], kDBusActivationArg) != 0)
+      continue;
+    for (int j = i; j + 1 < *argc; ++j)
+      argv[j] = argv[j + 1];
+    --*argc;
+    argv[*argc] = nullptr;
+    return true;
+  }
+  return false;
+}
+
 std::string ApplicationObjectPath(const std::string& app_id) {
   std::string path = "/";
   for (char c : app_id)
@@ -568,16 +585,32 @@ std::string ApplicationObjectPath(const std::string& app_id) {
   return path;
 }
 
-std::string NotificationTimerUnit(const std::string& app_id,
-                                  const std::string& tag) {
-  std::string out = "laufey-";
+std::string NotificationTimerAppPart(const std::string& app_id) {
+  std::string out;
   for (char c : app_id) {
     bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
               (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-' ||
               c == ':';
     out += ok ? c : '_';
   }
-  return out + "-" + NotificationTagId(tag);
+  if (out.size() > kTimerUnitAppIdMax) {
+    out.resize(kTimerUnitAppIdMax - 9);
+    out += "_" + NotificationTagId(app_id).substr(0, 8);
+  }
+  return out;
+}
+
+std::string NotificationTimerUnit(const std::string& app_id,
+                                  const std::string& tag) {
+  return "laufey-" + NotificationTimerAppPart(app_id) + "-" +
+         NotificationTagId(tag);
+}
+
+std::string NotificationTimerGlob(const std::string& app_id) {
+  std::string out = "laufey-" + NotificationTimerAppPart(app_id) + "-";
+  for (int i = 0; i < 16; ++i)
+    out += "[0-9a-f]";
+  return out + ".timer";
 }
 
 std::string SystemdCalendarUtc(int64_t at_ms) {
@@ -639,6 +672,7 @@ NotificationFacts LinuxNotificationFacts() {
 int RunNotifyLaunch(const std::string&) {
   return 0;
 }
+void SetDBusActivationLaunch(bool) {}
 void SetDBusActivationLaunchForTesting(bool) {}
 #endif
 

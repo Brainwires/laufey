@@ -895,6 +895,13 @@ static bool LaufeyChooseSandbox() {
 }
 
 int main(int argc, char* argv[]) {
+  // D-Bus activation for a notification click (`<app id>.service` passes
+  // --laufey-dbus-activated): noted, and taken out of argv before Chromium,
+  // the single-instance forwarding or the runtime sees it. (A CEF
+  // subprocess never has it.)
+  laufey_common::SetDBusActivationLaunch(
+      laufey_common::StripDBusActivationArg(&argc, argv));
+
   // CEF gets its own copy of argv. Chromium sets the process title by
   // rewriting the argv strings in place (setproctitle), which garbles the
   // arguments the runtime later reads with std::env::args() or its

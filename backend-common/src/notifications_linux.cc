@@ -21,8 +21,8 @@
 //   this process exited can't be delivered.
 //
 // The server's GetCapabilities decides what is sent and reported: without
-// "actions" no button or click is offered; with "body-markup" the body is
-// escaped (it is text, not markup).
+// "actions" no button or click is offered; the body is escaped (it is text,
+// not markup) unless the server is known not to read markup.
 //
 // Scheduling: laufey's own timer delivers a scheduled notification while
 // the app runs. The schedule is persisted in the app data directory
@@ -32,8 +32,9 @@
 // claimed from it before it is posted, so it fires once. Where a systemd
 // user manager answers on the session bus, each scheduled notification also
 // gets a transient timer (laufey-<app id>-<tag id>.timer) that runs
-// `<exe> --laufey-notify <tag id>` at its time: that launch posts it when
-// the app isn't running (RunNotifyLaunch) and exits. Transient timers live
+// `<exe> --laufey-notify <tag id>` at its time: that launch (RunNotifyLaunch)
+// asks a running app to post it ("laufey-schedule-due", SweepSchedule),
+// posts it itself when the app doesn't run or leaves it pending, and exits. Transient timers live
 // until the user manager stops (logout without linger, a reboot); every
 // launch re-creates them.
 //
@@ -61,10 +62,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -98,6 +101,12 @@ constexpr int64_t kMaxTimerMs = 60LL * 60 * 1000;
 constexpr int64_t kMinTimerAheadMs = 2000;
 // A scheduled launch posts an entry due within this much of now.
 constexpr int64_t kNotifyLaunchSlackMs = 5000;
+// The GApplication action a scheduled launch nudges the running app with:
+// re-read the schedule and post what is due (SweepSchedule).
+const char kScheduleDueAction[] = "laufey-schedule-due";
+// How long a scheduled launch waits for the running app to answer that
+// before it posts the notification itself.
+constexpr gint kNudgeTimeoutMs = 2000;
 
 const char kAppXml[] =
     "<node>"
@@ -117,7 +126,7 @@ const char kAppXml[] =
     " </interface>"
     "</node>";
 
-std::atomic<bool> g_activation_launch_for_testing{false};
+std::atomic<bool> g_activation_launch{false};
 
 std::string ScheduleFilePath() {
   const std::string& dir = AppDataDir();
@@ -165,29 +174,55 @@ class ScheduleFile {
     return list;
   }
 
-  void Write(const std::vector<ScheduledNotification>& list) {
+  // Replaces the file through a temporary one and rename(2), then syncs
+  // the directory so the rename survives a crash. On any failure the old
+  // file stays as it was, the failure is reported on stderr, and false is
+  // returned.
+  bool Write(const std::vector<ScheduledNotification>& list) {
     if (!ok())
-      return;
+      return false;
     std::string tmp = path_ + ".tmp";
     {
       int fd =
           open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-      if (fd < 0)
-        return;
+      if (fd < 0) {
+        Report("can't create " + tmp);
+        return false;
+      }
       std::string text = SerializeSchedule(list);
       bool ok = write(fd, text.data(), text.size()) ==
                 static_cast<ssize_t>(text.size());
       ok = fsync(fd) == 0 && ok;
-      close(fd);
+      ok = close(fd) == 0 && ok;
       if (!ok) {
+        Report("can't write " + tmp);
         unlink(tmp.c_str());
-        return;
+        return false;
       }
     }
-    rename(tmp.c_str(), path_.c_str());
+    if (rename(tmp.c_str(), path_.c_str()) != 0) {
+      Report("can't replace it with " + tmp);
+      unlink(tmp.c_str());
+      return false;
+    }
+    std::string dir = path_.substr(0, path_.find_last_of('/') + 1);
+    int dir_fd = open(dir.empty() ? "." : dir.c_str(),
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+      fsync(dir_fd);
+      close(dir_fd);
+    }
+    return true;
   }
 
  private:
+  void Report(const std::string& what) {
+    int err = errno;
+    std::cerr << "laufey: the notification schedule " << path_
+              << " is unchanged: " << what << " (" << std::strerror(err)
+              << ")" << std::endl;
+  }
+
   std::string path_;
   int fd_ = -1;
 };
@@ -269,13 +304,10 @@ std::string FindDataFile(const std::string& sub, const std::string& file) {
 }
 
 // The executable a scheduled launch runs: the AppImage itself when this is
-// one (the running file is inside its temporary mount), else this file.
+// one (the running file is inside its temporary mount, $APPDIR; $APPIMAGE
+// alone is not trusted), else this file.
 std::string LaunchExecutable() {
-  if (const char* appimage = getenv("APPIMAGE")) {
-    if (*appimage && access(appimage, X_OK) == 0)
-      return appimage;
-  }
-  return ExecutablePath();
+  return RelaunchExecutablePath();
 }
 
 class LinuxNotificationPlatform : public NotificationPlatform {
@@ -424,17 +456,28 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     });
   }
 
-  // A scheduled launch (RunNotifyLaunch): posts the entry `id` names when
-  // the app doesn't run; the running app's own timer posts it otherwise.
+  // A scheduled launch (RunNotifyLaunch): posts the entry `id` names. When
+  // the app runs (another process owns its name) it is nudged to post it
+  // itself (its clicks then reach it, whatever the transport), and the entry
+  // is posted here only if it is still in the file after that: the owner
+  // didn't answer in time, or answered without claiming it (a process that
+  // took the name but isn't the app, an instance that never armed it). The
+  // claim under the file lock keeps it to one post either way.
   void NotifyLaunch(const std::string& id) {
     RunSync([&] {
       if (!Connection())
         return;
       if (AppRunning()) {
-        std::cerr << "laufey: " << app_id_
-                  << " is running; its own timer posts the notification"
-                  << std::endl;
-        return;
+        if (NudgeRunningApp(id)) {
+          std::cerr << "laufey: " << app_id_
+                    << " is running; it was asked to post the notification"
+                    << std::endl;
+        } else {
+          std::cerr << "laufey: " << app_id_
+                    << " is running but didn't answer; the notification is "
+                       "posted from here if it is still pending"
+                    << std::endl;
+        }
       }
       ScheduledNotification n;
       {
@@ -652,11 +695,44 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     return IsValidApplicationId(app_id_) && NameHasOwner(app_id_.c_str());
   }
 
+  // ActivateAction(kScheduleDueAction, [id]) on the app's name: whether its
+  // owner answered within kNudgeTimeoutMs. Thread only.
+  bool NudgeRunningApp(const std::string& id) {
+    GVariantBuilder param;
+    g_variant_builder_init(&param, G_VARIANT_TYPE("av"));
+    g_variant_builder_add(&param, "v", g_variant_new_string(id.c_str()));
+    GVariantBuilder platform_data;
+    g_variant_builder_init(&platform_data, G_VARIANT_TYPE("a{sv}"));
+    GVariant* r = g_dbus_connection_call_sync(
+        conn_, app_id_.c_str(), ApplicationObjectPath(app_id_).c_str(),
+        "org.freedesktop.Application", "ActivateAction",
+        g_variant_new("(sava{sv})", kScheduleDueAction, &param,
+                      &platform_data),
+        nullptr, G_DBUS_CALL_FLAGS_NO_AUTO_START, kNudgeTimeoutMs, nullptr,
+        nullptr);
+    if (!r)
+      return false;
+    g_variant_unref(r);
+    return true;
+  }
+
   static void OnAppMethod(GDBusConnection*, const gchar* /*sender*/,
                           const gchar*, const gchar*, const gchar* method,
                           GVariant* params, GDBusMethodInvocation* invocation,
                           gpointer self_ptr) {
     auto* self = static_cast<LinuxNotificationPlatform*>(self_ptr);
+    // A scheduled launch's nudge (NotifyLaunch): post what is due, then
+    // answer, so the launch finds it claimed. Not a click: it leaves the
+    // pending launch click alone.
+    if (g_strcmp0(method, "ActivateAction") == 0) {
+      const char* name = nullptr;
+      g_variant_get(params, "(&sav@a{sv})", &name, nullptr, nullptr);
+      if (g_strcmp0(name, kScheduleDueAction) == 0) {
+        self->SweepSchedule();
+        g_dbus_method_invocation_return_value(invocation, nullptr);
+        return;
+      }
+    }
     // The first call to a process D-Bus started is what it was started for.
     bool launch = self->launch_click_pending_.exchange(false);
     if (g_strcmp0(method, "ActivateAction") == 0) {
@@ -1039,6 +1115,12 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     return server_caps_;
   }
 
+  // Whether ServerCaps() (called just before) holds the running server's
+  // answer, not an empty set for want of one. Thread only.
+  bool ServerCapsKnown() const {
+    return !caps_owner_.empty();
+  }
+
   bool NotifyOnThread(const NotificationOptions& o) {
     // An activatable server is started first (once: a start that fails, as
     // on Sway with only Plasma's activatable service, is remembered), so a
@@ -1101,9 +1183,11 @@ class LinuxNotificationPlatform : public NotificationPlatform {
                             g_variant_new_boolean(TRUE));
     if (GVariant* image = ImageData(o.icon_png))
       g_variant_builder_add(&hints, "{sv}", "image-data", image);
-    // A server that reads markup gets the body escaped: it is text.
-    std::string body =
-        caps.count("body-markup") ? EscapeNotificationMarkup(o.body) : o.body;
+    // The body is text: escaped unless the server is known not to read
+    // markup (its capabilities were read and lack "body-markup"). One whose
+    // capabilities couldn't be read may well read markup.
+    bool markup = !ServerCapsKnown() || caps.count("body-markup");
+    std::string body = markup ? EscapeNotificationMarkup(o.body) : o.body;
     std::string app_name = LoginItemName();
     GError* error = nullptr;
     GVariant* r = g_dbus_connection_call_sync(
@@ -1386,6 +1470,44 @@ class LinuxNotificationPlatform : public NotificationPlatform {
       Arm(n);  // a long wait, in steps
       return;
     }
+    Deliver(n);
+    // Another instance (or a scheduled launch that found this one running)
+    // may have added entries this one never armed.
+    SweepSchedule();
+  }
+
+  // Re-reads the schedule: posts every entry due (within the scheduled
+  // launch's slack) and arms the ones this instance hasn't. The nudge from a
+  // scheduled launch, and after each of this instance's own timers. Thread
+  // only.
+  void SweepSchedule() {
+    std::vector<ScheduledNotification> list;
+    {
+      ScheduleFile file(ScheduleFilePath());
+      if (!file.ok())
+        return;
+      list = file.Read();
+    }
+    int64_t now = UnixTimeMs();
+    for (const ScheduledNotification& e : list) {
+      if (e.at_ms <= now + kNotifyLaunchSlackMs) {
+        Deliver(e);
+        continue;
+      }
+      auto armed = scheduled_.find(e.tag);
+      if (armed == scheduled_.end() || armed->second.n.at_ms != e.at_ms)
+        Arm(e);
+    }
+  }
+
+  // Posts the due entry `n` once: claimed from the file first (another
+  // instance or a scheduled launch may have posted it, or the app cancelled
+  // it). With no server yet it stays and is retried in 30 seconds. Thread
+  // only.
+  void Deliver(const ScheduledNotification& due) {
+    // A copy: `due` may be the armed entry, which Arm / Disarm free.
+    const ScheduledNotification n = due;
+    const std::string& tag = n.tag;
     if (!ServerPresent()) {
       // No notification server (yet: a session still starting): keep it,
       // and try again in a while.
@@ -1451,9 +1573,11 @@ class LinuxNotificationPlatform : public NotificationPlatform {
 LinuxNotificationPlatform* g_linux_platform = nullptr;
 
 // This process was started by D-Bus activation (`<app id>.service` runs the
-// app with kDBusActivationArg).
+// app with kDBusActivationArg): the host said so (SetDBusActivationLaunch,
+// after StripDBusActivationArg took it out of argv), or, for a host that
+// doesn't, the argument is still on the command line.
 bool StartedByDBusActivation() {
-  if (g_activation_launch_for_testing)
+  if (g_activation_launch)
     return true;
   std::ifstream in("/proc/self/cmdline", std::ios::binary);
   if (!in)
@@ -1500,8 +1624,12 @@ int RunNotifyLaunch(const std::string& id) {
   return 0;
 }
 
+void SetDBusActivationLaunch(bool activated) {
+  g_activation_launch = activated;
+}
+
 void SetDBusActivationLaunchForTesting(bool activated) {
-  g_activation_launch_for_testing = activated;
+  g_activation_launch = activated;
 }
 
 }  // namespace laufey_common

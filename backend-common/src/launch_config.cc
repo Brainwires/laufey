@@ -390,6 +390,45 @@ std::string ExecutablePath() {
 #endif
 }
 
+std::string TrustedAppImagePath(
+    const std::string& exe, const std::string& appimage,
+    const std::string& appdir,
+    const std::function<std::string(const std::string&)>& canonical) {
+  if (exe.empty() || appimage.empty() || appimage[0] != '/' || appdir.empty())
+    return std::string();
+  std::string mount = canonical(appdir);
+  if (mount.empty())
+    return std::string();
+  // Inside: the mount itself or below it, never a sibling that only shares
+  // its name as a prefix (/tmp/.mount_ab vs /tmp/.mount_abc).
+  if (mount.size() > 1 && mount.back() == '/')
+    mount.pop_back();
+  bool inside = exe == mount || (exe.size() > mount.size() &&
+                                 exe.compare(0, mount.size(), mount) == 0 &&
+                                 (mount == "/" || exe[mount.size()] == '/'));
+  if (!inside)
+    return std::string();
+  return canonical(appimage);
+}
+
+std::string RelaunchExecutablePath() {
+  std::string exe = ExecutablePath();
+#ifndef _WIN32
+  auto canonical = [](const std::string& path) {
+    char resolved[PATH_MAX];
+    return realpath(path.c_str(), resolved) ? std::string(resolved)
+                                            : std::string();
+  };
+  const char* appimage = getenv("APPIMAGE");
+  const char* appdir = getenv("APPDIR");
+  std::string image = TrustedAppImagePath(
+      exe, appimage ? appimage : "", appdir ? appdir : "", canonical);
+  if (!image.empty())
+    return image;
+#endif
+  return exe;
+}
+
 const LaunchConfig& ProcessLaunchConfig() {
   static const LaunchConfig config = LoadProcessLaunchConfig();
   return config;

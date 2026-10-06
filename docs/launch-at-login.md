@@ -89,10 +89,12 @@ X-GNOME-Autostart-enabled=true
 
 `Exec` is quoted and escaped per the Desktop Entry specification. For an
 AppImage it is `$APPIMAGE` (the mounted executable disappears when the AppImage
-exits). The file is written through a temporary file and `rename(2)`. An entry
-turned off with `Hidden=true` or `X-GNOME-Autostart-enabled=false` reads as
-`DISABLED`; enabling rewrites it. Desktops without XDG autostart (a bare window
-manager) ignore the file; laufey cannot detect that.
+exits), trusted only while the running executable is inside the AppImage's mount
+(`$APPDIR`): elsewhere the variable could name anything. The file is written
+through a temporary file and `rename(2)`. An entry turned off with `Hidden=true`
+or `X-GNOME-Autostart-enabled=false` reads as `DISABLED`; enabling rewrites it.
+Desktops without XDG autostart (a bare window manager) ignore the file; laufey
+cannot detect that.
 
 The executable that starts at login is the backend host. A packaged app that
 relies on environment variables from a launcher should put its settings in

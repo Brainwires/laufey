@@ -7,9 +7,15 @@
 // user manager, with `<app id>.desktop` and `<app id>.service` installed in
 // a private XDG data directory.
 //
-//   - a scheduled launch (`--laufey-notify <id>`) yields to a running app
-//     (another process owns the app's name), then posts the stored
-//     notification through the portal and claims it from the file;
+//   - a scheduled launch (`--laufey-notify <id>`) nudges a running app
+//     (another process owns the app's name) with ActivateAction
+//     "laufey-schedule-due" and leaves the notification to it when it
+//     claims it; when the owner answers without claiming it (it never armed
+//     it), or doesn't answer, the launch posts it itself, once; with no app
+//     running it posts the stored notification through the portal and
+//     claims it from the file;
+//   - the running app answers that nudge by posting a due entry it never
+//     armed;
 //   - at launch the app takes its D-Bus name and exports
 //     org.freedesktop.Application; capabilities report the cold start and
 //     persisted schedules; facts say "portal";
@@ -423,6 +429,112 @@ void WriteFile(const std::string& path, const std::string& text) {
   EXPECT(g_file_set_contents(path.c_str(), text.c_str(), -1, nullptr));
 }
 
+// Another process that owns the app's name and exports
+// org.freedesktop.Application, as a running instance would. What it does
+// with a scheduled launch's "laufey-schedule-due" nudge:
+enum class OwnerMode {
+  kClaim,   // a running app: claims the entry from the file (and posts it)
+  kIgnore,  // answers, but never armed the entry: leaves it in the file
+  kSilent,  // never answers
+};
+struct Owner {
+  std::atomic<OwnerMode> mode{OwnerMode::kClaim};
+  std::string file;
+  std::mutex mutex;
+  std::vector<std::string> nudges;  // the tag ids it was nudged with
+};
+Owner g_owner;
+
+const char kOwnerXml[] =
+    "<node>"
+    " <interface name='org.freedesktop.Application'>"
+    "  <method name='ActivateAction'>"
+    "   <arg type='s' direction='in'/><arg type='av' direction='in'/>"
+    "   <arg type='a{sv}' direction='in'/>"
+    "  </method>"
+    " </interface>"
+    "</node>";
+
+void HandleOwnerMethod(GDBusConnection*, const gchar*, const gchar*,
+                       const gchar*, const gchar* method, GVariant* params,
+                       GDBusMethodInvocation* invocation, gpointer) {
+  const char* name = nullptr;
+  GVariantIter* param = nullptr;
+  g_variant_get(params, "(&sava{sv})", &name, &param, nullptr);
+  GVariant* v = nullptr;
+  std::string id;
+  if (g_variant_iter_next(param, "v", &v)) {
+    if (g_variant_is_of_type(v, G_VARIANT_TYPE_STRING))
+      id = g_variant_get_string(v, nullptr);
+    g_variant_unref(v);
+  }
+  g_variant_iter_free(param);
+  EXPECT(strcmp(method, "ActivateAction") == 0 &&
+         strcmp(name, "laufey-schedule-due") == 0);
+  {
+    std::lock_guard<std::mutex> lock(g_owner.mutex);
+    g_owner.nudges.push_back(id);
+  }
+  switch (g_owner.mode.load()) {
+    case OwnerMode::kSilent:
+      return;  // the invocation is never answered
+    case OwnerMode::kClaim: {
+      std::vector<ScheduledNotification> list;
+      std::string error;
+      gchar* text = nullptr;
+      if (g_file_get_contents(g_owner.file.c_str(), &text, nullptr, nullptr)) {
+        ParseSchedule(text, &list, &error);
+        g_free(text);
+      }
+      list.erase(std::remove_if(list.begin(), list.end(),
+                                [&](const ScheduledNotification& e) {
+                                  return NotificationTagId(e.tag) == id;
+                                }),
+                 list.end());
+      WriteFile(g_owner.file, SerializeSchedule(list));
+      break;
+    }
+    case OwnerMode::kIgnore:
+      break;
+  }
+  g_dbus_method_invocation_return_value(invocation, nullptr);
+}
+
+const GDBusInterfaceVTable kOwnerVTable = {HandleOwnerMethod, nullptr, nullptr,
+                                           {}};
+
+// Starts the owner on a thread of its own: its connection, once it owns the
+// app's name.
+GDBusConnection* StartOwner(GTestDBus* bus) {
+  std::atomic<GDBusConnection*> conn{nullptr};
+  std::thread([&conn, bus] {
+    GMainContext* ctx = g_main_context_new();
+    g_main_context_push_thread_default(ctx);
+    GDBusConnection* c = NewClient(bus);
+    GError* error = nullptr;
+    GDBusNodeInfo* info = g_dbus_node_info_new_for_xml(kOwnerXml, &error);
+    EXPECT(info);
+    EXPECT(g_dbus_connection_register_object(c, "/dev/laufey/portaltest",
+                                             info->interfaces[0],
+                                             &kOwnerVTable, nullptr, nullptr,
+                                             &error) != 0);
+    EXPECT(RequestName(c, kAppId) == 1);
+    conn = c;
+    g_main_loop_run(g_main_loop_new(ctx, FALSE));
+  }).detach();
+  EXPECT(WaitFor([&] { return conn.load() != nullptr; }));
+  return conn.load();
+}
+
+bool InFile(const std::string& file, const std::string& tag) {
+  gchar* text = nullptr;
+  if (!g_file_get_contents(file.c_str(), &text, nullptr, nullptr))
+    return false;
+  bool found = std::string(text).find("\"" + tag + "\"") != std::string::npos;
+  g_free(text);
+  return found;
+}
+
 }  // namespace
 
 int main() {
@@ -503,13 +615,40 @@ int main() {
   WriteFile(file, SerializeSchedule({due}));
   std::string due_id = NotificationTagId("daily");
 
-  // The app runs (another process owns its name): its own timer posts it.
-  GDBusConnection* other = NewClient(bus);
-  EXPECT(RequestName(other, kAppId) == 1);
+  // The app runs (another process owns its name): the launch nudges it,
+  // and it claims and posts the notification; the launch posts nothing.
+  g_owner.file = file;
+  GDBusConnection* other = StartOwner(bus);
   EXPECT(RunNotifyLaunch(due_id) == 0);
   EXPECT(AddedCount() == 0);
-  EXPECT(ReadFile(file).find("\"daily\"") != std::string::npos);
-  g_object_unref(other);  // the app quit
+  EXPECT(!InFile(file, "daily"));
+  {
+    std::lock_guard<std::mutex> lock(g_owner.mutex);
+    EXPECT(g_owner.nudges == std::vector<std::string>({due_id}));
+  }
+  // The owner answers but never armed the entry (an instance that didn't
+  // schedule it, a process that took the name): the launch posts it, once.
+  WriteFile(file, SerializeSchedule({due}));
+  g_owner.mode = OwnerMode::kIgnore;
+  EXPECT(RunNotifyLaunch(due_id) == 0);
+  EXPECT(AddedCount() == 1 && LastAdded().id == "daily");
+  EXPECT(!InFile(file, "daily"));
+  EXPECT(RunNotifyLaunch(due_id) == 0);
+  EXPECT(AddedCount() == 1);
+  // The owner never answers: after the nudge's timeout the launch posts it.
+  WriteFile(file, SerializeSchedule({due}));
+  g_owner.mode = OwnerMode::kSilent;
+  auto nudged = std::chrono::steady_clock::now();
+  EXPECT(RunNotifyLaunch(due_id) == 0);
+  EXPECT(std::chrono::steady_clock::now() - nudged < std::chrono::seconds(4));
+  EXPECT(AddedCount() == 2 && LastAdded().id == "daily");
+  EXPECT(!InFile(file, "daily"));
+  {
+    std::lock_guard<std::mutex> lock(g_mock.mutex);
+    g_mock.added.clear();
+  }
+  WriteFile(file, SerializeSchedule({due}));
+  g_dbus_connection_close_sync(other, nullptr, nullptr);  // the app quit
   EXPECT(WaitFor([&] {
     GVariant* r = g_dbus_connection_call_sync(
         client, "org.freedesktop.DBus", "/org/freedesktop/DBus",
@@ -706,6 +845,29 @@ int main() {
     std::lock_guard<std::mutex> lock(g_mock.mutex);
     EXPECT(std::find(g_mock.stopped.begin(), g_mock.stopped.end(),
                      unit + ".timer") != g_mock.stopped.end());
+  }
+
+  // A scheduled launch's nudge to this app (the name's owner) for an entry
+  // it never armed (another instance scheduled it): posted, and claimed,
+  // before the answer; not a click.
+  {
+    ScheduledNotification missed;
+    missed.tag = "missed";
+    missed.title = "Missed";
+    missed.at_ms = UnixTimeMs() - 500;
+    WriteFile(file, SerializeSchedule({missed}));
+    GVariantBuilder param;
+    g_variant_builder_init(&param, G_VARIANT_TYPE("av"));
+    g_variant_builder_add(
+        &param, "v",
+        g_variant_new_string(NotificationTagId("missed").c_str()));
+    GVariantBuilder pd;
+    g_variant_builder_init(&pd, G_VARIANT_TYPE("a{sv}"));
+    CallApp(client, "ActivateAction",
+            g_variant_new("(sava{sv})", "laufey-schedule-due", &param, &pd));
+    EXPECT(AddedCount() == 4 && LastAdded().id == "missed");
+    EXPECT(!InFile(file, "missed"));
+    EXPECT(ResponseCount() == 1);
   }
 
   std::printf("laufey_notifications_portal_dbus_test: ok\n");

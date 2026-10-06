@@ -9,6 +9,9 @@
 //     buttons and no cold start;
 //   - Notify carries no actions (not even "default") and the body escaped,
 //     since the server reads it as markup;
+//   - a server whose GetCapabilities fails gets the body escaped too (it may
+//     read markup); one known not to read markup ("body" alone, a new
+//     owner of the name) gets it as it is;
 //   - with no portal and no `<app id>.desktop`, the transport is
 //     org.freedesktop.Notifications, and the facts say why there is no
 //     cold start; with no systemd user manager, why a scheduled one isn't
@@ -73,13 +76,27 @@ struct Notified {
 std::mutex g_mutex;
 std::vector<Notified> g_notified;
 
+// What GetCapabilities answers: an error, then {"body", "body-markup"}, then
+// (a new server) {"body"}.
+enum CapsMode { kCapsFail, kCapsMarkup, kCapsPlain };
+std::atomic<int> g_caps_mode{kCapsFail};
+
 void HandleMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
                   const gchar* method, GVariant* params,
                   GDBusMethodInvocation* invocation, gpointer) {
   if (strcmp(method, "GetCapabilities") == 0) {
-    const gchar* caps[] = {"body", "body-markup", nullptr};
+    if (g_caps_mode == kCapsFail) {
+      g_dbus_method_invocation_return_dbus_error(
+          invocation, "org.freedesktop.DBus.Error.Failed", "not now");
+      return;
+    }
+    const gchar* markup[] = {"body", "body-markup", nullptr};
+    const gchar* plain[] = {"body", nullptr};
     g_dbus_method_invocation_return_value(
-        invocation, g_variant_new("(@as)", g_variant_new_strv(caps, -1)));
+        invocation,
+        g_variant_new("(@as)", g_variant_new_strv(
+                                   g_caps_mode == kCapsPlain ? plain : markup,
+                                   -1)));
     return;
   }
   if (strcmp(method, "GetServerInformation") == 0) {
@@ -128,6 +145,45 @@ bool Contains(const std::string& s, const std::string& part) {
   return s.find(part) != std::string::npos;
 }
 
+size_t NotifiedCount() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return g_notified.size();
+}
+
+// A notification server on a thread of its own: its connection, once it
+// owns org.freedesktop.Notifications.
+GDBusConnection* StartServer(GTestDBus* bus) {
+  std::atomic<GDBusConnection*> ready{nullptr};
+  std::thread([&ready, bus] {
+    GMainContext* ctx = g_main_context_new();
+    g_main_context_push_thread_default(ctx);
+    GError* error = nullptr;
+    GDBusConnection* conn = g_dbus_connection_new_for_address_sync(
+        g_test_dbus_get_bus_address(bus),
+        static_cast<GDBusConnectionFlags>(
+            G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+            G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+        nullptr, nullptr, &error);
+    EXPECT(conn);
+    GDBusNodeInfo* info = g_dbus_node_info_new_for_xml(kXml, &error);
+    EXPECT(info);
+    EXPECT(g_dbus_connection_register_object(
+               conn, "/org/freedesktop/Notifications", info->interfaces[0],
+               &kVTable, nullptr, nullptr, &error) != 0);
+    GVariant* r = g_dbus_connection_call_sync(
+        conn, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "RequestName",
+        g_variant_new("(su)", "org.freedesktop.Notifications", 0u),
+        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    EXPECT(r);
+    g_variant_unref(r);
+    ready = conn;
+    g_main_loop_run(g_main_loop_new(ctx, FALSE));
+  }).detach();
+  EXPECT(WaitFor([&] { return ready.load() != nullptr; }));
+  return ready.load();
+}
+
 }  // namespace
 
 int main() {
@@ -152,51 +208,29 @@ int main() {
   setenv("LAUFEY_DATA_DIR", dir.c_str(), 1);
   setenv("LAUFEY_APP_ID", "dev.laufey.capstest", 1);
 
-  std::atomic<bool> ready{false};
-  std::thread([&] {
-    GMainContext* ctx = g_main_context_new();
-    g_main_context_push_thread_default(ctx);
-    GError* error = nullptr;
-    GDBusConnection* conn = g_dbus_connection_new_for_address_sync(
-        g_test_dbus_get_bus_address(bus),
-        static_cast<GDBusConnectionFlags>(
-            G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
-            G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
-        nullptr, nullptr, &error);
-    EXPECT(conn);
-    GDBusNodeInfo* info = g_dbus_node_info_new_for_xml(kXml, &error);
-    EXPECT(info);
-    EXPECT(g_dbus_connection_register_object(
-               conn, "/org/freedesktop/Notifications", info->interfaces[0],
-               &kVTable, nullptr, nullptr, &error) != 0);
-    GVariant* r = g_dbus_connection_call_sync(
-        conn, "org.freedesktop.DBus", "/org/freedesktop/DBus",
-        "org.freedesktop.DBus", "RequestName",
-        g_variant_new("(su)", "org.freedesktop.Notifications", 0u),
-        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    EXPECT(r);
-    g_variant_unref(r);
-    ready = true;
-    g_main_loop_run(g_main_loop_new(ctx, FALSE));
-  }).detach();
-  EXPECT(WaitFor([&] { return ready.load(); }));
+  GDBusConnection* server = StartServer(bus);
 
   InitNotificationsAtLaunch();
-  // No "actions": no clicks, no buttons, no cold start.
-  EXPECT(NotificationCapabilities() ==
-         (LAUFEY_NOTIFICATION_CAP_SHOW | LAUFEY_NOTIFICATION_CAP_SCHEDULE));
-
   NotificationOptions o;
   o.title = "Build";
   o.body = "a < b & c";
   o.actions = {{"rebuild", "Rebuild"}};
+
+  // The server's capabilities can't be read: the body is escaped all the
+  // same (it may read markup).
   EXPECT(ShowNotification(o, nullptr, nullptr) > 0);
-  EXPECT(WaitFor([] {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return g_notified.size() == 1;
-  }));
-  EXPECT(g_notified[0].actions.empty());
+  EXPECT(WaitFor([] { return NotifiedCount() == 1; }));
   EXPECT(g_notified[0].body == "a &lt; b &amp; c");
+
+  // Now it answers: no "actions" means no clicks, no buttons, no cold
+  // start.
+  g_caps_mode = kCapsMarkup;
+  EXPECT(NotificationCapabilities() ==
+         (LAUFEY_NOTIFICATION_CAP_SHOW | LAUFEY_NOTIFICATION_CAP_SCHEDULE));
+  EXPECT(ShowNotification(o, nullptr, nullptr) > 0);
+  EXPECT(WaitFor([] { return NotifiedCount() == 2; }));
+  EXPECT(g_notified[1].actions.empty());
+  EXPECT(g_notified[1].body == "a &lt; b &amp; c");
 
   NotificationFacts facts = LinuxNotificationFacts();
   EXPECT(facts.transport == "freedesktop");
@@ -218,6 +252,29 @@ int main() {
   EXPECT(Contains(json, "\"notificationScheduleWhileClosed\":false"));
   // No dock reads launcher badges on this bus.
   EXPECT(Contains(json, "\"badge\":\"title\",\"badgeReason\":\"no dock"));
+
+  // Another server, known to show the body as it is ("body", no
+  // "body-markup"): no escaping.
+  g_dbus_connection_close_sync(server, nullptr, nullptr);
+  g_caps_mode = kCapsPlain;
+  GDBusConnection* plain = StartServer(bus);
+  EXPECT(WaitFor([&] {
+    GVariant* r = g_dbus_connection_call_sync(
+        plain, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "GetNameOwner",
+        g_variant_new("(s)", "org.freedesktop.Notifications"),
+        G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+    if (!r)
+      return false;
+    const char* owner = nullptr;
+    g_variant_get(r, "(&s)", &owner);
+    bool ours = g_strcmp0(owner, g_dbus_connection_get_unique_name(plain)) == 0;
+    g_variant_unref(r);
+    return ours;
+  }));
+  EXPECT(ShowNotification(o, nullptr, nullptr) > 0);
+  EXPECT(WaitFor([] { return NotifiedCount() == 3; }));
+  EXPECT(g_notified[2].body == "a < b & c");
 
   std::printf("laufey_notifications_caps_dbus_test: ok\n");
   std::fflush(stdout);

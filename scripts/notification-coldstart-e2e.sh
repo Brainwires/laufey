@@ -14,7 +14,8 @@
 # backend and the runtime (as its colocated runtime, with a launch file
 # naming dev.laufey.e2e.coldstart) to a temporary folder, installs
 # `<app id>.desktop` and `<app id>.service` (Exec: the copy with
-# --laufey-dbus-activated) under $XDG_DATA_HOME, runs the app once to post
+# --laufey-dbus-activated, and LAUFEY_E2E_COLDSTART=1 for the runtime, which
+# never sees that argument) under $XDG_DATA_HOME, runs the app once to post
 # (or schedule) the notification, and lets it quit. The click is then what
 # the desktop's shell sends for a click (gnome-shell and KDE's portal):
 # org.freedesktop.Application.ActivateAction("laufey-notification",
@@ -53,7 +54,8 @@ done
 cleanup() {
   rm -f "$desktop_file" "$service_file" "$result"
   if [ "$mode" = "--schedule" ] && command -v systemctl >/dev/null; then
-    systemctl --user stop "laufey-$app_id-*.timer" 2>/dev/null || true
+    systemctl --user stop "laufey-$app_id-$(printf '[0-9a-f]%.0s' $(seq 16)).timer" \
+      2>/dev/null || true
   fi
   pkill -f "$dir/$exe_name" 2>/dev/null || true
   rm -rf "$dir" "$data_home/$app_id"
@@ -71,7 +73,7 @@ printf '{"appId": "%s"}\n' "$app_id" > "$dir/laufey-launch.json"
 mkdir -p "$(dirname "$desktop_file")" "$(dirname "$service_file")"
 printf '[Desktop Entry]\nType=Application\nName=laufey cold-start e2e\nExec=%s\nNoDisplay=true\n' \
   "$exe" > "$desktop_file"
-printf '[D-BUS Service]\nName=%s\nExec=%s --laufey-dbus-activated\n' \
+printf '[D-BUS Service]\nName=%s\nExec=/usr/bin/env LAUFEY_E2E_COLDSTART=1 %s --laufey-dbus-activated\n' \
   "$app_id" "$exe" > "$service_file"
 command -v update-desktop-database >/dev/null &&
   update-desktop-database -q "$data_home/applications" || true
@@ -158,4 +160,6 @@ if [ -z "${LAUFEY_E2E_CLICK:-}${LAUFEY_E2E_CLICK_CMD:-}" ]; then
 fi
 [ "${lines[2]}" = "$data" ] || fail "data ${lines[2]}, expected $data"
 [ "${lines[3]}" = "true" ] || fail "launch ${lines[3]}, expected true"
+[ "${lines[4]}" = "args-clean" ] ||
+  fail "the runtime saw --laufey-dbus-activated (${lines[4]})"
 echo "PASS: the click started the app and reached its response handler as the launch"
