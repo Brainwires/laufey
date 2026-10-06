@@ -5,6 +5,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_cef_network_quiet.h"
 #include "laufey_io.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
@@ -27,7 +28,10 @@
 #include <vector>
 
 #ifdef __linux__
+#include <dirent.h>
 #include <gtk/gtk.h>
+
+#include "include/cef_request_context.h"
 #endif
 
 #ifdef __APPLE__
@@ -842,6 +846,86 @@ void LaufeyStripDeepLinkSwitches(CefRefPtr<CefCommandLine> command_line) {
     }
   }
 }
+
+void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line) {
+  auto value = [&](const char* name) {
+    return command_line->HasSwitch(name)
+               ? command_line->GetSwitchValue(name).ToString()
+               : std::string();
+  };
+  const std::string disable = value("disable-features");
+  const std::string merged = laufey_common::MergeQuietDisabledFeatures(
+      disable, value("enable-features"));
+  if (merged != disable) {
+    if (command_line->HasSwitch("disable-features"))
+      command_line->RemoveSwitch("disable-features");
+    command_line->AppendSwitchWithValue("disable-features", merged);
+  }
+  if (!command_line->HasSwitch("gaia-url")) {
+    command_line->AppendSwitchWithValue("gaia-url",
+                                        laufey_common::kCefQuietGaiaUrl);
+  }
+  // The component updater, which --disable-background-networking leaves
+  // running: a minute after launch it checks update.googleapis.com and
+  // downloads components from edgedl.me.gvt1.com. An app that configures
+  // it (--component-updater=...) keeps it.
+  if (!command_line->HasSwitch("component-updater"))
+    command_line->AppendSwitch("disable-component-update");
+}
+
+#if defined(__linux__)
+void LaufeyKeepLocalSpellcheckDictionaries(const std::string& root_cache_path) {
+  CefRefPtr<CefRequestContext> context = CefRequestContext::GetGlobalContext();
+  if (!context || root_cache_path.empty())
+    return;
+  std::vector<std::string> files;
+  if (DIR* dir = opendir((root_cache_path + "/Dictionaries").c_str())) {
+    while (struct dirent* entry = readdir(dir))
+      files.push_back(entry->d_name);
+    closedir(dir);
+  }
+  std::vector<std::string> languages;
+  CefRefPtr<CefValue> pref = context->GetPreference("spellcheck.dictionaries");
+  if (pref && pref->GetType() == VTYPE_LIST) {
+    CefRefPtr<CefListValue> list = pref->GetList();
+    for (size_t i = 0; i < list->GetSize(); ++i) {
+      if (list->GetType(i) == VTYPE_STRING)
+        languages.push_back(list->GetString(i).ToString());
+    }
+  }
+  const std::vector<std::string> listed = languages;
+  // The single-language pref (its default is the UI language), which
+  // Chromium moves into an empty list when the spellchecker starts: done
+  // here instead, so the language is checked like the others.
+  CefRefPtr<CefValue> single = context->GetPreference("spellcheck.dictionary");
+  if (single && single->GetType() == VTYPE_STRING &&
+      !single->GetString().empty()) {
+    if (languages.empty())
+      languages.push_back(single->GetString().ToString());
+    CefRefPtr<CefValue> empty = CefValue::Create();
+    empty->SetString("");
+    CefString error;
+    if (!context->SetPreference("spellcheck.dictionary", empty, error)) {
+      std::cerr << "laufey: spellcheck.dictionary: " << error.ToString()
+                << std::endl;
+    }
+  }
+  const std::vector<std::string> kept =
+      laufey_common::LocalHunspellDictionaries(languages, files);
+  if (kept == listed)
+    return;
+  CefRefPtr<CefListValue> list = CefListValue::Create();
+  for (size_t i = 0; i < kept.size(); ++i)
+    list->SetString(i, kept[i]);
+  CefRefPtr<CefValue> value = CefValue::Create();
+  value->SetList(list);
+  CefString error;
+  if (!context->SetPreference("spellcheck.dictionaries", value, error)) {
+    std::cerr << "laufey: spellcheck.dictionaries: " << error.ToString()
+              << std::endl;
+  }
+}
+#endif
 
 bool LaufeyDevToolsReachable() {
   if (laufey_common::LaunchInspectable())

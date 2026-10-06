@@ -824,12 +824,19 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     // propagates it to subprocesses.
     if (process_type.empty()) {
       command_line->AppendSwitch("disable-background-networking");
+      // What --disable-background-networking leaves: the Chrome services
+      // that still contact Google at startup (laufey_cef_network_quiet.h).
+      LaufeyApplyNetworkQuietDefaults(command_line);
       LaufeyApplyInspectableToCommandLine(command_line);
     }
   }
 
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
+
+    // Before any browser starts the spellchecker, which would download a
+    // missing Hunspell dictionary from Google.
+    LaufeyKeepLocalSpellcheckDictionaries(g_root_cache_path);
 
     // Keep the handler alive for the lifetime of the app.
     // Backend_CreateWindow uses LaufeyHandler::GetInstance() from the runtime

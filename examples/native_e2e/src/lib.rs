@@ -35,6 +35,7 @@ mod io_checks;
 mod launch_checks;
 mod lna_checks;
 mod menu_notification_checks;
+mod network_quiet_checks;
 mod os_view;
 mod platform_checks;
 mod sandbox_checks;
@@ -855,6 +856,12 @@ fn e2e_main() {
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("lna") {
       lna_checks::run(echo_url.as_deref()).await;
       finish();
+    }
+    // LAUFEY_E2E_ONLY=network-quiet: the app page, an idle period, then
+    // quit() (network_quiet_checks.rs; the script checks the net log).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("network-quiet") {
+      network_quiet_checks::run(echo_url.as_deref()).await;
+      return;
     }
     let scheme_report: Arc<Mutex<Option<SchemeReport>>> =
       Arc::new(Mutex::new(None));
