@@ -124,7 +124,7 @@ if [ "$mode" = "--schedule" ]; then
   target='laufey=1&tag=sched-tag&action=sched-action&data=%7B%22s%22%3A1%7D'
 else
   LAUFEY_E2E_NOTIFY_POST=1 "$exe" >"$log" 2>&1 || fail "the posting run failed"
-  grep -q "posted cold-tag: Ok" "$log" || fail "the notification wasn't shown"
+  grep -q 'posted cold-tag: Ok(Some("Shown"))' "$log" || fail "the notification wasn't shown"
   echo "PASS: posted cold-tag, and the app quit"
   grep -o '"notificationTransport":"[a-z]*"\|"notificationColdStart":[a-z]*' "$log" || true
 fi

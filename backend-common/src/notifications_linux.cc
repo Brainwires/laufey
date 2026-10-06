@@ -1040,10 +1040,13 @@ class LinuxNotificationPlatform : public NotificationPlatform {
   }
 
   bool NotifyOnThread(const NotificationOptions& o) {
-    if (!Connection())
+    // An activatable server is started first (once: a start that fails, as
+    // on Sway with only Plasma's activatable service, is remembered), so a
+    // session with no server fails at once instead of on every Notify's
+    // auto-start timeout.
+    if (!Connection() || !ServerPresent())
       return false;
-    bool posted =
-        UsePortal(nullptr) && ServerPresent() ? PortalNotify(o) : FdoNotify(o);
+    bool posted = UsePortal(nullptr) ? PortalNotify(o) : FdoNotify(o);
     if (!posted)
       return false;
     if (o.has_data)
