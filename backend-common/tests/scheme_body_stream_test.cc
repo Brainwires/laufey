@@ -5,7 +5,9 @@
 // is unread; a reader on a GMainContext reads it asynchronously
 // (g_input_stream_read_bytes_async, as WebKit does) byte for byte; a body
 // past the cap fails both sides; a reader that went away fails the writer;
-// a synchronous reader works too. Plain asserts, no WebKit.
+// a synchronous reader works too; and none of it logs a GLib critical (an
+// async read's pollable source once did, for its child source's closure).
+// Plain asserts, no WebKit.
 
 #include "laufey_scheme_body_stream.h"
 #include "laufey_scheme_cancel.h"
@@ -376,7 +378,19 @@ static void TestSynchronousReaderAndEof() {
   g_object_unref(s3);
 }
 
+static int g_criticals = 0;
+
+static void CountCritical(const gchar* domain, GLogLevelFlags, const gchar* msg,
+                          gpointer) {
+  std::fprintf(stderr, "unexpected critical (%s): %s\n",
+               domain ? domain : "", msg ? msg : "");
+  g_criticals++;
+}
+
 int main() {
+  for (const char* domain : {"GLib", "GLib-GObject", "GLib-GIO"}) {
+    g_log_set_handler(domain, G_LOG_LEVEL_CRITICAL, CountCritical, nullptr);
+  }
   TestWritesNeverBlockAndArriveIntact();
   TestHighWaterMarkTakesNothingUntilRead();
   TestReaderWokenByAnotherThread();
@@ -385,6 +399,7 @@ int main() {
   TestReaderGoneHook();
   TestCancelGate();
   TestSynchronousReaderAndEof();
+  CHECK(g_criticals == 0);
   if (g_failures) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

@@ -62,8 +62,8 @@ void (*buffer_free)(void* backend_data, void* buffer);
   synthesizes as `CF_DIB` / `CF_BITMAP`), and every format gdk-pixbuf can write
   on Linux. A write that isn't a decodable PNG is refused. A read returns PNG
   bytes: the PNG itself when the source offered one, otherwise the image
-  converted (TIFF and other `NSImage` types on macOS, a DIB on Windows, any
-  pixbuf format on Linux).
+  converted (TIFF and other `NSImage` types on macOS, a DIB on Windows, JPEG,
+  BMP or GIF on Linux).
 - **Formats** are MIME types separated by `\n`: `text/plain`, `text/html`,
   `image/png` (any image), `text/uri-list` (files), `text/rtf`. An empty string
   is an empty clipboard.
@@ -71,16 +71,64 @@ void (*buffer_free)(void* backend_data, void* buffer);
   every change, including this app's own writes. `clipboard_capabilities`
   reports `LAUFEY_CLIPBOARD_CAP_CHANGE_EVENTS` where they work.
 
-| OS      | Text                         | HTML                      | Image                            | Change events                                                                                                                        |
-| ------- | ---------------------------- | ------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| macOS   | `NSPasteboardTypeString`     | `NSPasteboardTypeHTML`    | `NSPasteboardTypePNG` + TIFF     | No OS notification: the pasteboard's `changeCount` is polled twice a second, only while a handler is set.                            |
-| Windows | `CF_UNICODETEXT`             | `HTML Format` (`CF_HTML`) | registered `PNG` + `CF_DIBV5`    | `AddClipboardFormatListener` on laufey's I/O window (`WM_CLIPBOARDUPDATE`).                                                          |
-| Linux   | GTK `CLIPBOARD` text targets | `text/html`               | `image/png` + gdk-pixbuf formats | GTK's `owner-change`: X11 needs the XFixes extension; on Wayland GTK hears of changes only while one of the app's windows has focus. |
-| Winit   | shell tools (below)          | —                         | —                                | —                                                                                                                                    |
+| OS      | Text                         | HTML                      | Image                            | Change events                                                                                                                                                                |
+| ------- | ---------------------------- | ------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS   | `NSPasteboardTypeString`     | `NSPasteboardTypeHTML`    | `NSPasteboardTypePNG` + TIFF     | No OS notification: the pasteboard's `changeCount` is polled twice a second, only while a handler is set.                                                                    |
+| Windows | `CF_UNICODETEXT`             | `HTML Format` (`CF_HTML`) | registered `PNG` + `CF_DIBV5`    | `AddClipboardFormatListener` on laufey's I/O window (`WM_CLIPBOARDUPDATE`).                                                                                                  |
+| Linux   | GTK `CLIPBOARD` text targets | `text/html`               | `image/png` + gdk-pixbuf formats | GTK's `owner-change`: X11 needs the XFixes extension; on Wayland, the data-control device's selection events, or GTK's while one of the app's windows has focus (see below). |
+| Winit   | shell tools (below)          | —                         | —                                | —                                                                                                                                                                            |
 
 The CEF and WebView backends share these implementations. Data written to the
 clipboard on Linux is offered to a running clipboard manager, so it survives the
 app exiting.
+
+**Wayland.** The core protocol lets only the client with keyboard focus set or
+read the clipboard. laufey's GTK connection is never that client under CEF
+(Chromium's own Wayland connection owns the window's surfaces), and no app is
+while it is in the background or the session is locked. So, on Wayland:
+
+- Where the compositor offers `ext-data-control-v1` (KWin 6.2+, wlroots 0.19+
+  compositors such as Sway), every clipboard operation goes through it, on a
+  private Wayland connection: focused or not, both backends.
+- GNOME's mutter has no data-control. Its Xwayland selection bridge copies the
+  clipboard between X11 and Wayland in both directions whatever has focus, so
+  there laufey is an X11 client of Xwayland's `CLIPBOARD` selection, over a
+  private XCB connection served by a thread of its own (GTK and the process
+  environment are left alone). The connection is opened on the first clipboard
+  call, which starts Xwayland if mutter hasn't yet (the documented price: a
+  moment on that first call, off the UI thread). Reads convert `TARGETS` and
+  then the wanted target, following `INCR` for large transfers, every step with
+  a 3 s deadline; as the owner laufey answers `TARGETS`, `TIMESTAMP` and each
+  type it offers, large data through `INCR` (at most 8 transfers at once, each
+  dropped after 3 s without progress). Text goes out as `UTF8_STRING` and
+  `text/plain;charset=utf-8`, and as `STRING` only when it is Latin-1 (ICCCM),
+  converted. Change events come from XFixes. Without Xwayland it falls back to
+  GTK's Wayland clipboard, which works only while one of the app's windows has
+  focus.
+- Elsewhere (another compositor without data-control) GTK's Wayland clipboard is
+  used: only while one of the app's windows has focus, and never under CEF.
+
+`LAUFEY_CLIPBOARD=gtk` turns both off (GTK's default display only).
+
+**Privacy (Linux).** The two paths above read the clipboard whatever has focus,
+so an app in the background reads it while the session is unlocked, as on macOS
+and Windows and as Electron does: apps that read the clipboard should do so in
+response to the user. While the session is **locked** (systemd-logind's
+`LockedHint` for the app's session, asked on each read with a 500 ms deadline)
+every read through them is refused: text, HTML and image reads answer `NULL`,
+formats an empty list, and the reason is logged once per lock
+(`laufey: clipboard read refused: the session is locked`). Writes still work.
+The refusal fails open: where logind can't be asked (no system bus, not in a
+session, no answer within the deadline) reads are allowed. It also relies on the
+screen locker setting `LockedHint`, which GNOME and KDE do but many wlroots
+lockers never do (swaylock and other `ext-session-lock-v1` clients started
+directly, from a keybinding or swayidle): on such sessions reads are **not**
+refused while the screen is locked. Image reads, on every Linux path, take
+`image/png` verbatim and otherwise only `image/jpeg`, `image/bmp` or `image/gif`
+(re-encoded as PNG): no other format offered by another app reaches an image
+decoder, and only those four count as `image/png` in the formats list. Apps
+built on laufey (denext's `clipboard` capability, for one) should say both in
+their own documentation.
 
 The engine-free Winit backend has no web engine bundled, so it shells out to the
 platform's standard clipboard tools instead — `pbcopy` / `pbpaste` on macOS,

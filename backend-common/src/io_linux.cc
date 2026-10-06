@@ -14,8 +14,18 @@
 #include "laufey_io.h"
 #include "laufey_ui_tasks.h"
 
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -39,6 +49,136 @@ bool OnGtkThread() {
 }
 
 }  // namespace
+
+namespace {
+
+// What the parked UI thread and the exiting thread share. Leaked on purpose:
+// nothing may be destroyed while exit runs.
+struct ExitPark {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool answered = false;
+};
+
+// How long exit may take, once it has begun, before the process ends anyway
+// (a destructor or another exit handler that hangs: a lock the parked UI
+// thread holds, a library waiting for a thread that is gone):
+// LAUFEY_EXIT_WATCHDOG_SECS, 5 by default; 0 turns the watchdog off.
+constexpr long kDefaultExitWatchdogSeconds = 5;
+
+// Read once, when the guard is installed (not while exit runs). A value that
+// isn't a whole number of seconds keeps the default.
+long ExitWatchdogSecondsFromEnv() {
+  const char* env = getenv("LAUFEY_EXIT_WATCHDOG_SECS");
+  if (!env || !*env)
+    return kDefaultExitWatchdogSeconds;
+  char* end = nullptr;
+  errno = 0;
+  long secs = strtol(env, &end, 10);
+  if (errno != 0 || *end != '\0' || secs < 0)
+    return kDefaultExitWatchdogSeconds;
+  return secs;
+}
+
+long g_exit_watchdog_seconds = kDefaultExitWatchdogSeconds;
+
+struct WatchdogArgs {
+  int status;
+  long seconds;
+};
+
+void* ExitWatchdog(void* arg) {
+  auto* args = static_cast<WatchdogArgs*>(arg);
+  struct timespec left = {static_cast<time_t>(args->seconds), 0};
+  while (nanosleep(&left, &left) != 0 && errno == EINTR) {
+  }
+  _exit(args->status);
+}
+
+// A raw detached thread (nothing exit tears down) that ends the process with
+// `status` after LAUFEY_EXIT_WATCHDOG_SECS; none when that is 0.
+void ArmExitWatchdog(int status) {
+  if (g_exit_watchdog_seconds <= 0)
+    return;
+  // Leaked on purpose, like ExitPark.
+  auto* args = new WatchdogArgs{status, g_exit_watchdog_seconds};
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) != 0)
+    return;
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_t thread;
+  pthread_create(&thread, &attr, ExitWatchdog, args);
+  pthread_attr_destroy(&attr);
+}
+
+void ParkUiThreadForExit(int status) {
+  ArmExitWatchdog(status);
+  UiTaskDispatcher& dispatcher = UiTaskDispatcher::Get();
+  // The UI thread itself exiting (main returning) has nothing to park; its
+  // loop is over, so later dispatches are answered at once.
+  if (dispatcher.IsUiThread()) {
+    dispatcher.Close();
+    return;
+  }
+  auto* park = new ExitPark();
+  dispatcher.Dispatch(
+      [](void* data, bool ran) {
+        auto* p = static_cast<ExitPark*>(data);
+        {
+          std::lock_guard<std::mutex> lock(p->mutex);
+          p->answered = true;
+        }
+        p->cv.notify_all();
+        if (!ran)
+          return;
+        // The UI thread stays here until the process is gone.
+        for (;;)
+          pause();
+      },
+      park);
+  {
+    std::unique_lock<std::mutex> lock(park->mutex);
+    park->cv.wait_for(lock, std::chrono::seconds(1),
+                      [park] { return park->answered; });
+  }
+  // Nothing runs on the UI thread any more: every task still waiting for it
+  // (a runtime thread in a synchronous UI call, say) is answered with `ran`
+  // false, and so is every later dispatch, instead of queueing forever.
+  dispatcher.Close();
+}
+
+#if defined(__GLIBC__)
+void ParkUiThreadOnExit(int status, void*) {
+  ParkUiThreadForExit(status);
+}
+#else
+// atexit handlers aren't told exit's status (on_exit is glibc's). The
+// watchdog only fires when exit hangs, and a hung exit is not a success:
+// it ends the process with 1 rather than report 0 for an exit that may have
+// been a failing one.
+constexpr int kHungExitStatus = 1;
+void ParkUiThreadAtExit() {
+  ParkUiThreadForExit(kHungExitStatus);
+}
+#endif
+
+}  // namespace
+
+void InstallUiExitGuard() {
+  static std::once_flag once;
+#if defined(__GLIBC__)
+  // on_exit: the watchdog ends the process with the status exit was given.
+  std::call_once(once, [] {
+    g_exit_watchdog_seconds = ExitWatchdogSecondsFromEnv();
+    on_exit(ParkUiThreadOnExit, nullptr);
+  });
+#else
+  std::call_once(once, [] {
+    g_exit_watchdog_seconds = ExitWatchdogSecondsFromEnv();
+    atexit(ParkUiThreadAtExit);
+  });
+#endif
+}
 
 void SetGtkThread(std::function<void(std::function<void()>)> post,
                   std::function<bool()> on_thread) {

@@ -3369,6 +3369,11 @@ bool RuntimeLoader::Load(const std::string& path) {
             TID_UI, base::BindOnce([](void (*t)(void*), void* d) { t(d); },
                                    task, task_data));
       });
+#if defined(__linux__)
+  // Deno.exit() ends the process from the runtime thread: keep the UI thread
+  // from drawing while exit tears the libraries down.
+  laufey_common::InstallUiExitGuard();
+#endif
 #if defined(_WIN32)
   // A context menu's TrackPopupMenu runs a native modal loop on TID_UI, and
   // Chromium runs no tasks inside one unless told to: every CefPostTask (the

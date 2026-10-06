@@ -102,6 +102,20 @@ void StartFileDragWin(void* hwnd, DragOutRequest* req);
 bool CanStartFileDragLinux();
 void StartFileDragLinux(std::function<void*()> source_widget,
                         DragOutRequest* req);
+
+// Registers (once) an exit handler that parks the UI thread when the process
+// exits from another thread (the runtime's Deno.exit(), say): exit() runs the
+// libraries' destructors while the UI thread keeps drawing, which crashed in
+// pixman/cairo under GTK. The UI thread is handed a task that never returns,
+// and exit waits for it to start (at most a second; not at all once the
+// loop has ended). The dispatcher is then closed, so every task still
+// waiting for the UI thread, and every later dispatch, is answered with `ran`
+// false. A watchdog ends the process with exit's status if exit has not
+// finished LAUFEY_EXIT_WATCHDOG_SECS (read here; 5 by default, 0 = no
+// watchdog) seconds later; without glibc's on_exit the status isn't known,
+// and a hung exit ends with 1. Call on the UI thread after
+// UiTaskDispatcher::Bind.
+void InstallUiExitGuard();
 #endif
 
 // --- File dialogs -----------------------------------------------------------

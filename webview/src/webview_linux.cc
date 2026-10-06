@@ -473,6 +473,81 @@ static bool LaufeyIsWaylandDisplay(GdkDisplay* display) {
          g_strcmp0(G_OBJECT_TYPE_NAME(display), "GdkWaylandDisplay") == 0;
 }
 
+// Sets `window`'s geometry hints from its size constraints. GTK thread.
+//
+// The constraints are for the content. GTK 3 hands geometry hints to GDK as
+// they are, and GDK's Wayland backend takes them as the size of the whole
+// client-side-decorated surface (it only subtracts the shadow margins), so
+// under CSD (GNOME) the title bar and shadows came out of the content: a
+// maximum of 820x620 left 730x482 of content. Add what the decorations take
+// (the surface's frame extents less the content size; zero with server-side
+// decorations, and on X11 where the hints are the client area's). That
+// depends on the window's state (the shadow goes away when maximized or
+// tiled and comes back when floating) and is unknown before the window is
+// realized, so the hints are set again on realize and on every state change.
+static void LaufeyApplySizeHints(GtkWidget* window,
+                                 const laufey_common::SizeConstraints& c) {
+  int extra_w = 0, extra_h = 0;
+  GdkWindow* gw = gtk_widget_get_window(window);
+  if (gw && LaufeyIsWaylandDisplay(gdk_window_get_display(gw))) {
+    GdkRectangle frame = {0, 0, 0, 0};
+    gdk_window_get_frame_extents(gw, &frame);
+    int cw = 0, ch = 0;
+    gtk_window_get_size(GTK_WINDOW(window), &cw, &ch);
+    if (cw > 0 && ch > 0) {
+      extra_w = std::max(0, frame.width - cw);
+      extra_h = std::max(0, frame.height - ch);
+    }
+  }
+  GdkGeometry geometry = {};
+  int mask = 0;
+  if (c.min_width > 0 || c.min_height > 0) {
+    geometry.min_width = c.min_width > 0 ? c.min_width + extra_w : 0;
+    geometry.min_height = c.min_height > 0 ? c.min_height + extra_h : 0;
+    mask |= GDK_HINT_MIN_SIZE;
+  }
+  if (c.max_width > 0 || c.max_height > 0) {
+    geometry.max_width = c.max_width > 0 ? c.max_width + extra_w : G_MAXSHORT;
+    geometry.max_height =
+        c.max_height > 0 ? c.max_height + extra_h : G_MAXSHORT;
+    mask |= GDK_HINT_MAX_SIZE;
+  }
+  gtk_window_set_geometry_hints(GTK_WINDOW(window), nullptr,
+                                mask ? &geometry : nullptr,
+                                static_cast<GdkWindowHints>(mask));
+}
+
+// Sets the hints again for a window that has constraints (realize, and
+// after a state change).
+static void LaufeyReapplySizeHints(GtkWidget* window) {
+  uint32_t wid = LaufeyIdForWidget(window);
+  if (wid == 0 || !gtk_widget_get_realized(window))
+    return;
+  laufey_common::SizeConstraints c = laufey_common::GetSizeConstraints(wid);
+  if (c.min_width > 0 || c.min_height > 0 || c.max_width > 0 ||
+      c.max_height > 0)
+    LaufeyApplySizeHints(window, c);
+}
+
+static void on_window_realize_size_hints(GtkWidget* widget, gpointer) {
+  LaufeyReapplySizeHints(widget);
+}
+
+static gboolean on_window_state_size_hints(GtkWidget* widget,
+                                           GdkEventWindowState*, gpointer) {
+  // After GTK has restyled the decorations for the new state (the shadow
+  // margins are only right from the next main loop iteration on).
+  g_idle_add(
+      [](gpointer data) -> gboolean {
+        auto* window = static_cast<GtkWidget*>(data);
+        LaufeyReapplySizeHints(window);
+        g_object_unref(window);
+        return G_SOURCE_REMOVE;
+      },
+      g_object_ref(widget));
+  return FALSE;
+}
+
 static void on_display_monitors_changed() {
   laufey_common::NotifyDisplayChanged();
 }
@@ -1243,6 +1318,12 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                      nullptr);
     g_signal_connect(window, "window-state-event",
                      G_CALLBACK(on_window_state_event), nullptr);
+    // The size constraints' hints depend on the decorations: set again once
+    // they are known, and whenever they change with the window's state.
+    g_signal_connect_after(window, "realize",
+                           G_CALLBACK(on_window_realize_size_hints), nullptr);
+    g_signal_connect(window, "window-state-event",
+                     G_CALLBACK(on_window_state_size_hints), nullptr);
     g_signal_connect(window, "configure-event", G_CALLBACK(on_configure_event),
                      nullptr);
 
@@ -1723,21 +1804,7 @@ void WebKitGTKBackend::SetWindowSizeConstraints(uint32_t window_id,
     auto* state = GetWindow(window_id);
     if (!state)
       return;
-    GdkGeometry geometry = {};
-    int mask = 0;
-    if (c.min_width > 0 || c.min_height > 0) {
-      geometry.min_width = c.min_width;
-      geometry.min_height = c.min_height;
-      mask |= GDK_HINT_MIN_SIZE;
-    }
-    if (c.max_width > 0 || c.max_height > 0) {
-      geometry.max_width = c.max_width > 0 ? c.max_width : G_MAXSHORT;
-      geometry.max_height = c.max_height > 0 ? c.max_height : G_MAXSHORT;
-      mask |= GDK_HINT_MAX_SIZE;
-    }
-    gtk_window_set_geometry_hints(GTK_WINDOW(state->window), nullptr,
-                                  mask ? &geometry : nullptr,
-                                  static_cast<GdkWindowHints>(mask));
+    LaufeyApplySizeHints(state->window, c);
     int w = 0, h = 0;
     gtk_window_get_size(GTK_WINDOW(state->window), &w, &h);
     if (laufey_common::ClampSize(c, &w, &h))

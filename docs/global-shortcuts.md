@@ -134,12 +134,23 @@ interface once; when it answers, `system_capabilities` reports both
 - Each shortcut gets its own portal session; `BindShortcuts` passes the
   canonical accelerator as the shortcut's id and description and the XDG trigger
   form (`CTRL+SHIFT+k`) as the preferred trigger.
-- The desktop shows its own dialog. The user may accept, pick a different
-  trigger, or decline (`DENIED`). The press handler still receives the canonical
-  accelerator that was registered, whatever trigger the user chose.
+- The desktop may show its own dialog (GNOME does, the first time). The user may
+  accept, pick a different trigger, or decline (`DENIED`). The press handler
+  still receives the canonical accelerator that was registered, whatever trigger
+  the user chose. A dialog nobody answers within 30 s
+  (`LAUFEY_SHORTCUT_PROMPT_TIMEOUT_MS`) is closed and the registration answers
+  `DENIED`, so a caller never waits on an empty desk. `CreateSession` gets 10 s
+  (`LAUFEY_SHORTCUT_SESSION_TIMEOUT_MS`); past that the registration answers
+  `DENIED` as well, and laufey closes the session by its predictable handle
+  (`…/session/<sender>/<token>`) and any session a late `Response` still names,
+  so none is left behind.
 - With `LAUFEY_APP_ID` set, laufey registers the app with the portal's host
   registry (xdg-desktop-portal 1.19+) so the desktop can remember the user's
-  choices per app.
+  choices per app. The portal ties an app id to a D-Bus connection the first
+  time that connection talks to it, and GTK reads the Settings portal over the
+  process's shared connection at startup, so the shortcut client uses a
+  connection of its own: on the shared one the registration fails and
+  xdg-desktop-portal 1.19+ refuses `CreateSession` ("An app id is required").
 - **The OS limit:** without the portal, or with a portal backend that doesn't
   implement GlobalShortcuts (it needs xdg-desktop-portal 1.17+ with
   xdg-desktop-portal-kde, or GNOME 48+), registrations answer `NOT_SUPPORTED`.
@@ -157,7 +168,9 @@ on a desktop whose XWayland allows global grabs).
 - `backend-common/tests/shortcuts_portal_test.cc` (ctest, Linux): the portal
   client against a mock portal on a private D-Bus bus: the probe, the host
   registration, `CreateSession` / `BindShortcuts` through Request objects,
-  `Activated` reaching the handler, a declined binding and `Session.Close` on
+  `Activated` reaching the handler, a declined binding, an unanswered dialog, a
+  `CreateSession` that times out (`DENIED`, the session closed by its handle) or
+  answers after the deadline (the late session closed), and `Session.Close` on
   unregister.
 - `native_e2e --system` (every backend; see [e2e-testing.md](e2e-testing.md)):
   the real OS registration, a `CONFLICT` while a second process holds the same

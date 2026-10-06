@@ -172,3 +172,19 @@ dialogs, notifications, key mapping) in
 [`backend-common/`](https://github.com/littledivy/laufey/tree/main/backend-common),
 included as a CMake subdirectory by each backend. The winit backend shares its
 non-engine pieces through `backend-winit-common` instead.
+
+## Exit and shutdown (Linux)
+
+On Linux, CEF and WebView install an exit guard: when the process exits from
+another thread (the runtime's `Deno.exit()`), the UI thread is parked before the
+libraries' destructors run (GTK kept drawing during exit and crashed in
+pixman/cairo), and every UI dispatch still waiting is answered as not run. A
+watchdog then ends the process if exit itself hangs (a destructor or exit
+handler waiting on a lock or a thread that is gone):
+
+- `LAUFEY_EXIT_WATCHDOG_SECS` sets how long exit may take before the watchdog
+  ends the process: 5 seconds by default; `0` turns the watchdog off. It is read
+  once, when the backend starts.
+- On glibc the watchdog exits with the status `exit()` was given. Without glibc
+  (musl, say) that status isn't available to the exit handler, so a hung exit
+  ends with status 1.
