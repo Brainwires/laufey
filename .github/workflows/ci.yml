@@ -704,7 +704,8 @@ jobs:
         run: |
           mock="$(ls webview/build/backend-common/laufey_mock_notification_server \
             cef/build/backend-common/laufey_mock_notification_server \
-            cef/build/laufey_mock_notification_server 2>/dev/null | head -1)"
+            cef/build/laufey_mock_notification_server 2>/dev/null | head -1 || true)"
+          [ -n "$mock" ] || { echo "no laufey_mock_notification_server built"; exit 1; }
           export XDG_DATA_HOME="$(mktemp -d)" LAUFEY_E2E_ENTRY_WAIT=0
           xvfb-run -a dbus-run-session -- bash -c \
             "$mock & sleep 1; scripts/notification-coldstart-e2e.sh ${{ matrix.backend }}"
