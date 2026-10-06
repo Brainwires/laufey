@@ -749,6 +749,16 @@ jobs:
         shell: bash
         run: scripts/storage-e2e-run.sh ${{ matrix.backend }}
 
+      # How an app ends: quit(), the last window closing and exit_app (API
+      # 46) each end the process (no hang), with their exit code, and what
+      # the page stored just before survives into the next launch. See
+      # docs/backends.md, "How an app ends".
+      - name: Exit — every path ends the process and keeps the profile
+        if: matrix.backend != 'winit'
+        timeout-minutes: 15
+        shell: bash
+        run: scripts/exit-e2e-run.sh ${{ matrix.backend }} 3
+
       # Single-instance lock + argument forwarding (second_instance), the
       # arguments a runtime sees at a cold start, and on macOS files opened
       # through LaunchServices (open_url). See docs/deep-links.md. Winit has

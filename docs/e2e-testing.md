@@ -710,6 +710,21 @@ The `native-e2e` CI job runs it after Layer 0 on every webview/cef leg, and on
 the webview/Linux leg, where the Layer-0 battery is excluded (see the status
 note above) and only the request-body round trip runs before it.
 
+How an app ends has its own driver over the same runtime,
+`scripts/exit-e2e-run.sh <webview|cef> [iterations] [paths...]`
+(`LAUFEY_E2E_STORAGE_EXIT`): each launch writes a fresh value to `localStorage`
+and a cookie and ends at once, with no pause for the engine, by one path —
+`quit` (`quit()`), `close` (the last window closes) or `exit` (`exit_app` with
+code 7, the runtime's thread then blocked for good, as `Deno.exit()` does). The
+driver asserts that the process ends within `LAUFEY_E2E_EXIT_TIMEOUT` seconds
+(60), with that path's exit code, and that the next launch of the same app reads
+the value back. It stops at the first hang: on Windows such a process may not be
+killable and keeps its profile locked. `process-exit`, run only when named, ends
+with `std::process::exit` from the runtime's thread under a running engine (how
+a runtime ended before API 46) and reports whether the value survived. See
+[backends.md](backends.md#how-an-app-ends). The `native-e2e` CI job runs it
+after the storage step on every webview/cef leg.
+
 ---
 
 ## 15. Single instance and opened files (`single_instance_e2e`)
