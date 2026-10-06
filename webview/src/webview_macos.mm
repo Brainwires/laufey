@@ -375,6 +375,11 @@ class WKWebViewBackend : public LaufeyBackend {
  private:
   MacWindowState* GetWindow(uint32_t window_id);
   WKWebView* WebViewOf(uint32_t window_id);
+  // DevTools closed while still opening (see CloseDevTools): when each close
+  // came, by window. Main thread only.
+  std::map<uint32_t, CFAbsoluteTime> devtools_close_pending_;
+  bool DevToolsClosePending(uint32_t window_id);
+  void CloseDevToolsOnceOpen(uint32_t window_id, CFAbsoluteTime since);
   void RemoveWindowState(uint32_t window_id);
   void InstallGlobalMonitors();
   void RemoveGlobalMonitors();
@@ -2851,10 +2856,60 @@ WKWebView* WKWebViewBackend::WebViewOf(uint32_t window_id) {
   return state ? state->webview : nil;
 }
 
+// Whether `inspector` (a _WKInspector) answers YES to `name`.
+static bool InspectorFlag(id inspector, NSString* name) {
+  SEL sel = NSSelectorFromString(name);
+  return inspector && [inspector respondsToSelector:sel] &&
+         reinterpret_cast<BOOL (*)(id, SEL)>(objc_msgSend)(inspector, sel);
+}
+
+// WebKit opens the inspector in two steps: `show` makes its page at once
+// (isConnected), asks the inspected page's web process to start, and opens
+// the inspector (isVisible) when that process answers. A `close` in between
+// drops the page, but the answer still arrives and opens a new one, so
+// DevTools closed right after they were opened came back on their own
+// (WebInspectorUIProxy::connect, openLocalInspectorFrontend). Such a close
+// is remembered for 10 s: the inspector reads as closed meanwhile, and is
+// closed again once it has opened. An open clears it.
+constexpr CFTimeInterval kDevToolsClosePendingSecs = 10;
+
+bool WKWebViewBackend::DevToolsClosePending(uint32_t window_id) {
+  auto it = devtools_close_pending_.find(window_id);
+  if (it == devtools_close_pending_.end())
+    return false;
+  if (CFAbsoluteTimeGetCurrent() - it->second < kDevToolsClosePendingSecs)
+    return true;
+  devtools_close_pending_.erase(it);
+  return false;
+}
+
+void WKWebViewBackend::CloseDevToolsOnceOpen(uint32_t window_id,
+                                             CFAbsoluteTime since) {
+  auto it = devtools_close_pending_.find(window_id);
+  // Cleared by an open, or replaced by a later close (its own watch runs).
+  if (it == devtools_close_pending_.end() || it->second != since)
+    return;
+  WKWebView* webview = WebViewOf(window_id);
+  id inspector = webview ? InspectorOf(webview) : nil;
+  if (!inspector || !DevToolsClosePending(window_id))
+    return;
+  if (InspectorFlag(inspector, @"isVisible")) {
+    devtools_close_pending_.erase(window_id);
+    if ([inspector respondsToSelector:@selector(close)])
+      [inspector performSelector:@selector(close)];
+    return;
+  }
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                 dispatch_get_main_queue(), ^{
+                   CloseDevToolsOnceOpen(window_id, since);
+                 });
+}
+
 void WKWebViewBackend::OpenDevTools(uint32_t window_id) {
   if (!laufey_common::LaunchInspectable())
     return;
   dispatch_async(dispatch_get_main_queue(), ^{
+    devtools_close_pending_.erase(window_id);
     WKWebView* webview = WebViewOf(window_id);
     if (!webview)
       return;
@@ -2876,6 +2931,17 @@ void WKWebViewBackend::CloseDevTools(uint32_t window_id) {
     if (!webview)
       return;
     id inspector = InspectorOf(webview);
+    // Still opening (its page exists, it isn't open yet): close it again
+    // once it opens.
+    if (InspectorFlag(inspector, @"isConnected") &&
+        !InspectorFlag(inspector, @"isVisible")) {
+      CFAbsoluteTime since = CFAbsoluteTimeGetCurrent();
+      devtools_close_pending_[window_id] = since;
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                     dispatch_get_main_queue(), ^{
+                       CloseDevToolsOnceOpen(window_id, since);
+                     });
+    }
     if (inspector && [inspector respondsToSelector:@selector(close)])
       [inspector performSelector:@selector(close)];
   });
@@ -2889,11 +2955,9 @@ bool WKWebViewBackend::IsDevToolsOpen(uint32_t window_id) {
     if (!state || !state->webview)
       return;
     id inspector = InspectorOf(state->webview);
-    SEL visible = NSSelectorFromString(@"isVisible");
-    if (inspector && [inspector respondsToSelector:visible]) {
-      open =
-          reinterpret_cast<BOOL (*)(id, SEL)>(objc_msgSend)(inspector, visible);
-    }
+    // One closed while still opening reads as closed (CloseDevTools).
+    open = InspectorFlag(inspector, @"isVisible") &&
+           !DevToolsClosePending(window_id);
   });
   return open;
 }

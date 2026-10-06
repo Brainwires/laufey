@@ -79,7 +79,10 @@ stop working. `native_e2e --devtools-off` checks that they still do.
 - **WKWebView:** the inspector is WebKit's `_WKInspector` (what Safari's Develop
   menu drives): `show`, `close` and `isVisible`. It is a private API on every
   macOS version laufey supports. Safari's Develop menu also lists inspectable
-  web views from outside the app.
+  web views from outside the app. As on WebKitGTK (below), `show` opens the
+  inspector only once the page's web process answers, so a `close` while it is
+  connected but not yet visible is remembered (for 10 s): it reads as closed
+  meanwhile and is closed again once it has opened.
 - **WebView2:** the DevTools open in a separate top-level window of the browser
   process, and WebView2 has no API to close them or ask whether they are open.
   laufey remembers the DevTools window `open_devtools` brought up (a new
