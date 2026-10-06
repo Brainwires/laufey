@@ -300,12 +300,23 @@ failed. Nothing an app relies on runs in that code: the profile is on disk after
 `scripts/exit-e2e-run.sh` checks each path (see
 [e2e-testing.md](e2e-testing.md)).
 
-Known gap: the WebKit backends (WebKitGTK on Linux, WKWebView on macOS) can lose
-a `localStorage` write made just before any of these ends (cookies survive; on
-CI 1 of 9 ends on macOS, 2 of 5 on Linux): WebKit writes it from another process
-a moment after the page, and the web view is torn down before then.
-`exit-e2e-run.sh` reports it as known there; pause briefly after a last write
-that must be kept.
+The WebKit backends (WebKitGTK on Linux, WKWebView on macOS) also flush
+`localStorage` before the process ends. WebKit writes it from its network
+process, in an SQLite transaction committed 500 ms after the first write
+(`SQLiteStorageArea`); a host that ended within that time lost the write now
+and then (on CI 1 of 9 ends on macOS, 2 of 5 on Linux; cookies survived). The
+network process commits when the host's connection closes, but only after the
+host is gone, so a launch right after could still read the previous value. Once
+the runtime has shut down, the backend (`FlushWebStorage`, at most 2 s):
+
+- macOS: calls WebKit's `WKWebsiteDataStoreSyncLocalStorage` (C SPI, looked up
+  with `dlsym`), which commits every open transaction and answers, and runs the
+  main run loop until it does.
+- Linux: fetches the `localStorage` records
+  (`webkit_website_data_manager_fetch`), which the network process answers from
+  its storage queue after the writes queued before; waits 600 ms, past the
+  commit those writes armed; and fetches again, which is answered after that
+  commit. WebKitGTK's API has no call that commits directly.
 
 ## Exit and shutdown (Linux)
 

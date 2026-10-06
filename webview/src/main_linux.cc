@@ -216,6 +216,8 @@ int main(int argc, char* argv[]) {
   // either is released before Shutdown waits for it.
   laufey_common::UiLoopEnded();
   loader->Shutdown();
+  // What the pages stored goes to disk before the process ends.
+  backend->FlushWebStorage();
   delete backend;
 
   // exit_app's code (API 46), else 0.

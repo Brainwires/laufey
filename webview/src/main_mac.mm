@@ -122,6 +122,9 @@ void EnsureEditMenu(NSMenu* menubar) {
   // either is released before Shutdown waits for it.
   laufey_common::UiLoopEnded();
   RuntimeLoader::GetInstance()->Shutdown();
+  // What the pages stored goes to disk before the process ends.
+  if (self.backend)
+    self.backend->FlushWebStorage();
   delete self.backend;
   self.backend = nullptr;
 }
