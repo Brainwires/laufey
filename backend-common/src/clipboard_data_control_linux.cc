@@ -316,10 +316,16 @@ class Client {
     wl_callback* cb = wl_display_sync(display_);
     wl_callback_add_listener(cb, &kRoundtripListener, &done);
     while (!done) {
+      // wl_display_cancel_read only after a prepare_read that succeeded.
+      bool prepared = true;
       while (wl_display_prepare_read(display_) != 0) {
-        if (wl_display_dispatch_pending(display_) < 0)
+        if (wl_display_dispatch_pending(display_) < 0) {
+          prepared = false;
           break;
+        }
       }
+      if (!prepared)
+        break;  // the connection broke
       if (done) {
         wl_display_cancel_read(display_);
         break;
@@ -446,8 +452,17 @@ class Client {
 
   void Loop() {
     while (true) {
-      while (wl_display_prepare_read(display_) != 0)
-        wl_display_dispatch_pending(display_);
+      bool prepared = true;
+      while (wl_display_prepare_read(display_) != 0) {
+        if (wl_display_dispatch_pending(display_) < 0) {
+          prepared = false;  // broken: prepare_read would fail forever
+          break;
+        }
+      }
+      if (!prepared) {
+        Fail();
+        return;
+      }
       wl_display_flush(display_);
       std::vector<pollfd> fds;
       fds.push_back({wl_display_get_fd(display_), POLLIN, 0});
