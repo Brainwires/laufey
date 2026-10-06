@@ -118,12 +118,17 @@ response to the user. While the session is **locked** (systemd-logind's
 every read through them is refused: text, HTML and image reads answer `NULL`,
 formats an empty list, and the reason is logged once per lock
 (`laufey: clipboard read refused: the session is locked`). Writes still work.
-Where logind can't be asked (no system bus, not in a session) reads are allowed.
-Image reads, on every Linux path, take `image/png` verbatim and otherwise only
-`image/jpeg`, `image/bmp` or `image/gif` (re-encoded as PNG): no other format
-offered by another app reaches an image decoder, and only those four count as
-`image/png` in the formats list. Apps built on laufey (denext's `clipboard`
-capability, for one) should say both in their own documentation.
+The refusal fails open: where logind can't be asked (no system bus, not in a
+session, no answer within the deadline) reads are allowed. It also relies on the
+screen locker setting `LockedHint`, which GNOME and KDE do but many wlroots
+lockers never do (swaylock and other `ext-session-lock-v1` clients started
+directly, from a keybinding or swayidle): on such sessions reads are **not**
+refused while the screen is locked. Image reads, on every Linux path, take
+`image/png` verbatim and otherwise only `image/jpeg`, `image/bmp` or `image/gif`
+(re-encoded as PNG): no other format offered by another app reaches an image
+decoder, and only those four count as `image/png` in the formats list. Apps
+built on laufey (denext's `clipboard` capability, for one) should say both in
+their own documentation.
 
 The engine-free Winit backend has no web engine bundled, so it shells out to the
 platform's standard clipboard tools instead — `pbcopy` / `pbpaste` on macOS,
