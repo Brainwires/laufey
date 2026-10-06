@@ -62,10 +62,16 @@ static int run_headless(const std::string& runtimePath) {
 
 int main(int argc, char* argv[]) {
   // D-Bus activation for a notification click (`<app id>.service` passes
-  // --laufey-dbus-activated): noted, and taken out of argv so neither GTK,
-  // the single-instance forwarding nor the runtime sees it.
+  // --laufey-dbus-activated): noted, and left out of the copy of argv that
+  // GTK and the single-instance forwarding get. The process's argv is never
+  // changed (gtk_init edits the copy): the runtime library's .init_array
+  // functions still get its original argc and argv. The runtime leaves the
+  // argument out itself (laufey::args_os).
+  static std::vector<char*> host_argv;
   laufey_common::SetDBusActivationLaunch(
-      laufey_common::StripDBusActivationArg(&argc, argv));
+      laufey_common::CopyArgvWithoutDBusActivationArg(argc, argv, &host_argv));
+  argc = static_cast<int>(host_argv.size()) - 1;
+  argv = host_argv.data();
 
   // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
   // (cef/src/main_windows.cc); never pass it on to what the app starts.

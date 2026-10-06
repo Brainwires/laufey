@@ -193,13 +193,20 @@ bool ParseNotifyLaunch(const std::vector<std::string>& args, std::string* id);
 // any "--".
 bool HasDBusActivationArg(const std::vector<std::string>& args);
 
-// Removes kDBusActivationArg (before any "--") from `argv` in place, so
-// neither the web engine nor the runtime sees it: the later entries move
-// down, `*argc` drops by one and argv[*argc] becomes NULL (the runtime reads
-// the process's argv up to the first NULL, as after gtk_init). Returns
-// whether it was there. The host's main() calls it first and passes the
-// answer to SetDBusActivationLaunch.
-bool StripDBusActivationArg(int* argc, char** argv);
+// Fills `out` with a NULL-terminated copy of argv (the same string
+// pointers) without kDBusActivationArg (before any "--"), and returns
+// whether it was there. argv itself is never changed: the C runtime passes
+// the process's original argc and argv to the .init_array functions of
+// every library loaded later (the runtime's), so an entry moved out of it
+// in place reads as NULL there (Deno's initializer called strlen on it and
+// the app crashed while its runtime loaded). The host's main() calls it
+// first, passes the answer to SetDBusActivationLaunch and hands `*out`
+// (out->size() - 1 arguments) to everything after it: the web engine, GTK,
+// the single-instance forwarding. A runtime reads the process's own
+// arguments, so it leaves kDBusActivationArg out itself (laufey::args_os).
+bool CopyArgvWithoutDBusActivationArg(int argc,
+                                      char* const* argv,
+                                      std::vector<char*>* out);
 
 // Whether `app_id` can be the app's D-Bus name and GApplication id: at most
 // 255 bytes, at least two '.'-separated elements of [A-Za-z0-9_-], none
@@ -265,7 +272,7 @@ NotificationFacts LinuxNotificationFacts();
 int RunNotifyLaunch(const std::string& id);
 
 // Linux: this process was started by D-Bus activation (its arguments
-// carried kDBusActivationArg, which StripDBusActivationArg removed). The
+// carry kDBusActivationArg; see CopyArgvWithoutDBusActivationArg). The
 // host's main() calls it before InitNotificationsAtLaunch.
 void SetDBusActivationLaunch(bool activated);
 

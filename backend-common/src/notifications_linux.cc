@@ -1573,9 +1573,8 @@ class LinuxNotificationPlatform : public NotificationPlatform {
 LinuxNotificationPlatform* g_linux_platform = nullptr;
 
 // This process was started by D-Bus activation (`<app id>.service` runs the
-// app with kDBusActivationArg): the host said so (SetDBusActivationLaunch,
-// after StripDBusActivationArg took it out of argv), or, for a host that
-// doesn't, the argument is still on the command line.
+// app with kDBusActivationArg): the host said so (SetDBusActivationLaunch),
+// or, for a host that doesn't, the argument is on the command line.
 bool StartedByDBusActivation() {
   if (g_activation_launch)
     return true;

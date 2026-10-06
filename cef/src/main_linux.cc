@@ -896,11 +896,16 @@ static bool LaufeyChooseSandbox() {
 
 int main(int argc, char* argv[]) {
   // D-Bus activation for a notification click (`<app id>.service` passes
-  // --laufey-dbus-activated): noted, and taken out of argv before Chromium,
-  // the single-instance forwarding or the runtime sees it. (A CEF
-  // subprocess never has it.)
+  // --laufey-dbus-activated): noted, and left out of the copy of argv that
+  // Chromium and the single-instance forwarding get. (A CEF subprocess never
+  // has it.) The process's argv is never changed: the runtime library's
+  // .init_array functions still get its original argc and argv. The runtime
+  // leaves the argument out itself (laufey::args_os).
+  static std::vector<char*> host_argv;
   laufey_common::SetDBusActivationLaunch(
-      laufey_common::StripDBusActivationArg(&argc, argv));
+      laufey_common::CopyArgvWithoutDBusActivationArg(argc, argv, &host_argv));
+  argc = static_cast<int>(host_argv.size()) - 1;
+  argv = host_argv.data();
 
   // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
   // (cef/src/main_windows.cc); never pass it on to what the app starts.

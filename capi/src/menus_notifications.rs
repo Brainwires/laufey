@@ -396,6 +396,37 @@ pub fn test_notification_respond(tag: &str, action: Option<&str>) -> bool {
   }
 }
 
+/// The argument a Linux host's D-Bus activation launch carries (the Exec
+/// line of the app's `<app id>.service`, for a notification click while the
+/// app isn't running). Only the host reads it.
+pub const DBUS_ACTIVATION_ARG: &str = "--laufey-dbus-activated";
+
+/// This process's arguments ([`std::env::args_os`]) without the ones only
+/// the host reads: on Linux, the first [`DBUS_ACTIVATION_ARG`] before any
+/// `--` (the host's rule). The host leaves the process's argv as it is (the
+/// C runtime passes it to the runtime library's `.init_array` functions), so
+/// a runtime reads its arguments here instead of from `std::env::args_os`.
+pub fn args_os() -> Vec<std::ffi::OsString> {
+  without_host_args(std::env::args_os())
+}
+
+fn without_host_args(
+  args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+  let mut args: Vec<_> = args.into_iter().collect();
+  if cfg!(target_os = "linux") {
+    let at = args
+      .iter()
+      .skip(1)
+      .take_while(|a| *a != "--")
+      .position(|a| a == DBUS_ACTIVATION_ARG);
+    if let Some(i) = at {
+      args.remove(i + 1);
+    }
+  }
+  args
+}
+
 /// A tag for a scheduled notification the caller didn't name.
 pub(crate) fn generated_tag() -> String {
   use std::sync::atomic::{AtomicU64, Ordering};
@@ -681,6 +712,37 @@ mod tests {
     assert_eq!(list[1].data, None);
     assert!(parse_list("[]").is_empty());
     assert!(parse_list("nope").is_empty());
+  }
+
+  #[test]
+  fn host_args_are_left_out() {
+    let os = |v: &[&str]| -> Vec<std::ffi::OsString> {
+      v.iter().map(std::ffi::OsString::from).collect()
+    };
+    let linux = cfg!(target_os = "linux");
+    let args = os(&["app", "--x", DBUS_ACTIVATION_ARG, "--", "acme://y"]);
+    let want = if linux {
+      os(&["app", "--x", "--", "acme://y"])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    // Only the first; after "--" or as the program it is the app's.
+    let args = os(&["app", DBUS_ACTIVATION_ARG, DBUS_ACTIVATION_ARG]);
+    let want = if linux {
+      os(&["app", DBUS_ACTIVATION_ARG])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    for kept in [
+      &["app", "--", DBUS_ACTIVATION_ARG][..],
+      &[DBUS_ACTIVATION_ARG],
+      &["app", "--laufey-notify", "0123456789abcdef"],
+      &[],
+    ] {
+      assert_eq!(without_host_args(os(kept)), os(kept));
+    }
   }
 
   #[test]

@@ -561,21 +561,25 @@ bool IsValidApplicationId(const std::string& app_id) {
   return elements >= 2;
 }
 
-bool StripDBusActivationArg(int* argc, char** argv) {
-  if (!argc || !argv)
-    return false;
-  for (int i = 1; i < *argc && argv[i]; ++i) {
-    if (std::strcmp(argv[i], "--") == 0)
-      return false;
-    if (std::strcmp(argv[i], kDBusActivationArg) != 0)
-      continue;
-    for (int j = i; j + 1 < *argc; ++j)
-      argv[j] = argv[j + 1];
-    --*argc;
-    argv[*argc] = nullptr;
-    return true;
+bool CopyArgvWithoutDBusActivationArg(int argc,
+                                      char* const* argv,
+                                      std::vector<char*>* out) {
+  out->clear();
+  bool found = false;
+  bool after_dashes = false;
+  for (int i = 0; argv && i < argc && argv[i]; ++i) {
+    if (i > 0 && !found && !after_dashes) {
+      if (std::strcmp(argv[i], "--") == 0) {
+        after_dashes = true;
+      } else if (std::strcmp(argv[i], kDBusActivationArg) == 0) {
+        found = true;
+        continue;
+      }
+    }
+    out->push_back(argv[i]);
   }
-  return false;
+  out->push_back(nullptr);
+  return found;
 }
 
 std::string ApplicationObjectPath(const std::string& app_id) {
