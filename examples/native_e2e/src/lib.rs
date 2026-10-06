@@ -1649,6 +1649,37 @@ fn e2e_main() {
       }
     }
 
+    // print_to_pdf for a window that doesn't exist refuses through the
+    // callback, and that callback may re-enter the backend: WebKitGTK runs it
+    // on the GTK thread, where get_size takes the same (non-recursive) window
+    // lock the not-found lookup takes. A refusal made under that lock
+    // deadlocks the UI thread here, and nothing is delivered.
+    if cfg!(target_os = "linux")
+      && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
+    {
+      let refusal =
+        Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
+      let rf = refusal.clone();
+      let live_id = win.id();
+      Window::from_id(u32::MAX - 1).print_to_pdf(None, move |r| {
+        let _ = Window::from_id(live_id).get_size();
+        *rf.lock().unwrap() = Some(r);
+      });
+      let delivered =
+        wait_for(|| refusal.lock().unwrap().is_some(), 50, 100).await;
+      let result = refusal.lock().unwrap().take();
+      check(
+        &format!(
+          "print_to_pdf on a missing window refuses through a callback that \
+           can re-enter the backend (got: {result:?})"
+        ),
+        delivered
+          && matches!(&result, Some(Err(e)) if e.contains("window not found")),
+      );
+    } else {
+      na("print_to_pdf missing-window re-entry (WebKitGTK only)");
+    }
+
     // ---- C. custom scheme is a real origin --------------------------------
     // The page at laufey-e2e://app/ (loaded above) reports back through the
     // schemeReport binding. Engine-less backends leave register_scheme_handler

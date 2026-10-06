@@ -2507,15 +2507,49 @@ static void on_pdf_print_finished(WebKitPrintOperation* op,
 // desktop). So the job names GTK's "Print to File" printer, which GTK's own
 // file print backend (part of libgtk-3) always provides. Its name is
 // translated, so it is found by its backend's type, which isn't.
+//
+// The search has a deadline (kPdfPrinterSearchTimeoutMs): a print backend
+// that never finishes listing (a hung CUPS) would otherwise hold the result
+// back for good. Whichever of the deadline and the search's end comes first
+// settles the callback; the other only releases its reference. Both run on
+// the GTK thread, so the struct needs no lock.
+static constexpr guint kPdfPrinterSearchTimeoutMs = 10000;
+
 struct PdfPrinterSearch {
   uint32_t window_id;
   laufey_pdf_result_fn callback;
   void* callback_data;
-  std::string printer;  // the file printer's name, once found
+  std::string printer;   // the file printer's name, once found
+  bool settled = false;  // the callback has been called (or handed on)
+  guint timeout_id = 0;  // the deadline's GSource, while it is pending
+  int refs = 2;          // the search's end + the deadline
 };
+
+static void pdf_printer_search_unref(PdfPrinterSearch* search) {
+  if (--search->refs == 0)
+    delete search;
+}
+
+// The deadline. GTK thread.
+static gboolean file_printer_search_timeout(gpointer data) {
+  auto* search = static_cast<PdfPrinterSearch*>(data);
+  search->timeout_id = 0;
+  if (!search->settled) {
+    search->settled = true;
+    search->callback(nullptr, 0,
+                     "timed out after 10 s looking up GTK's \"Print to "
+                     "File\" printer (a print backend did not finish "
+                     "listing its printers)",
+                     search->callback_data);
+  }
+  pdf_printer_search_unref(search);
+  return G_SOURCE_REMOVE;
+}
 
 static gboolean find_file_printer(GtkPrinter* printer, gpointer data) {
   auto* search = static_cast<PdfPrinterSearch*>(data);
+  if (search->settled)
+    return TRUE;  // the deadline passed: stop listing
   GtkPrintBackend* backend = gtk_printer_get_backend(printer);
   if (!backend ||
       g_strcmp0(G_OBJECT_TYPE_NAME(backend), "GtkPrintBackendFile") != 0)
@@ -2528,19 +2562,27 @@ static gboolean find_file_printer(GtkPrinter* printer, gpointer data) {
 // GTK thread.
 static void file_printer_search_done(gpointer data) {
   auto* search = static_cast<PdfPrinterSearch*>(data);
-  if (search->printer.empty()) {
-    search->callback(nullptr, 0,
-                     "no \"Print to File\" printer: GTK's file print backend "
-                     "(printbackends/libprintbackend-file.so, part of "
-                     "libgtk-3) is not installed",
-                     search->callback_data);
-  } else if (g_gtk_backend) {
-    g_gtk_backend->PrintToPdfOn(search->window_id, search->printer,
-                                search->callback, search->callback_data);
-  } else {
-    search->callback(nullptr, 0, "backend is gone", search->callback_data);
+  if (search->timeout_id) {
+    g_source_remove(search->timeout_id);
+    search->timeout_id = 0;
+    pdf_printer_search_unref(search);  // the deadline's reference
   }
-  delete search;
+  if (!search->settled) {
+    search->settled = true;
+    if (search->printer.empty()) {
+      search->callback(nullptr, 0,
+                       "no \"Print to File\" printer: GTK's file print "
+                       "backend (printbackends/libprintbackend-file.so, part "
+                       "of libgtk-3) is not installed",
+                       search->callback_data);
+    } else if (g_gtk_backend) {
+      g_gtk_backend->PrintToPdfOn(search->window_id, search->printer,
+                                  search->callback, search->callback_data);
+    } else {
+      search->callback(nullptr, 0, "backend is gone", search->callback_data);
+    }
+  }
+  pdf_printer_search_unref(search);  // the search's own reference
 }
 
 void WebKitGTKBackend::PrintToPdf(uint32_t window_id,
@@ -2549,19 +2591,27 @@ void WebKitGTKBackend::PrintToPdf(uint32_t window_id,
   if (!callback)
     return;
   gtk_invoke_sync([&] {
+    // The callback is a user FnOnce that may re-enter backend APIs taking
+    // windows_mutex_ (non-recursive), so it is never called under the lock:
+    // the lookup only records whether the window exists.
+    bool found;
     {
       std::lock_guard<std::mutex> lock(windows_mutex_);
       auto* state = GetWindow(window_id);
-      if (!state || !state->webview) {
-        callback(nullptr, 0, "window not found", callback_data);
-        return;
-      }
+      found = state && state->webview;
+    }
+    if (!found) {
+      callback(nullptr, 0, "window not found", callback_data);
+      return;
     }
     // Asynchronous: GTK lists the printers it already knows at once (the
     // file printer among them, which ends the search there), and a slow
-    // backend (CUPS) never holds up this thread.
+    // backend (CUPS) never holds up this thread. The deadline settles the
+    // callback if the search never ends.
     auto* search =
         new PdfPrinterSearch{window_id, callback, callback_data, std::string()};
+    search->timeout_id = g_timeout_add(kPdfPrinterSearchTimeoutMs,
+                                       file_printer_search_timeout, search);
     gtk_enumerate_printers(find_file_printer, search, file_printer_search_done,
                            FALSE);
   });
