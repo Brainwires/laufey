@@ -261,7 +261,17 @@ void SubscribeOffTheOwnerThread() {
   for (int i = 0; i < 500 && g_changed < 1; ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   EXPECT(g_changed == 1);
-  EXPECT(TrayUnavailableReasonForAbi() == nullptr);  // a host: no reason
+  // The reason follows the host only where the appindicator library loads
+  // (without it the reason is the missing library, host or not: the webview
+  // CI job installs no appindicator).
+  PlatformFeatures lib_probe;
+  ProbeTray(&lib_probe);
+  const bool tray_library = lib_probe.tray_library;
+  if (tray_library) {
+    char* none = TrayUnavailableReasonForAbi();
+    EXPECT(none == nullptr);  // a host: no reason
+    free(none);
+  }
   BusCall("ReleaseName", "org.kde.StatusNotifierWatcher");
   EXPECT(wait(false));
   for (int i = 0; i < 500 && g_changed < 2; ++i)
@@ -269,7 +279,8 @@ void SubscribeOffTheOwnerThread() {
   EXPECT(g_changed == 2);
   EXPECT(g_changed_on_owner);
   char* reason = TrayUnavailableReasonForAbi();
-  EXPECT(reason && strstr(reason, "StatusNotifierWatcher"));
+  EXPECT(reason && strstr(reason, tray_library ? "StatusNotifierWatcher"
+                                               : "no tray library"));
   free(reason);
   SetPlatformFeaturesChangedHandler(nullptr, nullptr);
   g_main_loop_quit(loop);
