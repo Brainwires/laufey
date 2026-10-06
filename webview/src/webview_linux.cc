@@ -1,6 +1,7 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
 #include <gtk/gtk.h>
+#include <gtk/gtkunixprint.h>
 #include <gdk/gdkkeysyms.h>
 
 #include "runtime_loader.h"
@@ -910,6 +911,10 @@ class WebKitGTKBackend : public LaufeyBackend {
 
   void PrintToPdf(uint32_t window_id, laufey_pdf_result_fn callback,
                   void* callback_data) override;
+  // The print job itself, on GTK's "Print to File" printer `printer` (found
+  // by PrintToPdf). GTK thread.
+  void PrintToPdfOn(uint32_t window_id, const std::string& printer,
+                    laufey_pdf_result_fn callback, void* callback_data);
 
   int ShowDialog(uint32_t window_id, int dialog_type, const std::string& title,
                  const std::string& message, const std::string& default_value,
@@ -2496,78 +2501,193 @@ static void on_pdf_print_finished(WebKitPrintOperation* op,
   delete d;
 }
 
+// WebKitPrintOperation prints without a dialog to the printer the settings
+// name, and with none named, to the default printer: "Printer not found" on
+// a machine with no default printer (no CUPS queue at all, the usual
+// desktop). So the job names GTK's "Print to File" printer, which GTK's own
+// file print backend (part of libgtk-3) always provides. Its name is
+// translated, so it is found by its backend's type, which isn't.
+//
+// The search has a deadline (kPdfPrinterSearchTimeoutMs): a print backend
+// that never finishes listing (a hung CUPS) would otherwise hold the result
+// back for good. Whichever of the deadline and the search's end comes first
+// settles the callback; the other only releases its reference. Both run on
+// the GTK thread, so the struct needs no lock.
+static constexpr guint kPdfPrinterSearchTimeoutMs = 10000;
+
+struct PdfPrinterSearch {
+  uint32_t window_id;
+  laufey_pdf_result_fn callback;
+  void* callback_data;
+  std::string printer;   // the file printer's name, once found
+  bool settled = false;  // the callback has been called (or handed on)
+  guint timeout_id = 0;  // the deadline's GSource, while it is pending
+  int refs = 2;          // the search's end + the deadline
+};
+
+static void pdf_printer_search_unref(PdfPrinterSearch* search) {
+  if (--search->refs == 0)
+    delete search;
+}
+
+// The deadline. GTK thread.
+static gboolean file_printer_search_timeout(gpointer data) {
+  auto* search = static_cast<PdfPrinterSearch*>(data);
+  search->timeout_id = 0;
+  if (!search->settled) {
+    search->settled = true;
+    search->callback(nullptr, 0,
+                     "timed out after 10 s looking up GTK's \"Print to "
+                     "File\" printer (a print backend did not finish "
+                     "listing its printers)",
+                     search->callback_data);
+  }
+  pdf_printer_search_unref(search);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean find_file_printer(GtkPrinter* printer, gpointer data) {
+  auto* search = static_cast<PdfPrinterSearch*>(data);
+  if (search->settled)
+    return TRUE;  // the deadline passed: stop listing
+  GtkPrintBackend* backend = gtk_printer_get_backend(printer);
+  if (!backend ||
+      g_strcmp0(G_OBJECT_TYPE_NAME(backend), "GtkPrintBackendFile") != 0)
+    return FALSE;
+  search->printer = gtk_printer_get_name(printer);
+  return TRUE;  // stop: the search ends (file_printer_search_done)
+}
+
+// The end of the printer search, found or not (GTK calls it exactly once).
+// GTK thread.
+static void file_printer_search_done(gpointer data) {
+  auto* search = static_cast<PdfPrinterSearch*>(data);
+  if (search->timeout_id) {
+    g_source_remove(search->timeout_id);
+    search->timeout_id = 0;
+    pdf_printer_search_unref(search);  // the deadline's reference
+  }
+  if (!search->settled) {
+    search->settled = true;
+    if (search->printer.empty()) {
+      search->callback(nullptr, 0,
+                       "no \"Print to File\" printer: GTK's file print "
+                       "backend (printbackends/libprintbackend-file.so, part "
+                       "of libgtk-3) is not installed",
+                       search->callback_data);
+    } else if (g_gtk_backend) {
+      g_gtk_backend->PrintToPdfOn(search->window_id, search->printer,
+                                  search->callback, search->callback_data);
+    } else {
+      search->callback(nullptr, 0, "backend is gone", search->callback_data);
+    }
+  }
+  pdf_printer_search_unref(search);  // the search's own reference
+}
+
 void WebKitGTKBackend::PrintToPdf(uint32_t window_id,
                                   laufey_pdf_result_fn callback,
                                   void* callback_data) {
   if (!callback)
     return;
   gtk_invoke_sync([&] {
-    // Scope the lock to the lookup only: the callback is an arbitrary user
-    // FnOnce that may re-enter backend APIs taking this same non-recursive
-    // mutex on this thread (the "failed" signal can fire synchronously from
-    // webkit_print_operation_print below). Using the webview after unlock is
-    // safe because window teardown also runs on this (main) thread.
-    WebKitWebView* webview = nullptr;
+    // The callback is a user FnOnce that may re-enter backend APIs taking
+    // windows_mutex_ (non-recursive), so it is never called under the lock:
+    // the lookup only records whether the window exists.
+    bool found;
     {
       std::lock_guard<std::mutex> lock(windows_mutex_);
       auto* state = GetWindow(window_id);
-      if (state)
-        webview = state->webview;
+      found = state && state->webview;
     }
-    if (!webview) {
+    if (!found) {
       callback(nullptr, 0, "window not found", callback_data);
       return;
     }
-
-    // Private (0600, unpredictable name) temp file for the print output;
-    // close the fd right away -- the web process opens the file by path.
-    gchar* tmp_path = nullptr;
-    GError* tmp_error = nullptr;
-    int tmp_fd = g_file_open_tmp("laufey-pdf-XXXXXX", &tmp_path, &tmp_error);
-    if (tmp_fd < 0) {
-      callback(nullptr, 0,
-               tmp_error && tmp_error->message ? tmp_error->message
-                                               : "failed to create temp file",
-               callback_data);
-      if (tmp_error)
-        g_error_free(tmp_error);
-      return;
-    }
-    close(tmp_fd);
-
-    auto* d = new PdfPrintData{callback, callback_data, tmp_path, false, ""};
-    gchar* uri = g_filename_to_uri(tmp_path, nullptr, nullptr);
-    g_free(tmp_path);
-    if (!uri) {
-      // Cannot happen for g_file_open_tmp's absolute path, but stay safe.
-      callback(nullptr, 0, "invalid temp file path", callback_data);
-      unlink(d->output_path.c_str());
-      delete d;
-      return;
-    }
-
-    GtkPrintSettings* settings = gtk_print_settings_new();
-    gtk_print_settings_set(settings, GTK_PRINT_SETTINGS_OUTPUT_URI, uri);
-    gtk_print_settings_set(settings, GTK_PRINT_SETTINGS_OUTPUT_FILE_FORMAT,
-                           "pdf");
-    g_free(uri);
-
-    WebKitPrintOperation* op = webkit_print_operation_new(webview);
-    webkit_print_operation_set_print_settings(op, settings);
-    g_object_unref(settings);
-
-    // "finished" is WebKitPrintOperation's guaranteed completion signal: it is
-    // emitted for every terminated operation, and always AFTER "failed" when an
-    // error occurred (WebKit forwards GtkPrintOperation's always-emitted "done"
-    // signal). So on_pdf_print_finished is the single owner of invoking the
-    // callback, deleting the temp file, unref-ing `op`, and freeing `d` -- the
-    // same "completion callback always fires" contract the macOS backend
-    // relies on. "failed" only records the error for that handler to report.
-    g_signal_connect(op, "failed", G_CALLBACK(on_pdf_print_failed), d);
-    g_signal_connect(op, "finished", G_CALLBACK(on_pdf_print_finished), d);
-
-    webkit_print_operation_print(op);
+    // Asynchronous: GTK lists the printers it already knows at once (the
+    // file printer among them, which ends the search there), and a slow
+    // backend (CUPS) never holds up this thread. The deadline settles the
+    // callback if the search never ends.
+    auto* search =
+        new PdfPrinterSearch{window_id, callback, callback_data, std::string()};
+    search->timeout_id = g_timeout_add(kPdfPrinterSearchTimeoutMs,
+                                       file_printer_search_timeout, search);
+    gtk_enumerate_printers(find_file_printer, search, file_printer_search_done,
+                           FALSE);
   });
+}
+
+void WebKitGTKBackend::PrintToPdfOn(uint32_t window_id,
+                                    const std::string& printer,
+                                    laufey_pdf_result_fn callback,
+                                    void* callback_data) {
+  // Scope the lock to the lookup only: the callback is an arbitrary user
+  // FnOnce that may re-enter backend APIs taking this same non-recursive
+  // mutex on this thread (the "failed" signal can fire synchronously from
+  // webkit_print_operation_print below). Using the webview after unlock is
+  // safe because window teardown also runs on this (main) thread. The window
+  // is looked up again: it may have closed during the printer search.
+  WebKitWebView* webview = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (state)
+      webview = state->webview;
+  }
+  if (!webview) {
+    callback(nullptr, 0, "window not found", callback_data);
+    return;
+  }
+
+  // Private (0600, unpredictable name) temp file for the print output;
+  // close the fd right away -- the web process opens the file by path.
+  gchar* tmp_path = nullptr;
+  GError* tmp_error = nullptr;
+  int tmp_fd = g_file_open_tmp("laufey-pdf-XXXXXX", &tmp_path, &tmp_error);
+  if (tmp_fd < 0) {
+    callback(nullptr, 0,
+             tmp_error && tmp_error->message ? tmp_error->message
+                                             : "failed to create temp file",
+             callback_data);
+    if (tmp_error)
+      g_error_free(tmp_error);
+    return;
+  }
+  close(tmp_fd);
+
+  auto* d = new PdfPrintData{callback, callback_data, tmp_path, false, ""};
+  gchar* uri = g_filename_to_uri(tmp_path, nullptr, nullptr);
+  g_free(tmp_path);
+  if (!uri) {
+    // Cannot happen for g_file_open_tmp's absolute path, but stay safe.
+    callback(nullptr, 0, "invalid temp file path", callback_data);
+    unlink(d->output_path.c_str());
+    delete d;
+    return;
+  }
+
+  GtkPrintSettings* settings = gtk_print_settings_new();
+  gtk_print_settings_set_printer(settings, printer.c_str());
+  gtk_print_settings_set(settings, GTK_PRINT_SETTINGS_OUTPUT_URI, uri);
+  gtk_print_settings_set(settings, GTK_PRINT_SETTINGS_OUTPUT_FILE_FORMAT,
+                         "pdf");
+  g_free(uri);
+
+  WebKitPrintOperation* op = webkit_print_operation_new(webview);
+  webkit_print_operation_set_print_settings(op, settings);
+  g_object_unref(settings);
+
+  // "finished" is WebKitPrintOperation's guaranteed completion signal: it is
+  // emitted for every terminated operation, and always AFTER "failed" when an
+  // error occurred (WebKit forwards GtkPrintOperation's always-emitted "done"
+  // signal). So on_pdf_print_finished is the single owner of invoking the
+  // callback, deleting the temp file, unref-ing `op`, and freeing `d` -- the
+  // same "completion callback always fires" contract the macOS backend
+  // relies on. "failed" only records the error for that handler to report.
+  g_signal_connect(op, "failed", G_CALLBACK(on_pdf_print_failed), d);
+  g_signal_connect(op, "finished", G_CALLBACK(on_pdf_print_finished), d);
+
+  webkit_print_operation_print(op);
 }
 
 // ============================================================================

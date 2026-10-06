@@ -338,15 +338,18 @@ mod linux {
   }
 }
 
-/// The in-process GTK dialogs run on one thread of their own, started on
-/// first use: GTK may only ever be used from the thread that initialized it,
-/// and `show_dialog` is called from whichever thread the runtime calls on.
-/// A job that panics is caught there; the caller gets `None`.
+/// The process's GTK thread, started on first use: GTK may only ever be used
+/// from the thread that initialized it, and the runtime calls in on
+/// whichever thread it likes. It serves the in-process dialogs and, on
+/// Linux, the tray (libappindicator and its menus, tray.rs). Where GTK
+/// started, the thread iterates GLib between jobs, so the tray's D-Bus
+/// registration and its menus' events are served while no job runs; a job
+/// wakes it. A job that panics is caught there; a `run` caller gets `None`.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) mod gtk_thread {
   use std::panic::{catch_unwind, AssertUnwindSafe};
   use std::sync::mpsc;
-  use std::sync::Mutex;
+  use std::sync::{Condvar, Mutex};
 
   type Job = Box<dyn FnOnce(bool) + Send>;
 
@@ -355,7 +358,7 @@ pub(crate) mod gtk_thread {
     &SENDER
   }
 
-  /// Whether GTK starts on the dialog thread: not when it can't open a
+  /// Whether GTK starts on the GTK thread: not when it can't open a
   /// display, nor when something else in the process already initialized it
   /// on another thread (gtk-rs would panic).
   #[cfg(target_os = "linux")]
@@ -369,6 +372,99 @@ pub(crate) mod gtk_thread {
     false
   }
 
+  /// Wake the GTK thread out of its GLib wait to take a new job. Safe from
+  /// any thread, and before the thread waits (the wakeup is kept until its
+  /// next iteration).
+  #[cfg(target_os = "linux")]
+  fn wake() {
+    gtk::glib::MainContext::default().wakeup();
+  }
+
+  #[cfg(not(target_os = "linux"))]
+  fn wake() {}
+
+  /// One GLib iteration, waiting for an event (a source, or [`wake`]).
+  #[cfg(target_os = "linux")]
+  fn iterate() {
+    gtk::main_iteration_do(true);
+  }
+
+  #[cfg(not(target_os = "linux"))]
+  fn iterate() {}
+
+  /// Whether GTK started on the GTK thread, once the thread has tried.
+  fn started() -> &'static (Mutex<Option<bool>>, Condvar) {
+    static STARTED: (Mutex<Option<bool>>, Condvar) =
+      (Mutex::new(None), Condvar::new());
+    &STARTED
+  }
+
+  fn serve(rx: mpsc::Receiver<Job>) {
+    let gtk_ok = init_gtk();
+    {
+      let (state, cv) = started();
+      *state.lock().unwrap_or_else(|e| e.into_inner()) = Some(gtk_ok);
+      cv.notify_all();
+    }
+    let run_job = |job: Job| {
+      // A panicking job drops its result sender: a `run` caller sees None,
+      // and the thread serves the next one.
+      let _ = catch_unwind(AssertUnwindSafe(|| job(gtk_ok)));
+    };
+    if !gtk_ok {
+      for job in rx {
+        run_job(job);
+      }
+      return;
+    }
+    loop {
+      loop {
+        match rx.try_recv() {
+          Ok(job) => run_job(job),
+          Err(mpsc::TryRecvError::Empty) => break,
+          Err(mpsc::TryRecvError::Disconnected) => return,
+        }
+      }
+      iterate();
+    }
+  }
+
+  /// Queue `job` on the GTK thread (its argument: GTK is usable there)
+  /// without waiting for it. Jobs run in the order they were queued. False
+  /// when the thread is gone.
+  pub(crate) fn spawn(job: impl FnOnce(bool) + Send + 'static) -> bool {
+    let mut guard = sender().lock().unwrap_or_else(|e| e.into_inner());
+    let sender = guard.get_or_insert_with(|| {
+      let (tx, rx) = mpsc::channel::<Job>();
+      std::thread::Builder::new()
+        .name("laufey-gtk".into())
+        .spawn(move || serve(rx))
+        .expect("spawn the GTK thread");
+      tx
+    });
+    let sent = sender.send(Box::new(job)).is_ok();
+    wake();
+    sent
+  }
+
+  /// Whether GTK is usable on the GTK thread, starting the thread if it
+  /// hasn't been. Waits only for GTK's initialization, never behind a queued
+  /// job (a modal dialog).
+  pub(crate) fn usable() -> bool {
+    let (state, cv) = started();
+    if let Some(ok) = *state.lock().unwrap_or_else(|e| e.into_inner()) {
+      return ok;
+    }
+    if !spawn(|_| {}) {
+      return false;
+    }
+    let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = cv
+      .wait_while(guard, |s| s.is_none())
+      .unwrap_or_else(|e| e.into_inner());
+    guard.unwrap_or(false)
+  }
+
   /// Run `job` on the GTK thread (its argument: GTK is usable there) and
   /// wait for its result. `None` when the job panicked or the thread is
   /// gone.
@@ -376,27 +472,10 @@ pub(crate) mod gtk_thread {
     job: impl FnOnce(bool) -> R + Send + 'static,
   ) -> Option<R> {
     let (tx, rx) = mpsc::channel();
-    let job: Job = Box::new(move |gtk_ok| {
+    if !spawn(move |gtk_ok| {
       let _ = tx.send(job(gtk_ok));
-    });
-    {
-      let mut guard = sender().lock().unwrap_or_else(|e| e.into_inner());
-      let sender = guard.get_or_insert_with(|| {
-        let (tx, rx) = mpsc::channel::<Job>();
-        std::thread::Builder::new()
-          .name("laufey-gtk-dialogs".into())
-          .spawn(move || {
-            let gtk_ok = init_gtk();
-            for job in rx {
-              // A panicking job drops its result sender: the caller sees
-              // None, and the thread serves the next one.
-              let _ = catch_unwind(AssertUnwindSafe(|| job(gtk_ok)));
-            }
-          })
-          .expect("spawn the GTK dialog thread");
-        tx
-      });
-      sender.send(job).ok()?;
+    }) {
+      return None;
     }
     rx.recv().ok()
   }
@@ -1120,7 +1199,7 @@ mod tests {
 
   #[test]
   fn gtk_jobs_run_on_one_thread() {
-    // Whatever thread asks, GTK is only ever used from the dialog thread.
+    // Whatever thread asks, GTK is only ever used from the GTK thread.
     let here = std::thread::current().id();
     let a = gtk_thread::run(|_| std::thread::current().id()).unwrap();
     let b = std::thread::spawn(|| {
@@ -1138,6 +1217,46 @@ mod tests {
     std::panic::set_hook(prev);
     assert_eq!(panicked, None);
     assert_eq!(gtk_thread::run(|_| 7), Some(7));
+  }
+
+  #[test]
+  fn gtk_jobs_run_in_queue_order() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for i in 0..20 {
+      let seen = seen.clone();
+      assert!(gtk_thread::spawn(move |_| seen.lock().unwrap().push(i)));
+    }
+    // `run` queues behind them, so they have all run when it returns.
+    assert_eq!(gtk_thread::run(|_| ()), Some(()));
+    assert_eq!(*seen.lock().unwrap(), (0..20).collect::<Vec<_>>());
+  }
+
+  /// Where GTK starts, the GTK thread serves GLib between jobs (the tray's
+  /// D-Bus registration and menus need it), and GTK widgets can be built in
+  /// a job (the tray menu panicked "GTK has not been initialized" when built
+  /// on the winit thread).
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn gtk_thread_serves_glib_between_jobs() {
+    let display = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
+      || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    let gtk_ok = gtk_thread::run(|ok| ok).unwrap();
+    if !display || !gtk_ok {
+      eprintln!("gtk_thread_serves_glib_between_jobs: no display, skipped");
+      return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    assert!(gtk_thread::spawn(move |_| {
+      let _menu = gtk::Menu::new();
+      gtk::glib::timeout_add_local_once(
+        std::time::Duration::from_millis(50),
+        move || {
+          let _ = tx.send(());
+        },
+      );
+    }));
+    // No job follows: only the thread's own GLib iteration fires the source.
+    assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok());
   }
 
   /// The real GTK dialogs, end to end (Linux with a display: CI runs this

@@ -189,7 +189,9 @@ elseif(PLATFORM_LINUX)
 
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(WEBKITGTK REQUIRED webkit2gtk-4.1)
-  pkg_check_modules(GTK REQUIRED gtk+-3.0)
+  # gtk+-unix-print-3.0: the printer lookup behind print_to_pdf (its
+  # header only; the symbols are libgtk-3's own).
+  pkg_check_modules(GTK REQUIRED gtk+-3.0 gtk+-unix-print-3.0)
 
   # No appindicator build dependency: the tray in backend-common
   # dlopen()s the Ayatana or legacy appindicator library at runtime.
