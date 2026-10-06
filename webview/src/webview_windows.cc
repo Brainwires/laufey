@@ -1706,6 +1706,17 @@ double WebView2Backend::GetWindowScaleFactor(uint32_t window_id) {
 
 void WebView2Backend::GetWindowSize(uint32_t window_id, int* width,
                                     int* height) {
+  // Answered on the UI thread, after the calls queued there before it. The
+  // window's creation and its geometry setters are queued there from other
+  // threads, so a direct read could land between them: Window::new queues
+  // the HWND's creation at a default size and then the resize to the size
+  // asked for, and the first window's creation holds the UI thread for
+  // seconds while WebView2 creates its environment, so a get_size right
+  // after the constructor read the default's client area (784x561).
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    RunOnUiThreadSync([&] { GetWindowSize(window_id, width, height); });
+    return;
+  }
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (state) {
@@ -1722,6 +1733,11 @@ void WebView2Backend::GetWindowSize(uint32_t window_id, int* width,
 
 void WebView2Backend::GetWindowOuterSize(uint32_t window_id, int* width,
                                          int* height) {
+  // On the UI thread, ordered after the calls queued there (GetWindowSize).
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    RunOnUiThreadSync([&] { GetWindowOuterSize(window_id, width, height); });
+    return;
+  }
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (state) {
@@ -1753,6 +1769,11 @@ void WebView2Backend::SetWindowPosition(uint32_t window_id, int x, int y) {
 
 void WebView2Backend::GetWindowInnerPosition(uint32_t window_id, int* x,
                                              int* y) {
+  // On the UI thread, ordered after the calls queued there (GetWindowSize).
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    RunOnUiThreadSync([&] { GetWindowInnerPosition(window_id, x, y); });
+    return;
+  }
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (!state)
@@ -1768,6 +1789,11 @@ void WebView2Backend::GetWindowInnerPosition(uint32_t window_id, int* x,
 }
 
 void WebView2Backend::GetWindowPosition(uint32_t window_id, int* x, int* y) {
+  // On the UI thread, ordered after the calls queued there (GetWindowSize).
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    RunOnUiThreadSync([&] { GetWindowPosition(window_id, x, y); });
+    return;
+  }
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (state) {

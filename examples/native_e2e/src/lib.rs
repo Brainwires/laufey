@@ -944,20 +944,35 @@ fn e2e_main() {
     // the first Resized; inner position used to be the frame origin.
     let early_scale = win.get_scale_factor();
     check("early scale factor is positive", early_scale > 0.0);
+    // WebView2 creates the HWND on its UI thread after create_window
+    // returns, at a default size the queued set_window_size then corrects;
+    // get_size is answered there too, after both, so it never reads the
+    // default's client area (784x561 at 100 %) or 0x0 in between.
     let (early_w, early_h) = win.get_size();
-    if (early_w, early_h) == (0, 0)
-      && cfg!(target_os = "windows")
-      && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
-    {
-      // WebView2 creates the HWND on its UI thread after create_window
-      // returns; until then there is no size to read.
-      na("constructor size is readable immediately (WebView2 creates the window asynchronously)");
-    } else {
-      check(
-        "constructor size is readable immediately",
-        (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
-      );
+    check(
+      &format!(
+        "constructor size is readable immediately (got {early_w}x{early_h})"
+      ),
+      (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
+    );
+    // And every read while the backend creates it is that size (or none
+    // yet), never the default it creates the OS window at.
+    let creating = std::time::Instant::now();
+    let mut odd = None;
+    while creating.elapsed() < std::time::Duration::from_millis(1500) {
+      let (w, h) = win.get_size();
+      if (w, h) != (0, 0) && ((w - 800).abs() > 2 || (h - 600).abs() > 2) {
+        odd = Some((w, h));
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+    check(
+      &format!(
+        "the size reads as set while the window is created (odd read {odd:?})"
+      ),
+      odd.is_none(),
+    );
 
     let decorated = Window::new(400, 300).title("native-e2e-chrome");
     decorated.set_position(240, 160);
