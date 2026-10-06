@@ -217,6 +217,7 @@ fn vtable_layout_matches_the_header() {
     set_js_call_handler_ex,
     platform_features,
     tray_unavailable_reason,
-    set_platform_features_changed_handler
+    set_platform_features_changed_handler,
+    exit_app
   );
 }

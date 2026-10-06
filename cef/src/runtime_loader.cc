@@ -271,6 +271,15 @@ static void Backend_Quit(void* data) {
               }));
 }
 
+// exit_app (API 46): quit() with an exit code. The host returns the code once
+// CefShutdown has written the profile (on Windows through
+// laufey_common::EndProcess), and RuntimeLoader::Shutdown doesn't wait for a
+// runtime thread that may be blocked for good in its exit().
+static void Backend_ExitApp(void* data, int exit_code) {
+  laufey_common::MarkExitRequested(exit_code);
+  Backend_Quit(data);
+}
+
 // Window sizes are the page area, the browser view (as window.innerWidth /
 // innerHeight see it), in DIP; CefWindow's size is the whole window, so the
 // frame around the page is added when resizing. UI thread.
@@ -3095,6 +3104,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.tray_unavailable_reason = Backend_TrayUnavailableReason;
   backend_api_.set_platform_features_changed_handler =
       Backend_SetPlatformFeaturesChangedHandler;
+  backend_api_.exit_app = Backend_ExitApp;
   backend_api_.js_call_respond = Backend_JsCallRespond;
 
   backend_api_.invoke_js_callback = Backend_InvokeJsCallback;
@@ -3502,6 +3512,15 @@ void RuntimeLoader::Shutdown() {
   }
 
   if (runtime_thread_.joinable()) {
+    // The app asked to exit (exit_app): its thread may never return (an
+    // exit() that blocks for good, as Deno.exit()), and the process ends
+    // with the code it asked for without it. A runtime that does return is
+    // given a moment to.
+    if (laufey_common::ExitRequested() &&
+        !runtime_exit_.WaitFor(kRuntimeExitGrace)) {
+      runtime_thread_.detach();
+      return;
+    }
     // The loop has ended (UiLoopEnded), so the runtime's synchronous UI calls
     // already return. A runtime that still ignores the shutdown is abandoned
     // after the timeout, as on Winit, rather than hanging the exit.

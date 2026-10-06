@@ -140,6 +140,27 @@ bool IsQuitting();
 // or keep-alive off. (macOS backends also keep an Accessory-policy app
 // alive; see ShouldQuitAfterLastWindowMac.)
 bool ShouldEndLoopAfterLastWindow();
+// Set by exit_app (API 46), with MarkQuitting: the app asked to end with
+// `code`. The host makes it the process's exit code once the loop has ended
+// and the engine has shut down, and doesn't wait for the runtime thread,
+// which may never return (an exit() that blocks for good, as Deno.exit()).
+// The first request's code wins.
+void MarkExitRequested(int code);
+bool ExitRequested();
+// The code exit_app asked for, else 0.
+int RequestedExitCode();
+
+#if defined(_WIN32)
+// Ends this process with `code` after flushing the host's stdout and stderr,
+// through TerminateProcess: no DLL_PROCESS_DETACH, static destructor or
+// atexit callback runs. ExitProcess runs them all after it has ended the
+// other threads, and one of them can wait for good on a COM call into an
+// apartment whose thread is already gone (Windows.Media.dll's exit-time
+// cleanup in a CEF browser process; see docs/backends.md, "How a Windows app
+// ends"). Call it only once everything that must persist has been written:
+// after CefShutdown, or after the WebView2 controllers are released.
+[[noreturn]] void EndProcess(int code);
+#endif
 
 #if defined(__APPLE__)
 // --- macOS (window_mac.mm). Main thread unless noted. -----------------------

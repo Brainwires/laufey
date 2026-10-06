@@ -270,6 +270,36 @@ dialogs, notifications, key mapping) in
 included as a CMake subdirectory by each backend. The winit backend shares its
 non-engine pieces through `backend-winit-common` instead.
 
+## How an app ends
+
+The event loop ends when the last window closes (unless
+`set_quit_on_last_window_closed(false)`), on `quit()`, or on `exit_app(code)`
+(API 46), which is `quit()` with an exit code. Then the backend tells the
+runtime (`laufey_runtime_shutdown`), waits for its thread (only briefly after
+`exit_app`, whose caller may block for good, as `Deno.exit()` does), shuts its
+engine down (`CefShutdown`, or the web views are released) and ends the process
+with `exit_app`'s code, else 0.
+
+A runtime ends the app with `exit_app` rather than its own `exit()`: an `exit()`
+from the runtime's thread ends the process under a running engine. CEF never
+shuts down, so cookies and web storage written just before can be lost (on
+Windows the next launch read neither back, every time), and on Windows the
+process can hang (below).
+
+On Windows the backends end the process with `TerminateProcess` once the engine
+has shut down, not by returning to the CRT. The CRT's exit is `ExitProcess`,
+which ends every other thread and then runs each DLL's `DLL_PROCESS_DETACH`,
+static destructors and `atexit` callbacks, and one of them can wait for good:
+Chromium loads `Windows.Media.dll` on the browser's main thread in every CEF
+app, and on windows-ci a CEF process sometimes never ended, its one thread left
+waiting in combase's `MTAThreadWaitForCall` (a COM call into an apartment whose
+thread was already gone) under that DLL's exit-time cleanup. Such a process
+could not be killed and kept its profile locked, so the app's next launch
+failed. Nothing an app relies on runs in that code: the profile is on disk after
+`CefShutdown`, and the host's stdout and stderr are flushed first.
+`scripts/exit-e2e-run.sh` checks each path (see
+[e2e-testing.md](e2e-testing.md)).
+
 ## Exit and shutdown (Linux)
 
 On Linux, CEF and WebView install an exit guard: when the process exits from

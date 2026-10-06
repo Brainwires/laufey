@@ -323,5 +323,6 @@ int main(int argc, char* argv[]) {
     [delegate shutDownRuntime];
   }
 
-  return 0;
+  // exit_app's code (API 46), else 0.
+  return laufey_common::RequestedExitCode();
 }

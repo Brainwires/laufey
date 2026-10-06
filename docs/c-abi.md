@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `45`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `46`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -101,8 +101,10 @@ The pointers group into:
   `set_display_changed_handler`, `window_capabilities` (what this backend / OS
   can do), `set_window_titlebar_style` / `set_window_traffic_light_position`
   (macOS), `set_window_backdrop` (Mica / Acrylic on Windows 11, vibrancy on
-  macOS), `get_window_normal_bounds`, `set_quit_on_last_window_closed`, and the
-  `quit` contract (ends the loop like the last window closing). See
+  macOS), `get_window_normal_bounds`, `set_quit_on_last_window_closed`, the
+  `quit` contract (ends the loop like the last window closing) and, from API 46,
+  `exit_app` (`quit` with the process's exit code, without waiting for the
+  calling thread; see [backends.md](backends.md#how-an-app-ends)). See
   [window-management.md](window-management.md). API 39 adds the
   `LAUFEY_WINDOW_CAP_FILE_*` bits for drag and drop and file dialogs.
 - **Drag and drop** (API ≥ 39) — `set_file_drop_handler` (files dragged over and
@@ -444,7 +446,7 @@ defaults (`0`, `false`, `NULL`, an empty list) instead of waiting forever. Once
 the loop has ended the backend calls `laufey_runtime_shutdown` and waits up to
 10 seconds for the runtime's thread to return from `laufey_runtime_start` (5 on
 Winit); a runtime still running then is abandoned and the process exits without
-it.
+it. After `exit_app` it waits only 200 ms: that thread may never return.
 
 `is_ui_thread` is true on the thread that runs those tasks: the process main
 thread on macOS (every backend) and for the WebView backends, CEF's `TID_UI`

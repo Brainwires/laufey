@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 45
+#define LAUFEY_API_VERSION 46
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -2123,6 +2123,22 @@ struct laufey_backend_api {
   void (*set_platform_features_changed_handler)(
       void* backend_data, laufey_platform_features_changed_fn handler,
       void* user_data);
+
+  // --- Exit with a code (API >= 46) ----------------------------------------
+  //
+  // Ends the app as quit() does and makes `exit_code` the process's exit
+  // code: every window closes without a close-requested event, the event
+  // loop ends, the web engine shuts down (so the profile, cookies and web
+  // storage are on disk) and the process ends with `exit_code`. The backend
+  // does not wait for the calling thread to return before it ends the
+  // process, so a runtime may block that thread for good after this call, as
+  // an exit() that never returns does (Deno.exit()); it must not block the UI
+  // thread, which ends the loop. Returns at once. The first call's code wins;
+  // quit() after it keeps that code. On Windows the process ends through
+  // TerminateProcess once the engine has shut down (no DLL detach code runs;
+  // see docs/backends.md, "How a Windows app ends"). Any thread. NULL on
+  // backends older than API version 46.
+  void (*exit_app)(void* backend_data, int exit_code);
 };
 
 #ifdef __cplusplus

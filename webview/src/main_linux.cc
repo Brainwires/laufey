@@ -5,6 +5,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
+#include "laufey_window.h"
 #include "runtime_loader.h"
 
 #include <gtk/gtk.h>
@@ -217,5 +218,6 @@ int main(int argc, char* argv[]) {
   loader->Shutdown();
   delete backend;
 
-  return 0;
+  // exit_app's code (API 46), else 0.
+  return laufey_common::RequestedExitCode();
 }

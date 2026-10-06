@@ -50,7 +50,7 @@ pub use platform::*;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 45;
+pub const LAUFEY_API_VERSION: u32 = 46;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -902,6 +902,31 @@ pub fn quit() {
   if let Some(f) = api.quit {
     unsafe { f(api.backend_data) };
   }
+}
+
+/// Ends the app with `code` as its exit code (API 46): like [`quit`], every
+/// window closes and the event loop ends, then the backend shuts its web
+/// engine down (the profile, cookies and web storage are written) and ends
+/// the process with `code`. The backend doesn't wait for this thread to
+/// return, so a caller may block it for good afterwards, as an `exit()` that
+/// never returns does; never block the UI thread that way (it ends the loop).
+/// This thread's buffered stdout and stderr are flushed first.
+///
+/// Returns at once: `true` once the backend has taken the request, `false`
+/// when it can't (a backend without `exit_app`, or no backend), in which case
+/// nothing happened and the caller ends the process its own way.
+pub fn exit(code: i32) -> bool {
+  use std::io::Write;
+  let Some(api) = BACKEND_API.get() else {
+    return false;
+  };
+  let Some(f) = api.exit_app else {
+    return false;
+  };
+  let _ = std::io::stdout().flush();
+  let _ = std::io::stderr().flush();
+  unsafe { f(api.backend_data, code) };
+  true
 }
 
 /// Run `f` on the backend UI thread and block until it returns.

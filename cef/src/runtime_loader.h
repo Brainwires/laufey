@@ -437,6 +437,8 @@ class RuntimeLoader {
   laufey_common::ThreadExit runtime_exit_;
   // How long Shutdown waits for the runtime thread before abandoning it.
   static constexpr std::chrono::milliseconds kRuntimeShutdownTimeout{10000};
+  // How long it waits after exit_app, whose caller may never return.
+  static constexpr std::chrono::milliseconds kRuntimeExitGrace{200};
   std::atomic<bool> running_{false};
 
   std::map<uint32_t, CefRefPtr<CefBrowser>> browsers_;

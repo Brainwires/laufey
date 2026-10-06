@@ -29,6 +29,7 @@
 #include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "renderer_app.h"
+#include "laufey_window.h"
 #include "runtime_loader.h"
 
 #include <gio/gio.h>
@@ -1060,5 +1061,6 @@ int main(int argc, char* argv[]) {
 
   CefShutdown();
 
-  return 0;
+  // exit_app's code (API 46), else 0.
+  return laufey_common::RequestedExitCode();
 }

@@ -9,6 +9,17 @@
 #include <map>
 #include <mutex>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#endif
+
 #include "laufey_window.h"
 
 namespace laufey_common {
@@ -41,6 +52,8 @@ void* g_display_user_data = nullptr;
 
 std::atomic<bool> g_quit_on_last_window{true};
 std::atomic<bool> g_quitting{false};
+std::atomic<bool> g_exit_requested{false};
+std::atomic<int> g_exit_code{0};
 
 // Commits a candidate that has been stable long enough. Caller holds
 // g_mutex.
@@ -329,5 +342,34 @@ bool IsQuitting() {
 bool ShouldEndLoopAfterLastWindow() {
   return IsQuitting() || QuitOnLastWindowClosed();
 }
+
+void MarkExitRequested(int code) {
+  // The first request wins: a second exit_app (or one racing a panic's exit)
+  // doesn't change the code the app already asked for.
+  bool expected = false;
+  if (g_exit_requested.compare_exchange_strong(expected, true))
+    g_exit_code.store(code);
+  MarkQuitting();
+}
+
+bool ExitRequested() {
+  return g_exit_requested.load();
+}
+
+int RequestedExitCode() {
+  return g_exit_requested.load() ? g_exit_code.load() : 0;
+}
+
+#if defined(_WIN32)
+void EndProcess(int code) {
+  std::cout.flush();
+  std::cerr.flush();
+  fflush(nullptr);
+  TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
+  // Terminating the current process doesn't return; should it ever, the
+  // CRT's fast exit still runs no atexit callback or destructor.
+  _exit(code);
+}
+#endif
 
 }  // namespace laufey_common

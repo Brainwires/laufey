@@ -20,6 +20,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
+#include "laufey_window.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
   @autoreleasepool {
@@ -461,5 +462,6 @@ int main(int argc, char* argv[]) {
     CefShutdown();
   }
 
-  return 0;
+  // exit_app's code (API 46), else 0.
+  return laufey_common::RequestedExitCode();
 }

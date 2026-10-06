@@ -28,6 +28,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
+#include "laufey_window.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
 
@@ -407,7 +408,19 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
 
   CefShutdown();
 
-  return 0;
+  // How a Windows app ends (docs/backends.md): CEF has shut down, so the
+  // profile, cookies and web storage are on disk; end the process here with
+  // the app's exit code (exit_app's, else 0) instead of returning to the
+  // bootstrap's CRT exit. That exit is ExitProcess, which ends every other
+  // thread and then runs each DLL's DLL_PROCESS_DETACH, static destructors
+  // and atexit callbacks, and one of them can wait there for good: on
+  // windows-ci 2 of about 160 CEF e2e processes that ended through
+  // ExitProcess never ended, the one thread left waiting in combase's
+  // MTAThreadWaitForCall (a cross-apartment COM call) under
+  // Windows.Media.dll's exit-time cleanup in ucrtbase. Chromium loads that
+  // DLL on the browser's main thread in every app. Such a process couldn't
+  // be killed and kept its profile locked, so the app's next launch failed.
+  laufey_common::EndProcess(laufey_common::RequestedExitCode());
 }
 
 #if defined(CEF_USE_BOOTSTRAP)

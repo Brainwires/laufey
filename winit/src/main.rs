@@ -703,5 +703,15 @@ fn main() -> Result<(), Box<dyn Error>> {
   laufey_backend_winit_common::shutdown_runtime(
     std::time::Duration::from_secs(5),
   );
+  // exit_app (API 46) asked for an exit code.
+  if let Some(code) =
+    laufey_backend_winit_common::window_api::requested_exit_code()
+  {
+    result?;
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code);
+  }
   Ok(result?)
 }
