@@ -376,6 +376,9 @@ int main() {
   EXPECT(!f.tray_watcher);
   EXPECT(!f.tray_xembed);  // no X display
   EXPECT(!TrayAvailable(f));
+  // The no-host wording, as where the appindicator library loads (without
+  // it the reason is the missing library: the webview CI job has none).
+  f.tray_library = true;
   EXPECT(TrayUnavailableReason(f).find("XDG_CURRENT_DESKTOP=GNOME") !=
          std::string::npos);
   EXPECT(!f.tray_clicks);
@@ -430,6 +433,7 @@ int main() {
   ProbeTray(&x11);
   EXPECT(XEmbedProbeCountForTesting() == probes + 1);
   EXPECT(!x11.tray_xembed);
+  x11.tray_library = true;  // the no-host wording, as above
   EXPECT(TrayUnavailableReason(x11).find("XEmbed") != std::string::npos);
   setenv("XDG_SESSION_TYPE", "tty", 1);
   unsetenv("DISPLAY");
