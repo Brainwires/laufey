@@ -202,6 +202,18 @@ public (`--ip-address-space-overrides=127.0.0.1:<port>=public`, the port in
 `LAUFEY_E2E_PUBLIC_PORT`), serves a page there, and its fetch to the echo server
 must fail within five seconds instead of waiting for a prompt.
 
+`--network-quiet` (`network_quiet_checks.rs`) checks that the CEF host makes no
+request of its own (see [Backends](backends.md#no-network-requests-of-its-own)):
+the script runs the host with `--log-net-log`, the battery loads the
+custom-scheme page (its fetch to the loopback echo server is the one request the
+log must show), idles for `LAUFEY_E2E_QUIET_SECS` seconds (default 10; CI uses
+75, past the component updater's first check at 60 s) and quits through `quit()`
+so Chromium finishes the log. `scripts/netlog-hosts.py` then lists every host
+the log shows a request, preconnect, DNS lookup or socket connect for, and the
+run fails on any but loopback (and `wpad` on Windows, the system's proxy
+auto-discovery). `LAUFEY_E2E_NETLOG_OUT` keeps a copy of the log; CI uploads it
+when the step fails. `N/A` on the other backends.
+
 The bridge (API 44) is held to the calling document. Every call of the
 request-body page must carry its origin (`call.origin == "app://e2e-body"`); a
 same-origin sub-frame that posts to the engine's message handler directly (an

@@ -182,6 +182,19 @@ void LaufeyApplyInspectableToCommandLine(
 // Uses the arguments the host recorded with laufey_common::SetProcessArgs (a
 // no-op where it recorded none). Browser process only.
 void LaufeyStripDeepLinkSwitches(CefRefPtr<CefCommandLine> command_line);
+// No network requests of laufey's own (laufey_cef_network_quiet.h): adds
+// the Chrome features that contact Google unasked to --disable-features
+// (except one the command line's --enable-features names), unless the
+// command line sets one, a --gaia-url Chromium refuses to connect to, and
+// --disable-component-update unless it configures the component updater
+// (--component-updater). Browser process only.
+void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line);
+#if defined(__linux__)
+// Linux: keeps only the spellcheck languages whose Hunspell dictionary is
+// already in <root_cache_path>/Dictionaries, so Chromium never downloads
+// one from Google. Before the first browser; UI thread.
+void LaufeyKeepLocalSpellcheckDictionaries(const std::string& root_cache_path);
+#endif
 // Whether DevTools can be reached in this process: inspectable, or a
 // remote-debugging switch present on the browser process's command line
 // despite it (read back from CEF's global command line). UI thread.
@@ -364,6 +377,9 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
     if (process_type.empty()) {
       LaufeyStripDeepLinkSwitches(command_line);
       command_line->AppendSwitch("disable-background-networking");
+      // What --disable-background-networking leaves: the Chrome services
+      // that still contact Google at startup (laufey_cef_network_quiet.h).
+      LaufeyApplyNetworkQuietDefaults(command_line);
       LaufeyApplyInspectableToCommandLine(command_line);
     }
   }

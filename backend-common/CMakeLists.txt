@@ -42,6 +42,7 @@ set(LAUFEY_COMMON_SRCS
   src/launch_config.cc
   src/launch_args.cc
   src/cef_sandbox.cc
+  src/cef_network_quiet.cc
   src/single_instance.cc
   src/passkey.cc
   src/window_state.cc
@@ -246,6 +247,14 @@ if(LAUFEY_BUILD_TESTS)
     laufey_backend_common
   )
   add_test(NAME laufey_cef_sandbox_test COMMAND laufey_cef_sandbox_test)
+
+  # The CEF host's network-quiet defaults (features, GAIA origin, Hunspell).
+  add_executable(laufey_cef_network_quiet_test tests/cef_network_quiet_test.cc)
+  target_link_libraries(laufey_cef_network_quiet_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_cef_network_quiet_test
+           COMMAND laufey_cef_network_quiet_test)
 
   # Takes (and releases) real single-instance locks under per-run app ids.
   add_executable(laufey_single_instance_test tests/single_instance_test.cc)

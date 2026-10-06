@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox|--network-quiet]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -68,9 +68,15 @@
 # frames, a non-activating window's page too, and a hidden window stays
 # hidden. On macOS a window from another process covers the screen first
 # (scripts/launch-occluder.swift), as an editor or terminal would.
+# --network-quiet (CEF) runs the host with Chromium's net log over an app
+# session (network_quiet_checks.rs: the app page, LAUFEY_E2E_QUIET_SECS of
+# idle, quit()) and fails on any host in the log other than loopback (and
+# WPAD on Windows, the system's proxy auto-discovery): the backend makes no
+# request of its own (scripts/netlog-hosts.py). LAUFEY_E2E_NETLOG_OUT keeps
+# a copy of the log there.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox|--network-quiet]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -131,6 +137,9 @@ if [ "$mode" = "--sandbox" ]; then
 fi
 if [ "$mode" = "--auth-thread" ]; then
   export LAUFEY_E2E_ONLY=auth-thread
+fi
+if [ "$mode" = "--network-quiet" ]; then
+  export LAUFEY_E2E_ONLY=network-quiet
 fi
 occluder_pid=""
 if [ "$mode" = "--platform" ]; then
@@ -282,6 +291,13 @@ if [ "$backend" = "cef" ]; then
   # On Windows the display itself is scaled (windows-display-scale.ps1).
   if [ "$mode" = "--hidpi" ] && [ "$(uname -s)" = "Linux" ]; then
     args+=("--force-device-scale-factor=$LAUFEY_E2E_EXPECT_SCALE")
+  fi
+  # Everything the network stack does, for netlog-hosts.py after the run.
+  # Git Bash: the native host and Python need a Windows path.
+  if [ "$mode" = "--network-quiet" ]; then
+    netlog="$(mktemp "${TMPDIR:-/tmp}/laufey-netlog.XXXXXX")"
+    if command -v cygpath >/dev/null; then netlog="$(cygpath -w "$netlog")"; fi
+    args+=("--log-net-log=$netlog" --net-log-capture-mode=Default)
   fi
 fi
 echo "== native-e2e: backend=$backend bin=$bin runtime=$rt =="
@@ -461,6 +477,33 @@ if is_linux && [ "$backend" = webview ] &&
   echo "native e2e: GTK reported criticals (a call reached a destroyed widget)" >&2
   rm -f "$log"
   exit 1
+fi
+# --network-quiet: the hosts in the CEF host's net log (loopback only).
+if [ "$mode" = "--network-quiet" ]; then
+  if [ "$backend" != cef ]; then
+    echo "[e2e] N/A  no network requests of its own (net log: CEF only)"
+  else
+    if [ -n "${LAUFEY_E2E_NETLOG_OUT:-}" ]; then
+      cp "$netlog" "$LAUFEY_E2E_NETLOG_OUT" || true
+    fi
+    allow=()
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN*) allow+=(--allow wpad) ;;
+    esac
+    py="$(command -v python3 || command -v python || true)"
+    echo "== hosts in the net log =="
+    if [ -z "$py" ]; then
+      echo "[e2e] FAIL no network requests of its own (no Python to read the net log)"
+      status=1
+    elif "$py" scripts/netlog-hosts.py "$netlog" --expect 127.0.0.1 \
+      ${allow[@]+"${allow[@]}"}; then
+      echo "[e2e] PASS no network requests of its own: only loopback in the net log"
+    else
+      echo "[e2e] FAIL no network requests of its own: the net log has other hosts (above)"
+      status=1
+    fi
+    rm -f "$netlog"
+  fi
 fi
 rm -f "$log"
 exit "$status"

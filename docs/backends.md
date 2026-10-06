@@ -41,6 +41,53 @@ when launching the host — `--laufey-custom-schemes=myapp` or
 `LAUFEY_CUSTOM_SCHEMES=myapp` (`cef/src/custom_schemes.h`). See
 [Custom URL schemes](custom-schemes.md).
 
+### No network requests of its own
+
+The CEF host sends no request the app didn't ask for: every request in a laufey
+app comes from its pages or its runtime. laufey's browsers are Chrome-style, so
+Chrome's profile services run in them, and `--disable-background-networking`
+leaves several that contact Google. Found from Chromium net logs of a launch and
+an idle period (each request's traffic annotation names the feature), and what
+the host does about each in the browser process (`cef/src/app.cc`,
+`backend-common/include/laufey_cef_network_quiet.h`):
+
+| Request                                                           | Cause (traffic annotation)                                                                 | Default                                                |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| `clients2.google.com/time/1/current`                              | network time tracker (`network_time_component`)                                            | `--disable-features=NetworkTimeServiceQuerying`        |
+| `www.google.com/async/folae`                                      | AI Mode eligibility (`aim_eligibility_fetch`)                                              | `--disable-features=AimEnabled`                        |
+| preconnects to `www.google.com`                                   | default search engine preconnector                                                         | `--disable-features=PreconnectToSearch`                |
+| `accounts.google.com/ListAccounts`                                | the Google accounts in the cookie jar (`gaia_auth_list_accounts`), asked by signin metrics | `--gaia-url=https://localhost:9` (see below)           |
+| `update.googleapis.com`, `edgedl.me.gvt1.com` (60 s after launch) | component updater (`update_client`)                                                        | `--disable-component-update`                           |
+| `redirector.gvt1.com/edgedl/chrome/dict/*.bdic` (Linux)           | Hunspell dictionary download (`spellcheck_hunspell_dictionary`)                            | only dictionaries already on disk are kept (see below) |
+
+- **Google accounts.** No switch or feature turns the ListAccounts check off:
+  Chrome's signin metrics services ask for the accounts in the cookie jar when
+  the profile starts. The host points Chrome's Google-accounts origin at port 9
+  on localhost, which is on Chromium's restricted-port list, so each check ends
+  with `ERR_UNSAFE_PORT` before any DNS lookup or socket. Pages are not
+  affected: `accounts.google.com` loads as any other site (Chrome only stops
+  treating it as its own sign-in origin, which laufey never used).
+- **Spellcheck.** macOS and Windows check spelling with the OS's own
+  spellchecker and download nothing. On Linux Chromium uses Hunspell and
+  downloads each language's dictionary from Google the first time it is used, so
+  at startup the host keeps only the languages whose dictionary is already in
+  the profile's `Dictionaries` folder (`<data dir>/CEF/Dictionaries`, a file
+  such as `en-US-10-1.bdic`), and spelling is not checked otherwise. An app that
+  wants it ships the `.bdic` files and copies them there.
+
+An app's own command line wins: a feature named in `--enable-features` is not
+disabled, a `--gaia-url` of its own is kept, and `--component-updater=...`
+(configuring the updater) keeps the component updater running. On Windows the
+net log also shows DNS lookups of `wpad`: the system's proxy auto-discovery
+("Automatically detect settings"), which follows the OS's proxy settings.
+
+The `--network-quiet` e2e mode checks it on every CEF leg in CI
+(`scripts/native-e2e-run.sh cef --network-quiet`, see
+[End-to-end testing](e2e-testing.md)): the host runs with Chromium's net log
+over a launch, the app page and an idle period (75 s in CI, past the component
+updater's first check), and the run fails on any host in the log other than
+loopback.
+
 ### The Chromium sandbox
 
 The CEF backend runs Chromium's renderer, GPU and utility processes in

@@ -208,6 +208,9 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     if (process_type.empty()) {
       LaufeyStripDeepLinkSwitches(command_line);
       command_line->AppendSwitch("disable-background-networking");
+      // What --disable-background-networking leaves: the Chrome services
+      // that still contact Google at startup (laufey_cef_network_quiet.h).
+      LaufeyApplyNetworkQuietDefaults(command_line);
       LaufeyApplyInspectableToCommandLine(command_line);
     }
   }
