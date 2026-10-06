@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -59,9 +60,22 @@ constexpr auto kTransferTimeout = std::chrono::seconds(30);
 constexpr size_t kChunk = 64 * 1024;
 // Outgoing INCR transfers in flight at once; requests beyond are refused.
 constexpr int kMaxTransfers = 8;
+// How long the server gets to answer a request we wait on (an atom, a
+// property): past it the connection counts as hung, and fails.
+constexpr auto kReplyTimeout = std::chrono::seconds(3);
+// The most TARGETS atoms looked at (names resolved) from one owner.
+constexpr size_t kMaxTargets = 256;
+// After the connection fails (or connecting timed out), one more connect,
+// no sooner than this after the failure; then none.
+constexpr auto kReconnectBackoff = std::chrono::seconds(30);
+constexpr int kMaxConnects = 2;
 
 std::atomic<bool> g_forced{false};
 std::atomic<int> g_transfers{0};
+std::atomic<bool> g_watching{false};
+std::atomic<int64_t> g_backoff_ms{
+    std::chrono::duration_cast<std::chrono::milliseconds>(kReconnectBackoff)
+        .count()};
 
 // XFIXES, spoken with raw requests (no libxcb-xfixes dependency): selection
 // owner changes, for change events.
@@ -143,20 +157,31 @@ struct Transfer {
 
 class Bridge {
  public:
+  // The live bridge, connecting on the first call. Once it failed (or the
+  // connect timed out), one reconnect, kReconnectBackoff after the failure;
+  // null until then, and for good after that one fails too.
   static Bridge* Get() {
-    static Bridge* bridge = [] {
-      auto* b = new Bridge();  // never freed: its thread may outlive us
-      std::thread([b] { b->Main(); }).detach();
-      std::unique_lock<std::mutex> lock(b->connect_mutex_);
-      if (!b->connect_cv_.wait_for(lock,
-                                   kConnectTimeout + std::chrono::seconds(1),
-                                   [b] { return b->connect_done_; })) {
-        b->abandoned_ = true;
-        return static_cast<Bridge*>(nullptr);
-      }
-      return b->connected_ ? b : nullptr;
-    }();
-    return bridge;
+    static std::mutex mutex;
+    static Bridge* current = nullptr;
+    static int connects = 0;
+    static Clock::time_point failed_at;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (current && current->ok())
+      return current;
+    if (connects > 0) {
+      if (connects >= kMaxConnects)
+        return nullptr;
+      if (current)
+        failed_at = current->failed_at();
+      if (Clock::now() - failed_at <
+          std::chrono::milliseconds(g_backoff_ms.load()))
+        return nullptr;
+    }
+    connects++;
+    current = Start();
+    if (!current)
+      failed_at = Clock::now();
+    return current;
   }
 
   bool ok() const {
@@ -201,8 +226,7 @@ class Bridge {
     if (!Run([this, atoms, names](bool live) {
           if (!live)
             return;
-          for (xcb_atom_t a : atoms) {
-            std::string name = AtomName(a);
+          for (const std::string& name : AtomNames(atoms)) {
             if (!name.empty() && name != "TARGETS" && name != "TIMESTAMP" &&
                 name != "MULTIPLE" && name != "SAVE_TARGETS")
               names->push_back(name);
@@ -296,12 +320,27 @@ class Bridge {
            f.get();
   }
 
-  void SetWatching(bool on) {
-    watching_ = on;
+  // When the connection failed (Clock::time_point{} while it hasn't).
+  Clock::time_point failed_at() const {
+    return Clock::time_point(Clock::duration(failed_at_.load()));
   }
 
  private:
   Bridge() = default;
+
+  // A new bridge, connected; null when connecting failed or timed out.
+  static Bridge* Start() {
+    auto* b = new Bridge();  // never freed: its thread may outlive us
+    std::thread([b] { b->Main(); }).detach();
+    std::unique_lock<std::mutex> lock(b->connect_mutex_);
+    if (!b->connect_cv_.wait_for(lock,
+                                 kConnectTimeout + std::chrono::seconds(1),
+                                 [b] { return b->connect_done_; })) {
+      b->abandoned_ = true;
+      return nullptr;
+    }
+    return b->connected_ ? b : nullptr;
+  }
 
   void Main() {
     bool connected = Connect();
@@ -369,17 +408,51 @@ class Bridge {
     conn_ = nullptr;
   }
 
+  // The reply to request `sequence` (free() it), waiting at most
+  // kReplyTimeout on the connection's fd; null on an X error, a broken
+  // connection or the timeout. A timeout marks the connection hung (the loop
+  // then fails it), so a server that stopped answering can't hold the thread
+  // while the bridge still reports ok; every wait after that returns null
+  // at once.
+  void* WaitReply(unsigned int sequence) {
+    if (!conn_ || hung_)
+      return nullptr;
+    xcb_flush(conn_);
+    auto deadline = Clock::now() + kReplyTimeout;
+    while (true) {
+      void* reply = nullptr;
+      xcb_generic_error_t* error = nullptr;
+      if (xcb_poll_for_reply(conn_, sequence, &reply, &error)) {
+        free(error);
+        return reply;
+      }
+      if (xcb_connection_has_error(conn_))
+        return nullptr;
+      auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      deadline - Clock::now())
+                      .count();
+      if (left <= 0) {
+        hung_ = true;
+        xcb_discard_reply(conn_, sequence);
+        return nullptr;
+      }
+      pollfd p = {xcb_get_file_descriptor(conn_), POLLIN, 0};
+      poll(&p, 1, static_cast<int>(left));
+    }
+  }
+
   // --- Atoms ------------------------------------------------------------
 
   xcb_atom_t Atom(const std::string& name) {
     auto it = atoms_.find(name);
     if (it != atoms_.end())
       return it->second;
-    xcb_intern_atom_reply_t* reply = xcb_intern_atom_reply(
-        conn_,
-        xcb_intern_atom(conn_, 0, static_cast<uint16_t>(name.size()),
-                        name.c_str()),
-        nullptr);
+    if (!conn_ || hung_)
+      return XCB_NONE;
+    auto* reply = static_cast<xcb_intern_atom_reply_t*>(
+        WaitReply(xcb_intern_atom(conn_, 0, static_cast<uint16_t>(name.size()),
+                                  name.c_str())
+                      .sequence));
     if (!reply)
       return XCB_NONE;
     xcb_atom_t atom = reply->atom;
@@ -390,21 +463,37 @@ class Bridge {
   }
 
   std::string AtomName(xcb_atom_t atom) {
-    if (atom == XCB_NONE)
-      return "";
-    auto it = names_.find(atom);
-    if (it != names_.end())
-      return it->second;
-    xcb_get_atom_name_reply_t* reply =
-        xcb_get_atom_name_reply(conn_, xcb_get_atom_name(conn_, atom), nullptr);
-    if (!reply)
-      return "";
-    std::string name(xcb_get_atom_name_name(reply),
-                     static_cast<size_t>(xcb_get_atom_name_name_length(reply)));
-    free(reply);
-    names_[atom] = name;
-    atoms_[name] = atom;
-    return name;
+    return AtomNames({atom})[0];
+  }
+
+  // The names of `atoms` ("" for one without), in order: every unknown name
+  // is asked for first, then the replies are collected (one round trip).
+  std::vector<std::string> AtomNames(const std::vector<xcb_atom_t>& atoms) {
+    std::vector<std::string> out(atoms.size());
+    std::vector<std::pair<size_t, unsigned int>> asked;
+    for (size_t i = 0; i < atoms.size(); i++) {
+      if (atoms[i] == XCB_NONE)
+        continue;
+      auto it = names_.find(atoms[i]);
+      if (it != names_.end())
+        out[i] = it->second;
+      else if (conn_ && !hung_)
+        asked.push_back({i, xcb_get_atom_name(conn_, atoms[i]).sequence});
+    }
+    for (const auto& [i, sequence] : asked) {
+      auto* reply =
+          static_cast<xcb_get_atom_name_reply_t*>(WaitReply(sequence));
+      if (!reply)
+        continue;
+      std::string name(
+          xcb_get_atom_name_name(reply),
+          static_cast<size_t>(xcb_get_atom_name_name_length(reply)));
+      free(reply);
+      names_[atoms[i]] = name;
+      atoms_[name] = atoms[i];
+      out[i] = std::move(name);
+    }
+    return out;
   }
 
   // --- Tasks ------------------------------------------------------------
@@ -443,7 +532,7 @@ class Bridge {
       CheckDeadlines();
       StartConversion();
       xcb_flush(conn_);
-      if (xcb_connection_has_error(conn_)) {
+      if (xcb_connection_has_error(conn_) || hung_) {
         Fail();
         return;
       }
@@ -503,6 +592,7 @@ class Bridge {
   // The connection broke: everything waiting is answered, every task from
   // now on runs at once with `live` false.
   void Fail() {
+    failed_at_ = Clock::now().time_since_epoch().count();
     ok_ = false;
     std::deque<std::function<void(bool)>> tasks;
     {
@@ -532,7 +622,10 @@ class Bridge {
         [done = std::move(done)](bool ok, std::string data, xcb_atom_t type) {
           std::vector<xcb_atom_t> atoms;
           if (ok && type == XCB_ATOM_ATOM) {
-            atoms.resize(data.size() / sizeof(xcb_atom_t));
+            // At most kMaxTargets: an owner offering thousands would cost
+            // as many name lookups.
+            atoms.resize(
+                std::min(data.size() / sizeof(xcb_atom_t), kMaxTargets));
             memcpy(atoms.data(), data.data(),
                    atoms.size() * sizeof(xcb_atom_t));
           }
@@ -574,17 +667,17 @@ class Bridge {
     StartConversion();
   }
 
-  // Reads our transfer property whole (in chunks), deleting it. False when
-  // it is unreadable or larger than `max_bytes`.
-  bool TakeProperty(size_t max_bytes, std::string* out, xcb_atom_t* type) {
+  // Reads our transfer property whole (in chunks), deleting it unless
+  // `keep`. False when it is unreadable or larger than `max_bytes`.
+  bool TakeProperty(size_t max_bytes, std::string* out, xcb_atom_t* type,
+                    bool keep = false) {
     out->clear();
     uint32_t offset = 0;  // in 32-bit units
     while (true) {
-      xcb_get_property_reply_t* reply = xcb_get_property_reply(
-          conn_,
+      auto* reply = static_cast<xcb_get_property_reply_t*>(WaitReply(
           xcb_get_property(conn_, 0, window_, transfer_prop_,
-                           XCB_GET_PROPERTY_TYPE_ANY, offset, kChunk / 4),
-          nullptr);
+                           XCB_GET_PROPERTY_TYPE_ANY, offset, kChunk / 4)
+              .sequence));
       if (!reply)
         return false;
       *type = reply->type;
@@ -601,7 +694,8 @@ class Bridge {
         break;
       offset += static_cast<uint32_t>(len) / 4;
     }
-    xcb_delete_property(conn_, window_, transfer_prop_);
+    if (!keep)
+      xcb_delete_property(conn_, window_, transfer_prop_);
     return true;
   }
 
@@ -618,17 +712,29 @@ class Bridge {
     }
     std::string data;
     xcb_atom_t type = XCB_NONE;
-    if (!TakeProperty(c.max_bytes, &data, &type)) {
+    // Kept for now: deleting an INCR property starts the transfer.
+    if (!TakeProperty(c.max_bytes, &data, &type, /*keep=*/true)) {
       FinishConversion(false);
       return;
     }
     if (type == incr_) {
-      // INCR: the owner sends chunks, each once we deleted the last one
-      // (TakeProperty did), ending with an empty one.
+      // The announced size (a lower bound) already over max_bytes: refused
+      // up front, without taking a single chunk.
+      uint32_t announced = 0;
+      if (data.size() >= sizeof(announced))
+        memcpy(&announced, data.data(), sizeof(announced));
+      if (announced > c.max_bytes) {
+        FinishConversion(false);
+        return;
+      }
+      // INCR: the owner sends chunks, each once we deleted the last one,
+      // ending with an empty one.
+      xcb_delete_property(conn_, window_, transfer_prop_);
       c.incr = true;
       c.step_deadline = Clock::now() + kStepTimeout;
       return;
     }
+    xcb_delete_property(conn_, window_, transfer_prop_);
     c.data = std::move(data);
     c.type = type;
     FinishConversion(true);
@@ -677,8 +783,8 @@ class Bridge {
     if (!own_pending_)
       return;
     xcb_set_selection_owner(conn_, window_, clipboard_, time);
-    xcb_get_selection_owner_reply_t* reply = xcb_get_selection_owner_reply(
-        conn_, xcb_get_selection_owner(conn_, clipboard_), nullptr);
+    auto* reply = static_cast<xcb_get_selection_owner_reply_t*>(
+        WaitReply(xcb_get_selection_owner(conn_, clipboard_).sequence));
     bool ok = reply && reply->owner == window_;
     free(reply);
     if (ok) {
@@ -714,8 +820,11 @@ class Bridge {
     // ICCCM: a requestor that names no property is an obsolete client; use
     // the target's name.
     xcb_atom_t property = e->property == XCB_NONE ? e->target : e->property;
+    // X timestamps wrap (32-bit milliseconds, ~49.7 days): "before we
+    // owned it" is a negative signed difference, not a smaller number.
     if (!owned_ || e->owner != window_ || e->selection != clipboard_ ||
-        (e->time != XCB_CURRENT_TIME && e->time < owned_time_) ||
+        (e->time != XCB_CURRENT_TIME &&
+         static_cast<int32_t>(e->time - owned_time_) < 0) ||
         e->target == multiple_) {
       Reply(e, XCB_NONE);
       return;
@@ -857,14 +966,15 @@ class Bridge {
         return;
       }
       default:
-        if (xfixes_ && type == xfixes_event_ && watching_)
+        if (xfixes_ && type == xfixes_event_ && g_watching.load())
           GtkRunAsync([] { FireClipboardChange(); });
         return;
     }
   }
 
   std::atomic<bool> ok_{false};
-  std::atomic<bool> watching_{false};
+  // Clock::duration ticks since the clock's epoch; 0 while it hasn't failed.
+  std::atomic<Clock::rep> failed_at_{0};
 
   std::mutex connect_mutex_;
   std::condition_variable connect_cv_;
@@ -886,6 +996,7 @@ class Bridge {
              time_prop_ = XCB_NONE;
   bool xfixes_ = false;
   uint8_t xfixes_event_ = 0;
+  bool hung_ = false;  // a reply didn't come in time (WaitReply)
   std::map<std::string, xcb_atom_t> atoms_;
   std::map<xcb_atom_t, std::string> names_;
   std::deque<Conversion> conversions_;
@@ -945,12 +1056,17 @@ bool Write(Entries entries) {
 }
 
 void Watch(bool on) {
-  if (Bridge* b = Usable())
-    b->SetWatching(on);
+  // Kept across a reconnect.
+  g_watching = on;
+  Usable();
 }
 
 void EnableForTesting() {
   g_forced = true;
+}
+
+void SetReconnectBackoffForTesting(int ms) {
+  g_backoff_ms = ms;
 }
 
 int ActiveTransfers() {

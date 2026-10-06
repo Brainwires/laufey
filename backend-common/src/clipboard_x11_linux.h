@@ -47,6 +47,9 @@ void Watch(bool on);
 void EnableForTesting();
 // Tests: outgoing INCR transfers in flight.
 int ActiveTransfers();
+// Tests: how long after the connection failed the one reconnect may happen
+// (30 s by default).
+void SetReconnectBackoffForTesting(int ms);
 
 }  // namespace x11_clipboard
 }  // namespace laufey_common

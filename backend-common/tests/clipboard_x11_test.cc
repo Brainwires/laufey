@@ -9,9 +9,13 @@
 //   - the peer owns: we read its UTF-8 text, Latin-1 STRING, an HTML larger
 //     than a chunk through INCR, and the formats; change events (XFixes);
 //   - hostile peers: an owner that never answers (the read gives up after
-//     its timeout), a requestor that starts 10 INCR transfers and never
-//     takes a chunk (8 run at once, all dropped after their idle timeout,
-//     and the next read still works), a read over max_bytes;
+//     its timeout), an owner that stalls mid-INCR (the read gives up after
+//     a step's timeout), an INCR announced over max_bytes (refused at once),
+//     a requestor that starts 10 INCR transfers and never takes a chunk (8
+//     run at once, all dropped after their idle timeout, and the next read
+//     still works), a read over max_bytes;
+//   - the connection killed mid-read (the read ends at once, the bridge is
+//     gone, one reconnect after the backoff, and none after that);
 //   - privacy: image reads take PNG, JPEG, BMP or GIF only (a TIFF is never
 //     handed to a decoder), and while the session is locked (a mock logind's
 //     LockedHint, on a private bus standing in for the system bus) every
@@ -38,6 +42,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -285,11 +290,35 @@ class Peer {
     return incr;
   }
 
+  // Kills the client that created `window` (XKillClient).
+  void Kill(xcb_window_t window) {
+    xcb_kill_client(conn_, window);
+    xcb_flush(conn_);
+  }
+
+  // The CLIPBOARD selection's owner window.
+  xcb_window_t Owner() {
+    xcb_get_selection_owner_reply_t* r = xcb_get_selection_owner_reply(
+        conn_, xcb_get_selection_owner(conn_, clipboard_), nullptr);
+    EXPECT(r);
+    xcb_window_t owner = r->owner;
+    free(r);
+    return owner;
+  }
+
+  // The requestor window of the last request served (or ignored).
+  xcb_window_t LastRequestor() const {
+    return last_requestor_.load();
+  }
+
   // Owns CLIPBOARD with `entries` and serves requests on a thread of its own
-  // until destroyed; `silent` answers nothing.
-  void Own(std::map<std::string, std::string> entries, bool silent) {
+  // until destroyed; `silent` answers nothing; an INCR transfer stops after
+  // `stall_after` chunks (never, when negative).
+  void Own(std::map<std::string, std::string> entries, bool silent,
+           int stall_after = -1) {
     entries_ = std::move(entries);
     silent_ = silent;
+    stall_after_ = stall_after;
     for (const auto& [name, data] : entries_)
       atoms_[Atom(name)] = name;
     targets_ = Atom("TARGETS");
@@ -319,6 +348,7 @@ class Peer {
         continue;
       auto req = *reinterpret_cast<xcb_selection_request_event_t*>(ev);
       free(ev);
+      last_requestor_ = req.requestor;
       if (!silent_)
         Answer(req);
     }
@@ -369,7 +399,9 @@ class Peer {
                         incr_, 32, 1, &size);
     Notify(r, r.property);
     size_t off = 0;
-    while (true) {
+    for (int chunks = 0;; chunks++) {
+      if (stall_after_ >= 0 && chunks == stall_after_)
+        return;  // stalls: the rest never comes
       xcb_generic_event_t* ev = Wait([&](xcb_generic_event_t* e) {
         auto* p = reinterpret_cast<xcb_property_notify_event_t*>(e);
         return (e->response_type & 0x7f) == XCB_PROPERTY_NOTIFY &&
@@ -396,6 +428,8 @@ class Peer {
   std::map<std::string, std::string> entries_;
   std::map<xcb_atom_t, std::string> atoms_;
   bool silent_ = false;
+  int stall_after_ = -1;
+  std::atomic<xcb_window_t> last_requestor_{0};
   std::atomic<bool> serving_{false};
   std::thread thread_;
 };
@@ -684,6 +718,37 @@ int main() {
     owner.Stop();
   }
 
+  // An owner that stalls mid-INCR: the read gives up after a step's timeout
+  // (3 s), not the whole conversion's.
+  {
+    Peer owner;
+    owner.Own({{"text/html", html}}, false, /*stall_after=*/2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    start = Clock::now();
+    bool found = true;
+    EXPECT(x11_clipboard::Read({"text/html"}, 1 << 20, &data, nullptr, &found));
+    double took = SecondsSince(start);
+    std::printf("stalled INCR: read gave up after %.1f s\n", took);
+    EXPECT(!found);
+    EXPECT(took >= 2.5 && took < 6.0);
+    owner.Stop();
+  }
+
+  // An INCR transfer announced larger than max_bytes: refused at once,
+  // before a chunk is taken (this owner never sends one, so waiting for the
+  // first would take a step's timeout).
+  {
+    Peer owner;
+    owner.Own({{"text/html", html}}, false, /*stall_after=*/0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    start = Clock::now();
+    bool found = true;
+    EXPECT(x11_clipboard::Read({"text/html"}, 1000, &data, nullptr, &found));
+    EXPECT(!found);
+    EXPECT(SecondsSince(start) < 1.0);
+    owner.Stop();
+  }
+
   // And we can take the clipboard back.
   ClipboardWriteTextLinux("back");
   EXPECT(Take(ClipboardReadTextLinux()) == "back");
@@ -749,6 +814,54 @@ int main() {
   } else {
     std::printf("lock: dbus-daemon missing, lock cases skipped\n");
   }
+
+  // --- The connection dies --------------------------------------------------
+
+  // Killed mid-read (the owner never answers; the peer kills the requestor's
+  // client, which is the bridge): the read ends at once, the bridge is gone,
+  // and after the backoff it reconnects, once.
+  x11_clipboard::SetReconnectBackoffForTesting(500);
+  {
+    Peer owner;
+    owner.Own({{"UTF8_STRING", "never"}}, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::atomic<bool> read_done{false};
+    std::atomic<bool> read_found{true};
+    std::thread reader([&] {
+      std::string got_data;
+      bool found = true;
+      x11_clipboard::Read({"UTF8_STRING"}, 1 << 20, &got_data, nullptr, &found);
+      read_found = found;
+      read_done = true;
+    });
+    EXPECT(WaitFor([&] { return owner.LastRequestor() != 0; }));
+    start = Clock::now();
+    owner.Kill(owner.LastRequestor());
+    EXPECT(WaitFor([&] { return read_done.load(); }, 2000));
+    reader.join();
+    std::printf("killed mid-read: the read ended after %.2f s\n",
+                SecondsSince(start));
+    EXPECT(!read_found.load());
+    EXPECT(!x11_clipboard::Available());  // within the backoff
+    owner.Stop();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  EXPECT(x11_clipboard::Available());  // the one reconnect
+  EXPECT(x11_clipboard::Write(
+      {{"UTF8_STRING", std::make_shared<const std::string>("again")}}));
+  {
+    bool found = false;
+    EXPECT(
+        x11_clipboard::Read({"UTF8_STRING"}, 1 << 20, &data, nullptr, &found));
+    EXPECT(found && data == "again");
+  }
+  EXPECT(peer.Fetch("UTF8_STRING", &data, &type) && data == "again");
+  // Killed again: no second reconnect.
+  peer.Kill(peer.Owner());
+  EXPECT(WaitFor([] { return !x11_clipboard::Available(); }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  EXPECT(!x11_clipboard::Available());
+  std::printf("connection killed: reconnected once, then gone for good\n");
 
   std::printf("laufey_clipboard_x11_test: ok\n");
   Finish(0);
