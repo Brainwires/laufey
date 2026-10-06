@@ -14,7 +14,9 @@
 //     a requestor that starts 10 INCR transfers and never takes a chunk (8
 //     run at once, all dropped after their idle timeout, and the next read
 //     still works), a read over max_bytes, an owner that keeps writing chunks
-//     after we abandoned its transfer (never read into a later conversion);
+//     after we abandoned its transfer (never read into a later conversion),
+//     a late refusal of an abandoned conversion (never taken as the next
+//     one's answer);
 //   - the connection killed mid-read (the read ends at once, the bridge is
 //     gone, one reconnect after the backoff, and none after that);
 //   - privacy: image reads take PNG, JPEG, BMP or GIF only (a TIFF is never
@@ -44,6 +46,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -321,13 +324,16 @@ class Peer {
   // until destroyed; `silent` answers nothing; an INCR transfer stops after
   // `stall_after` chunks (never, when negative); `flood` sends an INCR
   // transfer's chunks back to back, never waiting for the requestor to take
-  // one, until stopped.
+  // one, until stopped; `late_refusal` leaves the first request unanswered
+  // and refuses it just before answering the next one for the same target.
   void Own(std::map<std::string, std::string> entries, bool silent,
-           int stall_after = -1, bool flood = false) {
+           int stall_after = -1, bool flood = false,
+           bool late_refusal = false) {
     entries_ = std::move(entries);
     silent_ = silent;
     stall_after_ = stall_after;
     flood_ = flood;
+    late_refusal_ = late_refusal;
     for (const auto& [name, data] : entries_)
       atoms_[Atom(name)] = name;
     targets_ = Atom("TARGETS");
@@ -358,6 +364,17 @@ class Peer {
       auto req = *reinterpret_cast<xcb_selection_request_event_t*>(ev);
       free(ev);
       last_requestor_ = req.requestor;
+      if (late_refusal_ && !held_requests_++) {
+        held_ = req;  // unanswered, for now
+        continue;
+      }
+      if (held_ && held_->target == req.target) {
+        // The refusal of the request given up on, arriving while the
+        // requestor waits for the answer to this one.
+        Notify(*held_, XCB_NONE);
+        held_.reset();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
       if (!silent_)
         Answer(req);
     }
@@ -454,6 +471,9 @@ class Peer {
   int stall_after_ = -1;
   bool flood_ = false;
   std::atomic<int> flooded_{0};
+  bool late_refusal_ = false;
+  int held_requests_ = 0;
+  std::optional<xcb_selection_request_event_t> held_;
   std::atomic<xcb_window_t> last_requestor_{0};
   std::atomic<bool> serving_{false};
   std::thread thread_;
@@ -740,6 +760,21 @@ int main() {
     double took = SecondsSince(start);
     std::printf("silent owner: read gave up after %.1f s\n", took);
     EXPECT(took >= 2.5 && took < 5.0);
+    owner.Stop();
+  }
+
+  // A late refusal of a conversion we gave up on (the owner sat on it past a
+  // step's timeout) arrives while the next read waits for its answer to the
+  // same target: it is not taken as that answer (each conversion carries a
+  // server timestamp of its own, and an earlier one's answer is told apart
+  // by it), so the next read gets the data.
+  {
+    Peer owner;
+    owner.Own({{"UTF8_STRING", "after the refusal"}}, false,
+              /*stall_after=*/-1, /*flood=*/false, /*late_refusal=*/true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT(Take(ClipboardReadTextLinux()).empty());  // the abandoned one
+    EXPECT(Take(ClipboardReadTextLinux()) == "after the refusal");
     owner.Stop();
   }
 

@@ -146,6 +146,10 @@ struct Conversion {
   size_t max_bytes = 0;
   bool incr = false;
   bool started = false;
+  // The ConvertSelection went out, with `time` (a server timestamp, fetched
+  // once the conversion started).
+  bool converting = false;
+  xcb_timestamp_t time = XCB_CURRENT_TIME;
   bool refused = false;  // the owner answered with no property
   std::string data;
   xcb_atom_t type = XCB_NONE;
@@ -398,8 +402,9 @@ class Bridge {
     multiple_ = Atom("MULTIPLE");
     incr_ = Atom("INCR");
     time_prop_ = Atom("LAUFEY_CLIPBOARD_TIME");
+    convert_time_prop_ = Atom("LAUFEY_CLIPBOARD_CONVERT_TIME");
     if (clipboard_ == XCB_NONE || targets_ == XCB_NONE || incr_ == XCB_NONE ||
-        time_prop_ == XCB_NONE) {
+        time_prop_ == XCB_NONE || convert_time_prop_ == XCB_NONE) {
       Teardown();
       return false;
     }
@@ -673,8 +678,34 @@ class Bridge {
     c.slot = TakeSlot(now);
     c.property = slots_[c.slot].property;
     xcb_delete_property(conn_, window_, c.property);
+    // The conversion goes out with a server timestamp of its own, which the
+    // owner echoes in its SelectionNotify: an answer to an earlier
+    // conversion (a late refusal, after we gave up on it) carries an earlier
+    // time and is told apart by it. A zero-length append to a property of
+    // ours reports one (OnConvertTimestamp).
+    xcb_change_property(conn_, XCB_PROP_MODE_APPEND, window_,
+                        convert_time_prop_, XCB_ATOM_STRING, 8, 0, nullptr);
+    xcb_flush(conn_);
+  }
+
+  void OnConvertTimestamp(xcb_timestamp_t time) {
+    if (conversions_.empty() || !conversions_.front().started ||
+        conversions_.front().converting)
+      return;  // the conversion it was fetched for already ended
+    // Each conversion's time is later than the one before (wrap-safe), so
+    // two conversions in the same millisecond still differ; never
+    // CurrentTime (0).
+    if (convert_time_ != XCB_CURRENT_TIME &&
+        static_cast<int32_t>(time - convert_time_) <= 0)
+      time = convert_time_ + 1;
+    if (time == XCB_CURRENT_TIME)
+      time = 1;
+    convert_time_ = time;
+    Conversion& c = conversions_.front();
+    c.time = time;
+    c.converting = true;
     xcb_convert_selection(conn_, window_, clipboard_, c.target, c.property,
-                          XCB_CURRENT_TIME);
+                          time);
     xcb_flush(conn_);
   }
 
@@ -758,12 +789,19 @@ class Bridge {
 
   void OnSelectionNotify(const xcb_selection_notify_event_t* e) {
     if (e->requestor != window_ || conversions_.empty() ||
-        !conversions_.front().started || conversions_.front().incr)
+        !conversions_.front().converting || conversions_.front().incr)
       return;
     Conversion& c = conversions_.front();
+    // A late answer to an earlier conversion: another target, another
+    // property, or (a refusal names no property) an earlier time. X
+    // timestamps wrap (32-bit milliseconds), so "earlier" is the signed
+    // difference. An owner that answers with CurrentTime, against ICCCM,
+    // can't be told apart and is taken as it is.
     if (e->target != c.target ||
-        (e->property != XCB_NONE && e->property != c.property))
-      return;  // a late answer to an earlier conversion
+        (e->property != XCB_NONE && e->property != c.property) ||
+        (e->time != XCB_CURRENT_TIME &&
+         static_cast<int32_t>(e->time - c.time) < 0))
+      return;
     if (e->property == XCB_NONE) {
       c.refused = true;
       FinishConversion(false);  // refused, or no owner
@@ -1031,6 +1069,9 @@ class Bridge {
             OnRequestorPropertyDeleted(e->window, e->atom);
           if (e->atom == time_prop_ && e->state == XCB_PROPERTY_NEW_VALUE)
             OnTimestamp(e->time);
+          else if (e->atom == convert_time_prop_ &&
+                   e->state == XCB_PROPERTY_NEW_VALUE)
+            OnConvertTimestamp(e->time);
           else if (e->state == XCB_PROPERTY_NEW_VALUE)
             OnSlotNewValue(e->atom);
         } else if (e->state == XCB_PROPERTY_DELETE) {
@@ -1065,7 +1106,10 @@ class Bridge {
   xcb_window_t root_ = XCB_NONE;
   xcb_window_t window_ = XCB_NONE;
   xcb_atom_t clipboard_ = XCB_NONE, targets_ = XCB_NONE, timestamp_ = XCB_NONE,
-             multiple_ = XCB_NONE, incr_ = XCB_NONE, time_prop_ = XCB_NONE;
+             multiple_ = XCB_NONE, incr_ = XCB_NONE, time_prop_ = XCB_NONE,
+             convert_time_prop_ = XCB_NONE;
+  // The last conversion's server timestamp (CurrentTime before the first).
+  xcb_timestamp_t convert_time_ = XCB_CURRENT_TIME;
   // The conversions' properties.
   struct Slot {
     xcb_atom_t property = XCB_NONE;
