@@ -3093,6 +3093,27 @@ async fn passkey_checks(window_id: u32) {
     ),
     freed,
   );
+  if !freed {
+    // Rare on windows-11-arm (2 of about 40 runs): the OS call ended neither
+    // when cancelled nor at its own deadline. Say whether it ever does.
+    let mut later = None;
+    while started.elapsed() < std::time::Duration::from_secs(75) {
+      let env = passkey_answer(
+        "passkey get after a held slot",
+        laufey::passkey_get(
+          window_id,
+          &passkey_get_options("example.com", 1000),
+        ),
+      )
+      .await;
+      if !env.contains("already in progress") {
+        later = Some(started.elapsed().as_millis());
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    eprintln!("[e2e] INFO the held passkey slot freed after {later:?} ms");
+  }
 }
 
 /// Report the overall result and exit immediately (see "shutdown" above).
