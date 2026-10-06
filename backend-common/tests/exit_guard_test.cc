@@ -15,7 +15,9 @@
 //            park and every later dispatch are answered with `ran` false,
 //            at once.
 //   watchdog an exit handler that never returns: the process still ends,
-//            with exit's status, about 5 seconds later.
+//            with exit's status, about 5 seconds later; with
+//            LAUFEY_EXIT_WATCHDOG_SECS=1 about a second later, and with
+//            LAUFEY_EXIT_WATCHDOG_SECS=0 not at all (no watchdog).
 
 #include <glib.h>
 #include <signal.h>
@@ -171,12 +173,18 @@ int RunCase(const std::string& name) {
   return 2;  // not reached
 }
 
-// Runs case `name` in a child; true if it exited with `want` within `limit`.
+// Runs case `name` in a child (with LAUFEY_EXIT_WATCHDOG_SECS=`watchdog_secs`
+// when given); true if it exited with `want` within `limit`.
 bool Child(const char* self, const char* name, int want,
-           std::chrono::seconds limit, std::chrono::milliseconds* took) {
+           std::chrono::seconds limit, std::chrono::milliseconds* took,
+           const char* watchdog_secs = nullptr) {
   auto start = std::chrono::steady_clock::now();
   pid_t pid = fork();
   if (pid == 0) {
+    if (watchdog_secs)
+      setenv("LAUFEY_EXIT_WATCHDOG_SECS", watchdog_secs, 1);
+    else
+      unsetenv("LAUFEY_EXIT_WATCHDOG_SECS");
     execl(self, self, name, static_cast<char*>(nullptr));
     _exit(127);
   }
@@ -202,6 +210,33 @@ bool Child(const char* self, const char* name, int want,
   return true;
 }
 
+// Runs case `name` with LAUFEY_EXIT_WATCHDOG_SECS=`watchdog_secs`; true if
+// it is still running after `wait` (then killed).
+bool ChildStillRunning(const char* self, const char* name,
+                       const char* watchdog_secs, std::chrono::seconds wait) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    setenv("LAUFEY_EXIT_WATCHDOG_SECS", watchdog_secs, 1);
+    execl(self, self, name, static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  if (pid < 0)
+    return false;
+  auto start = std::chrono::steady_clock::now();
+  int status = 0;
+  while (std::chrono::steady_clock::now() - start < wait) {
+    if (waitpid(pid, &status, WNOHANG) == pid) {
+      std::fprintf(stderr, "laufey_exit_guard_test: %s ended with status %d\n",
+                   name, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  kill(pid, SIGKILL);
+  waitpid(pid, &status, 0);
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -219,7 +254,30 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "laufey_exit_guard_test: the watchdog fired early\n");
     return 1;
   }
-  std::printf("laufey_exit_guard_test: ok (watchdog after %lld ms)\n",
-              static_cast<long long>(took.count()));
+  // LAUFEY_EXIT_WATCHDOG_SECS=1: the same, about a second after exit began.
+  std::chrono::milliseconds quick{0};
+  if (!Child(argv[0], "watchdog", 7, std::chrono::seconds(10), &quick, "1"))
+    return 1;
+  if (quick < std::chrono::milliseconds(900) ||
+      quick > std::chrono::seconds(4)) {
+    std::fprintf(stderr,
+                 "laufey_exit_guard_test: LAUFEY_EXIT_WATCHDOG_SECS=1 fired "
+                 "after %lld ms\n",
+                 static_cast<long long>(quick.count()));
+    return 1;
+  }
+  // LAUFEY_EXIT_WATCHDOG_SECS=0: no watchdog; the hung exit is still hung
+  // well past the default 5 seconds.
+  if (!ChildStillRunning(argv[0], "watchdog", "0", std::chrono::seconds(7))) {
+    std::fprintf(stderr,
+                 "laufey_exit_guard_test: LAUFEY_EXIT_WATCHDOG_SECS=0 did not "
+                 "turn the watchdog off\n");
+    return 1;
+  }
+  std::printf(
+      "laufey_exit_guard_test: ok (watchdog after %lld ms; after %lld ms "
+      "with LAUFEY_EXIT_WATCHDOG_SECS=1; none with 0)\n",
+      static_cast<long long>(took.count()),
+      static_cast<long long>(quick.count()));
   return 0;
 }

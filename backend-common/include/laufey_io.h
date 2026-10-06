@@ -111,7 +111,9 @@ void StartFileDragLinux(std::function<void*()> source_widget,
 // loop has ended). The dispatcher is then closed, so every task still
 // waiting for the UI thread, and every later dispatch, is answered with `ran`
 // false. A watchdog ends the process with exit's status if exit has not
-// finished 5 seconds later. Call on the UI thread after
+// finished LAUFEY_EXIT_WATCHDOG_SECS (read here; 5 by default, 0 = no
+// watchdog) seconds later; without glibc's on_exit the status isn't known,
+// and a hung exit ends with 1. Call on the UI thread after
 // UiTaskDispatcher::Bind.
 void InstallUiExitGuard();
 #endif
