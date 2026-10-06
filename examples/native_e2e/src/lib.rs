@@ -3101,13 +3101,37 @@ fn finish() -> ! {
   eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
   let _ = std::io::Write::flush(&mut std::io::stderr());
   // _exit avoids running C++ static destructors / atexit handlers in the
-  // backend, which is where the teardown crash lives.
+  // backend, which is where the teardown crash lives (on Windows it ends
+  // the process outright, see libc_exit).
   unsafe { libc_exit(if failed { 1 } else { 0 }) };
 }
 
+#[cfg(not(windows))]
 extern "C" {
   #[link_name = "_exit"]
   fn libc_exit(code: i32) -> !;
+}
+
+/// Windows: `_exit` is ExitProcess, which still runs every DLL's
+/// DLL_PROCESS_DETACH and its static destructors, after it has ended the
+/// process's other threads, and one of them can wait there forever on a
+/// COM call into an apartment whose thread is already gone. Minidumps of
+/// two CEF runs stuck after their OVERALL line: the one thread left waits
+/// in combase's MTAThreadWaitForCall (a cross-apartment call), and its stack
+/// below holds Windows.Media.dll, ucrtbase's exit-time callbacks and
+/// ntdll's process shutdown, under this library's exit. Such a process
+/// can't be killed either and keeps its profile locked, so every later run
+/// with that profile fails at start. End the process without running any
+/// of it.
+#[cfg(windows)]
+unsafe fn libc_exit(code: i32) -> ! {
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    fn TerminateProcess(process: *mut std::ffi::c_void, code: u32) -> i32;
+  }
+  TerminateProcess(GetCurrentProcess(), code as u32);
+  unreachable!("TerminateProcess returned")
 }
 
 // What this library's `.init_array` function saw of argv (Linux): the C
