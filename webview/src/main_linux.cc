@@ -61,6 +61,10 @@ static int run_headless(const std::string& runtimePath) {
 }
 
 int main(int argc, char* argv[]) {
+  // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
+  // (cef/src/main_windows.cc); never pass it on to what the app starts.
+  unsetenv("LAUFEY_CWD");
+
   const std::vector<std::string> args(argv + 1, argv + argc);
 
   // The runtime library: a packaged app (a launch file, or a runtime next to

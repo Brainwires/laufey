@@ -267,6 +267,9 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
 // or null for an unsandboxed build (-DUSE_SANDBOX=OFF), which then runs every
 // child with no_sandbox.
 static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
+  // LAUFEY_CWD is for the host behind CEF's bootstrap (RunWinMain, which has
+  // already consumed it): never pass it on to what the app starts.
+  SetEnvironmentVariableW(L"LAUFEY_CWD", nullptr);
   CefMainArgs main_args(hInstance);
 
   std::vector<std::string> args;
@@ -473,6 +476,19 @@ void LaufeyRestoreLaunchWorkingDirectory() {
 CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance, LPTSTR lpCmdLine,
                                     int nCmdShow, void* sandbox_info,
                                     cef_version_info_t* version_info) {
+  // DLL planting: the bootstrap starts a browser-type process in the
+  // executable's directory, but LAUFEY_CWD (below) moves it to wherever the
+  // app was launched from, a directory anyone may have written a DLL into.
+  // Take the working directory out of the DLL search order before any
+  // library is loaded by name (libcef.dll is delay-loaded; Windows itself
+  // loads more on demand). The executable's directory, System32 and PATH
+  // stay. SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) would
+  // also drop PATH, which breaks what the runtime loads for the app: a
+  // Node-API addon whose dependency DLL is found on PATH (an SDK's bin
+  // directory) and a Deno.dlopen() of a bare DLL name on PATH both fail
+  // with ERROR_MOD_NOT_FOUND under it (checked on Windows 11), so it is not
+  // called.
+  SetDllDirectoryW(L"");
   (void)lpCmdLine;
   (void)nCmdShow;
   if (!LaufeyBootstrapMatches(version_info)) {

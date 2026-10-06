@@ -632,10 +632,13 @@ async fn os_checks() {
   );
   // Not every helper is sandboxed by every policy; the renderer and the
   // GPU process are. A renderer lowers its token a moment after it starts,
-  // so wait for the expected state before judging it.
+  // so wait for the expected state before judging it, for 10 s at most per
+  // kind: each round can itself wait 5 s for a first child (wait_children),
+  // so a bound on the rounds alone would let a missing kind take minutes.
   for kind in ["renderer", "gpu-process"] {
     let mut found: Vec<(u32, Option<TokenFacts>)> = Vec::new();
-    for _ in 0..50 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
       found = wait_children(kind)
         .await
         .into_iter()
@@ -645,7 +648,7 @@ async fn os_checks() {
         && found
           .iter()
           .all(|(_, t)| t.is_some_and(|t| is_sandboxed(&t) == want));
-      if settled {
+      if settled || std::time::Instant::now() >= deadline {
         break;
       }
       tokio::time::sleep(Duration::from_millis(100)).await;

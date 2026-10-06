@@ -809,6 +809,10 @@ static bool LaufeyChooseSandbox() {
 }
 
 int main(int argc, char* argv[]) {
+  // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
+  // (cef/src/main_windows.cc); never pass it on to what the app starts.
+  unsetenv("LAUFEY_CWD");
+
   // CEF gets its own copy of argv. Chromium sets the process title by
   // rewriting the argv strings in place (setproctitle), which garbles the
   // arguments the runtime later reads with std::env::args() or its

@@ -135,13 +135,31 @@ session; a deep-link launch drops that switch with every other Chromium switch
   trusted certificate (a packager that signs every PE file in the app does).
 
   The bootstrap moves the browser process to the executable's directory before
-  the host runs (`SetCwdForBrowserProcess` in CEF's `bootstrap_win.cc`, so no
-  handle to an arbitrary directory leaks into child processes), and the
-  directory the app was started in is gone. A launcher that knows it passes it
-  in `LAUFEY_CWD`: the host changes back to it and removes the variable (Deno
-  Desktop's runtime does this for the workers it forks of its own executable, so
-  a dev server's workers keep the project directory). Any other launch, from a
-  shell or a shortcut, starts in the executable's directory.
+  the host runs (`SetCwdForBrowserProcess` in CEF's `bootstrap_win.cc`; CEF
+  does it so Chromium's child processes don't hold an arbitrary directory
+  open), and the directory the app was started in is gone. A launcher that
+  knows it passes it in `LAUFEY_CWD`: the host changes back to it and removes
+  the variable (Deno Desktop's runtime does this for the workers it forks of
+  its own executable and for its updater's detached launches, and
+  `deno desktop`'s dev run for the app, so a dev server's workers keep the
+  project directory). Because the host changes back before Chromium starts,
+  the renderer, GPU and crashpad processes it starts inherit that directory
+  as their working directory and hold it open while they run (it can't be
+  removed or renamed until the app exits); that is harmless. Any other
+  launch, from a shell or a shortcut, starts in the executable's (install)
+  directory. Every laufey host, on every backend and OS, removes `LAUFEY_CWD`
+  from its environment at startup, so the variable never reaches the
+  programs an app starts. Since that directory can be anywhere, the host
+  first takes the working directory out of the DLL search order
+  (`SetDllDirectoryW(L"")`, before any library is loaded by name). It does
+  not call `SetDefaultDllDirectories`, which would also drop `PATH` and so
+  break a Node-API addon whose dependency is found on `PATH`, or a
+  `Deno.dlopen()` of a bare name on `PATH`.
+
+  The layout is new: a Windows CEF app packaged before it, as one unsandboxed
+  `<App>.exe` with the runtime as `<App>.dll` (Deno Desktop runtime
+  2.9.7-denext.9 and earlier), can't update itself into it with Deno Desktop's
+  full-app updater. Reinstall the app.
 
   The renderers run at Untrusted integrity and the GPU process at Low.
   `-DUSE_SANDBOX=OFF` builds the unsandboxed single `laufey.exe` instead

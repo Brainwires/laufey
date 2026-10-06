@@ -10,6 +10,7 @@
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -231,6 +232,10 @@ static std::string ResolveMacRuntimePath(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
+  // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
+  // (cef/src/main_windows.cc); never pass it on to what the app starts.
+  unsetenv("LAUFEY_CWD");
+
   const std::string runtimePath = ResolveMacRuntimePath(argc, argv);
 
   // Forked worker processes should not create a window.

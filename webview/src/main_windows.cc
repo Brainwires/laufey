@@ -66,6 +66,9 @@ static int run_headless(const std::string& runtimePath) {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
+  // LAUFEY_CWD is only for the Windows CEF host behind CEF's bootstrap
+  // (cef/src/main_windows.cc); never pass it on to what the app starts.
+  SetEnvironmentVariableW(L"LAUFEY_CWD", nullptr);
   // laufey's own options end at "--" (a registered URL scheme runs
   // `"<exe>" -- "%1"`, so a link can only add positional arguments), and a
   // packaged app (a launch file or a runtime next to the executable) loads
