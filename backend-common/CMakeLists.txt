@@ -51,6 +51,7 @@ set(LAUFEY_COMMON_SRCS
   src/login_item.cc
   src/menu_common.cc
   src/notifications.cc
+  src/notification_auth.cc
   src/auth_session.cc
   src/platform_features.cc
   src/title_bar.cc
@@ -142,6 +143,8 @@ if(WIN32)
     # for the app's display name.
     runtimeobject
     version
+    # Notification click keys (BCryptGenRandom).
+    bcrypt
   )
 elseif(APPLE)
   find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)

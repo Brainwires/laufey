@@ -22,7 +22,12 @@
 # [target]) on the app's D-Bus name, which nothing owns, so D-Bus starts the
 # app. The runtime's cold-start mode writes what its response handler
 # received to $TMPDIR/laufey-coldstart-result.txt. In a desktop session the
-# notification is real (the portal when it is available); to click it on
+# notification is real (the portal when it is available). Any process on the
+# session bus can call ActivateAction, so laufey accepts only targets MAC'd
+# with the install's key ($XDG_DATA_HOME/<app id>/laufey-notification-key):
+# a forged click (a well-formed target without a MAC) is sent first, starts
+# the app and must not arrive, nor use up the launch; the genuine target is
+# signed here with the key, as laufey signs what it posts. To click it on
 # screen instead, set LAUFEY_E2E_CLICK=manual and click it within 60 s, or
 # set LAUFEY_E2E_CLICK_CMD to a command that clicks it (it gets the
 # notification's title as $1: a desktop-specific test hook, such as Plasma's
@@ -141,10 +146,28 @@ elif [ -n "${LAUFEY_E2E_CLICK_CMD:-}" ]; then
   bash -c "$LAUFEY_E2E_CLICK_CMD" click "$title" || fail "the click command failed"
   click_wait=30
 else
-  gdbus call --session --dest "$app_id" --object-path "$app_path" \
-    --method org.freedesktop.Application.ActivateAction \
-    laufey-notification "[<'$target'>]" "{}" >/dev/null ||
+  activate() {
+    gdbus call --session --dest "$app_id" --object-path "$app_path" \
+      --method org.freedesktop.Application.ActivateAction \
+      laufey-notification "[<'$1'>]" "{}" >/dev/null
+  }
+  # Forged: D-Bus starts the app, which drops it.
+  activate "laufey=1&tag=forged-tag&data=%7B%22f%22%3A1%7D" ||
     fail "ActivateAction on $app_id failed (D-Bus activation)"
+  sleep 5
+  [ ! -s "$result" ] || fail "a forged click reached the response handler: $(cat "$result")"
+  echo "PASS: a forged click (no MAC) started the app and was dropped"
+  # Genuine: signed with the install's key, as the app signs what it posts.
+  # (The app makes the key when it first signs: posting through the portal.
+  # Through org.freedesktop.Notifications nothing is signed, so the started
+  # app made it just now to check the forged click.)
+  key_file="$data_home/$app_id/laufey-notification-key"
+  [ -f "$key_file" ] || fail "no $key_file"
+  [ "$(stat -c %a "$key_file")" = 600 ] || fail "$key_file isn't owner-only"
+  mac="$(printf 'laufey-notification-click/1\n%s' "$target" |
+    openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$key_file")" |
+    sed 's/.*= //')"
+  activate "$target&mac=$mac" || fail "ActivateAction on $app_id failed"
   click_wait=30
 fi
 deadline=$((SECONDS + click_wait))

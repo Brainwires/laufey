@@ -15,6 +15,12 @@
 # -Embedding) and INotificationActivationCallback::Activate with the toast's
 # arguments. The runtime's cold-start mode writes what its response handler
 # received to %TEMP%\laufey-coldstart-result.txt.
+#
+# Any process of the user can call Activate, so laufey accepts only
+# arguments MAC'd with the install's key (laufey-notification-key in the app
+# data directory). A forged Activate (well-formed arguments, no MAC) goes
+# first and must not arrive, nor use up the launch; then the genuine click,
+# signed here with the key as laufey signs what it posts.
 param([Parameter(Mandatory = $true)][ValidateSet("webview", "cef")][string]$Backend)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -74,9 +80,37 @@ public static class ToastClick {
 }
 "@
 
+# The install's key (created here when no run made one yet; the app reads it).
+$dataDir = Join-Path $env:LOCALAPPDATA $aumid
+New-Item -ItemType Directory -Force $dataDir | Out-Null
+$keyFile = Join-Path $dataDir "laufey-notification-key"
+if (-not (Test-Path $keyFile)) {
+  $bytes = New-Object byte[] 32
+  [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+  (($bytes | ForEach-Object { $_.ToString("x2") }) -join "") + "`n" |
+    Set-Content -NoNewline -Encoding ascii $keyFile
+}
+$hex = (Get-Content -Raw $keyFile).Trim()
+$key = New-Object byte[] 32
+for ($i = 0; $i -lt 32; $i++) { $key[$i] = [Convert]::ToByte($hex.Substring(2 * $i, 2), 16) }
+function Sign([string]$plain) {
+  $hmac = New-Object Security.Cryptography.HMACSHA256 (, $key)
+  $mac = $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("laufey-notification-click/1`n" + $plain))
+  return $plain + "&mac=" + (($mac | ForEach-Object { $_.ToString("x2") }) -join "")
+}
+
 $failed = $false
 try {
-  [ToastClick]::Click($clsid, $aumid, "laufey=1&tag=cold-tag&action=cold-action&data=%7B%22c%22%3A1%7D")
+  # Forged: COM starts the app, which drops it; no result.
+  [ToastClick]::Click($clsid, $aumid, "laufey=1&tag=forged-tag&data=%7B%22f%22%3A1%7D")
+  Start-Sleep -Seconds 10
+  if (Test-Path $result) {
+    Write-Host "FAIL a forged Activate reached the response handler: $(Get-Content $result)"
+    $failed = $true
+    Remove-Item $result
+  }
+  # Genuine: the running copy (the COM server now) gets it, as the launch.
+  [ToastClick]::Click($clsid, $aumid, (Sign "laufey=1&tag=cold-tag&action=cold-action&data=%7B%22c%22%3A1%7D"))
   $deadline = (Get-Date).AddSeconds(60)
   while (-not (Test-Path $result) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
   if (-not (Test-Path $result)) { throw "the started app wrote no result" }
@@ -94,4 +128,4 @@ try {
   Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($dir) } | ForEach-Object { try { $_.Kill() } catch {} }
 }
 if ($failed) { exit 1 }
-Write-Host "[coldstart] PASS a toast click started the app and reached its response handler as the launch"
+Write-Host "[coldstart] PASS a forged Activate was dropped; a toast click started the app and reached its response handler as the launch"

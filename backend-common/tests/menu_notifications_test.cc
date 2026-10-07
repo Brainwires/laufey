@@ -22,6 +22,8 @@
 #include <deque>
 #ifndef _WIN32
 #include <fnmatch.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 #include <mutex>
 #include <string>
@@ -692,6 +694,173 @@ void TestLinuxActivationHelpers() {
   EXPECT(EscapeNotificationMarkup("plain") == "plain");
 }
 
+std::string ToHex(const std::string& bytes) {
+  static const char kHex[] = "0123456789abcdef";
+  std::string out;
+  for (unsigned char c : bytes) {
+    out += kHex[c >> 4];
+    out += kHex[c & 15];
+  }
+  return out;
+}
+
+#ifndef _WIN32
+std::string ReadAll(const std::string& path) {
+  std::string out;
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f)
+    return out;
+  char buf[512];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+    out.append(buf, n);
+  std::fclose(f);
+  return out;
+}
+
+void WriteAll(const std::string& path, const std::string& text, int mode) {
+  FILE* f = std::fopen(path.c_str(), "wb");
+  EXPECT(f);
+  std::fwrite(text.data(), 1, text.size(), f);
+  std::fclose(f);
+  EXPECT(chmod(path.c_str(), mode) == 0);
+}
+#endif
+
+// Click arguments are MAC'd (S3): HMAC-SHA256 against RFC 4231, sign and
+// verify, the per-install key file, and what an activation accepts.
+void TestClickAuth() {
+  // RFC 4231 test cases 1, 2 and 6 (a key longer than the block).
+  EXPECT(ToHex(HmacSha256(std::string(20, '\x0b'), "Hi There")) ==
+         "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+  EXPECT(ToHex(HmacSha256("Jefe", "what do ya want for nothing?")) ==
+         "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+  EXPECT(ToHex(HmacSha256(
+             std::string(131, '\xaa'),
+             "Test Using Larger Than Block-Size Key - Hash Key First")) ==
+         "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+
+  const std::string key(32, 'k'), other(32, 'o');
+  std::string plain = "laufey=1&tag=t&action=a&data=%7B%7D";
+  std::string signed_args = SignToastArguments(key, plain);
+  EXPECT(signed_args.rfind(plain + "&mac=", 0) == 0);
+  EXPECT(VerifyToastArguments(key, signed_args));
+  EXPECT(!VerifyToastArguments(other, signed_args));     // another install
+  EXPECT(!VerifyToastArguments(std::string(), signed_args));  // no key
+  EXPECT(!VerifyToastArguments(key, plain));             // no MAC: forged
+  EXPECT(!VerifyToastArguments(key, plain + "&mac="));
+  EXPECT(!VerifyToastArguments(key, plain + "&mac=" + std::string(64, '0')));
+  std::string tampered = signed_args;
+  tampered.replace(tampered.find("tag=t"), 5, "tag=u");
+  EXPECT(!VerifyToastArguments(key, tampered));
+  EXPECT(!VerifyToastArguments(
+      key, signed_args.substr(0, signed_args.size() - 1)));
+  // Appending after the MAC (a second data field) breaks it.
+  EXPECT(!VerifyToastArguments(key, signed_args + "&data=x"));
+  // Over the cap: dropped unread, even when signed.
+  std::string huge =
+      "laufey=1&tag=t&data=" +
+      std::string(kMaxNotificationClickArgumentsBytes, 'x');
+  EXPECT(!VerifyToastArguments(key, SignToastArguments(key, huge)));
+
+  // What an activation accepts: arguments this process's key signed.
+  SetNotificationClickKeyForTesting(key);
+  std::string data = "{\"q\":\"a&mac=b\"}";
+  std::string args = EncodeToastArguments("tag 1", "act", &data);
+  std::string tag, action, d;
+  bool has_action = false, has_data = false;
+  EXPECT(DecodeClickArguments(args, &tag, &action, &has_action, &d, &has_data));
+  EXPECT(tag == "tag 1" && has_action && action == "act" && has_data &&
+         d == data);
+  // What a forger would send: well-formed, but no (or another key's) MAC.
+  EXPECT(!DecodeClickArguments("laufey=1&tag=tag%201", &tag, &action,
+                               &has_action, &d, &has_data));
+  EXPECT(!DecodeClickArguments(
+      SignToastArguments(other, "laufey=1&tag=tag%201"), &tag, &action,
+      &has_action, &d, &has_data));
+  // Signed, but a field over its limit (the data cap is 4 KiB).
+  EXPECT(!DecodeClickArguments(
+      SignToastArguments(key, "laufey=1&tag=t&data=" +
+                                  std::string(
+                                      LAUFEY_NOTIFICATION_MAX_DATA_BYTES + 1,
+                                      'x')),
+      &tag, &action, &has_action, &d, &has_data));
+  EXPECT(DecodeClickArguments(
+      SignToastArguments(
+          key, "laufey=1&tag=t&data=" +
+                   std::string(LAUFEY_NOTIFICATION_MAX_DATA_BYTES, 'x')),
+      &tag, &action, &has_action, &d, &has_data));
+  EXPECT(!DecodeClickArguments(
+      SignToastArguments(key, "laufey=1&tag=" +
+                                  std::string(
+                                      LAUFEY_NOTIFICATION_MAX_TAG_BYTES + 1,
+                                      'x')),
+      &tag, &action, &has_action, &d, &has_data));
+  EXPECT(!DecodeClickArguments(
+      SignToastArguments(key, "laufey=1&tag=t&action=" +
+                                  std::string(kMaxNotificationActionBytes + 1,
+                                              'x')),
+      &tag, &action, &has_action, &d, &has_data));
+  // Signed but not laufey's format.
+  EXPECT(!DecodeClickArguments(SignToastArguments(key, "tag=t"), &tag, &action,
+                               &has_action, &d, &has_data));
+  // A key change (another install) drops what the old one signed.
+  SetNotificationClickKeyForTesting(other);
+  EXPECT(!DecodeClickArguments(args, &tag, &action, &has_action, &d,
+                               &has_data));
+  // No key (no entropy): nothing verifies.
+  SetNotificationClickKeyForTesting(std::string());
+  EXPECT(!DecodeClickArguments(EncodeToastArguments("t", nullptr, nullptr),
+                               &tag, &action, &has_action, &d, &has_data));
+  SetNotificationClickKeyForTesting(key);
+
+#ifndef _WIN32
+  // The key file: created owner-only, the same key on every load; one that
+  // others can read, or that is damaged, is replaced.
+  char dir_template[] = "/tmp/laufey-click-key-XXXXXX";
+  std::string dir = mkdtemp(dir_template);
+  std::string path = dir + "/" + kNotificationClickKeyFile;
+  std::string k1, k2, k3;
+  EXPECT(!LoadOrCreateNotificationClickKey("", &k1));
+  EXPECT(LoadOrCreateNotificationClickKey(dir, &k1));
+  EXPECT(k1.size() == kNotificationClickKeyBytes);
+  struct stat st;
+  EXPECT(stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+  EXPECT(ReadAll(path) == ToHex(k1) + "\n");
+  EXPECT(LoadOrCreateNotificationClickKey(dir, &k2) && k2 == k1);
+  EXPECT(chmod(path.c_str(), 0644) == 0);  // others could have read it
+  EXPECT(LoadOrCreateNotificationClickKey(dir, &k3) && k3 != k1);
+  EXPECT(stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+  WriteAll(path, "not a key", 0600);
+  EXPECT(LoadOrCreateNotificationClickKey(dir, &k1) && k1 != k3 &&
+         k1.size() == kNotificationClickKeyBytes);
+  // A symlink planted in its place isn't followed (it is replaced).
+  std::string target = dir + "/elsewhere";
+  WriteAll(target, ToHex(std::string(32, 'p')) + "\n", 0600);
+  EXPECT(unlink(path.c_str()) == 0 &&
+         symlink(target.c_str(), path.c_str()) == 0);
+  EXPECT(LoadOrCreateNotificationClickKey(dir, &k2) &&
+         k2 != std::string(32, 'p'));
+  EXPECT(lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode));
+  // Processes starting together agree on one key.
+  EXPECT(unlink(path.c_str()) == 0);
+  std::vector<std::string> keys(8);
+  std::vector<std::thread> threads;
+  for (size_t i = 0; i < keys.size(); ++i) {
+    threads.emplace_back([&, i] {
+      EXPECT(LoadOrCreateNotificationClickKey(dir, &keys[i]));
+    });
+  }
+  for (std::thread& t : threads)
+    t.join();
+  for (const std::string& k : keys)
+    EXPECT(k == keys[0]);
+  unlink(path.c_str());
+  unlink(target.c_str());
+  rmdir(dir.c_str());
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -710,6 +879,7 @@ int main() {
   TestValidate();
   TestRouting();
   TestFormats();
+  TestClickAuth();
   TestPermissionCallbacksOnUiThread();
   TestLinuxActivationHelpers();
   std::printf("menu_notifications_test: OK\n");
