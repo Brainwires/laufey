@@ -210,10 +210,14 @@ int RunGtkDialog(void* dialog);
 void CancelGtkDialogsForQuit();
 
 // SIGTERM, SIGINT and SIGHUP end the app through `quit`, the backend's own
-// quit (as quit() from the runtime): GLib sources on the default main
-// context, so `quit` runs on the UI thread. The first signal removes all
-// three handlers, which gives them their default action back: a second
-// signal ends a quit that hangs. UI thread, once the loop's context is set up.
+// quit (as quit() from the runtime), which runs on the UI thread (an idle
+// source on the default main context). The first signal removes all three
+// handlers, which gives them their default action back: a second signal
+// ends a quit that hangs. The signal is taken off the UI thread (a pipe and
+// a watcher thread): if the UI thread hasn't taken the quit within
+// LAUFEY_SIGNAL_QUIT_DEADLINE_SECS (10 by default; 0 = wait for ever),
+// stuck in a call that never returns to its loop, the process ends by the
+// signal. UI thread, once the loop's context is set up.
 void InstallTerminationSignalHandlers(void (*quit)());
 // Removes them (a signal from then on takes its default action). UI thread.
 void RemoveTerminationSignalHandlers();

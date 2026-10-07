@@ -385,9 +385,15 @@ the child processes found their browser gone. On WebView the signal's default
 action killed the process, skipping the runtime's shutdown and the web storage
 flush. A GTK dialog that is open ends as a cancel (see
 [dialogs.md](dialogs.md)). The first signal starts the quit and gives the three
-signals their default action back, so a second one ends a quit that hangs. A
-runtime that installs its own handlers for these signals afterwards (Deno's
-`Deno.addSignalListener`) takes them over.
+signals their default action back, so a second one ends a quit that hangs. The
+signal is taken off the UI thread and the quit handed to it; a UI thread stuck
+in a call that never returns to its loop (CEF waiting on an X server that does
+not answer before its first window exists) would otherwise leave the signal
+ignored until `SIGKILL`. If the UI thread has not taken the quit within
+`LAUFEY_SIGNAL_QUIT_DEADLINE_SECS` (10 by default; 0 waits for ever), the
+process says so on stderr and ends by the signal. A quit the UI thread has taken
+is never cut short. A runtime that installs its own handlers for these signals
+afterwards (Deno's `Deno.addSignalListener`) takes them over.
 
 ## External links and popups
 
