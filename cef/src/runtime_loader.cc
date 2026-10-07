@@ -2489,8 +2489,7 @@ static uint32_t Backend_ShowFileDialog(
   // export), so there the portal's dialog is app-level too.
   EnsureGtkReady();
   laufey_common::PortalParentResolver portal_parent;
-  const char* wayland = getenv("WAYLAND_DISPLAY");
-  if (window_id != 0 && !(wayland && *wayland)) {
+  if (window_id != 0 && laufey_common::DisplayBackend() != "wayland") {
     portal_parent = [window_id]() -> std::string {
       CefRefPtr<CefWindow> window = CefWindowForId(window_id);
       unsigned long xid = window ? window->GetWindowHandle() : 0;
@@ -2747,10 +2746,9 @@ static uint32_t Backend_WindowCapabilities(void* /*data*/) {
   // windowed mode, so a DWM backdrop could never show through the page.
   caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
 #else
-  // Ozone/Wayland (chosen when WAYLAND_DISPLAY is set, see main_linux.cc)
-  // can't place windows.
-  const char* wayland = getenv("WAYLAND_DISPLAY");
-  if (!(wayland && *wayland))
+  // Ozone/Wayland (chosen when a Wayland display is there, see
+  // main_linux.cc) can't place windows.
+  if (laufey_common::DisplayBackend() != "wayland")
     caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
 #endif
   // Drag and drop and file dialogs (API >= 39). The paths of an external

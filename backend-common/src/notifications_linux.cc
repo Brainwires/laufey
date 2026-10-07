@@ -514,6 +514,8 @@ class LinuxNotificationPlatform : public NotificationPlatform {
       Server server = ServerState();
       if (server != Server::kNone)
         f.transport = UsePortal(nullptr) ? "portal" : "freedesktop";
+      if (server == Server::kNone && activation_failed_)
+        f.activation_error = activation_error_;
       f.schedule_while_closed = TimersAvailable(&f.schedule_reason);
       if (server == Server::kRunning) {
         f.server_caps_known = true;
@@ -523,7 +525,8 @@ class LinuxNotificationPlatform : public NotificationPlatform {
       } else {
         f.cold_start_reason =
             server == Server::kNone
-                ? "no notification server"
+                ? (f.activation_error.empty() ? "no notification server"
+                                              : f.activation_error)
                 : "the notification server hasn't started yet";
       }
     });
@@ -872,12 +875,23 @@ class LinuxNotificationPlatform : public NotificationPlatform {
         g_variant_new("(sa{sv})", app_id_.c_str(), &options), nullptr,
         G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr, &error);
     if (!r) {
-      portal_reason_ = std::string(
-                           "xdg-desktop-portal can't register this app's id "
-                           "(it needs xdg-desktop-portal 1.19 or later): ") +
-                       (error ? error->message : "no answer");
-      if (error)
+      // Not running and not startable (NameHasNoOwner: XFCE / i3 under GDM,
+      // where the unit's Requisite=graphical-session.target fails) is not
+      // the same as too old (UnknownMethod). The call above already asked
+      // D-Bus to start the portal once.
+      std::string name;
+      std::string message;
+      if (error) {
+        gchar* remote = g_dbus_error_get_remote_error(error);
+        name = remote ? remote : "";
+        g_free(remote);
+        if (g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD))
+          name = "org.freedesktop.DBus.Error.UnknownMethod";
+        g_dbus_error_strip_remote_error(error);
+        message = error->message;
         g_error_free(error);
+      }
+      portal_reason_ = PortalRegistryFailureReason(name, message);
       return;
     }
     g_variant_unref(r);
@@ -1039,12 +1053,13 @@ class LinuxNotificationPlatform : public NotificationPlatform {
         G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr,
         [](GObject* source, GAsyncResult* result, gpointer self_ptr) {
           auto* self = static_cast<LinuxNotificationPlatform*>(self_ptr);
+          GError* error = nullptr;
           GVariant* r = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),
-                                                      result, nullptr);
+                                                      result, &error);
           bool started = r != nullptr;
           if (r)
             g_variant_unref(r);
-          self->activation_failed_ = !started;
+          self->NoteActivation(started, error);
           self->activation_pending_ = false;
           std::vector<std::function<void(bool)>> waiters;
           waiters.swap(self->activation_waiters_);
@@ -1086,15 +1101,35 @@ class LinuxNotificationPlatform : public NotificationPlatform {
       case Server::kActivatable:
         break;
     }
+    GError* error = nullptr;
     GVariant* r = g_dbus_connection_call_sync(
         conn_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
         "org.freedesktop.DBus", "StartServiceByName",
         g_variant_new("(su)", kName, 0u), G_VARIANT_TYPE("(u)"),
-        G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr, nullptr);
+        G_DBUS_CALL_FLAGS_NONE, kCallTimeoutMs, nullptr, &error);
     if (r)
       g_variant_unref(r);
-    activation_failed_ = r == nullptr;
+    NoteActivation(r != nullptr, error);
     return r != nullptr;
+  }
+
+  // Remembers how a start of the activatable server ended (frees `error`):
+  // a failure, with D-Bus's own words for it, counts for the rest of the
+  // process. One seen on Fedora: dunst and xfce4-notifyd both installed,
+  // each with a systemd unit for org.freedesktop.Notifications, and systemd
+  // refuses to start either ("unit is invalid"). Thread only.
+  void NoteActivation(bool started, GError* error) {
+    activation_failed_ = !started;
+    if (!started) {
+      if (error)
+        g_dbus_error_strip_remote_error(error);
+      activation_error_ =
+          std::string("D-Bus could not start the notification server for "
+                      "org.freedesktop.Notifications: ") +
+          (error ? error->message : "no answer");
+    }
+    if (error)
+      g_error_free(error);
   }
 
   // The running server's GetCapabilities, read once per server (a new owner
@@ -1171,9 +1206,11 @@ class LinuxNotificationPlatform : public NotificationPlatform {
     // Without "actions" the server draws none and reports no click: none
     // is sent. A server whose capabilities aren't known gets them.
     if (caps.empty() || caps.count("actions")) {
-      // "default" is the body click; servers don't draw it as a button.
+      // "default" is the body click. GNOME Shell, Plasma, dunst and mako
+      // never draw it as a button; xfce4-notifyd draws every action, this
+      // one too, so it gets a label instead of a blank button.
       g_variant_builder_add(&actions, "s", "default");
-      g_variant_builder_add(&actions, "s", "");
+      g_variant_builder_add(&actions, "s", "Open");
       for (const NotificationAction& a : o.actions) {
         if (a.id == "default")
           continue;  // the protocol's own key
@@ -1554,6 +1591,7 @@ class LinuxNotificationPlatform : public NotificationPlatform {
   // An activatable notification server failed to start (Activate,
   // ServerPresent); remembered for the process.
   bool activation_failed_ = false;
+  std::string activation_error_;  // why, when activation_failed_
   bool activation_pending_ = false;  // an Activate call is in flight
   std::vector<std::function<void(bool)>> activation_waiters_;
   std::map<uint32_t, std::string> by_id_;    // server id -> tag

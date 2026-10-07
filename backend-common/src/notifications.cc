@@ -648,6 +648,29 @@ std::string SystemdCalendarUtc(int64_t at_ms) {
   return buf;
 }
 
+std::string PortalRegistryFailureReason(const std::string& error_name,
+                                        const std::string& message) {
+  const std::string detail =
+      ": " + (message.empty() ? std::string("no answer") : message);
+  auto is = [&error_name](const char* suffix) {
+    return error_name == std::string("org.freedesktop.DBus.Error.") + suffix;
+  };
+  if (error_name.empty() || is("NameHasNoOwner") || is("ServiceUnknown") ||
+      is("NoReply") || is("Timeout") || is("TimedOut") ||
+      error_name.rfind("org.freedesktop.DBus.Error.Spawn.", 0) == 0) {
+    return "xdg-desktop-portal is not running and D-Bus could not start it "
+           "(its systemd unit requires graphical-session.target, which some "
+           "sessions never reach)" +
+           detail;
+  }
+  if (is("UnknownMethod") || is("UnknownInterface") || is("UnknownObject")) {
+    return "xdg-desktop-portal can't register this app's id (it needs "
+           "xdg-desktop-portal 1.19 or later)" +
+           detail;
+  }
+  return "xdg-desktop-portal refused to register this app's id" + detail;
+}
+
 std::string EscapeNotificationMarkup(const std::string& text) {
   std::string out;
   out.reserve(text.size());

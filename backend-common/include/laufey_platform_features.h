@@ -63,8 +63,9 @@ const char* KWalletStateName(KWalletState state);
 struct PlatformFeatures {
   std::string os;            // "linux", "macos", "windows"
   std::string session_type;  // Linux: XDG_SESSION_TYPE ("wayland", "x11",
-                             // "tty"), "unknown" when unset; never from
-                             // $DISPLAY / $WAYLAND_DISPLAY
+                             // "tty"), "unknown" when unset; a graphical
+                             // one follows the display that is there
+                             // (ReportedSessionType)
   std::string desktop_hint;  // XDG_CURRENT_DESKTOP, verbatim (a hint only)
   bool session_bus = false;  // Linux: a session bus answered
 
@@ -100,6 +101,8 @@ struct PlatformFeatures {
   // Sway with no daemon the portal still offers it, with nothing behind it.
   std::string notification_server;
   bool notification_activatable = false;
+  // Activatable, but this process's start of it failed (D-Bus's error).
+  std::string notification_activation_error;
   // Linux, from the notification platform (LinuxNotificationFacts): how
   // notifications are sent ("portal" or "freedesktop"; empty with no
   // server), whether a click starts the app when it isn't running, whether
@@ -190,6 +193,49 @@ bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env);
 // (or no session bus), Chromium falls back to basic by itself, so the
 // choice is left to it.
 bool NeedsBasicPasswordStore(const PlatformFeatures& f);
+
+// --- The display a Linux process reaches (pure; tested without a display)
+// ----------------------------------------------------------------------
+
+// The display server this process's windows go to, from the display that
+// is actually there: "wayland" when $WAYLAND_DISPLAY names a socket that
+// exists (an absolute path, else one under $XDG_RUNTIME_DIR, as libwayland
+// resolves it) or $WAYLAND_SOCKET hands one over; else "x11" when $DISPLAY
+// is set; else "" (no display). $XDG_SESSION_TYPE is never read: it is only
+// a hint, and a wrong one is common (GDM's autologin into an Xorg session,
+// XFCE or i3, leaves it "wayland" with only $DISPLAY set). Everything keyed
+// on the session's display (Chromium's Ozone platform, the clipboard and
+// global shortcut backends, the session type platform_features reports)
+// follows this. `env` returns a variable's value, nullptr when unset;
+// `is_socket` says whether a path is a Unix socket.
+std::string DisplayBackend(
+    const std::function<const char*(const char*)>& env,
+    const std::function<bool(const std::string&)>& is_socket);
+// The same, from this process's environment and file system ("" on
+// Windows; only meaningful on Linux).
+std::string DisplayBackend();
+
+// The session type platform_features reports: $XDG_SESSION_TYPE as set
+// ("unknown" when unset), except that a graphical one ("x11" / "wayland")
+// says which display there is (DisplayBackend's `display_backend`) when one
+// is there. A display alone never makes a session graphical: "tty" and
+// "unknown" stay as they are (Xvfb under cron or a systemd service has a
+// $DISPLAY and no one in front of it).
+std::string ReportedSessionType(const std::string& xdg_session_type,
+                                const std::string& display_backend);
+
+// Whether the WebKitGTK host sets WEBKIT_DMABUF_RENDERER_FORCE_SHM=1: on an
+// X11 display (GDK's, `gdk_display_is_x11`), unless the user chose a
+// renderer setting of their own (WEBKIT_DMABUF_RENDERER_FORCE_SHM,
+// WEBKIT_DISABLE_DMABUF_RENDERER or WEBKIT_DISABLE_COMPOSITING_MODE set,
+// even empty). GTK 3 can't show a GPU buffer on X11: WebKit's UI process
+// maps each GBM buffer to the CPU (gbm_bo_map) to draw it with cairo, and
+// that map crashes on some drivers (Mali / Panfrost: SIGSEGV in
+// AcceleratedBackingStore::BufferGBM::didUpdateContents, webkit2gtk 2.54).
+// With shared memory the web process does the same read back itself, so
+// the frame costs the same copy (docs/backends.md).
+bool ShouldForceWebKitShm(bool gdk_display_is_x11,
+                          const std::function<const char*(const char*)>& env);
 
 // --- The cookie store per profile (CEF on Linux)
 // -------------------------------------------------------------------

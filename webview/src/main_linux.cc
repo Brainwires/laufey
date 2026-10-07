@@ -4,6 +4,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
+#include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "runtime_loader.h"
 
@@ -127,6 +128,24 @@ int main(int argc, char* argv[]) {
   laufey_common::InitNotificationsAtLaunch();
 
   gtk_init(&argc, &argv);
+
+  // WebKitGTK on an X11 display: frames in shared memory
+  // (WEBKIT_DMABUF_RENDERER_FORCE_SHM=1) unless the user chose a renderer
+  // setting. GTK 3 can't show a GPU buffer on X11, so WebKit's UI process
+  // maps each GBM buffer to the CPU to draw it; that map crashes on Mali /
+  // Panfrost (SIGSEGV in AcceleratedBackingStore::BufferGBM::
+  // didUpdateContents, webkit2gtk 2.54), and shared memory moves the same
+  // read back into the web process. Before the first web view: WebKit reads
+  // it when it starts the web process. See docs/backends.md.
+  {
+    GdkDisplay* display = gdk_display_get_default();
+    bool x11 =
+        display && g_strcmp0(G_OBJECT_TYPE_NAME(display), "GdkX11Display") == 0;
+    if (laufey_common::ShouldForceWebKitShm(
+            x11, [](const char* name) { return getenv(name); })) {
+      setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", 0);
+    }
+  }
 
   laufey_common::SecondInstanceUiHooks single_instance_hooks;
   single_instance_hooks.post = [](void*, void (*task)(void*), void* data) {

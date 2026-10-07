@@ -85,10 +85,12 @@ pub fn capabilities() -> u32 {
     | CAP_SCREENS
     | CAP_NORMAL_BOUNDS
     | CAP_KEEP_ALIVE;
-  // winit picks Wayland when a Wayland display exists; Wayland clients can't
-  // place their windows.
-  let wayland = cfg!(target_os = "linux")
-    && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+  // winit picks Wayland when a Wayland display exists (and falls back to
+  // X11 when none answers); Wayland clients can't place their windows.
+  #[cfg(target_os = "linux")]
+  let wayland = crate::platform::current_display_backend() == "wayland";
+  #[cfg(not(target_os = "linux"))]
+  let wayland = false;
   if !wayland {
     caps |= CAP_SET_POSITION;
   }

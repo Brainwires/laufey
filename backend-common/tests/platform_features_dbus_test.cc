@@ -27,6 +27,9 @@
 
 #include <gio/gio.h>
 #include <glib/gstdio.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -414,8 +417,20 @@ int main() {
   // --- The XEmbed tray: X11 sessions only -----------------------------------
   // In a Wayland session $DISPLAY is Xwayland's: the probe never connects to
   // it (that can start Xwayland). The display here is a socket-less :97, so
-  // an X11 probe connects, fails and finds no tray.
+  // an X11 probe connects, fails and finds no tray. A Wayland session is one
+  // with a Wayland socket that exists (a bound one here).
+  std::string wl_dir = "/tmp/laufey-pf-wl-XXXXXX";
+  EXPECT(mkdtemp(wl_dir.data()) != nullptr);
+  std::string wl_path = wl_dir + "/wayland-test";
+  int wl_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  sockaddr_un wl_addr{};
+  wl_addr.sun_family = AF_UNIX;
+  std::snprintf(wl_addr.sun_path, sizeof(wl_addr.sun_path), "%s",
+                wl_path.c_str());
+  EXPECT(bind(wl_fd, reinterpret_cast<sockaddr*>(&wl_addr), sizeof(wl_addr)) ==
+         0);
   setenv("DISPLAY", ":97", 1);
+  setenv("WAYLAND_DISPLAY", wl_path.c_str(), 1);
   for (const char* session : {"wayland", "tty"}) {
     setenv("XDG_SESSION_TYPE", session, 1);
     ResetPlatformFeaturesForTesting();
@@ -425,6 +440,22 @@ int main() {
     ProbePlatformFeatures();
     EXPECT(!t.tray_xembed);
     EXPECT(XEmbedProbeCountForTesting() == probes);
+  }
+  unsetenv("WAYLAND_DISPLAY");
+  close(wl_fd);
+  unlink(wl_path.c_str());
+  rmdir(wl_dir.c_str());
+  // XDG_SESSION_TYPE=x11, and an Xorg session that says "wayland" with only
+  // $DISPLAY (GDM's autologin into XFCE or i3): both are X11 sessions, and
+  // the XEmbed tray (i3bar's, xfce4-panel's) is looked for.
+  for (const char* session : {"x11", "wayland"}) {
+    setenv("XDG_SESSION_TYPE", session, 1);
+    ResetPlatformFeaturesForTesting();
+    int probes = XEmbedProbeCountForTesting();
+    PlatformFeatures t;
+    ProbeTray(&t);
+    EXPECT(t.session_type == "x11");
+    EXPECT(XEmbedProbeCountForTesting() == probes + 1);
   }
   setenv("XDG_SESSION_TYPE", "x11", 1);
   ResetPlatformFeaturesForTesting();

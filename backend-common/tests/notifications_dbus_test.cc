@@ -391,7 +391,7 @@ int main() {
   EXPECT(n.summary == "Build finished" && n.body == "3 warnings");
   EXPECT(n.replaces == 0);
   EXPECT(n.actions ==
-         std::vector<std::string>({"default", "", "rebuild", "Rebuild"}));
+         std::vector<std::string>({"default", "Open", "rebuild", "Rebuild"}));
   EXPECT(n.desktop_entry == "dev.laufey.notiftest");
   EXPECT(n.urgency == 2 && n.suppress_sound && n.timeout == 0);
   EXPECT(n.has_image && n.image_w == 1);

@@ -35,6 +35,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_platform_features.h"
 #include "wayland/ext-data-control-v1-client-protocol.h"
 
 namespace laufey_common {
@@ -357,10 +358,9 @@ class Client {
   }
 
   bool Connect(Clock::time_point deadline) {
-    // Only in a Wayland session: without WAYLAND_DISPLAY libwayland would try
-    // "wayland-0" anyway.
-    const char* name = getenv("WAYLAND_DISPLAY");
-    if (!name || !*name)
+    // Only with a Wayland display that is there: without WAYLAND_DISPLAY
+    // libwayland would try "wayland-0" anyway.
+    if (DisplayBackend() != "wayland")
       return false;
     display_ = wl_display_connect(nullptr);
     if (!display_)

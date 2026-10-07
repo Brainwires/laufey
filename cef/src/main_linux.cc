@@ -784,25 +784,25 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
       LaufeyApplyPasswordStore(command_line);
     }
 
-    // Native Wayland support. By default CEF/Chromium uses the X11 Ozone
-    // backend and runs through XWayland on Wayland sessions. Mirror the
-    // approach Electron/Chrome standardized on: --ozone-platform-hint=auto,
-    // which selects Wayland on a Wayland session and X11 otherwise. `auto`
-    // keys off XDG_SESSION_TYPE, so it misses sessions that export only
-    // WAYLAND_DISPLAY (sandboxed / nested / misconfigured); cover that gap by
-    // hard-selecting Wayland when WAYLAND_DISPLAY is present. The explicit
-    // --ozone-platform wins over the hint, so the result is: Wayland whenever a
-    // Wayland display exists, auto-detect (X11 in practice) otherwise.
-    // Only the browser process (empty process_type) needs the switch; CEF
-    // propagates the resolved platform to its subprocesses. Respect an explicit
-    // override.
+    // The Ozone platform: the display that is actually there
+    // (laufey_common::DisplayBackend: a Wayland socket that exists, else
+    // $DISPLAY), always as an explicit --ozone-platform. Chromium's own
+    // --ozone-platform-hint=auto keys off XDG_SESSION_TYPE, which is only a
+    // hint and often wrong: GDM's autologin into an Xorg session (XFCE, i3)
+    // leaves it "wayland" with only $DISPLAY set, and Ozone/Wayland then
+    // finds no compositor and opens no window. The hint is left only when
+    // there is no display at all. Only the browser process (empty
+    // process_type) needs the switch; CEF propagates the resolved platform to
+    // its subprocesses. An app's own --ozone-platform or
+    // --ozone-platform-hint wins.
     if (process_type.empty() &&
         !command_line->HasSwitch("ozone-platform-hint") &&
         !command_line->HasSwitch("ozone-platform")) {
-      command_line->AppendSwitchWithValue("ozone-platform-hint", "auto");
-      const char* wayland_display = getenv("WAYLAND_DISPLAY");
-      if (wayland_display && *wayland_display) {
-        command_line->AppendSwitchWithValue("ozone-platform", "wayland");
+      const std::string backend = laufey_common::DisplayBackend();
+      if (backend.empty()) {
+        command_line->AppendSwitchWithValue("ozone-platform-hint", "auto");
+      } else {
+        command_line->AppendSwitchWithValue("ozone-platform", backend);
       }
     }
 

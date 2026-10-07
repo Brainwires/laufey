@@ -38,6 +38,7 @@
 #include "laufey_io.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
+#include "laufey_platform_features.h"
 #include "laufey_system.h"
 
 namespace laufey_common {
@@ -59,10 +60,12 @@ Mode ChooseMode() {
     return Mode::kPortal;
   if (forced == "off")
     return Mode::kNone;
-  if (!GetEnvUtf8("WAYLAND_DISPLAY").empty() ||
-      GetEnvUtf8("XDG_SESSION_TYPE") == "wayland")
+  // The display that is there, not XDG_SESSION_TYPE: an Xorg session that
+  // GDM's autologin labels "wayland" grabs keys through X11 like any other.
+  std::string backend = DisplayBackend();
+  if (backend == "wayland")
     return Mode::kPortal;
-  if (!GetEnvUtf8("DISPLAY").empty())
+  if (backend == "x11")
     return Mode::kX11;
   return Mode::kNone;
 }

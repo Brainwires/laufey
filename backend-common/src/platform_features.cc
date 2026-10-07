@@ -151,6 +151,70 @@ const char* SecretServiceStateName(SecretServiceState state) {
   return "absent";
 }
 
+std::string DisplayBackend(
+    const std::function<const char*(const char*)>& env,
+    const std::function<bool(const std::string&)>& is_socket) {
+  auto value_of = [&env](const char* name) {
+    const char* v = env(name);
+    return std::string(v ? v : "");
+  };
+  if (!value_of("WAYLAND_SOCKET").empty())
+    return "wayland";
+  std::string wayland = value_of("WAYLAND_DISPLAY");
+  if (!wayland.empty()) {
+    std::string path;
+    if (wayland[0] == '/') {
+      path = wayland;
+    } else {
+      std::string runtime = value_of("XDG_RUNTIME_DIR");
+      if (!runtime.empty())
+        path = runtime + "/" + wayland;
+    }
+    if (!path.empty() && is_socket(path))
+      return "wayland";
+  }
+  if (!value_of("DISPLAY").empty())
+    return "x11";
+  return "";
+}
+
+std::string DisplayBackend() {
+#ifdef _WIN32
+  return "";
+#else
+  return DisplayBackend([](const char* name) { return std::getenv(name); },
+                        [](const std::string& path) {
+                          struct stat st;
+                          return stat(path.c_str(), &st) == 0 &&
+                                 S_ISSOCK(st.st_mode);
+                        });
+#endif
+}
+
+std::string ReportedSessionType(const std::string& xdg_session_type,
+                                const std::string& display_backend) {
+  if (xdg_session_type.empty())
+    return "unknown";
+  if ((xdg_session_type == "x11" || xdg_session_type == "wayland") &&
+      !display_backend.empty()) {
+    return display_backend;
+  }
+  return xdg_session_type;
+}
+
+bool ShouldForceWebKitShm(bool gdk_display_is_x11,
+                          const std::function<const char*(const char*)>& env) {
+  if (!gdk_display_is_x11)
+    return false;
+  for (const char* name :
+       {"WEBKIT_DMABUF_RENDERER_FORCE_SHM", "WEBKIT_DISABLE_DMABUF_RENDERER",
+        "WEBKIT_DISABLE_COMPOSITING_MODE"}) {
+    if (env(name) != nullptr)
+      return false;
+  }
+  return true;
+}
+
 bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env) {
   // base::nix::GetDesktopEnvironment: XDG_CURRENT_DESKTOP's values in
   // priority order; the first one Chromium knows decides. os_crypt's
@@ -286,6 +350,8 @@ std::string NotificationUnavailableReason(const PlatformFeatures& f) {
     return "";
   if (!f.session_bus)
     return "no D-Bus session bus";
+  if (f.notification_activatable && !f.notification_activation_error.empty())
+    return f.notification_activation_error;
   if (f.notification_activatable) {
     return "no notification server is running; D-Bus can start one for "
            "org.freedesktop.Notifications (it is tried when notifications "
