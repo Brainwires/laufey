@@ -563,8 +563,6 @@ if(LAUFEY_BUILD_TESTS)
     set_tests_properties(laufey_shortcuts_portal_test PROPERTIES
                          SKIP_RETURN_CODE 77)
 
-    # The UI-thread exit guard: exit() from another thread parks the UI
-    # thread before the libraries' destructors run.
     # Quitting ends the GTK dialogs as a cancel, from the UI thread or
     # another one, nested ones too, and none is shown once quitting (private
     # Xvfb; skipped without it).
@@ -588,6 +586,8 @@ if(LAUFEY_BUILD_TESTS)
     add_test(NAME laufey_termination_signals_test
              COMMAND laufey_termination_signals_test)
 
+    # The UI-thread exit guard: exit() from another thread parks the UI
+    # thread before the libraries' destructors run.
     # The "late" case's library: exit-time teardown registered after the
     # guard, and an exit() called from a library, as the runtime's is.
     add_library(laufey_exit_guard_late_lib MODULE

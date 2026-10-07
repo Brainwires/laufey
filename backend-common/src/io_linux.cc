@@ -128,11 +128,17 @@ void ArmExitWatchdog(int status) {
 
 // Set by InstallUiExitGuard: until then exit() parks nothing.
 std::atomic<bool> g_exit_guard_installed{false};
+// The process that installed the guard, whose UI thread it parks. A child
+// forked without exec inherits the guard (and the on_exit handler) but not
+// the UI thread: its exit parks nothing.
+std::atomic<pid_t> g_exit_guard_pid{0};
 // The first exit to get here parks the UI thread (exit() below, before any
 // exit handler; else the guard's own handler); a later one has nothing to do.
 std::atomic<bool> g_ui_parked_for_exit{false};
 
 void ParkUiThreadForExit(int status) {
+  if (getpid() != g_exit_guard_pid.load())
+    return;
   if (g_ui_parked_for_exit.exchange(true))
     return;
   ArmExitWatchdog(status);
@@ -210,12 +216,14 @@ void InstallUiExitGuard() {
   // on_exit: the watchdog ends the process with the status exit was given.
   std::call_once(once, [] {
     g_exit_watchdog_seconds = ExitWatchdogSecondsFromEnv();
+    g_exit_guard_pid.store(getpid());
     on_exit(ParkUiThreadOnExit, nullptr);
     g_exit_guard_installed.store(true);
   });
 #else
   std::call_once(once, [] {
     g_exit_watchdog_seconds = ExitWatchdogSecondsFromEnv();
+    g_exit_guard_pid.store(getpid());
     atexit(ParkUiThreadAtExit);
     g_exit_guard_installed.store(true);
   });

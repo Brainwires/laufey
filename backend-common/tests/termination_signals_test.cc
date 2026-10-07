@@ -11,8 +11,9 @@
 // With the UI thread stuck in a nested call that never returns to the loop
 // (CEF blocked in xcb_wait_for_reply before its first window), the signal
 // still ends the process: by the signal, within the quit deadline
-// (LAUFEY_SIGNAL_QUIT_DEADLINE_SECS); and a quit that the loop has taken but
-// that runs past the deadline is not cut short.
+// (LAUFEY_SIGNAL_QUIT_DEADLINE_SECS), also when the stuck thread holds
+// stderr's stdio lock (in a write of its own); and a quit that the loop has
+// taken but that runs past the deadline is not cut short.
 
 #include <glib.h>
 #include <poll.h>
@@ -107,6 +108,28 @@ int Run(int first, int second) {
   }).detach();
   g_idle_add(
       [](gpointer) -> gboolean {
+        for (;;)
+          poll(nullptr, 0, -1);
+        return G_SOURCE_REMOVE;
+      },
+      nullptr);
+  GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
+  g_main_loop_run(loop);
+  _exit(0);
+}
+
+// Child: as StuckChild, but the UI thread takes stderr's stdio lock before it
+// blocks (a thread stuck writing to stderr), and the signal is SIGTERM. The
+// watcher thread must not wait for that lock. Exits 0 if the block ever ends.
+[[noreturn]] void StuckHoldingStderrChild() {
+  InstallTerminationSignalHandlers(OnQuit);
+  std::thread([] {
+    usleep(300 * 1000);
+    kill(getpid(), SIGTERM);
+  }).detach();
+  g_idle_add(
+      [](gpointer) -> gboolean {
+        flockfile(stderr);
         for (;;)
           poll(nullptr, 0, -1);
         return G_SOURCE_REMOVE;
@@ -217,6 +240,20 @@ int main() {
     Expect(result == -sig,
            "a signal ends the process when the UI thread is stuck");
     Expect(elapsed < 5000, "within the quit deadline");
+  }
+  // The same with the stuck thread holding stderr's lock.
+  {
+    long long elapsed = 0;
+    int result =
+        RunWithDeadline([] { StuckHoldingStderrChild(); }, 8000, &elapsed);
+    if (result != -SIGTERM)
+      std::fprintf(stderr,
+                   "laufey_termination_signals_test: stuck UI thread holding "
+                   "stderr: result %d after %lld ms\n",
+                   result, elapsed);
+    Expect(result == -SIGTERM,
+           "a signal ends the process when the stuck thread holds stderr");
+    Expect(elapsed < 5000, "within the quit deadline, stderr held");
   }
   // A quit the loop took is not cut short by the deadline.
   {

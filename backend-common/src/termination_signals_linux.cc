@@ -32,6 +32,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <iostream>
@@ -159,7 +160,6 @@ void* Watcher(void*) {
       g_quit_taken = false;
       seconds = g_deadline_seconds;
     }
-    std::cerr << "laufey: " << strsignal(sig) << ", quitting" << std::endl;
     // An idle source attached to the default context always runs on the
     // thread that iterates it (g_main_context_invoke would run it here when
     // the UI thread doesn't hold the context, as when it is stuck outside
@@ -169,6 +169,16 @@ void* Watcher(void*) {
     g_source_set_callback(source, QuitOnUiThread, nullptr, nullptr);
     g_source_attach(source, nullptr);
     g_source_unref(source);
+    // With write(2), not stdio: a stuck thread may hold stderr's lock (in a
+    // write of its own), and the deadline below must still be kept.
+    char msg[96];
+    int len = snprintf(msg, sizeof(msg), "laufey: %s, quitting\n",
+                       strsignal(sig));
+    if (len > 0) {
+      size_t n = std::min(static_cast<size_t>(len), sizeof(msg) - 1);
+      ssize_t written = write(STDERR_FILENO, msg, n);
+      (void)written;
+    }
 
     std::unique_lock<std::mutex> lock(g_mutex);
     auto taken = [] { return g_quit_taken || !g_installed; };

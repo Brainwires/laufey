@@ -25,6 +25,9 @@
 //            teardown runs before any handler the guard registered: the UI
 //            thread must be parked before it, or it faults (as a WebKitGTK
 //            paint did on libgbm's unloaded backend).
+//   forked   a child forked without exec (from another thread, as a library
+//            may) inherits the guard but not the UI thread: its exit()
+//            parks nothing and returns at once, with its status.
 
 #include <dlfcn.h>
 #include <glib.h>
@@ -174,7 +177,7 @@ int RunCase(const std::string& name) {
     atexit(CheckDispatchAfterPark);
   } else if (name == "watchdog") {
     atexit(HangForever);
-  } else if (name != "late") {
+  } else if (name != "late" && name != "forked") {
     Fail("unknown case");
   }
   laufey_common::InstallUiExitGuard();
@@ -188,6 +191,43 @@ int RunCase(const std::string& name) {
     return 2;  // not reached
   }
   Busy();
+  if (name == "forked") {
+    After(200, [] {
+      auto start = std::chrono::steady_clock::now();
+      pid_t pid = fork();
+      if (pid == 0)
+        exit(5);
+      if (pid < 0)
+        Fail("fork failed");
+      int status = 0;
+      while (waitpid(pid, &status, WNOHANG) != pid) {
+        if (std::chrono::steady_clock::now() - start >
+            std::chrono::seconds(8)) {
+          kill(pid, SIGKILL);
+          waitpid(pid, &status, 0);
+          Fail("a forked child's exit() hung");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      auto took = std::chrono::steady_clock::now() - start;
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 5)
+        Fail("a forked child's exit() lost its status");
+      if (took > std::chrono::milliseconds(500)) {
+        std::fprintf(stderr,
+                     "laufey_exit_guard_test: the forked child's exit() took "
+                     "%lld ms\n",
+                     static_cast<long long>(
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             took)
+                             .count()));
+        Fail("a forked child's exit() waited for a UI thread it lacks");
+      }
+      _exit(0);
+    });
+    GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
+    g_main_loop_run(loop);
+    return 2;  // not reached
+  }
   if (name == "nested") {
     // The UI thread enters a nested loop (a modal dialog) and is still in it
     // when exit comes.
@@ -299,7 +339,7 @@ int main(int argc, char** argv) {
   if (argc > 1)
     return RunCase(argv[1]);
   std::chrono::milliseconds took{0};
-  for (const char* name : {"busy", "nested", "dispatch", "late"}) {
+  for (const char* name : {"busy", "nested", "dispatch", "late", "forked"}) {
     if (!Child(argv[0], name, 0, std::chrono::seconds(10), &took))
       return 1;
   }
