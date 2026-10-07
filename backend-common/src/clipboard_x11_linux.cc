@@ -35,6 +35,7 @@
 #include <thread>
 
 #include "laufey_io.h"
+#include "laufey_platform_features.h"
 
 namespace laufey_common {
 namespace x11_clipboard {
@@ -1142,9 +1143,10 @@ bool Enabled() {
     const char* forced = getenv("LAUFEY_CLIPBOARD");
     if (forced && strcmp(forced, "gtk") == 0)
       return false;
-    const char* wayland = getenv("WAYLAND_DISPLAY");
+    // A Wayland display that is there (not XDG_SESSION_TYPE, nor a stale
+    // $WAYLAND_DISPLAY) with Xwayland's $DISPLAY beside it.
     const char* x11 = getenv("DISPLAY");
-    return wayland && *wayland && x11 && *x11 &&
+    return DisplayBackend() == "wayland" && x11 && *x11 &&
            data_control::CompositorIsMutter();
   }();
   return enabled;

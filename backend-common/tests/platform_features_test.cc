@@ -54,6 +54,65 @@ int main() {
   unsetenv("WAYLAND_DISPLAY");
 #endif
 
+  // --- The display that is there (not XDG_SESSION_TYPE) --------------------
+  {
+    using Vars = std::map<std::string, std::string>;
+    auto backend = [](const Vars& vars, const std::vector<std::string>& socks) {
+      return DisplayBackend(
+          [&vars](const char* name) -> const char* {
+            auto it = vars.find(name);
+            return it == vars.end() ? nullptr : it->second.c_str();
+          },
+          [&socks](const std::string& path) {
+            for (const auto& s : socks)
+              if (s == path)
+                return true;
+            return false;
+          });
+    };
+    // GDM's autologin into Xorg XFCE / i3: logind and the env say
+    // "wayland", only $DISPLAY is there. X11 (CEF opened no window when
+    // Chromium's ozone hint followed XDG_SESSION_TYPE).
+    EXPECT(backend({{"XDG_SESSION_TYPE", "wayland"}, {"DISPLAY", ":0"}}, {}) ==
+           "x11");
+    // A stale $WAYLAND_DISPLAY with no socket behind it.
+    EXPECT(backend({{"WAYLAND_DISPLAY", "wayland-0"},
+                    {"XDG_RUNTIME_DIR", "/run/user/1000"},
+                    {"DISPLAY", ":0"}},
+                   {}) == "x11");
+    EXPECT(backend({{"WAYLAND_DISPLAY", "wayland-0"},
+                    {"XDG_RUNTIME_DIR", "/run/user/1000"},
+                    {"DISPLAY", ":0"}},
+                   {"/run/user/1000/wayland-0"}) == "wayland");
+    EXPECT(backend({{"WAYLAND_DISPLAY", "/tmp/wl"}}, {"/tmp/wl"}) == "wayland");
+    // Relative without XDG_RUNTIME_DIR: libwayland can't find it either.
+    EXPECT(backend({{"WAYLAND_DISPLAY", "wayland-0"}}, {"wayland-0"}).empty());
+    EXPECT(backend({{"WAYLAND_SOCKET", "5"}}, {}) == "wayland");
+    EXPECT(backend({{"XDG_SESSION_TYPE", "x11"}}, {}).empty());
+    EXPECT(backend({{"DISPLAY", ""}, {"WAYLAND_DISPLAY", ""}}, {}).empty());
+
+    EXPECT(ReportedSessionType("wayland", "x11") == "x11");
+    EXPECT(ReportedSessionType("x11", "wayland") == "wayland");
+    EXPECT(ReportedSessionType("wayland", "wayland") == "wayland");
+    EXPECT(ReportedSessionType("wayland", "") == "wayland");
+    // A display never makes a tty / unknown session graphical.
+    EXPECT(ReportedSessionType("tty", "x11") == "tty");
+    EXPECT(ReportedSessionType("", "x11") == "unknown");
+
+    // WebKitGTK on X11: shared-memory frames unless the user chose.
+    auto none = [](const char*) -> const char* { return nullptr; };
+    EXPECT(ShouldForceWebKitShm(true, none));
+    EXPECT(!ShouldForceWebKitShm(false, none));
+    for (const char* user :
+         {"WEBKIT_DMABUF_RENDERER_FORCE_SHM", "WEBKIT_DISABLE_DMABUF_RENDERER",
+          "WEBKIT_DISABLE_COMPOSITING_MODE"}) {
+      std::string set = user;
+      EXPECT(!ShouldForceWebKitShm(true, [&set](const char* name) {
+        return set == name ? "0" : nullptr;
+      }));
+    }
+  }
+
   // --- The cookie store ------------------------------------------------------
   PlatformFeatures f = Linux();
   EXPECT(!NeedsBasicPasswordStore(f));
@@ -539,6 +598,14 @@ int main() {
                     "notification server"));
     n.notification_activatable = true;
     EXPECT(Contains(NotificationUnavailableReason(n), "can start one"));
+    // Activatable, but the start failed (two units for the name): D-Bus's
+    // reason, not "can start one".
+    n.notification_activation_error =
+        "D-Bus could not start the notification server for "
+        "org.freedesktop.Notifications: unit is invalid";
+    EXPECT(Contains(NotificationUnavailableReason(n), "unit is invalid"));
+    EXPECT(!Contains(NotificationUnavailableReason(n), "can start one"));
+    n.notification_activation_error.clear();
     n.session_bus = false;
     EXPECT(NotificationUnavailableReason(n) == "no D-Bus session bus");
     EXPECT(NotificationUnavailableReason(mac).empty());

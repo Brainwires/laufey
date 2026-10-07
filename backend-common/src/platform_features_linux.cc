@@ -18,9 +18,11 @@
 //     kwalletd answers (the one Chromium's rule names first, at its own
 //     object path), and whether its wallet is open (kwalletd's isEnabled /
 //     networkWallet / isOpen: only an open wallet answers Chromium);
-//   - the session type: XDG_SESSION_TYPE as set, never guessed from the
-//     display variables (Xvfb, cron and systemd services that run
-//     `xvfb-run` have a $DISPLAY and no one in front of it). A session is
+//   - the session type: XDG_SESSION_TYPE as set, never made graphical by
+//     the display variables alone (Xvfb, cron and systemd services that run
+//     `xvfb-run` have a $DISPLAY and no one in front of it); a graphical one
+//     names the display that is there (ReportedSessionType: GDM's autologin
+//     into Xorg XFCE or i3 says "wayland" with only $DISPLAY). A session is
 //     graphical (someone could answer a prompt) only when XDG_SESSION_TYPE
 //     says x11 or wayland and, where logind can say, the process's logind
 //     session is of that type and active;
@@ -94,12 +96,13 @@ std::string Env(const char* name) {
   return v ? v : "";
 }
 
-// XDG_SESSION_TYPE as set ("unknown" when unset). Never from $DISPLAY or
-// $WAYLAND_DISPLAY: a display alone (Xvfb, xvfb-run under cron or a systemd
-// service, a forwarded X connection) says nothing about who is there.
+// XDG_SESSION_TYPE as set ("unknown" when unset), a graphical one corrected
+// to the display that is there (ReportedSessionType). Never made graphical
+// by $DISPLAY or $WAYLAND_DISPLAY alone: a display (Xvfb, xvfb-run under
+// cron or a systemd service, a forwarded X connection) says nothing about
+// who is there.
 std::string SessionType() {
-  std::string t = Env("XDG_SESSION_TYPE");
-  return t.empty() ? "unknown" : t;
+  return ReportedSessionType(Env("XDG_SESSION_TYPE"), DisplayBackend());
 }
 
 bool HasDisplay() {
@@ -700,6 +703,7 @@ PlatformFeatures ProbePlatformFeatures() {
   // timers, the server's capabilities), and the launcher badge.
   NotificationFacts facts = LinuxNotificationFacts();
   f.notification_transport = facts.transport;
+  f.notification_activation_error = facts.activation_error;
   f.notification_cold_start = facts.cold_start;
   f.notification_cold_start_reason = facts.cold_start_reason;
   f.notification_schedule_while_closed = facts.schedule_while_closed;

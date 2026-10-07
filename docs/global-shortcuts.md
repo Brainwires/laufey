@@ -126,10 +126,11 @@ with the process.
 ## Wayland
 
 Wayland gives no client a way to grab keys, so laufey asks the XDG desktop
-portal. In a Wayland session (`WAYLAND_DISPLAY` set or
-`XDG_SESSION_TYPE=wayland`) the backend probes the portal's GlobalShortcuts
-interface once; when it answers, `system_capabilities` reports both
-`GLOBAL_SHORTCUTS` and `SHORTCUTS_USER_BINDS`.
+portal. On a Wayland display (`WAYLAND_DISPLAY` names a socket that exists;
+`XDG_SESSION_TYPE` is not read, see [Backends](backends.md)) the backend probes
+the portal's GlobalShortcuts interface once; when it answers,
+`system_capabilities` reports both `GLOBAL_SHORTCUTS` and
+`SHORTCUTS_USER_BINDS`.
 
 - Each shortcut gets its own portal session; `BindShortcuts` passes the
   canonical accelerator as the shortcut's id and description and the XDG trigger

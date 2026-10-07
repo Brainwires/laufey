@@ -586,6 +586,39 @@ void TestLinuxActivationHelpers() {
   EXPECT(!HasDBusActivationArg({"--", "--laufey-dbus-activated"}));
   EXPECT(!HasDBusActivationArg({"acme://x"}));
 
+  // The portal's registry refused: not running (XFCE / i3 under GDM, whose
+  // portal unit needs graphical-session.target) is not "too old".
+  {
+    auto has = [](const std::string& s, const char* needle) {
+      return s.find(needle) != std::string::npos;
+    };
+    std::string r = PortalRegistryFailureReason(
+        "org.freedesktop.DBus.Error.NameHasNoOwner",
+        "Could not activate remote peer 'org.freedesktop.portal.Desktop': "
+        "activation request failed: a concurrent deactivation request is "
+        "already in progress");
+    EXPECT(has(r, "not running and D-Bus could not start it"));
+    EXPECT(!has(r, "1.19"));
+    EXPECT(has(r, "activation request failed"));
+    EXPECT(has(PortalRegistryFailureReason(
+                   "org.freedesktop.DBus.Error.ServiceUnknown", "x"),
+               "not running"));
+    EXPECT(has(PortalRegistryFailureReason(
+                   "org.freedesktop.DBus.Error.Spawn.ChildExited", "x"),
+               "not running"));
+    EXPECT(has(PortalRegistryFailureReason("", ""), "not running"));
+    EXPECT(has(PortalRegistryFailureReason("", ""), "no answer"));
+    r = PortalRegistryFailureReason("org.freedesktop.DBus.Error.UnknownMethod",
+                                    "No such interface");
+    EXPECT(has(r, "1.19 or later"));
+    EXPECT(has(PortalRegistryFailureReason(
+                   "org.freedesktop.DBus.Error.UnknownInterface", "x"),
+               "1.19 or later"));
+    r = PortalRegistryFailureReason("org.freedesktop.DBus.Error.AccessDenied",
+                                    "denied");
+    EXPECT(has(r, "refused") && !has(r, "1.19") && !has(r, "not running"));
+  }
+
   EXPECT(IsValidApplicationId("dev.denext.kitchen-sink"));
   EXPECT(IsValidApplicationId("org.example.App_2"));
   EXPECT(!IsValidApplicationId("app"));     // one element

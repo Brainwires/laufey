@@ -174,16 +174,70 @@ impl PlatformFeatures {
   }
 }
 
-/// The session type: XDG_SESSION_TYPE as set, `"unknown"` when unset. Never
-/// guessed from `$DISPLAY` / `$WAYLAND_DISPLAY`: a display alone (Xvfb,
-/// `xvfb-run` under cron or a systemd service, a forwarded X connection)
-/// says nothing about who is in front of it.
+/// The display server this process's windows go to, from the display that
+/// is actually there (backend-common's `DisplayBackend`): `"wayland"` when
+/// `$WAYLAND_DISPLAY` names a socket that exists (absolute, else under
+/// `$XDG_RUNTIME_DIR`) or `$WAYLAND_SOCKET` is set; else `"x11"` when
+/// `$DISPLAY` is set; else `""`. `$XDG_SESSION_TYPE` is only a hint and is
+/// not read: GDM's autologin into an Xorg session (XFCE, i3) leaves it
+/// `"wayland"` with only `$DISPLAY` set.
 #[cfg(any(target_os = "linux", test))]
-fn session_type(xdg_session_type: Option<&str>) -> String {
-  xdg_session_type
-    .filter(|t| !t.is_empty())
-    .unwrap_or("unknown")
-    .to_string()
+pub(crate) fn display_backend(
+  env: impl Fn(&str) -> Option<String>,
+  is_socket: impl Fn(&std::path::Path) -> bool,
+) -> &'static str {
+  let env = |name: &str| env(name).filter(|v| !v.is_empty());
+  if env("WAYLAND_SOCKET").is_some() {
+    return "wayland";
+  }
+  if let Some(name) = env("WAYLAND_DISPLAY") {
+    let path = if name.starts_with('/') {
+      Some(std::path::PathBuf::from(&name))
+    } else {
+      env("XDG_RUNTIME_DIR").map(|dir| std::path::Path::new(&dir).join(&name))
+    };
+    if path.is_some_and(|p| is_socket(&p)) {
+      return "wayland";
+    }
+  }
+  if env("DISPLAY").is_some() {
+    return "x11";
+  }
+  ""
+}
+
+/// [`display_backend`] from this process's environment and file system.
+#[cfg(target_os = "linux")]
+pub(crate) fn current_display_backend() -> &'static str {
+  use std::os::unix::fs::FileTypeExt;
+  display_backend(
+    |name| std::env::var(name).ok(),
+    |path| {
+      std::fs::metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+    },
+  )
+}
+
+/// The session type: XDG_SESSION_TYPE as set, `"unknown"` when unset; a
+/// graphical one (`x11` / `wayland`) names the display that is there
+/// (`display_backend`, when there is one). Never made graphical by
+/// `$DISPLAY` / `$WAYLAND_DISPLAY` alone: a display (Xvfb, `xvfb-run` under
+/// cron or a systemd service, a forwarded X connection) says nothing about
+/// who is in front of it.
+#[cfg(any(target_os = "linux", test))]
+fn session_type(
+  xdg_session_type: Option<&str>,
+  display_backend: &str,
+) -> String {
+  match xdg_session_type.filter(|t| !t.is_empty()) {
+    None => "unknown".to_string(),
+    Some("x11" | "wayland") if !display_backend.is_empty() => {
+      display_backend.to_string()
+    }
+    Some(t) => t.to_string(),
+  }
 }
 
 /// Whether someone could answer a prompt (a keyring unlock) here: the
@@ -470,7 +524,10 @@ mod linux {
   }
 
   fn session_type() -> String {
-    super::session_type(env("XDG_SESSION_TYPE").as_deref())
+    super::session_type(
+      env("XDG_SESSION_TYPE").as_deref(),
+      super::current_display_backend(),
+    )
   }
 
   /// This process's logind session (XDG_SESSION_ID's, else the process's
@@ -844,13 +901,72 @@ mod tests {
 
   #[test]
   fn session_type_from_env() {
-    assert_eq!(session_type(Some("wayland")), "wayland");
-    assert_eq!(session_type(Some("tty")), "tty");
-    assert_eq!(session_type(Some("mir")), "mir");
-    // Never from the display variables (Xvfb, cron, xvfb-run under
-    // systemd): unset is unknown.
-    assert_eq!(session_type(Some("")), "unknown");
-    assert_eq!(session_type(None), "unknown");
+    assert_eq!(session_type(Some("wayland"), ""), "wayland");
+    assert_eq!(session_type(Some("wayland"), "wayland"), "wayland");
+    assert_eq!(session_type(Some("x11"), "x11"), "x11");
+    // GDM's autologin into Xorg (XFCE, i3): "wayland" with only $DISPLAY.
+    assert_eq!(session_type(Some("wayland"), "x11"), "x11");
+    assert_eq!(session_type(Some("x11"), "wayland"), "wayland");
+    assert_eq!(session_type(Some("tty"), "x11"), "tty");
+    assert_eq!(session_type(Some("mir"), ""), "mir");
+    // Never made graphical by the display variables (Xvfb, cron, xvfb-run
+    // under systemd): unset is unknown.
+    assert_eq!(session_type(Some(""), "x11"), "unknown");
+    assert_eq!(session_type(None, "wayland"), "unknown");
+  }
+
+  #[test]
+  fn display_backend_from_the_display_that_is_there() {
+    use std::collections::HashMap;
+    let run = |vars: &[(&str, &str)], sockets: &[&str]| {
+      let vars: HashMap<String, String> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+      let sockets: Vec<std::path::PathBuf> =
+        sockets.iter().map(std::path::PathBuf::from).collect();
+      display_backend(
+        |n| vars.get(n).cloned(),
+        |p| sockets.iter().any(|s| s == p),
+      )
+    };
+    // XDG_SESSION_TYPE=wayland, DISPLAY only (the Pi's XFCE / i3).
+    assert_eq!(
+      run(&[("XDG_SESSION_TYPE", "wayland"), ("DISPLAY", ":0")], &[]),
+      "x11"
+    );
+    // A stale WAYLAND_DISPLAY with no socket behind it.
+    assert_eq!(
+      run(
+        &[
+          ("WAYLAND_DISPLAY", "wayland-0"),
+          ("XDG_RUNTIME_DIR", "/run/user/1"),
+          ("DISPLAY", ":0")
+        ],
+        &[]
+      ),
+      "x11"
+    );
+    assert_eq!(
+      run(
+        &[
+          ("WAYLAND_DISPLAY", "wayland-0"),
+          ("XDG_RUNTIME_DIR", "/run/user/1"),
+          ("DISPLAY", ":0")
+        ],
+        &["/run/user/1/wayland-0"]
+      ),
+      "wayland"
+    );
+    assert_eq!(
+      run(&[("WAYLAND_DISPLAY", "/tmp/w")], &["/tmp/w"]),
+      "wayland"
+    );
+    // Relative without XDG_RUNTIME_DIR: libwayland can't find it either.
+    assert_eq!(run(&[("WAYLAND_DISPLAY", "wayland-0")], &["wayland-0"]), "");
+    assert_eq!(run(&[("WAYLAND_SOCKET", "5")], &[]), "wayland");
+    assert_eq!(run(&[("XDG_SESSION_TYPE", "x11")], &[]), "");
+    assert_eq!(run(&[("DISPLAY", "")], &[]), "");
   }
 
   #[test]

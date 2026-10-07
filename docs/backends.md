@@ -256,6 +256,37 @@ HasAuthorityComponent) on the WebView2 environment — so each is a real
 (WebView2: the first one) is created; register schemes before the first window.
 See [Custom URL schemes](custom-schemes.md).
 
+### WebKitGTK on X11: shared-memory frames
+
+On an X11 display the host sets `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` before the
+first web view, unless the user set it, `WEBKIT_DISABLE_DMABUF_RENDERER` or
+`WEBKIT_DISABLE_COMPOSITING_MODE` (any value) themselves.
+
+GTK 3 draws with GLX on X11, which WebKit's EGL display can't share, so its UI
+process takes each frame as a GBM buffer and maps it to the CPU (`gbm_bo_map`)
+to paint it with cairo (`AcceleratedBackingStore::BufferGBM`). On Mali /
+Panfrost (Fedora 44, webkit2gtk4.1 2.54.0, XFCE and i3) that map crashes the
+app: SIGSEGV in `BufferGBM::didUpdateContents`. With shared memory the web
+process reads the frame back itself (`BufferSHM`), so the frame costs the same
+one copy to the CPU on every GPU; only the side of the process boundary changes.
+On Wayland GTK 3 shares EGL with WebKit and keeps the zero-copy `BufferEGLImage`
+path; nothing is set there. `WEBKIT_DISABLE_DMABUF_RENDERER=1` is not used
+instead: with it the web process aborts in `FrameRenderer::graphicsLayerFactory`
+on the first `document.startViewTransition()`.
+
+## Display: Wayland or X11 (Linux)
+
+Each backend goes to the display that is there, never by `XDG_SESSION_TYPE`,
+which is only a hint (GDM's autologin into an Xorg session such as XFCE or i3
+leaves it `wayland` with only `$DISPLAY` set): Wayland when `$WAYLAND_DISPLAY`
+names a socket that exists (absolute, else under `$XDG_RUNTIME_DIR`) or
+`$WAYLAND_SOCKET` is set, else X11 when `$DISPLAY` is set. CEF passes it as an
+explicit `--ozone-platform=` (an app's own `--ozone-platform` or
+`--ozone-platform-hint` wins; with no display at all,
+`--ozone-platform-hint=auto`). The clipboard and global shortcut backends,
+window placement and `platformFeatures().sessionType` follow the same choice.
+WebKitGTK and Winit choose through GTK and winit, which connect the same way.
+
 ## Winit
 
 Engine-free. It creates native windows via

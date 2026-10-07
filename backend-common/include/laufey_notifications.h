@@ -300,6 +300,18 @@ std::string SystemdCalendarUtc(int64_t at_ms);
 // reads the body as markup ("body-markup").
 std::string EscapeNotificationMarkup(const std::string& text);
 
+// Why xdg-desktop-portal's host registry (org.freedesktop.host.portal.
+// Registry.Register) refused this app's id, from the D-Bus error's name
+// (`error_name`, empty when it has none: a local timeout) and message. A
+// portal that isn't running and couldn't be started (NameHasNoOwner,
+// ServiceUnknown, a failed spawn, no reply, a timeout) is told apart from
+// one too old to have the registry (UnknownMethod / UnknownInterface /
+// UnknownObject: xdg-desktop-portal before 1.19). On XFCE or i3 started by
+// GDM the portal is installed but never starts: its systemd unit has
+// Requisite=graphical-session.target, which those sessions don't reach.
+std::string PortalRegistryFailureReason(const std::string& error_name,
+                                        const std::string& message);
+
 // What the Linux notification platform can do in this session, with the
 // reason for each "no" (platform_features). Empty transport: no server.
 struct NotificationFacts {
@@ -310,6 +322,9 @@ struct NotificationFacts {
   std::string schedule_reason;
   bool server_caps_known = false;
   std::vector<std::string> server_caps;  // the server's GetCapabilities
+  // Nothing owns org.freedesktop.Notifications and D-Bus failed to start
+  // the activatable one: its error (empty otherwise).
+  std::string activation_error;
 };
 
 // Linux: the facts above, read from the notification platform (created on
