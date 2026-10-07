@@ -197,6 +197,14 @@ elseif(UNIX)
   target_compile_options(laufey_backend_common PUBLIC
     ${LAUFEY_COMMON_GTK_CFLAGS_OTHER}
   )
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The UI exit guard's exit() (src/io_linux.cc) is exported from every
+    # executable that links this library, so a library the host loads (the
+    # runtime, with dlopen) calls it rather than the C library's.
+    target_link_options(laufey_backend_common INTERFACE
+      "LINKER:--export-dynamic-symbol=exit"
+    )
+  endif()
 endif()
 
 # The single-instance server runs on its own thread.
@@ -580,10 +588,19 @@ if(LAUFEY_BUILD_TESTS)
     add_test(NAME laufey_termination_signals_test
              COMMAND laufey_termination_signals_test)
 
+    # The "late" case's library: exit-time teardown registered after the
+    # guard, and an exit() called from a library, as the runtime's is.
+    add_library(laufey_exit_guard_late_lib MODULE
+                tests/exit_guard_late_lib.cc)
     add_executable(laufey_exit_guard_test tests/exit_guard_test.cc)
     target_link_libraries(laufey_exit_guard_test PRIVATE
       laufey_backend_common
+      ${CMAKE_DL_LIBS}
     )
+    target_compile_definitions(laufey_exit_guard_test PRIVATE
+      LAUFEY_EXIT_GUARD_LATE_LIB="$<TARGET_FILE:laufey_exit_guard_late_lib>"
+    )
+    add_dependencies(laufey_exit_guard_test laufey_exit_guard_late_lib)
     add_test(NAME laufey_exit_guard_test COMMAND laufey_exit_guard_test)
 
     # The clipboard through ext-data-control against the session's own

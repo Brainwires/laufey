@@ -146,11 +146,12 @@ int main(int argc, char* argv[]) {
   // WebKitGTK on an X11 display: frames in shared memory
   // (WEBKIT_DMABUF_RENDERER_FORCE_SHM=1) unless the user chose a renderer
   // setting. GTK 3 can't show a GPU buffer on X11, so WebKit's UI process
-  // maps each GBM buffer to the CPU to draw it; that map crashes on Mali /
-  // Panfrost (SIGSEGV in AcceleratedBackingStore::BufferGBM::
-  // didUpdateContents, webkit2gtk 2.54), and shared memory moves the same
-  // read back into the web process. Before the first web view: WebKit reads
-  // it when it starts the web process. See docs/backends.md.
+  // maps each GBM buffer to the CPU to draw it; shared memory moves the same
+  // read back into the web process and keeps this process off libgbm (the
+  // BufferGBM::didUpdateContents crashes on Mali / Panfrost came from
+  // libgbm's teardown during exit(), which the exit guard now runs after
+  // parking the UI thread). Before the first web view: WebKit reads it when
+  // it starts the web process. See docs/backends.md.
   {
     GdkDisplay* display = gdk_display_get_default();
     bool x11 =
