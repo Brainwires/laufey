@@ -81,6 +81,7 @@ if(APPLE)
     src/login_item_mac.mm
     src/auth_session_mac.mm
     src/title_bar_mac.mm
+    src/secret_store_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -158,6 +159,8 @@ elseif(APPLE)
   # macOS 13+, checked at runtime).
   find_library(CARBON_FRAMEWORK Carbon REQUIRED)
   find_library(SERVICEMANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
+  # The secure store (SecItem*, SecAccess, SecTask).
+  find_library(SECURITY_FRAMEWORK Security REQUIRED)
   target_link_libraries(laufey_backend_common PUBLIC
     ${USERNOTIFICATIONS_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
@@ -165,6 +168,7 @@ elseif(APPLE)
     ${AUTHENTICATIONSERVICES_FRAMEWORK}
     ${CARBON_FRAMEWORK}
     ${SERVICEMANAGEMENT_FRAMEWORK}
+    ${SECURITY_FRAMEWORK}
   )
   target_compile_options(laufey_backend_common PRIVATE
     $<$<COMPILE_LANGUAGE:OBJC,OBJCXX>:-fobjc-arc>
@@ -636,5 +640,32 @@ if(LAUFEY_BUILD_TESTS)
     target_link_libraries(laufey_io_mac_test PRIVATE laufey_backend_common)
     target_compile_options(laufey_io_mac_test PRIVATE -fobjc-arc)
     add_test(NAME laufey_io_mac_test COMMAND laufey_io_mac_test)
+
+    # The secure store in the login keychain: round trips, an item another
+    # program wrote (never read here, in the way of a store), and that
+    # another program can't read this app's items: the reader (a program of
+    # its own, prompts off) is refused, and `security find-generic-password
+    # -w` doesn't print the secret (LAUFEY_SECRET_TEST_SECURITY_CLI=1: it
+    # puts up macOS's prompt on a desktop). Skipped (77) without a usable
+    # login keychain unless LAUFEY_SECRET_TEST_REQUIRE=1.
+    add_executable(laufey_secret_store_mac_reader
+                   tests/secret_store_mac_reader.mm)
+    target_link_libraries(laufey_secret_store_mac_reader PRIVATE
+      "-framework Foundation" "-framework Security")
+    target_compile_options(laufey_secret_store_mac_reader PRIVATE -fobjc-arc)
+    add_executable(laufey_secret_store_mac_test
+                   tests/secret_store_mac_test.mm)
+    target_link_libraries(laufey_secret_store_mac_test PRIVATE
+      laufey_backend_common
+    )
+    target_compile_options(laufey_secret_store_mac_test PRIVATE -fobjc-arc)
+    target_compile_definitions(laufey_secret_store_mac_test PRIVATE
+      LAUFEY_SECRET_READER="$<TARGET_FILE:laufey_secret_store_mac_reader>")
+    add_dependencies(laufey_secret_store_mac_test
+                     laufey_secret_store_mac_reader)
+    add_test(NAME laufey_secret_store_mac_test
+             COMMAND laufey_secret_store_mac_test)
+    set_tests_properties(laufey_secret_store_mac_test PROPERTIES
+                         SKIP_RETURN_CODE 77 TIMEOUT 120)
   endif()
 endif()

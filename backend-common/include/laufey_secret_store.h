@@ -1,6 +1,13 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 //
-// The secure store on Linux (API 47): a small secret per (service, account)
+// The secure store (API 47): a small secret per (service, account) in the
+// OS's secret store. On macOS (secret_store_mac.mm) the Keychain through
+// Security.framework in this process: the data-protection keychain when the
+// app is signed with a keychain access group, otherwise the login keychain
+// with an access list that trusts only this app, so another program of the
+// user gets macOS's prompt, never the secret silently. Below: Linux.
+//
+// On Linux: a small secret per (service, account)
 // in the Secret Service (org.freedesktop.secrets: gnome-keyring, KWallet's
 // Secret Service, KeePassXC), through libsecret (dlopen()ed: no build or
 // package dependency beyond libsecret-1.so.0, which every desktop ships)
@@ -75,6 +82,12 @@ int SecretStoreForAbi(const char* service, const char* account,
                       char** reason);
 int SecretDeleteForAbi(const char* service, const char* account,
                        uint32_t timeout_ms, char** reason);
+
+#if defined(__APPLE__)
+// Which keychain the macOS store uses in this process: "data-protection" (the
+// app is signed with a keychain access group) or "login".
+const char* SecretKeychainKind();
+#endif
 
 // --- Pieces with no bus (tested on their own) --------------------------------
 

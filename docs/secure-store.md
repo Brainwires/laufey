@@ -16,9 +16,49 @@ Each returns a `LAUFEY_SECRET_*` status (`OK`, `NOT_FOUND`, `UNAVAILABLE`,
 **blocks the calling thread** for at most about its timeout (0: 20 s): call it
 off the UI thread.
 
-They exist on Linux, in the CEF and WebView backends. On macOS and Windows (and
-on Winit) they are `NULL`: the embedder uses the Keychain / Credential Locker
-itself.
+They exist on Linux and macOS, in the CEF and WebView backends. On Windows (and
+on Winit) they are `NULL`: the embedder uses the Credential Locker itself.
+
+## macOS
+
+The secret is a generic password in the Keychain (`kSecAttrService` = service,
+`kSecAttrAccount` = account, the label as `kSecAttrLabel`), written and read by
+the app's own process through Security.framework (`SecItemAdd` /
+`SecItemCopyMatching` / `SecItemUpdate` / `SecItemDelete`), so the item belongs
+to the app, not to a tool it ran. Which keychain depends on how the app is
+signed:
+
+| The app                                                                                                                                                                   | Keychain                                                                                                                                                                        | Who can read the item                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Signed with a keychain access group: the `com.apple.application-identifier` or `keychain-access-groups` entitlement, which macOS honours only with a provisioning profile | The data-protection keychain (`kSecUseDataProtectionKeychain`), in the app's default access group, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`                           | The app (and apps the developer put in the same access group). No other program, with or without a prompt; `security` doesn't list it.                                                                                                                             |
+| Signed with a Developer ID, no profile                                                                                                                                    | The login keychain, with an access list (`SecAccessCreate`) whose only trusted application is the app (`SecTrustedApplicationCreateFromPath(NULL)`: its designated requirement) | The app, and its updates signed by the same identity, without a prompt. Any other program of the user, `security find-generic-password -w` included, gets macOS's prompt (the keychain password, or the person's Allow / Always Allow), never the secret silently. |
+| Ad-hoc signed or unsigned (a development build)                                                                                                                           | The same                                                                                                                                                                        | The same, but the access list names this exact build: a rebuilt app is another program to macOS, so its first lookup shows the prompt (Always Allow adds it). Other programs are refused as above.                                                                 |
+
+The entitlement is read from the running app's signature
+(`SecTaskCopyValueForEntitlement`); if the data-protection keychain refuses it
+anyway (`errSecMissingEntitlement`), the login keychain is used from then on. An
+item the app wrote to the login keychain before it had the entitlement moves to
+the data-protection keychain on its first lookup.
+
+Items written here carry `kSecAttrCreator` `'Lfy1'`, and every query matches it.
+An item another program wrote for the same service and account (for instance
+with `security add-generic-password`, which makes `/usr/bin/security` the item's
+trusted application, so every program of the user can read it through
+`security`) is never read here: a lookup is `NOT_FOUND`, without a prompt. A
+store refuses while such an item is in the way (`UNAVAILABLE`, "another
+program's keychain item for this service and account is in the way"). Moving
+those items over is the embedder's job, with the tool that wrote them: read it,
+delete it, then store it here.
+
+Prompts: every call runs on one serial queue. A store or a delete never prompts
+(user interaction is off while it runs): a locked keychain, or an item this
+build may not change, is `UNAVAILABLE` with the reason. A lookup may show
+macOS's prompt (a locked login keychain, a rebuilt ad-hoc app), and gives up
+after its timeout (`UNAVAILABLE`); the prompt stays up for the person. A call
+still queued when its caller gave up never runs, so nothing is written after the
+call gave up.
+
+There is never a plaintext fallback.
 
 ## Linux
 
@@ -57,6 +97,16 @@ nothing is locked any more. "Someone could answer an unlock prompt" is
 
 ## Testing
 
+- `laufey_secret_store_mac_test` (ctest, macOS): against the real login
+  keychain: bad arguments, the round trip, an item written the old way
+  (`security add-generic-password`, which `security find-generic-password -w`
+  then reads back: the fail-first) is never read here and is in the way of a
+  store, and an item stored here is refused to another program (a reader with
+  prompts off gets `errSecAuthFailed`; with `LAUFEY_SECRET_TEST_SECURITY_CLI=1`,
+  `security find-generic-password -w` never prints it). Skipped without a usable
+  login keychain unless `LAUFEY_SECRET_TEST_REQUIRE=1`. The data-protection
+  keychain needs a provisioning profile, which CI's ad-hoc builds can't carry.
+
 - `laufey_secret_store_dbus_test` (ctest, Linux): on a private bus, libsecret
   missing, no session bus, no provider, KWallet without the Secret Service, a
   provider that never answers, a locked item where no one can answer (refused at
@@ -64,5 +114,5 @@ nothing is locked any more. "Someone could answer an unlock prompt" is
   round trips, then locked without a prompter (at once) and with a prompter that
   never answers (after the timeout).
 - `scripts/native-e2e-run.sh <backend> --secret-store`: every call answers
-  within its timeout through the backend;
-  `LAUFEY_E2E_EXPECT_SECRET=ok|unavailable` for a real session.
+  within its timeout through the backend (macOS: the round trip, in the host's
+  login keychain); `LAUFEY_E2E_EXPECT_SECRET=ok|unavailable` for a real session.
