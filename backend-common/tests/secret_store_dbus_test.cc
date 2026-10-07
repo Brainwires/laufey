@@ -16,7 +16,10 @@
 //   - gnome-keyring (its login keyring, unlocked): store / lookup / replace /
 //     delete round trips,
 //     non-ASCII text, a missing item is "not found", deleting nothing is
-//     fine; locked: refused at once without a prompter, and with one that
+//     fine; a second gnome-keyring-daemon taking org.freedesktop.secrets
+//     over (two daemons in one session) is written to and read from, not
+//     sent the first one's transfer session; locked: refused at once
+//     without a prompter, and with one that
 //     never answers, unavailable after the timeout (not a hang), the prompt
 //     never dismissed (gnome-keyring stays up) and a second call joining the
 //     pending unlock instead of a second prompt.
@@ -215,7 +218,27 @@ void LibsecretMissing() {
 
 // A real gnome-keyring-daemon on the private bus, its login keyring created
 // and unlocked (the default collection). False when it isn't installed.
-bool StartGnomeKeyring(const std::string& home) {
+std::string NameOwner(const char* name) {
+  GVariant* r = g_dbus_connection_call_sync(
+      g_conn, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+      "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)", name),
+      G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+  std::string owner;
+  if (r) {
+    const gchar* s = nullptr;
+    g_variant_get(r, "(&s)", &s);
+    owner = s;
+    g_variant_unref(r);
+  }
+  return owner;
+}
+
+// Starts gnome-keyring-daemon (its login keyring unlocked) and waits until
+// it owns org.freedesktop.secrets; with `replace`, until it has taken the
+// name over from the one that had it.
+bool StartGnomeKeyring(const std::string& home, bool replace = false) {
+  const std::string before =
+      replace ? NameOwner("org.freedesktop.secrets") : std::string();
   gchar* daemon = g_find_program_in_path("gnome-keyring-daemon");
   if (!daemon)
     return false;
@@ -230,8 +253,12 @@ bool StartGnomeKeyring(const std::string& home) {
     setenv("HOME", home.c_str(), 1);
     setenv("XDG_DATA_HOME", (home + "/data").c_str(), 1);
     setenv("XDG_RUNTIME_DIR", run.c_str(), 1);
-    execl(daemon, daemon, "--foreground", "--components=secrets", "--unlock",
-          static_cast<char*>(nullptr));
+    if (replace)
+      execl(daemon, daemon, "--foreground", "--components=secrets", "--unlock",
+            "--replace", static_cast<char*>(nullptr));
+    else
+      execl(daemon, daemon, "--foreground", "--components=secrets", "--unlock",
+            static_cast<char*>(nullptr));
     _exit(127);
   }
   g_free(daemon);
@@ -239,9 +266,13 @@ bool StartGnomeKeyring(const std::string& home) {
   // The login keyring's password (an empty one creates no keyring).
   EXPECT(write(in[1], "laufey", 6) == 6);
   close(in[1]);
-  for (int i = 0; i < 500 && !HasOwner("org.freedesktop.secrets"); ++i)
+  auto owned = [&] {
+    std::string owner = NameOwner("org.freedesktop.secrets");
+    return !owner.empty() && owner != before;
+  };
+  for (int i = 0; i < 500 && !owned(); ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  return HasOwner("org.freedesktop.secrets");
+  return owned();
 }
 
 // The gnome-keyring-daemon this test started is still running (not exited,
@@ -480,6 +511,36 @@ int main() {
     EXPECT(value == "b");
     // Deleting nothing is fine.
     EXPECT(SecretDelete(service, "alice", 5000, &reason) == SecretStatus::kOk);
+
+    // A second gnome-keyring takes org.freedesktop.secrets over, as when a
+    // session has two (PAM's --login one and a D-Bus-activated
+    // --components=secrets one). The secret of a write goes encrypted with
+    // a transfer session; the one libsecret opened with the first daemon
+    // means nothing to the second, so each call must use a session with
+    // whoever owns the name now.
+    {
+      const pid_t first = g_keyring;
+      gchar* home2 = g_dir_make_tmp("laufey-ss2-XXXXXX", nullptr);
+      EXPECT(home2);
+      EXPECT(StartGnomeKeyring(home2, /*replace=*/true));
+      const SecretStatus stored =
+          SecretStore(service, "carol", "", "c", 5000, &reason);
+      if (stored != SecretStatus::kOk)
+        std::fprintf(stderr, "  write after the owner changed: %s\n",
+                     reason.c_str());
+      EXPECT(stored == SecretStatus::kOk);
+      EXPECT(SecretLookup(service, "carol", 5000, &value, &reason) ==
+             SecretStatus::kOk);
+      EXPECT(value == "c");
+      // The first daemon's items aren't the new owner's.
+      EXPECT(SecretLookup(service, "bob", 5000, &value, &reason) ==
+             SecretStatus::kNotFound);
+      EXPECT(SecretStore(service, "bob", "", "b", 5000, &reason) ==
+             SecretStatus::kOk);
+      kill(first, SIGTERM);
+      waitpid(first, nullptr, 0);
+      g_free(home2);
+    }
 
     // Locked, and no one here can answer the prompt: at once.
     LockAll();

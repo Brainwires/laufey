@@ -55,14 +55,27 @@ nothing is locked any more. "Someone could answer an unlock prompt" is
 `platform_features`' `secretServicePrompt` (see
 [platform-features.md](platform-features.md)).
 
+When another daemon takes `org.freedesktop.secrets` over (a session running two
+gnome-keyring daemons: PAM's `--login` one and a D-Bus-activated
+`--components=secrets` one), the next call opens a new transfer session with it.
+libsecret keeps one service, and the session it opened with the first owner, for
+the process: it watches the name from the private main context of the `*_sync`
+call that made the service, which is never iterated again, so it never notices
+the change, and the new owner refused every later write ("The session wrapping
+the secret does not exist", or "The secret was transferred or encrypted in an
+invalid way"). Each call now notes the owner it is made with and drops
+libsecret's service (`secret_service_disconnect`) when it changed; a call that
+still fails with such an error is retried once with a new service.
+
 ## Testing
 
 - `laufey_secret_store_dbus_test` (ctest, Linux): on a private bus, libsecret
   missing, no session bus, no provider, KWallet without the Secret Service, a
   provider that never answers, a locked item where no one can answer (refused at
   once for lookup, store and delete), and a real `gnome-keyring-daemon`: the
-  round trips, then locked without a prompter (at once) and with a prompter that
-  never answers (after the timeout).
+  round trips, a second daemon taking the name over (written to and read from),
+  then locked without a prompter (at once) and with a prompter that never
+  answers (after the timeout).
 - `scripts/native-e2e-run.sh <backend> --secret-store`: every call answers
   within its timeout through the backend;
   `LAUFEY_E2E_EXPECT_SECRET=ok|unavailable` for a real session.

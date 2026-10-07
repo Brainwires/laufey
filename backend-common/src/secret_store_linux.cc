@@ -87,6 +87,9 @@ struct Libsecret {
                           const gchar*, const gchar*, GCancellable*, GError**);
   gboolean (*clearv_sync)(const Schema*, GHashTable*, GCancellable*, GError**);
   void (*password_free)(gchar*);
+  // Drops libsecret's default SecretService (and its transfer session).
+  // Optional: missing, a stale service is kept.
+  void (*service_disconnect)();
 };
 
 std::string g_libsecret_path = "libsecret-1.so.0";
@@ -105,6 +108,8 @@ const Libsecret* LoadLibsecret() {
         dlsym(lib, "secret_password_clearv_sync"));
     api.password_free = reinterpret_cast<decltype(api.password_free)>(
         dlsym(lib, "secret_password_free"));
+    api.service_disconnect = reinterpret_cast<decltype(api.service_disconnect)>(
+        dlsym(lib, "secret_service_disconnect"));
     if (!api.lookupv_sync || !api.storev_sync || !api.clearv_sync ||
         !api.password_free) {
       return nullptr;
@@ -119,6 +124,28 @@ const Libsecret* LoadLibsecret() {
 std::mutex& CallMutex() {
   static std::mutex m;
   return m;
+}
+
+// libsecret keeps one SecretService for the process, with the transfer
+// session (the key a written or read secret is encrypted with) it opened
+// with whichever daemon owned org.freedesktop.secrets then. It means to drop
+// that service when the name's owner goes, but it watches the name from the
+// main context that was thread-default when the service was made: for the
+// *_sync calls, a private one that is never iterated again. So when another
+// daemon takes the name over (a session with two gnome-keyring daemons:
+// PAM's --login one and a D-Bus-activated --components=secrets one) every
+// later call still sends the first daemon's session to the new owner, which
+// refuses it ("The session wrapping the secret does not exist", or "The
+// secret was transferred or encrypted in an invalid way" when the path
+// means another session there), until the process restarts. The owner each
+// call is made with is noted here (under CallMutex), and the service is
+// dropped when it changes, so libsecret opens a session with the new one.
+std::string g_libsecret_owner;
+
+void ForgetLibsecretService() {
+  const Libsecret* lib = LoadLibsecret();
+  if (lib && lib->service_disconnect)
+    lib->service_disconnect();
 }
 
 // --- The session bus ---------------------------------------------------------
@@ -186,6 +213,47 @@ std::string OwnerProvider(GDBusConnection* bus) {
   std::string name;
   std::getline(comm, name);
   return SecretProviderFromComm(name);
+}
+
+// The unique name owning org.freedesktop.secrets ("" when none answers).
+std::string SecretsOwner(GDBusConnection* bus) {
+  GVariant* r =
+      BusCall(bus, "GetNameOwner", g_variant_new("(s)", kSecretsName), "(s)");
+  if (!r)
+    return "";
+  const gchar* owner = nullptr;
+  g_variant_get(r, "(&s)", &owner);
+  std::string out = owner ? owner : "";
+  g_variant_unref(r);
+  return out;
+}
+
+// Before a libsecret call (under CallMutex): a service libsecret made with
+// another owner is dropped (see g_libsecret_owner).
+void UseCurrentOwner(GDBusConnection* bus) {
+  std::string owner = SecretsOwner(bus);
+  if (owner.empty())
+    return;
+  if (!g_libsecret_owner.empty() && owner != g_libsecret_owner)
+    ForgetLibsecretService();
+  g_libsecret_owner = owner;
+}
+
+// An error the Secret Service gives a secret sent with a transfer session it
+// doesn't know (an unknown session: a D-Bus error libsecret has no code for)
+// or can't decrypt with (InvalidArgs), or a service that is gone.
+bool TransferSessionError(const GError* error) {
+  if (!error)
+    return false;
+  if (error->domain == G_IO_ERROR)
+    return error->code == G_IO_ERROR_DBUS_ERROR;
+  if (error->domain == G_DBUS_ERROR)
+    return error->code == G_DBUS_ERROR_INVALID_ARGS ||
+           error->code == G_DBUS_ERROR_UNKNOWN_METHOD ||
+           error->code == G_DBUS_ERROR_UNKNOWN_OBJECT ||
+           error->code == G_DBUS_ERROR_SERVICE_UNKNOWN ||
+           error->code == G_DBUS_ERROR_NAME_HAS_NO_OWNER;
+  return false;
 }
 
 struct Provider {
@@ -475,6 +543,26 @@ bool WithDeadline(uint32_t timeout_ms, Op op) {
   return fired;
 }
 
+int Remaining(uint32_t timeout_ms, std::chrono::steady_clock::time_point start);
+
+// A libsecret call (`op(cancellable, &error)`) within what is left of the
+// timeout; when it fails with a transfer-session error, once more with a
+// new service (and so a new session). True when the deadline ended it.
+template <typename Op>
+bool LibsecretCall(uint32_t timeout_ms,
+                   std::chrono::steady_clock::time_point start, GError** error,
+                   Op op) {
+  bool timed_out =
+      WithDeadline(static_cast<uint32_t>(Remaining(timeout_ms, start)),
+                   [&](GCancellable* c) { op(c, error); });
+  if (timed_out || !TransferSessionError(*error))
+    return timed_out;
+  ForgetLibsecretService();
+  g_clear_error(error);
+  return WithDeadline(static_cast<uint32_t>(Remaining(timeout_ms, start)),
+                      [&](GCancellable* c) { op(c, error); });
+}
+
 uint32_t Elapsed(std::chrono::steady_clock::time_point start) {
   return static_cast<uint32_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -604,6 +692,8 @@ SecretStatus SecretLookup(const std::string& service,
   std::string error_text;
   bool answered = SearchItems(
       bus, service, account, Remaining(timeout_ms, start), &found, &error_text);
+  if (answered)
+    UseCurrentOwner(bus);
   g_object_unref(bus);
   if (!answered) {
     *reason = NoAnswerReason(provider, error_text);
@@ -628,11 +718,10 @@ SecretStatus SecretLookup(const std::string& service,
   gchar* secret = nullptr;
   GError* error = nullptr;
   GHashTable* attrs = Attributes(service, account);
-  bool timed_out =
-      WithDeadline(static_cast<uint32_t>(Remaining(timeout_ms, start)),
-                   [&](GCancellable* c) {
-                     secret = lib->lookupv_sync(&kSchema, attrs, c, &error);
-                   });
+  bool timed_out = LibsecretCall(
+      timeout_ms, start, &error, [&](GCancellable* c, GError** e) {
+        secret = lib->lookupv_sync(&kSchema, attrs, c, e);
+      });
   g_hash_table_unref(attrs);
   if (secret) {
     *value = secret;
@@ -678,6 +767,8 @@ SecretStatus SecretStore(const std::string& service, const std::string& account,
       answered ? DefaultCollection(bus, kQuickTimeoutMs) : "";
   int collection_locked =
       collection.empty() ? -1 : DefaultCollectionLocked(bus, kQuickTimeoutMs);
+  if (answered)
+    UseCurrentOwner(bus);
   g_object_unref(bus);
   if (!answered) {
     *reason = NoAnswerReason(provider, error_text);
@@ -710,19 +801,17 @@ SecretStatus SecretStore(const std::string& service, const std::string& account,
   GError* error = nullptr;
   GHashTable* attrs = Attributes(service, account);
   int items = found.unlocked + static_cast<int>(found.locked.size());
-  bool timed_out =
-      WithDeadline(static_cast<uint32_t>(Remaining(timeout_ms, start)),
-                   [&](GCancellable* c) {
-                     // Several items with these attributes (written before, in
-                     // other collections): clear them, so the next read can't
-                     // find an old one.
-                     if (items > 1)
-                       lib->clearv_sync(&kSchema, attrs, c, nullptr);
-                     stored = lib->storev_sync(
-                         &kSchema, attrs, nullptr,
-                         label.empty() ? service.c_str() : label.c_str(),
-                         value.c_str(), c, &error);
-                   });
+  bool timed_out = LibsecretCall(
+      timeout_ms, start, &error, [&](GCancellable* c, GError** e) {
+        // Several items with these attributes (written before, in other
+        // collections): clear them, so the next read can't find an old one.
+        if (items > 1)
+          lib->clearv_sync(&kSchema, attrs, c, nullptr);
+        stored =
+            lib->storev_sync(&kSchema, attrs, nullptr,
+                             label.empty() ? service.c_str() : label.c_str(),
+                             value.c_str(), c, e);
+      });
   g_hash_table_unref(attrs);
   if (stored) {
     g_clear_error(&error);
@@ -777,12 +866,14 @@ SecretStatus SecretDelete(const std::string& service,
       return SecretStatus::kUnavailable;
     }
   }
+  UseCurrentOwner(bus);
   const Libsecret* lib = LoadLibsecret();
   GError* error = nullptr;
   GHashTable* attrs = Attributes(service, account);
-  bool timed_out = WithDeadline(
-      static_cast<uint32_t>(Remaining(timeout_ms, start)),
-      [&](GCancellable* c) { lib->clearv_sync(&kSchema, attrs, c, &error); });
+  bool timed_out = LibsecretCall(timeout_ms, start, &error,
+                                 [&](GCancellable* c, GError** e) {
+                                   lib->clearv_sync(&kSchema, attrs, c, e);
+                                 });
   g_hash_table_unref(attrs);
   // Whatever libsecret says, the store decides: anything left is not
   // deleted.
