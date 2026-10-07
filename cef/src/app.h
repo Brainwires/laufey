@@ -371,6 +371,15 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
   void OnBeforeCommandLineProcessing(
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
+    // macOS: Chromium's mock keychain. Without it OSCrypt keeps its key in
+    // the login Keychain item "Chromium Safe Storage", a name fixed at
+    // Chromium's build time (CEF has no setting for it) and shared by every
+    // unbranded Chromium and CEF app: the second such app is asked whether it
+    // may read another app's item, a denial deletes its cookies, and a
+    // profile written with the mock key loses its cookies at the switch
+    // (Chromium deletes what it can't decrypt). With it the key is the same
+    // on every install, so platform_features reports
+    // "cookieEncryption": "basic" (runtime_loader.cc), not "os".
     command_line->AppendSwitch("use-mock-keychain");
 
     // Silence Chromium's background networking. The GCM (Google Cloud
@@ -433,6 +442,11 @@ void LaufeyQuitMainLoopMac();
 // Ends the CEF backend's main loop on every platform (LaufeyQuitMainLoopMac on
 // macOS, CefQuitMessageLoop elsewhere). UI thread.
 void LaufeyQuitMainLoop();
+
+// The app's own quit() (runtime_loader.cc): every window is closed and the
+// loop ends, so the host goes on to the runtime's shutdown and CefShutdown.
+// Any thread. The Linux host calls it for SIGTERM, SIGINT and SIGHUP.
+void LaufeyRequestQuit();
 
 // Window-state bookkeeping (API 38; runtime_loader.cc). Recheck reads the
 // window's state back from CefWindow on the UI thread and reports a change;

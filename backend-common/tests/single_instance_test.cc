@@ -562,6 +562,83 @@ static void TestTransport() {
 #endif
 }
 
+static void SetEnv(const char* name, const char* value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
+}
+
+// A primary that is ending (quit(), the loop's end, exit()) refuses
+// launches instead of acknowledging what it would never deliver; the launch
+// becomes the primary once the ending one lets go of the lock.
+static void TestEnding() {
+  std::string app_id = UniqueAppId();
+  SingleInstanceEndpoint e;
+  std::string err;
+  EXPECT(ResolveSingleInstanceEndpoint(app_id, &e, &err));
+  SecondInstanceMessage m;
+  m.args = {"acme://late"};
+  m.cwd = "/";
+
+  Inbox inbox;
+  std::unique_ptr<SingleInstanceServer> primary;
+  EXPECT(AcquireSingleInstance(e, inbox.Sink(), &primary, &err) ==
+         SingleInstanceAcquire::kPrimary);
+  EXPECT(!SingleInstanceEnding());
+  EXPECT(ForwardToPrimaryInstance(e, m, 5000, &err) ==
+         SingleInstanceForward::kAcknowledged);
+
+  // Ending: the forward is refused, never delivered.
+  MarkSingleInstanceEnding();
+  EXPECT(SingleInstanceEnding());
+  EXPECT(ForwardToPrimaryInstance(e, m, 5000, &err) ==
+         SingleInstanceForward::kEnding);
+  std::string encoded;
+  EXPECT(EncodeSecondInstanceMessage(m, &encoded));
+  EXPECT(RawExchange(EndpointName(e), encoded) == kSingleInstanceEnding);
+  // Malformed input is still a NAK.
+  EXPECT(RawExchange(EndpointName(e), "garbage!") == kSingleInstanceNak);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  {
+    std::lock_guard<std::mutex> lock(inbox.mutex);
+    EXPECT(inbox.messages.size() == 1);  // only the one before ending
+  }
+
+  // A launch while it ends: forwarding is refused until the primary lets go
+  // of the lock (here 500 ms later), then the launch is the primary.
+  SetEnv("LAUFEY_SINGLE_INSTANCE", "1");
+  SetEnv("LAUFEY_APP_ID", app_id.c_str());
+  std::thread ender([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    primary->Stop();
+  });
+  int exit_code = -1;
+  char arg0[] = "laufey";
+  char arg1[] = "acme://late";
+  char* argv[] = {arg0, arg1, nullptr};
+  auto start = std::chrono::steady_clock::now();
+  bool continues = SingleInstanceStartup(2, argv, &exit_code);
+  auto waited = std::chrono::steady_clock::now() - start;
+  ender.join();
+  EXPECT(continues);  // it became the primary, not forwarded and lost
+  EXPECT(exit_code == -1);
+  EXPECT(waited >= std::chrono::milliseconds(400));
+  EXPECT(waited < std::chrono::seconds(9));
+  {
+    std::lock_guard<std::mutex> lock(inbox.mutex);
+    EXPECT(inbox.messages.size() == 1);
+  }
+  // The new primary holds the lock now.
+  std::unique_ptr<SingleInstanceServer> other;
+  EXPECT(AcquireSingleInstance(e, inbox.Sink(), &other, &err) ==
+         SingleInstanceAcquire::kSecondary);
+  SetEnv("LAUFEY_SINGLE_INSTANCE", "");
+  SetEnv("LAUFEY_APP_ID", "");
+  ResetSingleInstanceEndingForTesting();
+}
+
 // Two simultaneous first launches end with exactly one primary.
 static void TestRace() {
   for (int round = 0; round < 20; ++round) {
@@ -620,6 +697,7 @@ int main() {
   TestDelivery();
   TestTransport();
   TestRace();
+  TestEnding();
   if (g_failures) {
     std::fprintf(stderr, "%d expectation(s) failed\n", g_failures);
     return 1;

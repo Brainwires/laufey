@@ -23,7 +23,9 @@
 // "-ToastActivated -Embedding" on its command line): the cold-start click.
 //
 // Toasts carry their tag, action and "data" in the activation arguments
-// (EncodeToastArguments), so a click needs nothing but the arguments. A
+// (EncodeToastArguments, MAC'd with this install's key: a COM Activate with
+// arguments laufey never posted is dropped), so a click needs nothing but
+// the arguments. A
 // scheduled notification is a ScheduledToastNotification: Windows delivers
 // it at its time whether or not the app runs.
 //
@@ -471,10 +473,14 @@ bool StartedForToastClick() {
   return found;
 }
 
+// A click: the toast's Activated event or the COM activator, which any
+// process of the user can create and call with any arguments. Only
+// arguments laufey posted count (DecodeClickArguments); a forgery neither
+// arrives nor uses up the launch.
 void HandleActivationArguments(const std::string& args) {
   std::string tag, action, data;
   bool has_action = false, has_data = false;
-  if (!DecodeToastArguments(args, &tag, &action, &has_action, &data, &has_data))
+  if (!DecodeClickArguments(args, &tag, &action, &has_action, &data, &has_data))
     return;
   if (!FirstDelivery(args))
     return;

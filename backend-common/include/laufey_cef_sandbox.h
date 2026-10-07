@@ -89,6 +89,16 @@ LinuxSandboxDecision DecideLinuxSandbox(const LinuxSandboxFacts& facts);
 // "namespace", "setuid", "chromium" or "off".
 const char* LinuxSandboxModeName(LinuxSandboxMode mode);
 
+// Whether the host refuses to start: the sandbox would be off and the app
+// requires it (LaunchRequireSandbox: "requireSandbox" in the launch file, or
+// LAUFEY_REQUIRE_SANDBOX). `message` gets the line to print. A machine where
+// the sandbox is on ("chromium" included) always starts.
+bool RefuseUnsandboxedStart(const LinuxSandboxDecision& decision,
+                            bool require_sandbox, std::string* message);
+// The exit code of that refusal (sysexits' EX_CONFIG: the machine's
+// configuration, not the app, is the problem).
+constexpr int kSandboxRequiredExitCode = 78;
+
 // Checks `path` as Chromium checks its setuid helper.
 SetuidHelperState InspectSetuidHelper(const std::string& path);
 

@@ -33,6 +33,8 @@
 #include "runtime_loader.h"
 
 #include <gio/gio.h>
+#include <glib-unix.h>
+#include <signal.h>
 
 void LaufeyOpenExternalURL(const std::string& url) {
   g_app_info_launch_default_for_uri(url.c_str(), nullptr, nullptr);
@@ -893,8 +895,11 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
 // and why. Chromium looks for chrome-sandbox next to the real executable
 // (/proc/self/exe). CHROME_DEVEL_SANDBOX (Chromium's override of the helper's
 // path) is not consulted: it can only make Chromium pick a helper and abort
-// when that one is unusable, never turn the sandbox off.
-static bool LaufeyChooseSandbox() {
+// when that one is unusable, never turn the sandbox off. The choice is a
+// platform fact ("sandbox", "sandboxReason"). An app that requires the
+// sandbox (LaunchRequireSandbox) refuses to start without one: false with
+// `*refuse` set.
+static bool LaufeyChooseSandbox(bool* refuse) {
   std::string exe_dir;
   char exe[4096];
   ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
@@ -911,7 +916,61 @@ static bool LaufeyChooseSandbox() {
   std::cerr << "laufey: sandbox: "
             << laufey_common::LinuxSandboxModeName(decision.mode) << " ("
             << decision.reason << ")" << std::endl;
+  laufey_common::SetSandboxMode(
+      laufey_common::LinuxSandboxModeName(decision.mode),
+      decision.reason.c_str());
+  std::string message;
+  *refuse = laufey_common::RefuseUnsandboxedStart(
+      decision, laufey_common::LaunchRequireSandbox(), &message);
+  if (*refuse)
+    std::cerr << message << std::endl;
   return decision.enabled();
+}
+
+// SIGTERM, SIGINT and SIGHUP end the app through its own quit, the path
+// quit() and closing the last window take: the windows close, the runtime is
+// shut down, and CefShutdown writes the profile and ends the child processes.
+// They replace the handlers Chromium installs during CefInitialize
+// (chrome/browser/shutdown_signal_handlers_posix.cc), which for SIGTERM call
+// chrome::SessionEnding(): that ends the browser process at once with
+// _exit(0), without the runtime's shutdown or CefShutdown, and leaves the
+// GPU, renderer and zygote processes to find their browser gone.
+// The handlers are GLib sources on the default main context, which the CEF
+// UI thread runs, so the quit starts on that thread. The first signal removes
+// them all, which gives the three signals their default action back: a
+// second one ends a quit that hangs.
+static guint g_termination_sources[3];
+
+static void LaufeyRemoveTerminationHandlers() {
+  for (guint& id : g_termination_sources) {
+    if (id != 0) {
+      g_source_remove(id);
+      id = 0;
+    }
+  }
+}
+
+static gboolean LaufeyOnTerminationSignal(gpointer data) {
+  std::cerr << "laufey: " << strsignal(GPOINTER_TO_INT(data)) << ", quitting"
+            << std::endl;
+  // This source ends by returning G_SOURCE_REMOVE; the others are removed.
+  const guint self = g_source_get_id(g_main_current_source());
+  for (guint& id : g_termination_sources) {
+    if (id == self)
+      id = 0;
+  }
+  LaufeyRemoveTerminationHandlers();
+  LaufeyRequestQuit();
+  return G_SOURCE_REMOVE;
+}
+
+static void LaufeyInstallTerminationHandlers() {
+  const int signals[] = {SIGTERM, SIGINT, SIGHUP};
+  for (size_t i = 0; i < 3; i++) {
+    g_termination_sources[i] = g_unix_signal_add_full(
+        G_PRIORITY_HIGH, signals[i], LaufeyOnTerminationSignal,
+        GINT_TO_POINTER(signals[i]), nullptr);
+  }
 }
 
 int main(int argc, char* argv[]) {
@@ -1021,7 +1080,10 @@ int main(int argc, char* argv[]) {
   laufey_common::InitNotificationsAtLaunch();
 
   CefSettings settings;
-  settings.no_sandbox = !LaufeyChooseSandbox();
+  bool refuse_unsandboxed = false;
+  settings.no_sandbox = !LaufeyChooseSandbox(&refuse_unsandboxed);
+  if (refuse_unsandboxed)
+    return laufey_common::kSandboxRequiredExitCode;
   settings.log_severity = LaufeyCefLogSeverity();
 
   // Set cache path. With a per-app data dir (LAUFEY_DATA_DIR / LAUFEY_APP_ID)
@@ -1060,8 +1122,12 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   LaufeyInstallSecondInstanceHooks();
+  LaufeyInstallTerminationHandlers();
 
   CefRunMessageLoop();
+
+  // A signal from here on takes its default action.
+  LaufeyRemoveTerminationHandlers();
 
   // The loop is over: UI tasks still queued are answered "not run" and an
   // auth session in progress ends cancelled, so a runtime thread waiting on

@@ -263,6 +263,9 @@ jobs:
             -Ibackend-common/include -Icapi/include \
             backend-common/tests/auth_main_thread_test.cc \
             backend-common/src/auth_session.cc \
+            backend-common/src/single_instance.cc \
+            backend-common/src/single_instance_posix.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/auth_main_thread_test"
           "$RUNNER_TEMP/auth_main_thread_test"
       # The WebKitGTK response body stream: a writer thread against a reader
@@ -794,6 +797,18 @@ jobs:
         shell: bash
         run: scripts/single-instance-e2e-run.sh ${{ matrix.backend }}
 
+      # SIGTERM / SIGINT / SIGHUP end the Linux CEF app through its own quit
+      # (runtime shut down, CefShutdown), not Chromium's session-end _exit:
+      # status 0, no process left, the profile's exit_type "Normal", no core
+      # or crash report.
+      - name: Termination signals (Linux, cef)
+        if: runner.os == 'Linux' && matrix.backend == 'cef'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          cargo build --release -p hello_runtime
+          scripts/signal-exit-e2e-run.sh
+
       # HiDPI: the window-API battery at a device scale factor of 2 (Linux:
       # CEF --force-device-scale-factor=2, WebKitGTK GDK_SCALE=2; Windows:
       # the display's own scale, raised first). Sizes and positions must stay
@@ -994,6 +1009,32 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
           sudo chmod 0755 cef/build/Release/chrome-sandbox
+          scripts/native-e2e-run.sh cef --sandbox
+
+      # An app that requires the sandbox (LAUFEY_REQUIRE_SANDBOX, or
+      # "requireSandbox" in its launch file) refuses to start where it would
+      # be off, before CEF or the runtime loads; where it is on it starts.
+      - name: off, required (the host refuses to start)
+        timeout-minutes: 5
+        run: |
+          set +e
+          LAUFEY_REQUIRE_SANDBOX=1 LAUFEY_RUNTIME_PATH="$PWD/target/release/libnative_e2e_runtime.so" \
+            timeout 60 xvfb-run -a cef/build/Release/laufey > require.log 2>&1
+          status=$?
+          set -e
+          cat require.log
+          [ "$status" = 78 ] || { echo "FAIL exit status $status, expected 78"; exit 1; }
+          grep -q '^laufey: sandbox: off (' require.log
+          grep -q '^laufey: this app requires the Chromium sandbox' require.log
+          ! grep -q '^\[e2e\]' require.log || { echo "FAIL the runtime ran"; exit 1; }
+
+      - name: namespace, required (starts)
+        timeout-minutes: 10
+        env:
+          LAUFEY_E2E_EXPECT_SANDBOX_MODE: namespace
+          LAUFEY_REQUIRE_SANDBOX: "1"
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           scripts/native-e2e-run.sh cef --sandbox
 
   e2e-cef-linux:

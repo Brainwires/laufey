@@ -56,7 +56,10 @@ namespace laufey_common {
 //
 // The payload must be consumed exactly. Every string must be valid UTF-8
 // without NUL. The server answers with one byte: kSingleInstanceAck when the
-// message was accepted, kSingleInstanceNak when it was rejected.
+// message was accepted, kSingleInstanceNak when it was rejected, and
+// kSingleInstanceEnding when the primary is ending (MarkSingleInstanceEnding):
+// it would never deliver the message, so it doesn't take it, and the launch
+// becomes the primary once the ending one lets go of the lock.
 
 // Largest payload accepted (1 MiB).
 constexpr uint32_t kSingleInstanceMaxMessageBytes = 1024 * 1024;
@@ -66,6 +69,7 @@ constexpr uint32_t kSingleInstanceMaxArgs = 4096;
 constexpr size_t kSingleInstanceHeaderBytes = 8;
 constexpr unsigned char kSingleInstanceAck = 0x06;
 constexpr unsigned char kSingleInstanceNak = 0x15;
+constexpr unsigned char kSingleInstanceEnding = 0x18;
 
 struct SecondInstanceMessage {
   std::vector<std::string> args;  // argv after the executable, UTF-8
@@ -171,6 +175,8 @@ enum class SingleInstanceForward {
   kNoPrimary,     // nobody holds the lock any more; try to become primary
   kFailed,        // the primary rejected it or did not answer
   kUntrusted,     // the endpoint belongs to another user; don't use the lock
+  kEnding,        // the primary is ending and didn't take it; once it lets go
+                  // of the lock, become the primary
 };
 
 // Sends `message` to the primary instance at `endpoint` and waits for its
@@ -181,6 +187,16 @@ enum class SingleInstanceForward {
 SingleInstanceForward ForwardToPrimaryInstance(
     const SingleInstanceEndpoint& endpoint,
     const SecondInstanceMessage& message, int timeout_ms, std::string* error);
+
+// Marks this process's primary as ending: from now on its server answers
+// every launch kSingleInstanceEnding instead of accepting a message it would
+// never deliver, and the launch waits for the lock and becomes the primary
+// itself. Called by quit() (MarkQuitting), when the UI loop ends
+// (UiLoopEnded), and when the process exits (exit() from any thread, such as
+// the runtime's Deno.exit()). Irreversible; any thread.
+void MarkSingleInstanceEnding();
+bool SingleInstanceEnding();
+void ResetSingleInstanceEndingForTesting();
 
 // --- Startup ----------------------------------------------------------------
 
@@ -195,7 +211,9 @@ SecondInstanceMessage CurrentProcessInvocation(int argc, char** argv);
 // continues unlocked. If another instance holds the lock, forwards this
 // invocation to it and returns false with `*exit_code` set (0 once the
 // primary acknowledged, 1 otherwise): the caller must return that from
-// main() right away. Otherwise returns true and, as the primary, keeps the
+// main() right away. A primary that is ending refuses the message
+// (kSingleInstanceEnding); this launch then waits (up to 10 s) for it to let
+// go of the lock and becomes the primary. Otherwise returns true and, as the primary, keeps the
 // server running for the life of the process; forwarded messages are queued
 // until SetSecondInstanceUiHooks is called.
 bool SingleInstanceStartup(int argc, char** argv, int* exit_code);

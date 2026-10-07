@@ -22,6 +22,10 @@
 //!       stay up until this file exists (at most 120 s), so the driver can
 //!       run another instance alongside however long that one takes to
 //!       start, then release this one.
+//!   LAUFEY_E2E_SI_LINGER_MS
+//!       after quit(), keep the runtime thread (and with it the process and
+//!       its single-instance lock) alive this long: an app that takes a
+//!       while to end, for the launch-while-ending scenario.
 //!   LAUFEY_E2E_SI_RESULT_FILE
 //!       also write the PASS/FAIL lines and the OVERALL line to this file
 //!       (for a launch the OS starts, whose output the driver can't see).
@@ -238,6 +242,11 @@ fn e2e_main() {
     win.close();
     tokio::time::sleep(Duration::from_millis(300)).await;
     laufey::quit();
+    if let Some(ms) = env_num("LAUFEY_E2E_SI_LINGER_MS") {
+      eprintln!("[e2e] quitting; lingering {ms} ms");
+      let _ = std::io::stderr().flush();
+      std::thread::sleep(Duration::from_millis(ms));
+    }
   });
 }
 

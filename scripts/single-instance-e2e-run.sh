@@ -17,6 +17,9 @@
 #       starts its update helper, or `<exe> <script>` with NODE_CHANNEL_FD, a
 #       forked worker) is not forwarded and never reaches the lock: it runs
 #       the runtime headless and exits.
+#   (g) a launch while the primary is ending (quit() called, still holding
+#       the lock): refused by the primary, it becomes the primary itself and
+#       runs, instead of being acknowledged and lost.
 #   (c) singleInstance off: two instances run side by side (on CEF with
 #       separate data directories: one CEF profile allows one process, see
 #       docs/app-data.md; scripts/storage-e2e-run.sh covers that refusal).
@@ -314,6 +317,43 @@ else
 fi
 touch "$scratch/release-primary"
 finish primary "$primary_pid" 60
+
+# (g) A launch while the primary is ending (quit() called, the process still
+# alive and holding the lock for a few seconds): the primary refuses it
+# (kSingleInstanceEnding) instead of acknowledging a launch it would never
+# deliver, and the launch becomes the primary itself once the lock is free.
+late_args=("late-arg" "acme://late/start")
+late_expect=()
+while IFS= read -r line; do late_expect+=("$line"); done \
+  < <(expect_vars LAUFEY_E2E_SI_COLD "${late_args[@]}")
+start ending LAUFEY_E2E_SI_LINGER_MS=4000 \
+  LAUFEY_E2E_SI_HOLD_FILE="$(native "$scratch/release-ending")" --
+ending_pid=$started_pid
+if wait_for ending '^\[e2e\] ready' 90; then
+  touch "$scratch/release-ending"
+  if wait_for ending '^\[e2e\] quitting; lingering' 30; then
+    sleep 0.5
+    if kill -0 "$ending_pid" 2>/dev/null; then
+      start late "${late_expect[@]}" LAUFEY_E2E_SI_HOLD_MS=500 -- "${late_args[@]}"
+      late_pid=$started_pid
+      finish late "$late_pid" 90
+      # Forwarded to the ending primary and acknowledged, it would have exited
+      # without running the runtime (no [e2e] lines).
+      if grep -q '^\[e2e\] OVERALL PASS' "$scratch/logs/late.log"; then
+        pass "a launch while the primary was ending became the primary itself"
+      else
+        fail "the launch while the primary was ending didn't run (see $scratch/logs/late.log)"
+      fi
+    else
+      fail "the ending primary exited before the late launch (raise LINGER)"
+    fi
+  else
+    fail "the ending primary never quit"
+  fi
+else
+  fail "ending never became ready"
+fi
+finish ending "$ending_pid" 60
 
 # Without an app id in the file, LAUFEY_SINGLE_INSTANCE=0 wins over its
 # singleInstance: two instances (CEF: separate profiles). The first stays up

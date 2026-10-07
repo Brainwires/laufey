@@ -376,6 +376,16 @@ which `CefQuitMessageLoop` did not); WebView2 posts the quit to its UI thread
 (it used to post it to the calling thread's queue); Winit now calls the
 runtime's shutdown once its loop has ended, like the other backends.
 
+On Linux the CEF host ends the same way on `SIGTERM`, `SIGINT` and `SIGHUP` (it
+prints `laufey: <signal>, quitting`): Chromium's own handlers, which
+`CefInitialize` installs, would end the browser process with `_exit(0)` for
+`SIGTERM` (Chromium's session end), skipping the runtime's shutdown and
+`CefShutdown`, so the profile was left marked `"SessionEnded"` and the child
+processes found their browser gone. The first signal starts the quit and gives
+the three signals their default action back, so a second one ends a quit that
+hangs. A runtime that installs its own handlers for these signals afterwards
+(Deno's `Deno.addSignalListener`) takes them over.
+
 ## External links and popups
 
 A web-engine backend never opens a second web view for the page. A link to

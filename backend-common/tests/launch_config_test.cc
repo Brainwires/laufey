@@ -320,6 +320,36 @@ static void TestInspectable() {
   EXPECT(LaunchInspectableFrom("", false, true, &warning));
 }
 
+static void TestRequireSandbox() {
+  size_t w = 0;
+  LaunchConfig c = Parse("{}", &w);
+  EXPECT(w == 0 && !c.has_require_sandbox && !c.require_sandbox);
+  c = Parse("{\"requireSandbox\": true}", &w);
+  EXPECT(w == 0 && c.has_require_sandbox && c.require_sandbox);
+  c = Parse("{\"requireSandbox\": false}", &w);
+  EXPECT(w == 0 && c.has_require_sandbox && !c.require_sandbox);
+  // Only a JSON boolean counts; a wrong value leaves the default (off).
+  const char* wrong[] = {"{\"requireSandbox\": 1}",
+                         "{\"requireSandbox\": \"yes\"}"};
+  for (const char* text : wrong) {
+    c = Parse(text, &w);
+    EXPECT(w == 1 && !c.has_require_sandbox && !c.require_sandbox);
+  }
+  // A shipped "requireSandbox": true can't be turned off from the
+  // environment (reported); the environment can turn it on.
+  std::string warning;
+  EXPECT(LaunchRequireSandboxFrom("0", true, true, &warning));
+  EXPECT(warning.find("ignored") != std::string::npos);
+  warning.clear();
+  EXPECT(LaunchRequireSandboxFrom("", true, true, &warning));
+  EXPECT(LaunchRequireSandboxFrom("1", false, false, &warning));
+  EXPECT(LaunchRequireSandboxFrom("1", true, false, &warning));
+  EXPECT(!LaunchRequireSandboxFrom("0", true, false, &warning));
+  EXPECT(!LaunchRequireSandboxFrom("", false, false, &warning));
+  EXPECT(!LaunchRequireSandboxFrom("", true, false, &warning));
+  EXPECT(warning.empty());
+}
+
 static void TestSingleInstance() {
   size_t w = 0;
   LaunchConfig c = Parse("{\"singleInstance\": true}", &w);
@@ -566,6 +596,7 @@ int main() {
   TestPinnedAppId();
   TestSingleInstance();
   TestInspectable();
+  TestRequireSandbox();
   TestPasskeyRpIds();
   TestPaths();
   TestTrustedAppImage();

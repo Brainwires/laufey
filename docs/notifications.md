@@ -112,6 +112,37 @@ connection that posted the notification, so a click after that process exited
 can't reach the app. `notification_capabilities()` reports `cold_start()` when
 the click would start it.
 
+### Click authenticity
+
+On Windows and on the Linux portal path a click arrives as a call that any
+process of the user can make: `INotificationActivationCallback::Activate` on the
+app's COM class, `ActivateAction` on its D-Bus name. Both carry the tag, action
+and data in their arguments (`laufey=1&tag=…&action=…&data=…`), so laufey signs
+what it posts: the arguments end in `&mac=` and an HMAC-SHA256 of the rest under
+a key of this install's own, and a click whose MAC doesn't verify is dropped
+without a trace (set `LAUFEY_NOTIFICATION_DEBUG=1` for a line on stderr).
+Arguments over 16 KiB, a tag over `LAUFEY_NOTIFICATION_MAX_TAG_BYTES`, data over
+`LAUFEY_NOTIFICATION_MAX_DATA_BYTES` (4 KiB) or an action id over 1 KiB are
+dropped too. A dropped click neither reaches a handler nor counts as the click
+that launched the app.
+
+The key is `laufey-notification-key` (32 random bytes, hex) in the app data
+directory ([app-data.md](app-data.md)), created on first use: owner-only
+(`0600`) on Unix, replaced if it is damaged, a link, or readable by others;
+under `%LOCALAPPDATA%`'s per-user ACL on Windows. Every process of the install
+reads the same key, so a cold-start click, a click on a scheduled notification
+(including one the Linux systemd timer's `--laufey-notify` launch posted) and a
+click after a restart all verify. Without an app data directory (no app id) the
+key is this process's alone: only clicks on what this process posted arrive.
+
+A MAC proves only that the arguments were posted by this install. It doesn't
+make the data trustworthy: a notification's `data` is whatever the app put there
+(often from a web page or a server), and the response handler must treat it as
+untrusted input. Clicks through macOS's `UNUserNotificationCenter` and the Linux
+`org.freedesktop.Notifications` path (the server sends `ActionInvoked` to the
+posting connection, and laufey keeps the tag and data itself) carry nothing that
+needs a MAC.
+
 ## Platforms
 
 ### macOS

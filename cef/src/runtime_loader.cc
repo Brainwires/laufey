@@ -284,6 +284,10 @@ static void Backend_ExitApp(void* data, int exit_code) {
   Backend_Quit(data);
 }
 
+void LaufeyRequestQuit() {
+  Backend_Quit(nullptr);
+}
+
 // Window sizes are the page area, the browser view (as window.innerWidth /
 // innerHeight see it), in DIP; CefWindow's size is the whole window, so the
 // frame around the page is added when resizing. UI thread.
@@ -1936,11 +1940,17 @@ static char* Backend_ListShortcuts(void* /*data*/) {
 }
 
 static char* Backend_PlatformFeatures(void* /*data*/) {
-#if !defined(__linux__)
-  // macOS (Keychain) and Windows (DPAPI): OSCrypt's key is always the OS's.
-  // On Linux main_linux.cc records the --password-store it chose.
+#if defined(__APPLE__)
+  // macOS: the browser process runs with --use-mock-keychain (app.h), so
+  // OSCrypt's key is derived from Chromium's fixed mock password: the same
+  // on every install. Cookies on disk are obfuscated, not protected by the
+  // Keychain.
+  laufey_common::SetCookieEncryption("basic");
+#elif !defined(__linux__)
+  // Windows (DPAPI): OSCrypt's key is the OS's.
   laufey_common::SetCookieEncryption("os");
 #endif
+  // Linux: main_linux.cc records the --password-store it chose.
   return laufey_common::PlatformFeaturesJsonForAbi();
 }
 

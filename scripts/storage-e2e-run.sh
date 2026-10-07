@@ -229,6 +229,32 @@ else
   if [ ! -e "$base/$id_a" ]; then pass "no data dir created (WKWebView uses an identifier-based store)"; else fail "unexpected $base/$id_a"; fi
 fi
 
+# macOS CEF runs Chromium with its mock keychain (cef/src/app.h): the key that
+# encrypts cookies on disk is the same on every install (PBKDF2-SHA1 of
+# "mock_password", salt "saltysalt", 1003 rounds; AES-128-CBC, an IV of 16
+# spaces), so platform_features reports "cookieEncryption": "basic". Check the
+# claim: the cookie write-a stored decrypts with that key.
+if [ "$backend" = cef ] && [ "$platform" = macos ]; then
+  hex=""
+  for db in "$base/$id_a/CEF/Default/Cookies" "$base/$id_a/CEF/Default/Network/Cookies"; do
+    [ -f "$db" ] || continue
+    hex="$(sqlite3 -readonly "$db" \
+      "SELECT hex(encrypted_value) FROM cookies WHERE name='laufey_e2e_storage'" 2>/dev/null | head -1)"
+    [ -z "$hex" ] || break
+  done
+  plain=""
+  if [ "${hex:0:6}" = 763130 ]; then # "v10"
+    plain="$(printf '%s' "${hex:6}" | xxd -r -p |
+      openssl enc -d -aes-128-cbc -K af0f762aaf6d7d11581b7aa8ce7218de \
+        -iv 20202020202020202020202020202020 2>/dev/null | tail -c +33 || true)"
+  fi
+  if [ "$plain" = "$value" ]; then
+    pass "a stored cookie decrypts with Chromium's mock-keychain key (cookieEncryption \"basic\" is true)"
+  else
+    fail "the stored cookie didn't decrypt with the mock-keychain key (prefix ${hex:0:6}, got '$plain')"
+  fi
+fi
+
 # CEF allows one process per profile: a second launch of the same app must
 # exit cleanly while the first keeps running.
 if [ "$backend" = cef ]; then

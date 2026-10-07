@@ -1511,6 +1511,17 @@ fn e2e_main() {
             && f.contains("\"cookieEncryption\":")
             && f.ends_with('}'),
         );
+        // CEF on macOS: cookies are encrypted with Chromium's mock-keychain
+        // key, the same on every install, so "basic", never "os"
+        // (storage-e2e-run.sh decrypts one with that key).
+        if cfg!(target_os = "macos")
+          && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("cef")
+        {
+          check(
+            "platform_features: macOS CEF reports cookieEncryption \"basic\"",
+            f.contains("\"cookieEncryption\":\"basic\""),
+          );
+        }
       }
       None => check("platform_features answers (API 45)", false),
     }

@@ -36,6 +36,14 @@ std::string& CookieEncryptionWait() {
   static std::string value;
   return value;
 }
+std::string& SandboxMode() {
+  static std::string value;
+  return value;
+}
+std::string& SandboxReason() {
+  static std::string value;
+  return value;
+}
 std::string Quote(const std::string& s) {
   std::string out = "\"";
   for (unsigned char c : s) {
@@ -346,6 +354,8 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   out += "}";
   out += ",\"cookieEncryption\":" + StringOrNull(f.cookie_encryption);
   out += ",\"cookieEncryptionWait\":" + StringOrNull(f.cookie_encryption_wait);
+  out += ",\"sandbox\":" + StringOrNull(f.sandbox);
+  out += ",\"sandboxReason\":" + StringOrNull(f.sandbox_reason);
   bool on_linux = f.os == "linux";
   out += ",\"notificationTransport\":" + StringOrNull(f.notification_transport);
   out += ",\"notificationColdStart\":" +
@@ -561,12 +571,20 @@ void SetCookieEncryption(const char* value, const char* wait) {
   CookieEncryptionWait() = wait ? wait : "";
 }
 
+void SetSandboxMode(const char* mode, const char* reason) {
+  std::lock_guard<std::mutex> lock(CookieMutex());
+  SandboxMode() = mode ? mode : "";
+  SandboxReason() = reason ? reason : "";
+}
+
 char* PlatformFeaturesJsonForAbi() {
   PlatformFeatures f = ProbePlatformFeatures();
   {
     std::lock_guard<std::mutex> lock(CookieMutex());
     f.cookie_encryption = CookieEncryption();
     f.cookie_encryption_wait = CookieEncryptionWait();
+    f.sandbox = SandboxMode();
+    f.sandbox_reason = SandboxReason();
   }
   std::string json = PlatformFeaturesToJson(f);
   char* out = static_cast<char*>(std::malloc(json.size() + 1));

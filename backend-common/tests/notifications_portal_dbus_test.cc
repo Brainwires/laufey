@@ -33,6 +33,7 @@
 // Exits 77 (skipped) without dbus-daemon.
 
 #include <gio/gio.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -711,6 +712,29 @@ int main() {
   EXPECT(facts.schedule_while_closed && facts.schedule_reason.empty());
   EXPECT(facts.server_caps_known && facts.server_caps.size() == 2);
 
+  // The scheduled launch's target carries a MAC under the install's key,
+  // which is in the data directory, owner-only: what a cold-started process
+  // (another one) verifies with.
+  {
+    std::string key_path = dir + "/" + kNotificationClickKeyFile;
+    struct stat st;
+    EXPECT(stat(key_path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    std::string key;
+    EXPECT(LoadOrCreateNotificationClickKey(dir, &key));
+    EXPECT(VerifyToastArguments(key, posted.default_target));
+  }
+
+  // Forged clicks: any process on the session bus can call ActivateAction
+  // on the app's name. Well-formed arguments without a MAC, and with one
+  // under another key, are dropped: neither arrives, nor uses up the launch.
+  ActivateAction(client, "laufey=1&tag=daily&data=%7B%22d%22%3A2%7D");
+  ActivateAction(client, SignToastArguments(std::string(32, 'x'),
+                                            "laufey=1&tag=daily&action=x"));
+  // Over the size cap.
+  ActivateAction(client, "laufey=1&tag=daily&data=" +
+                             std::string(kMaxNotificationClickArgumentsBytes,
+                                         'x'));
+
   // The click that started it: buffered until the handler registers, and
   // marked as the launch.
   ActivateAction(client, posted.default_target);
@@ -761,8 +785,11 @@ int main() {
   ActivateAction(client, n.button_targets[1]);
   EXPECT(WaitFor(
       [&] { return CountEvents(id, LAUFEY_NOTIFICATION_ACTION, "logs"); }));
+  // A forged click on the live notification's button never reaches it.
+  ActivateAction(client, "laufey=1&tag=build&action=rebuild");
   ActivateAction(client, n.default_target);
   EXPECT(WaitFor([&] { return CountEvents(id, LAUFEY_NOTIFICATION_CLICKED); }));
+  EXPECT(!CountEvents(id, LAUFEY_NOTIFICATION_ACTION, "rebuild"));
   EXPECT(ResponseCount() == 1);
   // Something that isn't a laufey target is ignored.
   ActivateAction(client, "tag=forged");
@@ -868,6 +895,13 @@ int main() {
     EXPECT(AddedCount() == 4 && LastAdded().id == "missed");
     EXPECT(!InFile(file, "missed"));
     EXPECT(ResponseCount() == 1);
+    // A genuine click on it (a scheduled notification) arrives; not the
+    // launch.
+    ActivateAction(client, LastAdded().default_target);
+    EXPECT(WaitFor([] { return ResponseCount() == 2; }));
+    EXPECT(g_responses[1] ==
+           "{\"tag\":\"missed\",\"action\":null,\"data\":null,"
+           "\"launch\":false}");
   }
 
   std::printf("laufey_notifications_portal_dbus_test: ok\n");

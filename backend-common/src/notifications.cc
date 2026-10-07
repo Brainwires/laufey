@@ -455,7 +455,7 @@ std::string EncodeToastArguments(const std::string& tag, const char* action,
     out += "&action=" + PercentEncode(action);
   if (data)
     out += "&data=" + PercentEncode(*data);
-  return out;
+  return SignToastArguments(NotificationClickKey(), out);
 }
 
 bool DecodeToastArguments(const std::string& args, std::string* tag,

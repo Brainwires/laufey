@@ -733,9 +733,10 @@ class LinuxNotificationPlatform : public NotificationPlatform {
         return;
       }
     }
-    // The first call to a process D-Bus started is what it was started for.
-    bool launch = self->launch_click_pending_.exchange(false);
     if (g_strcmp0(method, "ActivateAction") == 0) {
+      // Any process on the session bus can call this: a click counts only
+      // with arguments laufey posted (DecodeClickArguments), and a forgery
+      // neither arrives nor uses up the launch.
       const char* name = nullptr;
       GVariantIter* param = nullptr;
       GVariant* platform_data = nullptr;
@@ -745,12 +746,17 @@ class LinuxNotificationPlatform : public NotificationPlatform {
           g_variant_iter_next(param, "v", &target)) {
         if (g_variant_is_of_type(target, G_VARIANT_TYPE_STRING))
           self->HandleClickTarget(g_variant_get_string(target, nullptr),
-                                  launch);
+                                  /*from_activation=*/true);
         g_variant_unref(target);
       }
       g_variant_iter_free(param);
       g_variant_unref(platform_data);
-    } else if (g_strcmp0(method, "Activate") == 0) {
+      g_dbus_method_invocation_return_value(invocation, nullptr);
+      return;
+    }
+    // The first call to a process D-Bus started is what it was started for.
+    bool launch = self->launch_click_pending_.exchange(false);
+    if (g_strcmp0(method, "Activate") == 0) {
       // The app was started (or brought up) from its launcher: a started
       // process just runs; a running one comes to the front, as a second
       // launch would.
@@ -781,13 +787,17 @@ class LinuxNotificationPlatform : public NotificationPlatform {
 
   // A click on a portal notification: ActivateAction (and, where a portal
   // backend also sends it, the portal's ActionInvoked). The first of the two
-  // wins for a few seconds.
-  void HandleClickTarget(const std::string& target, bool launch) {
+  // wins for a few seconds. A target laufey didn't post is dropped
+  // (DecodeClickArguments). The first verified ActivateAction to a process
+  // D-Bus started is the click it was started for (`from_activation`).
+  void HandleClickTarget(const std::string& target, bool from_activation) {
     std::string tag, action, data;
     bool has_action = false, has_data = false;
-    if (!DecodeToastArguments(target, &tag, &action, &has_action, &data,
+    if (!DecodeClickArguments(target, &tag, &action, &has_action, &data,
                               &has_data))
       return;
+    bool launch =
+        from_activation && launch_click_pending_.exchange(false);
     auto now = std::chrono::steady_clock::now();
     for (auto it = recent_clicks_.begin(); it != recent_clicks_.end();) {
       if (now - it->second > std::chrono::seconds(5))

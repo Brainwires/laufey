@@ -154,11 +154,62 @@ std::string SerializeSchedule(const std::vector<ScheduledNotification>& list);
 bool ParseSchedule(const std::string& text,
                    std::vector<ScheduledNotification>* out, std::string* error);
 
-// The key=value argument string a Windows toast carries back on activation
-// (and its parser): tag, action and data, percent-encoded.
+// The key=value argument string a Windows toast (and a Linux portal
+// notification's action target) carries back on activation: tag, action and
+// data, percent-encoded, then "&mac=" and the MAC of the rest under
+// NotificationClickKey() (SignToastArguments). DecodeToastArguments only
+// parses (it ignores the MAC: reading back what the OS holds); an activation
+// goes through DecodeClickArguments, which verifies.
 std::string EncodeToastArguments(const std::string& tag, const char* action,
                                  const std::string* data);
 bool DecodeToastArguments(const std::string& args, std::string* tag,
+                          std::string* action, bool* has_action,
+                          std::string* data, bool* has_data);
+
+// --- Click arguments: authenticated (notification_auth.cc) ---
+//
+// A click reaches the app as a call any local process can make (Linux:
+// org.freedesktop.Application.ActivateAction on the session bus; Windows:
+// the COM activator's Activate), carrying the arguments above. Each argument
+// string laufey posts ends in a MAC under a key of this install's own, so an
+// activation laufey never posted is dropped. The MAC proves only that the
+// arguments came from this install: their data is still untrusted input.
+
+// HMAC-SHA256 (RFC 2104), the raw 32-byte tag.
+std::string HmacSha256(const std::string& key, const std::string& message);
+
+constexpr size_t kNotificationClickKeyBytes = 32;
+// The key's file in the app data directory: hex, owner-only (0600 on Unix;
+// %LOCALAPPDATA%'s per-user ACL on Windows).
+constexpr char kNotificationClickKeyFile[] = "laufey-notification-key";
+// Activation arguments longer than this are dropped unread: the tag
+// (LAUFEY_NOTIFICATION_MAX_TAG_BYTES) and data
+// (LAUFEY_NOTIFICATION_MAX_DATA_BYTES) percent-encoded at worst, an action id
+// and the MAC fit.
+constexpr size_t kMaxNotificationClickArgumentsBytes = 16 * 1024;
+// The longest action id a click may carry back.
+constexpr size_t kMaxNotificationActionBytes = 1024;
+
+// `dir`/kNotificationClickKeyFile, created (random, owner-only) when missing,
+// damaged or (Unix) not owner-only; of two processes creating it at once,
+// both end up with the same key. False when `dir` is "" or unusable.
+bool LoadOrCreateNotificationClickKey(const std::string& dir,
+                                      std::string* key);
+// This install's key: from the app data directory, else (no app id) one for
+// this process only, so a click on a notification an earlier run posted is
+// then dropped. Loaded once.
+const std::string& NotificationClickKey();
+void SetNotificationClickKeyForTesting(const std::string& key);
+// `args` + "&mac=" + the MAC of `args` under `key`.
+std::string SignToastArguments(const std::string& key, const std::string& args);
+// Whether `args` is at most kMaxNotificationClickArgumentsBytes and ends in a
+// MAC of the rest under `key` (constant-time). False for an empty key.
+bool VerifyToastArguments(const std::string& key, const std::string& args);
+// An activation's arguments: verified under NotificationClickKey(), parsed
+// (DecodeToastArguments), and the tag, data and action within their limits.
+// False drops the click (with a line on stderr when
+// LAUFEY_NOTIFICATION_DEBUG is set).
+bool DecodeClickArguments(const std::string& args, std::string* tag,
                           std::string* action, bool* has_action,
                           std::string* data, bool* has_data);
 
