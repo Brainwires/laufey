@@ -47,6 +47,17 @@ class RuntimeLoader {
 
   void Shutdown();
 
+  // A headless launch (`run <script>`: a forked worker, the updater's
+  // helper; no UI loop) waits here for its runtime to return on its own,
+  // however long it runs, before Shutdown. Shutdown alone gives a runtime
+  // kRuntimeShutdownTimeout and then exits without it, the bound for a
+  // windowed app whose loop has ended; a headless runtime was cut off there
+  // (a helper waiting for the old app's processes, a long worker).
+  void WaitForRuntime() {
+    if (runtime_thread_.joinable())
+      runtime_thread_.join();
+  }
+
   void SetBackend(LaufeyBackend* backend) {
     backend_ = backend;
   }

@@ -71,6 +71,8 @@ static int run_headless(const std::string& runtimePath) {
     std::cerr << "Failed to start headless worker runtime." << std::endl;
     return 1;
   }
+  // It ends when the runtime returns, however long that takes.
+  loader->WaitForRuntime();
   loader->Shutdown();
   return 0;
 }

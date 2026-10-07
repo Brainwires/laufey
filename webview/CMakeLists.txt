@@ -213,6 +213,21 @@ elseif(PLATFORM_LINUX)
     ${GTK_CFLAGS_OTHER}
   )
 
+  # A headless launch (`run <script>`) runs its runtime to the end, past the
+  # bounded wait a windowed app's runtime gets (a stand-in runtime library).
+  if(LAUFEY_BUILD_TESTS)
+    add_library(laufey_headless_runtime MODULE tests/headless_runtime_lib.cc)
+    add_executable(laufey_headless_launch_test tests/headless_launch_test.cc)
+    target_compile_definitions(laufey_headless_launch_test PRIVATE
+      LAUFEY_HOST="$<TARGET_FILE:${LAUFEY_TARGET}>"
+      LAUFEY_HEADLESS_RUNTIME="$<TARGET_FILE:laufey_headless_runtime>"
+    )
+    add_dependencies(laufey_headless_launch_test
+      ${LAUFEY_TARGET} laufey_headless_runtime)
+    add_test(NAME laufey_headless_launch_test
+             COMMAND laufey_headless_launch_test)
+  endif()
+
 elseif(PLATFORM_WINDOWS)
   add_executable(${LAUFEY_TARGET} WIN32
     ${LAUFEY_SRCS_COMMON}
