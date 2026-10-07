@@ -140,6 +140,11 @@ With it on:
   starts. If the primary does not answer within 10 seconds, it prints an error
   and exits 1. On Windows it first calls `AllowSetForegroundWindow(ASFW_ANY)`,
   so the primary may take the focus.
+- A primary that is ending (`quit()` was called, its event loop has ended, or
+  the process is exiting, e.g. through `Deno.exit()`) would never deliver a
+  launch, so it doesn't take it: it answers "ending", and the launch keeps
+  trying to take the lock (every 50 ms, for up to 10 seconds) and becomes the
+  primary itself once the ending one lets go.
 - The primary brings the app to the front (it restores and activates its focused
   or first visible window; windows the app hid stay hidden), then calls the
   `on_second_instance` handler on the UI thread with the arguments and the

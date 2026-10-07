@@ -4,6 +4,7 @@
 // laufey_auth_session.h.
 
 #include "laufey_auth_session.h"
+#include "laufey_single_instance.h"
 #include "laufey_ui_tasks.h"
 
 #include <cstring>
@@ -387,6 +388,8 @@ bool AuthSessionCancelCurrent(const std::string& message) {
 }
 
 void UiLoopEnded() {
+  // The app is ending: a later launch becomes the primary instead.
+  MarkSingleInstanceEnding();
   UiTaskDispatcher::Get().Close();
   AuthSessionCancelCurrent("the app is quitting");
 }

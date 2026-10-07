@@ -263,6 +263,9 @@ jobs:
             -Ibackend-common/include -Icapi/include \
             backend-common/tests/auth_main_thread_test.cc \
             backend-common/src/auth_session.cc \
+            backend-common/src/single_instance.cc \
+            backend-common/src/single_instance_posix.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/auth_main_thread_test"
           "$RUNNER_TEMP/auth_main_thread_test"
       # The WebKitGTK response body stream: a writer thread against a reader

@@ -272,9 +272,14 @@ class PipeServer : public SingleInstanceServer {
                                         deadline, stop_.get())) &&
            DecodeSecondInstancePayload(payload, &message, nullptr);
     }
-    if (ok)
+    // An ending primary would never deliver it: refuse, so the launch
+    // becomes the primary instead of being acknowledged and lost.
+    bool ending = ok && SingleInstanceEnding();
+    if (ok && !ending)
       on_message_(std::move(message));
-    unsigned char answer = ok ? kSingleInstanceAck : kSingleInstanceNak;
+    unsigned char answer = ending ? kSingleInstanceEnding
+                           : ok   ? kSingleInstanceAck
+                                  : kSingleInstanceNak;
     TransferFull(pipe, true, &answer, 1, Clock::now() + std::chrono::seconds(1),
                  stop_.get());
     FlushFileBuffers(pipe);
@@ -380,6 +385,10 @@ SingleInstanceForward ForwardToPrimaryInstance(
       sent && TransferFull(pipe.get(), false, &answer, 1, deadline, nullptr);
   if (answered && answer == kSingleInstanceAck)
     return SingleInstanceForward::kAcknowledged;
+  if (answered && answer == kSingleInstanceEnding) {
+    *error = "the running instance is quitting";
+    return SingleInstanceForward::kEnding;
+  }
   *error = !sent ? "could not send" : !answered ? "no answer" : "rejected";
   return SingleInstanceForward::kFailed;
 }

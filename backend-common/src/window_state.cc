@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 
+#include "laufey_single_instance.h"
 #include "laufey_window.h"
 
 namespace laufey_common {
@@ -320,6 +321,8 @@ bool QuitOnLastWindowClosed() {
 
 void MarkQuitting() {
   g_quitting.store(true);
+  // Quitting: a later launch must become the primary, not be forwarded here.
+  MarkSingleInstanceEnding();
 }
 
 bool IsQuitting() {

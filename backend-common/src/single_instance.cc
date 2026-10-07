@@ -6,8 +6,12 @@
 
 #include "laufey_single_instance.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
+#include <thread>
 #include <iostream>
 #include <mutex>
 #include <utility>
@@ -23,6 +27,12 @@ const char kMagic[4] = {'L', 'F', 'S', 'I'};
 
 // How long a second launch waits for the primary to answer before giving up.
 constexpr int kForwardTimeoutMs = 10000;
+// How long a launch waits for an ending primary to let go of the lock, and
+// how often it tries to take it meanwhile.
+constexpr int kEndingWaitMs = 10000;
+constexpr int kEndingRetryMs = 50;
+
+std::atomic<bool> g_ending{false};
 
 void PutU32(std::string* out, uint32_t v) {
   out->push_back(static_cast<char>(v & 0xFF));
@@ -298,6 +308,21 @@ std::string SingleInstancePipeName(const std::string& app_id,
          user_sid + "-" + std::to_string(session_id);
 }
 
+// --- Ending
+// --------------------------------------------------------------------
+
+void MarkSingleInstanceEnding() {
+  g_ending.store(true);
+}
+
+bool SingleInstanceEnding() {
+  return g_ending.load();
+}
+
+void ResetSingleInstanceEndingForTesting() {
+  g_ending.store(false);
+}
+
 // --- Startup
 // -------------------------------------------------------------------
 
@@ -320,14 +345,25 @@ bool SingleInstanceStartup(int argc, char** argv, int* exit_code) {
     return true;
   }
   // A primary can disappear between our failed lock attempt and the connect
-  // (it exited); then try to become the primary again, a few times.
-  for (int attempt = 0; attempt < 3; ++attempt) {
+  // (it exited); then try to become the primary again, a few times. One
+  // that is ending refuses the message: keep trying to take the lock until
+  // it lets go (bounded by kEndingWaitMs).
+  auto ending_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(kEndingWaitMs);
+  // The primary said it is ending: from then on an exchange that fails (it
+  // exited with this connection still unanswered) means "try again" too.
+  bool primary_ending = false;
+  for (int attempt = 0; attempt < 3;) {
     std::unique_ptr<SingleInstanceServer> server;
     SingleInstanceAcquire result = AcquireSingleInstance(
         endpoint, [](SecondInstanceMessage m) { QueueSecondInstance(m); },
         &server, &error);
     if (result == SingleInstanceAcquire::kPrimary) {
       g_process_server = server.release();
+      // exit() from any thread (the runtime's Deno.exit()) ends the process
+      // without quit() or the loop's end: refuse launches from then on.
+      static std::once_flag at_exit;
+      std::call_once(at_exit, [] { std::atexit(MarkSingleInstanceEnding); });
       return true;
     }
     if (result == SingleInstanceAcquire::kError) {
@@ -342,6 +378,19 @@ bool SingleInstanceStartup(int argc, char** argv, int* exit_code) {
       *exit_code = 0;
       return false;
     }
+    if (forwarded == SingleInstanceForward::kEnding ||
+        (primary_ending && forwarded == SingleInstanceForward::kFailed)) {
+      primary_ending = true;
+      if (std::chrono::steady_clock::now() >= ending_deadline) {
+        std::cerr << "laufey: another instance of " << app_id
+                  << " is quitting but still holds the single-instance lock"
+                  << std::endl;
+        *exit_code = 1;
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(kEndingRetryMs));
+      continue;  // not an attempt: the primary is on its way out
+    }
     if (forwarded == SingleInstanceForward::kUntrusted) {
       std::cerr << "laufey: single-instance lock unavailable (" << error
                 << "); running without it" << std::endl;
@@ -354,6 +403,7 @@ bool SingleInstanceStartup(int argc, char** argv, int* exit_code) {
       *exit_code = 1;
       return false;
     }
+    ++attempt;  // kNoPrimary: it went away; try to take the lock again
   }
   std::cerr << "laufey: could not take or reach the single-instance lock for "
             << app_id << "; running without it" << std::endl;
