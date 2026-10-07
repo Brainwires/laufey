@@ -2508,6 +2508,53 @@ async fn window_api_checks() {
       );
       // macOS animates the exit; let it settle before the next checks.
       tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+      // Minimize right after leaving fullscreen (X11 window managers apply
+      // both asynchronously; xfwm4 and Cinnamon's muffin used to leave the
+      // window reported, or left, not minimized).
+      #[cfg(target_os = "linux")]
+      {
+        w.set_fullscreen(true);
+        if wait_state(&w, |s| s.fullscreen, 10000).await {
+          w.set_fullscreen(false);
+          let left = wait_state(&w, |s| !s.fullscreen, 10000).await;
+          let asked = std::time::Instant::now();
+          w.minimize();
+          let minimized = wait_state(&w, |s| s.minimized, 6000).await;
+          check(
+            &format!(
+              "minimize right after leaving fullscreen -> is_minimized (left fullscreen: {left}, after {} ms, state {:?})",
+              asked.elapsed().as_millis(),
+              w.get_state()
+            ),
+            left && minimized,
+          );
+          // ... and stays minimized: nothing left over from leaving
+          // fullscreen restores it.
+          let mut stayed = minimized;
+          for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            stayed = stayed && w.get_state().minimized;
+          }
+          check(
+            &format!(
+              "that minimize holds for 1.5 s (state {:?})",
+              w.get_state()
+            ),
+            stayed,
+          );
+          w.restore();
+          check(
+            "restore after that minimize -> !is_minimized",
+            wait_state(&w, |s| !s.minimized && !s.fullscreen, 6000).await,
+          );
+          tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        } else {
+          check(
+            "fullscreen again for the minimize-after-fullscreen check",
+            false,
+          );
+        }
+      }
     } else {
       check(
         "fullscreen did not report a wrong state",
