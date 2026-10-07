@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 46
+#define LAUFEY_API_VERSION 47
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -453,6 +453,19 @@ typedef void (*laufey_display_changed_fn)(void* user_data);
 // UI thread on CEF and WebView, a watcher thread on Winit); call
 // platform_features again for the new answer.
 typedef void (*laufey_platform_features_changed_fn)(void* user_data);
+
+// Callback fired when what title_bar_preferences reports changed (API 47):
+// the user moved the window buttons, picked another double-click action,
+// colour scheme or accent colour. Fires on a watcher thread (Linux,
+// Windows) or the main thread (macOS); call title_bar_preferences again
+// for the new answer.
+typedef void (*laufey_title_bar_preferences_changed_fn)(void* user_data);
+
+// Statuses of secret_lookup / secret_store / secret_delete (API 47).
+#define LAUFEY_SECRET_OK 0
+#define LAUFEY_SECRET_NOT_FOUND 1
+#define LAUFEY_SECRET_UNAVAILABLE 2
+#define LAUFEY_SECRET_FAILED 3
 
 typedef struct laufey_backend_api laufey_backend_api_t;
 
@@ -2139,6 +2152,70 @@ struct laufey_backend_api {
   // see docs/backends.md, "How a Windows app ends"). Any thread. NULL on
   // backends older than API version 46.
   void (*exit_app)(void* backend_data, int exit_code);
+
+  // --- Title bar preferences (API >= 47) -----------------------------------
+  //
+  // How the user set up title bars, for an app that draws its own (a hidden
+  // title bar with a drag region): a JSON object freed with string_free,
+  //   {"buttons": {"left": [...], "right": [...]},  // "close", "minimize",
+  //                                                 // "maximize", "appmenu",
+  //                                                 // "menu", "icon"
+  //    "side": "left" | "right",                    // the close button's
+  //    "doubleClick": "maximize" | "minimize" | "shade" | "lower" | "menu" |
+  //                   "none",
+  //    "colorScheme": "light" | "dark" | "no-preference",
+  //    "accentColor": "#rrggbb" | null,
+  //    "font": string | null,                       // the title bar font
+  //    "source": "portal" | "gsettings" | "default" | "os"}
+  // Linux reads xdg-desktop-portal's Settings first (the portal's answer wins
+  // over GSettings key by key), then GSettings, then GTK's defaults; macOS:
+  // the buttons on the left, the double click per AppleActionOnDoubleClick;
+  // Windows: the buttons on the right, a double click maximizes. Never a
+  // look of laufey's own: windows with the OS's frame already follow these
+  // (see docs/title-bar.md). Any thread; on Linux the first call may wait a
+  // few seconds for xdg-desktop-portal to start. NULL on backends older than
+  // API version 47.
+  char* (*title_bar_preferences)(void* backend_data);
+
+  // The handler fired when title_bar_preferences answers differently (see
+  // laufey_title_bar_preferences_changed_fn). One handler per process; NULL
+  // clears it. NULL on backends older than API version 47.
+  void (*set_title_bar_preferences_changed_handler)(
+      void* backend_data, laufey_title_bar_preferences_changed_fn handler,
+      void* user_data);
+
+  // --- Secure store (API >= 47) --------------------------------------------
+  //
+  // A small secret per (service, account) in the OS's secret store: on Linux
+  // the Secret Service (gnome-keyring, KWallet's Secret Service, KeePassXC)
+  // through libsecret. Items carry the attributes `service` and `account`
+  // (as `secret-tool store … service S account A` writes them, so either
+  // reads the other's); a store replaces what is there. Each call BLOCKS the
+  // calling thread for at most about `timeout_ms` (0: 20 s) and must not be
+  // made on the UI thread. Returns a LAUFEY_SECRET_* status:
+  //   OK           lookup: `*value` is the secret; store / delete: done
+  //                (deleting nothing is OK)
+  //   NOT_FOUND    lookup: no such item (nothing locked matched either)
+  //   UNAVAILABLE  the store can't answer: no session bus, no provider
+  //                ("install gnome-keyring", "enable KWallet's Secret
+  //                Service"), libsecret missing, or a locked keyring whose
+  //                unlock prompt no one can answer here (refused at once) or
+  //                no one answered within `timeout_ms`. Never a plaintext
+  //                fallback, and a locked item is never "not found".
+  //   FAILED       bad arguments (empty or non-UTF-8 strings)
+  // `*value` and `*reason` (why, for UNAVAILABLE / FAILED; may be NULL) are
+  // freed with string_free; either out pointer may be NULL. Strings are
+  // UTF-8; the value is text. Linux CEF and WebView backends; NULL elsewhere
+  // (macOS and Windows keep their own keychain / credential APIs) and on
+  // backends older than API version 47. See docs/secure-store.md.
+  int (*secret_lookup)(void* backend_data, const char* service,
+                       const char* account, uint32_t timeout_ms, char** value,
+                       char** reason);
+  int (*secret_store)(void* backend_data, const char* service,
+                      const char* account, const char* label, const char* value,
+                      uint32_t timeout_ms, char** reason);
+  int (*secret_delete)(void* backend_data, const char* service,
+                       const char* account, uint32_t timeout_ms, char** reason);
 };
 
 #ifdef __cplusplus

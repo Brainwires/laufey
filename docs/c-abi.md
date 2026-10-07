@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `46`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `47`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -148,6 +148,16 @@ The pointers group into:
   `tray_unavailable_reason`; `set_platform_features_changed_handler` (fires when
   a tray host appears or goes away: create the tray again). See
   [platform-features.md](platform-features.md).
+- **Title bar preferences** (API ≥ 47) — `title_bar_preferences`: how the user
+  set up title bars (the buttons on each side, the double-click action, the
+  colour scheme, the accent colour, the title bar font), as JSON, for an app
+  that draws its own; `set_title_bar_preferences_changed_handler` (fires when
+  that answer changes). See [title-bar.md](title-bar.md).
+- **Secure store** (API ≥ 47) — `secret_lookup`, `secret_store`,
+  `secret_delete`: a small secret per (service, account) in the Secret Service
+  on Linux (CEF and WebView), blocking with a timeout; a missing provider or a
+  locked keyring is `LAUFEY_SECRET_UNAVAILABLE` with a reason, never "not found"
+  and never a hang. `NULL` elsewhere. See [secure-store.md](secure-store.md).
 - **Notifications** — `show_notification`, `close_notification`, and from API 41
   the `"schedule_at"` and `"data"` options, `notification_capabilities`,
   `set_notification_response_handler` (clicks no live callback owns, buffered

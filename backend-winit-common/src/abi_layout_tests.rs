@@ -218,6 +218,11 @@ fn vtable_layout_matches_the_header() {
     platform_features,
     tray_unavailable_reason,
     set_platform_features_changed_handler,
-    exit_app
+    exit_app,
+    title_bar_preferences,
+    set_title_bar_preferences_changed_handler,
+    secret_lookup,
+    secret_store,
+    secret_delete
   );
 }

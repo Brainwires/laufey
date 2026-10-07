@@ -53,6 +53,7 @@ set(LAUFEY_COMMON_SRCS
   src/notifications.cc
   src/auth_session.cc
   src/platform_features.cc
+  src/title_bar.cc
 )
 
 if(WIN32)
@@ -78,6 +79,7 @@ if(APPLE)
     src/shortcuts_mac.mm
     src/login_item_mac.mm
     src/auth_session_mac.mm
+    src/title_bar_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -98,6 +100,8 @@ elseif(UNIX)
     src/scheme_body_stream_linux.cc
     src/platform_features_linux.cc
     src/cookie_db_linux.cc
+    src/title_bar_linux.cc
+    src/secret_store_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -111,6 +115,7 @@ elseif(WIN32)
     src/io_win.cc
     src/shortcuts_win.cc
     src/login_item_win.cc
+    src/title_bar_win.cc
   )
 endif()
 
@@ -372,7 +377,55 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_platform_features_test
            COMMAND laufey_platform_features_test)
 
+  # Title bar preferences: the layout parser, the merge of the sources, the
+  # JSON; macOS / Windows: the OS's answer (no bus).
+  add_executable(laufey_title_bar_test tests/title_bar_test.cc)
+  target_link_libraries(laufey_title_bar_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_title_bar_test COMMAND laufey_title_bar_test)
+
   if(UNIX AND NOT APPLE)
+    # Title bar preferences against a mock xdg-desktop-portal Settings and
+    # GSettings' memory backend: the portal wins, SettingChanged is followed
+    # live (GTestDBus; skipped without dbus-daemon / glib-compile-schemas).
+    add_executable(laufey_title_bar_dbus_test tests/title_bar_dbus_test.cc)
+    target_link_libraries(laufey_title_bar_dbus_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_title_bar_dbus_test
+             COMMAND laufey_title_bar_dbus_test)
+    set_tests_properties(laufey_title_bar_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77
+                         ENVIRONMENT "G_DEBUG=fatal-criticals")
+
+    # File dialogs through xdg-desktop-portal's FileChooser against a mock
+    # portal (GTestDBus) and GTK's chooser as the fallback, on a private Xvfb
+    # (skipped without dbus-daemon / Xvfb).
+    add_executable(laufey_file_chooser_dbus_test
+                   tests/file_chooser_dbus_test.cc)
+    target_link_libraries(laufey_file_chooser_dbus_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_file_chooser_dbus_test
+             COMMAND laufey_file_chooser_dbus_test)
+    set_tests_properties(laufey_file_chooser_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # The secure store: no provider, KWallet without the Secret Service, a
+    # provider that never answers, a locked keyring (refused, never "not
+    # found"), and a real gnome-keyring-daemon round trip on a private bus
+    # (GTestDBus; skipped without dbus-daemon / libsecret).
+    add_executable(laufey_secret_store_dbus_test
+                   tests/secret_store_dbus_test.cc)
+    target_link_libraries(laufey_secret_store_dbus_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_secret_store_dbus_test
+             COMMAND laufey_secret_store_dbus_test)
+    set_tests_properties(laufey_secret_store_dbus_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
     # The Linux platform-features probe against mock services (a tray
     # watcher that comes and goes, a locked / unlocked Secret Service, the
     # portal versions) on a private D-Bus session bus (GTestDBus; skipped

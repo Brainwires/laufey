@@ -234,15 +234,46 @@ bool CancelFileDialogWin(uint32_t dialog_id);
 bool TestFileDialogRespondWin(int action, const char* path);
 #endif
 
+// Which file chooser a Linux dialog uses (API 47): xdg-desktop-portal's
+// FileChooser (the desktop's own dialog: GNOME's, Plasma's, ...) whenever the
+// portal offers it, GTK's own chooser otherwise. `portal_version` is the
+// portal's FileChooser version (0: none: no portal, or a portal backend
+// without one, as xdg-desktop-portal-wlr alone); `request` (optional) is the
+// dialog (picking a folder needs version 3); `override_env` is
+// LAUFEY_FILE_CHOOSER ("gtk" / "portal"; null or anything else: auto).
+// `reason` says why GTK's, empty for the portal. Pure; any platform.
+struct FileChooserChoice {
+  bool portal = false;
+  std::string reason;
+};
+FileChooserChoice ChooseFileChooser(uint32_t portal_version,
+                                    const FileDialogRequest* request,
+                                    const char* override_env);
+
 #ifdef __linux__
-// GtkFileChooserNative (portal-aware), transient for the GtkWindow* `parent`
-// returns.
+// The portal's parent-window identifier for a dialog ("x11:<xid>",
+// "wayland:<handle>"), for backends whose windows aren't GTK's (CEF); empty
+// for none.
+using PortalParentResolver = std::function<std::string()>;
+
+// xdg-desktop-portal's FileChooser where the portal offers it (the desktop's
+// own dialog, outside Flatpak / Snap too), else GtkFileChooserNative. The
+// GtkWindow* `parent` returns makes it modal (the portal gets its X11 id, or
+// its exported Wayland handle); `portal_parent` names a window that isn't
+// GTK's. Which one it used is reported by platform_features ("fileChooser").
 uint32_t ShowFileDialogLinux(ParentResolver parent,
                              const laufey_file_dialog_options_t* options,
                              laufey_file_dialog_result_fn callback,
-                             void* user_data);
+                             void* user_data,
+                             PortalParentResolver portal_parent = nullptr);
 bool CancelFileDialogLinux(uint32_t dialog_id);
 bool TestFileDialogRespondLinux(int action, const char* path);
+
+// The portal's FileChooser version as the last dialog found it (-1: not
+// asked yet). Test-only.
+int PortalFileChooserVersionForTesting();
+// Forget it (the next dialog asks again). Test-only.
+void ResetPortalFileChooserForTesting();
 #endif
 
 // --- Clipboard ---------------------------------------------------------------

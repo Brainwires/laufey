@@ -374,6 +374,8 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   }
   out += ",\"badge\":" + StringOrNull(f.badge);
   out += ",\"badgeReason\":" + StringOrNull(f.badge_reason);
+  out += ",\"fileChooser\":" + StringOrNull(f.file_chooser);
+  out += ",\"fileChooserReason\":" + StringOrNull(f.file_chooser_reason);
   out += "}";
   return out;
 }

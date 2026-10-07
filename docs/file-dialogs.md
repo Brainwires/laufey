@@ -56,9 +56,11 @@ typedef void (*laufey_file_dialog_result_fn)(void* user_data,
   cancelled it; it returns false when that dialog isn't open.
 - **Modal.** A nonzero `window_id` makes the dialog modal to that window where
   `LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL` is reported: a sheet on macOS, an owned
-  dialog on Windows, a transient GTK dialog on WebKitGTK. On CEF for Linux the
-  dialog is app-level (Chromium's windows aren't GTK windows). An unknown window
-  id shows an app-level dialog.
+  dialog on Windows, a transient GTK dialog on WebKitGTK (the portal's dialog
+  gets the window's X11 id, or its exported Wayland handle). On CEF for Linux
+  GTK's chooser is app-level (Chromium's windows aren't GTK windows); the
+  portal's is modal on X11 (it gets the window's X11 id) and app-level on
+  Wayland. An unknown window id shows an app-level dialog.
 
 ### Options
 
@@ -106,8 +108,30 @@ Windows adds the first filter's first extension to a typed name without one.
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | macOS   | `NSOpenPanel` / `NSSavePanel`, a sheet on the window or `beginWithCompletionHandler`. The title also shows as the panel's message (panels have no title bar on macOS 11+).                                                                                                                                                                                                                                                                                                                      |
 | Windows | `IFileOpenDialog` (`FOS_PICKFOLDERS` for folders) / `IFileSaveDialog`, with `FOS_FORCEFILESYSTEM`. Shown on laufey's own I/O thread (an STA with a message loop, as Electron does), owned by the window, so its modal loop never stalls the engine's UI thread; cancel requests reach it there and press the dialog's Cancel button (`IFileDialog::Close` is not used: one made while the dialog is still being set up is swallowed, and every later `Close` on that dialog then does nothing). |
-| Linux   | `GtkFileChooserNative`, which uses the xdg-desktop-portal FileChooser when GTK decides to (inside Flatpak / Snap, or with `GTK_USE_PORTAL=1`) and a GTK dialog otherwise.                                                                                                                                                                                                                                                                                                                       |
+| Linux   | xdg-desktop-portal's `FileChooser`, called directly (not only inside Flatpak / Snap), so the dialog is the desktop's own: GNOME's, Plasma's. Where the portal offers no FileChooser (no portal; a backend without one, as `xdg-desktop-portal-wlr` alone on Sway), or the portal's call fails, GTK's own chooser (`GtkFileChooserNative`). See [below](#linux-which-chooser).                                                                                                                   |
 | Winit   | Not supported (`NULL`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Linux: which chooser
+
+A dialog uses the portal's FileChooser (API 47) whenever xdg-desktop-portal
+offers one, and GTK's chooser otherwise:
+
+- the portal's FileChooser version is asked once per process, asynchronously
+  (the first dialog may start the portal; neither the caller nor the UI thread
+  waits for it);
+- a folder dialog needs FileChooser version 3 (`directory`); with an older
+  portal it is GTK's;
+- a portal whose `OpenFile` / `SaveFile` call fails is not asked again: that
+  dialog, and the rest, are GTK's;
+- `LAUFEY_FILE_CHOOSER=gtk` forces GTK's chooser (troubleshooting, tests).
+
+`platform_features` reports the choice: `"fileChooser"` is `"portal"` or
+`"gtk"`, and `"fileChooserReason"` says why GTK's. The portal's dialog carries
+the title, the accept label, `multiple`, `directory`, the filters (as
+case-insensitive globs) and the start folder / proposed name; it has no "show
+hidden files" or "don't confirm overwrite" option (the desktop's dialog
+decides). `cancel_file_dialog` closes it with the request's `Close`. Selections
+that aren't local files (a non-`file:` URI) are dropped.
 
 ### Testing
 
@@ -121,4 +145,8 @@ closes it; `LAUFEY_TEST_DIALOG_ACCEPT` first puts `path` into it (the save
 dialog's folder and name; the selection or the typed name of an open dialog) and
 then accepts, so the result returns through the dialog's own completion path.
 Returns false when no dialog is open yet (poll until true). A dialog that won't
-take a typed path (a portal dialog) is cancelled instead.
+take a typed path (the portal's dialog: the desktop's own can't be driven from
+here) is cancelled instead. On Linux, `scripts/native-e2e-run.sh --io` under
+Xvfb sets `LAUFEY_FILE_CHOOSER=gtk` so its dialogs can be accepted; the portal
+path is covered by `laufey_file_chooser_dbus_test` (a mock portal) and
+`--file-chooser` (the session's own portal).

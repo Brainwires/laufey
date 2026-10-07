@@ -150,6 +150,12 @@ struct PlatformFeatures {
   // interface the portal lacks is absent from the map.
   std::map<std::string, uint32_t> portal_versions;
 
+  // Linux: which file chooser a file dialog uses (API 47): "portal" (the
+  // portal's FileChooser, the desktop's own dialog) or "gtk" (GTK's own
+  // chooser), and why GTK's. Empty elsewhere.
+  std::string file_chooser;
+  std::string file_chooser_reason;
+
   // CEF only: "os" (OSCrypt keeps its key in the OS keystore) or "basic"
   // (--password-store=basic: the key is fixed, cookies are only obfuscated).
   // Empty on engines that don't encrypt with an OS key (WebKit, Winit).

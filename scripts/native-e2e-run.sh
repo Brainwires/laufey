@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox|--network-quiet]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -58,6 +58,18 @@
 # LAUFEY_E2E_EXPECT_* facts given for the session hold. With
 # LAUFEY_E2E_HOST_SESSION=1 (Linux) it runs in the caller's own desktop
 # session instead of Xvfb and a private bus: the per-desktop matrix check.
+# --title-bar runs only the title-bar-preferences checks (API 47,
+# title_bar_checks.rs): the JSON, the OS's button side and, on Linux, the
+# portal Settings answer and its live changes (under Xvfb the battery serves
+# a stub portal on the private bus; with LAUFEY_E2E_HOST_SESSION=1 the
+# session's own portal, with LAUFEY_E2E_TITLEBAR_SET_CMD changing a setting).
+# --file-chooser (Linux, API 47; file_chooser_checks.rs): which chooser the
+# file dialogs use (the portal's FileChooser where the portal offers one,
+# GTK's otherwise) agrees with platform_features, and a real dialog closes
+# with cancel_file_dialog.
+# --secret-store (API 47; secret_checks.rs): on Linux every secure-store
+# call answers within its timeout (a value, not found, or unavailable with a
+# reason); LAUFEY_E2E_EXPECT_SECRET=ok|unavailable for a real session.
 # --sandbox runs only the CEF sandbox checks (sandbox_checks.rs): the
 # renderer and GPU processes run in Chromium's sandbox, as the OS reports
 # them (LAUFEY_E2E_EXPECT_SANDBOX=0 expects the host to have turned it off;
@@ -76,7 +88,7 @@
 # a copy of the log there.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--sandbox|--network-quiet]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -155,6 +167,30 @@ if [ "$mode" = "--platform" ]; then
     printf '[D-BUS Service]\nName=org.freedesktop.secrets\nExec=/bin/false\n' \
       >"$secrets_dir/dbus-1/services/org.freedesktop.secrets.service"
     export XDG_DATA_DIRS="$secrets_dir:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  fi
+fi
+# --io drives its dialogs through the test hook, which can accept only GTK's
+# chooser: under Xvfb (a private bus may activate xdg-desktop-portal) the
+# dialogs are GTK's. The portal's FileChooser has its own battery
+# (--file-chooser) and ctest (file_chooser_dbus_test). In a real session
+# (LAUFEY_E2E_HOST_SESSION=1) the session's own choice stands; there the
+# accept steps report N/A when the dialog is the portal's.
+if [ "$mode" = "--io" ] && [ "$(uname -s)" = "Linux" ] &&
+  [ -z "${LAUFEY_E2E_HOST_SESSION:-}" ]; then
+  export LAUFEY_FILE_CHOOSER="${LAUFEY_FILE_CHOOSER:-gtk}"
+fi
+if [ "$mode" = "--secret-store" ]; then
+  export LAUFEY_E2E_ONLY=secret-store
+fi
+if [ "$mode" = "--file-chooser" ]; then
+  export LAUFEY_E2E_ONLY=file-chooser
+fi
+if [ "$mode" = "--title-bar" ]; then
+  export LAUFEY_E2E_ONLY=title-bar
+  # Under Xvfb the battery serves the private bus's portal Settings itself;
+  # in a real session the session's own portal answers.
+  if [ "$(uname -s)" = "Linux" ] && [ -z "${LAUFEY_E2E_HOST_SESSION:-}" ]; then
+    export LAUFEY_E2E_TITLEBAR_STUB=1
   fi
 fi
 if [ "$mode" = "--launch-visibility" ]; then

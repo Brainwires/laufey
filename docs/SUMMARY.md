@@ -26,6 +26,8 @@
 - [DevTools](devtools.md)
 - [Permissions](permissions.md)
 - [Platform features](platform-features.md)
+- [Title bars](title-bar.md)
+- [Secure store](secure-store.md)
 - [Passkeys](passkeys.md)
 - [Auth session](auth-session.md)
 - [App data & web storage](app-data.md)

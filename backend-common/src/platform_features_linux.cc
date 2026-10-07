@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "laufey_backend_common.h"
+#include "laufey_io.h"
 #include "laufey_notifications.h"
 #include "laufey_platform_features.h"
 
@@ -688,6 +689,13 @@ PlatformFeatures ProbePlatformFeatures() {
   ProbeNotificationServer(bus, &f);
   if (bus)
     g_object_unref(bus);
+  // The file chooser a dialog would use (the same choice io_linux.cc makes).
+  auto chooser = f.portal_versions.find("FileChooser");
+  FileChooserChoice choice = ChooseFileChooser(
+      chooser == f.portal_versions.end() ? 0 : chooser->second, nullptr,
+      std::getenv("LAUFEY_FILE_CHOOSER"));
+  f.file_chooser = choice.portal ? "portal" : "gtk";
+  f.file_chooser_reason = choice.reason;
   // The notification platform's own view (its transport, the cold start,
   // timers, the server's capabilities), and the launcher badge.
   NotificationFacts facts = LinuxNotificationFacts();

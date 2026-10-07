@@ -1,14 +1,25 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 //
-// Linux drag-out (a GTK drag source offering text/uri-list) and file dialogs
-// (GtkFileChooserNative, which goes through xdg-desktop-portal when GTK
-// decides to: inside Flatpak / Snap, or with GTK_USE_PORTAL=1), shared by the
-// WebKitGTK and CEF backends. GTK is not thread-safe, so every entry point
-// hops to the default GLib main context, which both backends run (WebKitGTK's
-// gtk_main, and Chromium's glib message pump on CEF's UI thread).
+// Linux drag-out (a GTK drag source offering text/uri-list) and file dialogs,
+// shared by the WebKitGTK and CEF backends. A file dialog is the portal's
+// FileChooser (org.freedesktop.portal.FileChooser: the desktop's own dialog,
+// GNOME's or Plasma's, called directly, not only inside Flatpak / Snap as
+// GtkFileChooserNative does) whenever xdg-desktop-portal offers it, and
+// GtkFileChooserNative otherwise (a portal backend without a FileChooser, as
+// xdg-desktop-portal-wlr alone; no portal at all). GTK is not thread-safe, so
+// every entry point hops to the default GLib main context, which both backends
+// run (WebKitGTK's gtk_main, and Chromium's glib message pump on CEF's UI
+// thread).
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <gio/gio.h>
 #include <gtk/gtk.h>
+#ifdef GDK_WINDOWING_X11
+#include <gdk/gdkx.h>
+#endif
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/gdkwayland.h>
+#endif
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
@@ -19,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -26,6 +38,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -567,26 +580,497 @@ class LinuxFileDialog : public FileDialogPlatform {
   guint accept_timer_ = 0;
 };
 
+// --- xdg-desktop-portal's FileChooser ------------------------------------
+
+constexpr char kPortalName[] = "org.freedesktop.portal.Desktop";
+constexpr char kPortalPath[] = "/org/freedesktop/portal/desktop";
+constexpr char kFileChooserInterface[] = "org.freedesktop.portal.FileChooser";
+constexpr char kRequestInterface[] = "org.freedesktop.portal.Request";
+// The first call may start xdg-desktop-portal.
+constexpr int kPortalTimeoutMs = 3000;
+
+// The portal's FileChooser version, asked once per process (-1: not yet).
+std::atomic<int> g_portal_chooser_version{-1};
+
+GDBusConnection* PortalBus() {
+  const char* address = std::getenv("DBUS_SESSION_BUS_ADDRESS");
+  const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+  bool have = address && *address;
+  if (!have && runtime && *runtime) {
+    std::string bus = std::string(runtime) + "/bus";
+    have = g_file_test(bus.c_str(), G_FILE_TEST_EXISTS);
+  }
+  if (!have)
+    return nullptr;  // never autolaunch a bus
+  return g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+}
+
+// Calls `then(version)` on the GTK thread with the portal's FileChooser
+// version (0: none), asking the portal once, asynchronously (it may start).
+void WithPortalFileChooserVersion(std::function<void(uint32_t)> then) {
+  int known = g_portal_chooser_version.load();
+  if (known >= 0) {
+    then(static_cast<uint32_t>(known));
+    return;
+  }
+  GDBusConnection* bus = PortalBus();
+  if (!bus) {
+    g_portal_chooser_version = 0;
+    then(0);
+    return;
+  }
+  auto* pending = new std::function<void(uint32_t)>(std::move(then));
+  g_dbus_connection_call(
+      bus, kPortalName, kPortalPath, "org.freedesktop.DBus.Properties", "Get",
+      g_variant_new("(ss)", kFileChooserInterface, "version"),
+      G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, kPortalTimeoutMs, nullptr,
+      [](GObject* source, GAsyncResult* result, gpointer data) {
+        std::unique_ptr<std::function<void(uint32_t)>> then(
+            static_cast<std::function<void(uint32_t)>*>(data));
+        GVariant* r = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),
+                                                    result, nullptr);
+        uint32_t version = 0;
+        if (r) {
+          GVariant* inner = nullptr;
+          g_variant_get(r, "(v)", &inner);
+          if (inner && g_variant_is_of_type(inner, G_VARIANT_TYPE_UINT32))
+            version = g_variant_get_uint32(inner);
+          if (inner)
+            g_variant_unref(inner);
+          g_variant_unref(r);
+        }
+        g_portal_chooser_version = static_cast<int>(version);
+        (*then)(version);
+      },
+      pending);
+  g_object_unref(bus);
+}
+
+// "x11:<xid>" for a realized GtkWindow on X11; on Wayland, `done` gets
+// "wayland:<handle>" once GDK has exported the toplevel (xdg-foreign); "" for
+// none. Calls `done` exactly once, on the GTK thread.
+void PortalParentFor(GtkWindow* window, std::function<void(std::string)> done) {
+  GdkWindow* gdk = window ? gtk_widget_get_window(GTK_WIDGET(window)) : nullptr;
+  if (!gdk) {
+    done("");
+    return;
+  }
+#ifdef GDK_WINDOWING_X11
+  if (GDK_IS_X11_WINDOW(gdk)) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "x11:%lx",
+                  static_cast<unsigned long>(gdk_x11_window_get_xid(gdk)));
+    done(buf);
+    return;
+  }
+#endif
+#ifdef GDK_WINDOWING_WAYLAND
+  if (GDK_IS_WAYLAND_WINDOW(gdk)) {
+    auto* pending = new std::function<void(std::string)>(std::move(done));
+    if (gdk_wayland_window_export_handle(
+            gdk,
+            [](GdkWindow*, const char* handle, gpointer data) {
+              std::unique_ptr<std::function<void(std::string)>> d(
+                  static_cast<std::function<void(std::string)>*>(data));
+              (*d)(handle ? std::string("wayland:") + handle : std::string());
+            },
+            pending, nullptr)) {
+      return;
+    }
+    // No xdg-foreign on this compositor: an app-level dialog.
+    std::unique_ptr<std::function<void(std::string)>> d(pending);
+    (*d)("");
+    return;
+  }
+#endif
+  done("");
+}
+
+// The request path the portal will use for `token` (the portal spec's
+// /org/freedesktop/portal/desktop/request/SENDER/TOKEN, SENDER being our
+// unique name without the ':' and with '.' as '_'), so the Response can be
+// subscribed to before the call (a fast answer would otherwise be lost).
+std::string ExpectedRequestPath(GDBusConnection* bus,
+                                const std::string& token) {
+  std::string sender = g_dbus_connection_get_unique_name(bus);
+  if (!sender.empty() && sender[0] == ':')
+    sender.erase(0, 1);
+  for (char& c : sender) {
+    if (c == '.')
+      c = '_';
+  }
+  return std::string(kPortalPath) + "/request/" + sender + "/" + token;
+}
+
+// The portal's filters (a(sa(us)): a name and globs) for the request's.
+GVariant* PortalFilters(const FileDialogRequest& req) {
+  GVariantBuilder filters;
+  g_variant_builder_init(&filters, G_VARIANT_TYPE("a(sa(us))"));
+  for (const auto& f : req.filters) {
+    GVariantBuilder globs;
+    g_variant_builder_init(&globs, G_VARIANT_TYPE("a(us)"));
+    for (const auto& ext : f.extensions) {
+      std::string glob =
+          ext == "*" ? std::string("*") : CaseInsensitiveGlob(ext);
+      g_variant_builder_add(&globs, "(us)", 0u, glob.c_str());
+    }
+    g_variant_builder_add(&filters, "(sa(us))", f.name.c_str(), &globs);
+  }
+  return g_variant_builder_end(&filters);
+}
+
+// What one portal request shares with its callbacks (which may arrive after
+// the dialog object is gone).
+struct PortalRequest {
+  uint32_t id = 0;
+  GDBusConnection* bus = nullptr;  // owned
+  std::string handle;              // the request object, once known
+  std::string subscribed;          // the path the Response is followed on
+  guint subscription = 0;
+  bool done = false;
+  bool cancelled = false;         // closed before the portal answered
+  GdkWindow* exported = nullptr;  // a Wayland export to drop at the end
+
+  ~PortalRequest() {
+    if (subscription)
+      g_dbus_connection_signal_unsubscribe(bus, subscription);
+#ifdef GDK_WINDOWING_WAYLAND
+    if (exported) {
+      gdk_wayland_window_unexport_handle(exported);
+      g_object_unref(exported);
+    }
+#endif
+    if (bus)
+      g_object_unref(bus);
+  }
+
+  // Request.Close on the request object: the one the portal named, or,
+  // before it answered the call, the path it will use (the handle_token's),
+  // which works once the portal has exported it; OnCalled closes the named
+  // one again when the answer comes. Flushed at once, so the Close is on the
+  // wire before the cancel is reported.
+  void Close() {
+    const std::string& path = handle.empty() ? subscribed : handle;
+    if (path.empty())
+      return;
+    g_dbus_connection_call(bus, kPortalName, path.c_str(), kRequestInterface,
+                           "Close", nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE,
+                           -1, nullptr, nullptr, nullptr);
+    g_dbus_connection_flush_sync(bus, nullptr, nullptr);
+  }
+
+  void Finish(int status, const std::vector<std::string>& paths) {
+    if (done)
+      return;
+    done = true;
+    FileDialogFinish(id, status, paths);
+  }
+};
+
+using PortalRequestRef = std::shared_ptr<PortalRequest>;
+
+// The Response signal on a request object: (u response, a{sv} results).
+void OnPortalResponse(GDBusConnection*, const gchar*, const gchar*,
+                      const gchar*, const gchar*, GVariant* params,
+                      gpointer data) {
+  PortalRequestRef req = *static_cast<PortalRequestRef*>(data);
+  if (req->done || !g_variant_is_of_type(params, G_VARIANT_TYPE("(ua{sv})")))
+    return;
+  guint32 response = 2;
+  GVariant* results = nullptr;
+  g_variant_get(params, "(u@a{sv})", &response, &results);
+  std::vector<std::string> paths;
+  if (response == 0 && results) {
+    GVariant* uris =
+        g_variant_lookup_value(results, "uris", G_VARIANT_TYPE_STRING_ARRAY);
+    if (uris) {
+      gsize n = 0;
+      const gchar** list = g_variant_get_strv(uris, &n);
+      for (gsize i = 0; i < n; ++i) {
+        GFile* file = g_file_new_for_uri(list[i]);
+        gchar* path = g_file_get_path(file);  // null for a non-local URI
+        if (path)
+          paths.emplace_back(path);
+        g_free(path);
+        g_object_unref(file);
+      }
+      g_free(list);
+      g_variant_unref(uris);
+    }
+  }
+  if (results)
+    g_variant_unref(results);
+  // 0: chosen; 1: the user cancelled; 2: ended some other way.
+  req->Finish(response == 0 ? LAUFEY_FILE_DIALOG_ACCEPTED
+                            : LAUFEY_FILE_DIALOG_CANCELLED,
+              paths);
+}
+
+void SubscribeResponse(const PortalRequestRef& req, const std::string& path) {
+  if (req->subscription)
+    g_dbus_connection_signal_unsubscribe(req->bus, req->subscription);
+  req->subscribed = path;
+  req->subscription = g_dbus_connection_signal_subscribe(
+      req->bus, kPortalName, kRequestInterface, "Response", path.c_str(),
+      nullptr, G_DBUS_SIGNAL_FLAGS_NONE, OnPortalResponse,
+      new PortalRequestRef(req),
+      [](gpointer data) { delete static_cast<PortalRequestRef*>(data); });
+}
+
+// A Linux file dialog: attached to the slot at once (so a cancel or a test
+// response that comes while the portal is asked is never lost), it picks the
+// portal's FileChooser or GTK's chooser once the portal's FileChooser version
+// is known (ChooseFileChooser), and shows that.
+class LinuxChooserDialog : public FileDialogPlatform {
+ public:
+  LinuxChooserDialog(uint32_t id, GtkWindow* parent,
+                     PortalParentResolver portal_parent, FileDialogRequest req)
+      : id_(id),
+        parent_(parent),
+        portal_parent_(std::move(portal_parent)),
+        req_(std::move(req)),
+        alive_(std::make_shared<bool>(true)) {
+    if (parent_)
+      g_object_ref(parent_);
+  }
+  ~LinuxChooserDialog() override {
+    *alive_ = false;
+    if (parent_)
+      g_object_unref(parent_);
+  }
+
+  bool Show() override {
+    std::shared_ptr<bool> alive = alive_;
+    WithPortalFileChooserVersion([this, alive](uint32_t version) {
+      if (!*alive || finished_)
+        return;
+      FileChooserChoice choice =
+          ChooseFileChooser(version, &req_, std::getenv("LAUFEY_FILE_CHOOSER"));
+      if (choice.portal && !pending_accept_)
+        ShowPortal();
+      else
+        ShowGtk();
+    });
+    return true;
+  }
+
+  void Cancel() override {
+    if (gtk_)
+      return gtk_->Cancel();
+    if (finished_)
+      return;
+    if (state_) {
+      if (state_->done)
+        return;
+      // The request object may not be known yet: it is closed as soon as
+      // the portal names it (OnCalled).
+      state_->cancelled = true;
+      state_->Close();
+      state_->Finish(LAUFEY_FILE_DIALOG_CANCELLED, {});
+      return;
+    }
+    // Still asking the portal (or exporting the parent): nothing shown yet.
+    finished_ = true;
+    FileDialogFinish(id_, LAUFEY_FILE_DIALOG_CANCELLED, {});
+  }
+
+  bool TestAccept(const std::string& path) override {
+    if (gtk_)
+      return gtk_->TestAccept(path);
+    if (state_)
+      return false;  // the desktop's own dialog can't be driven from here
+    // Not shown yet: a test that answers this early gets GTK's chooser (the
+    // only one it can drive), accepted once it is up.
+    pending_accept_ = path;
+    return true;
+  }
+
+ private:
+  void ShowGtk() {
+    gtk_ = std::make_unique<LinuxFileDialog>(id_, parent_, req_);
+    if (!gtk_->Show()) {
+      finished_ = true;
+      FileDialogFinish(id_, LAUFEY_FILE_DIALOG_FAILED, {});
+      return;
+    }
+    if (pending_accept_)
+      gtk_->TestAccept(*pending_accept_);
+  }
+
+  void ShowPortal() {
+    GDBusConnection* bus = PortalBus();
+    if (!bus)
+      return ShowGtk();
+    state_ = std::make_shared<PortalRequest>();
+    state_->id = id_;
+    state_->bus = bus;
+    if (portal_parent_)
+      return Call(portal_parent_());
+    std::shared_ptr<bool> alive = alive_;
+    PortalRequestRef state = state_;
+    GtkWindow* parent = parent_;
+    PortalParentFor(parent, [this, alive, state, parent](std::string handle) {
+#ifdef GDK_WINDOWING_WAYLAND
+      if (handle.rfind("wayland:", 0) == 0 && parent) {
+        GdkWindow* gdk = gtk_widget_get_window(GTK_WIDGET(parent));
+        if (gdk)
+          state->exported = static_cast<GdkWindow*>(g_object_ref(gdk));
+      }
+#else
+      (void)parent;
+#endif
+      // Cancelled while the handle was exported: nothing to show.
+      if (!*alive || state->done)
+        return;
+      Call(handle);
+    });
+  }
+
+  // The OpenFile / SaveFile call, with the parent window's identifier.
+  void Call(const std::string& parent_handle) {
+    static std::atomic<unsigned> counter{0};
+    std::string token =
+        "laufey" + std::to_string(getpid()) + "_" + std::to_string(++counter);
+    SubscribeResponse(state_, ExpectedRequestPath(state_->bus, token));
+
+    bool save = req_.kind == LAUFEY_FILE_DIALOG_SAVE;
+    GVariantBuilder options;
+    g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&options, "{sv}", "handle_token",
+                          g_variant_new_string(token.c_str()));
+    if (!req_.button_label.empty()) {
+      g_variant_builder_add(&options, "{sv}", "accept_label",
+                            g_variant_new_string(req_.button_label.c_str()));
+    }
+    g_variant_builder_add(&options, "{sv}", "modal",
+                          g_variant_new_boolean(!parent_handle.empty()));
+    if (!save) {
+      g_variant_builder_add(&options, "{sv}", "multiple",
+                            g_variant_new_boolean(req_.Multiple()));
+      if (req_.ChoosesDirectories()) {
+        g_variant_builder_add(&options, "{sv}", "directory",
+                              g_variant_new_boolean(TRUE));
+      }
+    }
+    if (!req_.ChoosesDirectories() && !req_.filters.empty())
+      g_variant_builder_add(&options, "{sv}", "filters", PortalFilters(req_));
+    std::string dir, name;
+    SplitDefaultPath(req_.default_path, &dir, &name);
+    if (!dir.empty()) {
+      g_variant_builder_add(&options, "{sv}", "current_folder",
+                            g_variant_new_bytestring(dir.c_str()));
+    }
+    if (save && !name.empty()) {
+      g_variant_builder_add(&options, "{sv}", "current_name",
+                            g_variant_new_string(name.c_str()));
+    }
+    const char* title = !req_.title.empty()         ? req_.title.c_str()
+                        : save                      ? "Save"
+                        : req_.ChoosesDirectories() ? "Select Folder"
+                                                    : "Open";
+    auto* pending = new Pending{alive_, this, state_};
+    g_dbus_connection_call(
+        state_->bus, kPortalName, kPortalPath, kFileChooserInterface,
+        save ? "SaveFile" : "OpenFile",
+        g_variant_new("(ss@a{sv})", parent_handle.c_str(), title,
+                      g_variant_builder_end(&options)),
+        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, kPortalTimeoutMs * 4,
+        nullptr, OnCalled, pending);
+  }
+
+  struct Pending {
+    std::shared_ptr<bool> alive;
+    LinuxChooserDialog* dialog;
+    PortalRequestRef state;
+  };
+
+  // The portal answered the call with the request object (or an error).
+  static void OnCalled(GObject* source, GAsyncResult* result, gpointer data) {
+    std::unique_ptr<Pending> pending(static_cast<Pending*>(data));
+    PortalRequestRef state = pending->state;
+    GError* error = nullptr;
+    GVariant* r = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),
+                                                result, &error);
+    if (!r) {
+      std::fprintf(stderr,
+                   "laufey: the portal's FileChooser failed (%s); using GTK's "
+                   "file chooser\n",
+                   error ? error->message : "no answer");
+      g_clear_error(&error);
+      // Not finished, so still the slot's dialog: shown by GTK instead.
+      if (!state->done && *pending->alive)
+        pending->dialog->FallBackToGtk();
+      return;
+    }
+    const gchar* handle = nullptr;
+    g_variant_get(r, "(&o)", &handle);
+    std::string path = handle ? handle : "";
+    g_variant_unref(r);
+    state->handle = path;
+    if (state->cancelled) {
+      // Cancelled before the answer: the Close sent then may have come before
+      // the portal exported the request (or went to the token's path, which
+      // a portal older than 0.9 doesn't use). Close the named one now.
+      state->Close();
+      return;
+    }
+    // A portal older than 0.9 ignores handle_token and picks its own path:
+    // follow that one.
+    if (!state->done && !path.empty() && path != state->subscribed)
+      SubscribeResponse(state, path);
+  }
+
+  void FallBackToGtk() {
+    g_portal_chooser_version = 0;  // don't ask it again in this process
+    if (state_ && state_->subscription) {
+      g_dbus_connection_signal_unsubscribe(state_->bus, state_->subscription);
+      state_->subscription = 0;
+    }
+    state_.reset();
+    ShowGtk();
+  }
+
+  uint32_t id_;
+  GtkWindow* parent_;
+  PortalParentResolver portal_parent_;
+  FileDialogRequest req_;
+  std::shared_ptr<bool> alive_;  // false once destroyed (late callbacks)
+  bool finished_ = false;        // cancelled before anything was shown
+  std::optional<std::string> pending_accept_;
+  PortalRequestRef state_;
+  std::unique_ptr<LinuxFileDialog> gtk_;
+};
+
 }  // namespace
 
 uint32_t ShowFileDialogLinux(ParentResolver parent,
                              const laufey_file_dialog_options_t* options,
                              laufey_file_dialog_result_fn callback,
-                             void* user_data) {
+                             void* user_data,
+                             PortalParentResolver portal_parent) {
   return ShowFileDialogCommon(
       options, callback, user_data, GtkRunner(),
-      [parent](uint32_t id, const FileDialogRequest& request) {
+      [parent, portal_parent](uint32_t id, const FileDialogRequest& request) {
         if (!gdk_display_get_default()) {
           FileDialogFinish(id, LAUFEY_FILE_DIALOG_FAILED, {});
           return;
         }
         GtkWindow* window =
             parent ? static_cast<GtkWindow*>(parent()) : nullptr;
-        auto* dialog = new LinuxFileDialog(id, window, request);
+        auto* dialog =
+            new LinuxChooserDialog(id, window, portal_parent, request);
         FileDialogAttach(id, dialog);
         if (!dialog->Show())
           FileDialogFinish(id, LAUFEY_FILE_DIALOG_FAILED, {});
       });
+}
+
+int PortalFileChooserVersionForTesting() {
+  return g_portal_chooser_version.load();
+}
+
+void ResetPortalFileChooserForTesting() {
+  g_portal_chooser_version = -1;
 }
 
 bool CancelFileDialogLinux(uint32_t dialog_id) {

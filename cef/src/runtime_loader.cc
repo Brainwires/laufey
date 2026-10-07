@@ -12,6 +12,10 @@
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
 #include "laufey_platform_features.h"
+#include "laufey_title_bar.h"
+#if defined(__linux__)
+#include "laufey_secret_store.h"
+#endif
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_scheme_registry.h"
@@ -1952,6 +1956,18 @@ static void Backend_SetPlatformFeaturesChangedHandler(
   laufey_common::SetPlatformFeaturesChangedHandler(handler, user_data);
 }
 
+// Title bar preferences (API 47). The change handler fires on the
+// watcher's own thread (Linux, Windows) or the main thread (macOS).
+static char* Backend_TitleBarPreferences(void* /*data*/) {
+  return laufey_common::TitleBarPreferencesJsonForAbi();
+}
+
+static void Backend_SetTitleBarPreferencesChangedHandler(
+    void* /*data*/, laufey_title_bar_preferences_changed_fn handler,
+    void* user_data) {
+  laufey_common::SetTitleBarPreferencesChangedHandler(handler, user_data);
+}
+
 static char* Backend_CanonicalizeAccelerator(void* /*data*/,
                                              const char* accelerator) {
   return laufey_common::CanonicalizeAccelerator(accelerator);
@@ -2466,11 +2482,26 @@ static uint32_t Backend_ShowFileDialog(
                                           callback, user_data);
 #else
   // GtkFileChooserNative needs a GtkWindow to be modal to; Chromium's X11 /
-  // Wayland windows aren't GTK's, so the dialog is app-level here.
-  (void)window_id;
+  // Wayland windows aren't GTK's, so GTK's chooser is app-level here. The
+  // portal's FileChooser takes the window's X11 id ("x11:<xid>") on X11;
+  // a Chromium Wayland toplevel can't be named to it (no xdg-foreign
+  // export), so there the portal's dialog is app-level too.
   EnsureGtkReady();
+  laufey_common::PortalParentResolver portal_parent;
+  const char* wayland = getenv("WAYLAND_DISPLAY");
+  if (window_id != 0 && !(wayland && *wayland)) {
+    portal_parent = [window_id]() -> std::string {
+      CefRefPtr<CefWindow> window = CefWindowForId(window_id);
+      unsigned long xid = window ? window->GetWindowHandle() : 0;
+      if (!xid)
+        return "";
+      char buf[32];
+      snprintf(buf, sizeof(buf), "x11:%lx", xid);
+      return buf;
+    };
+  }
   return laufey_common::ShowFileDialogLinux(nullptr, options, callback,
-                                            user_data);
+                                            user_data, portal_parent);
 #endif
 }
 
@@ -3105,6 +3136,32 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_platform_features_changed_handler =
       Backend_SetPlatformFeaturesChangedHandler;
   backend_api_.exit_app = Backend_ExitApp;
+  backend_api_.title_bar_preferences = Backend_TitleBarPreferences;
+  backend_api_.set_title_bar_preferences_changed_handler =
+      Backend_SetTitleBarPreferencesChangedHandler;
+#if defined(__linux__)
+  // The secure store (API 47): the Secret Service through libsecret. macOS
+  // and Windows keep NULL (their keychain / credential APIs are the
+  // embedder's).
+  backend_api_.secret_lookup = [](void*, const char* service,
+                                  const char* account, uint32_t timeout_ms,
+                                  char** value, char** reason) {
+    return laufey_common::SecretLookupForAbi(service, account, timeout_ms,
+                                             value, reason);
+  };
+  backend_api_.secret_store =
+      [](void*, const char* service, const char* account, const char* label,
+         const char* value, uint32_t timeout_ms, char** reason) {
+        return laufey_common::SecretStoreForAbi(service, account, label, value,
+                                                timeout_ms, reason);
+      };
+  backend_api_.secret_delete = [](void*, const char* service,
+                                  const char* account, uint32_t timeout_ms,
+                                  char** reason) {
+    return laufey_common::SecretDeleteForAbi(service, account, timeout_ms,
+                                             reason);
+  };
+#endif
   backend_api_.js_call_respond = Backend_JsCallRespond;
 
   backend_api_.invoke_js_callback = Backend_InvokeJsCallback;

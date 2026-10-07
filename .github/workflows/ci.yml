@@ -625,6 +625,31 @@ jobs:
           LAUFEY_E2E_EXPECT_COOKIES: ${{ matrix.backend == 'cef' && 'basic' || '' }}
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --platform
 
+      # API 47: title bar preferences on every leg. macOS: the buttons on
+      # the left; Windows: on the right; Linux: the battery serves the
+      # private bus's xdg-desktop-portal Settings and moves the buttons (the
+      # change handler must see it).
+      - name: Title bar preferences
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --title-bar
+
+      # API 47: the secure store answers within its timeout (Linux: the
+      # private bus may have no provider, or a keyring no one can unlock:
+      # unavailable with a reason); NULL elsewhere.
+      - name: Secure store
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --secret-store
+
+      # API 47 (Linux): the file chooser report agrees with the portal's
+      # interfaces, and a real dialog closes with cancel_file_dialog.
+      - name: File chooser (Linux)
+        if: runner.os == 'Linux' && matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --file-chooser
+
       # API 45 (Linux, cef): no tray host at first. The tray is refused with
       # a reason, then the observer starts a StatusNotifierWatcher, which the
       # backend must see (it follows NameOwnerChanged) before the Layer 1
@@ -842,7 +867,8 @@ jobs:
           sudo apt-get update
           # xvfb + dbus: ctest's clipboard_x11_test starts its own Xvfb and a
           # private bus.
-          sudo apt-get install -y cmake ninja-build pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev xvfb dbus
+          # gnome-keyring: secret_store_dbus_test's real Secret Service.
+          sudo apt-get install -y cmake ninja-build pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev xvfb dbus gnome-keyring
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'

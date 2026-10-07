@@ -31,6 +31,7 @@ mod auth_thread_checks;
 mod body_echo;
 mod bridge_origin_checks;
 mod close_checks;
+mod file_chooser_checks;
 mod io_checks;
 mod launch_checks;
 mod lna_checks;
@@ -39,8 +40,10 @@ mod network_quiet_checks;
 mod os_view;
 mod platform_checks;
 mod sandbox_checks;
+mod secret_checks;
 mod stream_checks;
 mod system_checks;
+mod title_bar_checks;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -835,6 +838,21 @@ fn e2e_main() {
       // Menus and notifications (API 41).
       Ok("menus-notifications") => {
         menu_notification_checks::run().await;
+        finish();
+      }
+      // Which file chooser Linux dialogs use (API 47).
+      Ok("file-chooser") => {
+        file_chooser_checks::run().await;
+        finish();
+      }
+      // The secure store (API 47).
+      Ok("secret-store") => {
+        secret_checks::run().await;
+        finish();
+      }
+      // Title bar preferences (API 47).
+      Ok("title-bar") => {
+        title_bar_checks::run().await;
         finish();
       }
       // Platform features (API 45) in the run's own session.

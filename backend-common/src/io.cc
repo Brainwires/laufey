@@ -382,6 +382,33 @@ bool CopyFileDialogOptions(const laufey_file_dialog_options_t* options,
   return true;
 }
 
+FileChooserChoice ChooseFileChooser(uint32_t portal_version,
+                                    const FileDialogRequest* request,
+                                    const char* override_env) {
+  FileChooserChoice c;
+  std::string forced = override_env ? override_env : "";
+  if (forced == "gtk") {
+    c.reason = "LAUFEY_FILE_CHOOSER=gtk";
+    return c;
+  }
+  if (portal_version == 0) {
+    c.reason =
+        "xdg-desktop-portal offers no FileChooser here (no portal runs, or "
+        "the portal backend for this desktop has none, as "
+        "xdg-desktop-portal-wlr alone)";
+    return c;
+  }
+  if (request && request->ChoosesDirectories() && portal_version < 3) {
+    c.reason =
+        "picking a folder needs the portal's FileChooser version 3; "
+        "this portal has version " +
+        std::to_string(portal_version);
+    return c;
+  }
+  c.portal = true;
+  return c;
+}
+
 void SplitDefaultPath(const std::string& default_path, std::string* directory,
                       std::string* name) {
   directory->clear();
