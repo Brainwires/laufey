@@ -322,6 +322,8 @@ class RuntimeLoader {
   laufey_common::ThreadExit runtime_exit_;
   // How long Shutdown waits for the runtime thread before abandoning it.
   static constexpr std::chrono::milliseconds kRuntimeShutdownTimeout{10000};
+  // How long it waits after exit_app, whose caller may never return.
+  static constexpr std::chrono::milliseconds kRuntimeExitGrace{200};
   std::atomic<bool> running_{false};
 
   LaufeyBackend* backend_ = nullptr;
@@ -478,6 +480,12 @@ class LaufeyBackend {
   // (it will never run).
   virtual bool PostUiTask(void (*task)(void*), void* data) = 0;
   virtual void Run() = 0;
+  // After the loop has ended and the runtime has been shut down, before the
+  // process ends: get what the pages stored (localStorage) onto disk, waiting
+  // a bounded time. The WebKit ports write localStorage in a transaction that
+  // stays open up to 500 ms after a write, from another process, so a write
+  // made just before the app ended was lost now and then. UI thread.
+  virtual void FlushWebStorage() {}
 
   // JS interop (broadcast to all windows for callback operations)
   virtual void InvokeJsCallback(uint32_t window_id, uint64_t callback_id,

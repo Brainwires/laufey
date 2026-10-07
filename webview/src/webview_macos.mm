@@ -26,6 +26,8 @@
 #include "laufey_window.h"
 #include "init_script.h"
 
+#include <dlfcn.h>
+
 #include <atomic>
 #include <iostream>
 #include <map>
@@ -117,6 +119,7 @@ class WKWebViewBackend : public LaufeyBackend {
                        laufey::ValuePtr error) override;
 
   void Run() override;
+  void FlushWebStorage() override;
 
   void SetApplicationMenu(uint32_t window_id, laufey_value_t* menu_template,
                           const laufey_backend_api_t* api,
@@ -2117,6 +2120,48 @@ void WKWebViewBackend::AuthSessionStart(uint32_t window_id, const char* url,
       laufey_common::AuthSessionStartMac(session, (__bridge void*)win);
     }
   });
+}
+
+// WKWebsiteDataStoreSyncLocalStorage (WebKit's C SPI, WKWebsiteDataStoreRef.h,
+// exported since 2020): the network process commits every localStorage
+// transaction still open, then answers. A WKWebsiteDataStore is the
+// WKWebsiteDataStoreRef (WebKit's API objects are toll-free bridged; WebKit's
+// own LocalStoragePersistence test passes one so). Looked up at run time, so
+// a WebKit without it only skips the flush.
+using LaufeySyncLocalStorageFn = void (*)(const void* data_store, void* context,
+                                          void (*callback)(void* context));
+
+// How long the flush may hold the end of the app.
+static constexpr double kFlushWebStorageSeconds = 2.0;
+
+void WKWebViewBackend::FlushWebStorage() {
+  // No window, no web view: nothing stored, and no network process to ask.
+  if (!any_window_created_.load())
+    return;
+  static LaufeySyncLocalStorageFn sync =
+      reinterpret_cast<LaufeySyncLocalStorageFn>(
+          dlsym(RTLD_DEFAULT, "WKWebsiteDataStoreSyncLocalStorage"));
+  if (!sync)
+    return;
+  WKWebsiteDataStore* store = LaufeyWebsiteDataStore();
+  if (!store)
+    store = [WKWebsiteDataStore defaultDataStore];
+  // Heap-held: should the deadline pass first, the reply still has somewhere
+  // to land (leaked then, once per process).
+  auto* done = new std::atomic<bool>(false);
+  sync((__bridge const void*)store, done, [](void* context) {
+    static_cast<std::atomic<bool>*>(context)->store(true);
+  });
+  // The reply comes through the main run loop: run it until then.
+  CFAbsoluteTime deadline =
+      CFAbsoluteTimeGetCurrent() + kFlushWebStorageSeconds;
+  while (!done->load() && CFAbsoluteTimeGetCurrent() < deadline)
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, true);
+  if (done->load())
+    delete done;
+  else
+    std::cerr << "laufey: localStorage was not confirmed written within "
+              << kFlushWebStorageSeconds << " s of the app ending" << std::endl;
 }
 
 void WKWebViewBackend::Quit() {

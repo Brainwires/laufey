@@ -5,6 +5,7 @@
 #include "laufey_launch_args.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
+#include "laufey_window.h"
 #include "runtime_loader.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -180,5 +181,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   delete backend;
 
   CoUninitialize();
-  return 0;
+  // The web views are released (WebView2's own browser process writes the
+  // profile): end the process with the app's exit code (exit_app's, else 0)
+  // without the CRT exit's ExitProcess, which runs every DLL's detach code
+  // after ending the other threads and can then wait for good on a COM call
+  // into an apartment whose thread is gone (see cef/src/main_windows.cc).
+  laufey_common::EndProcess(laufey_common::RequestedExitCode());
 }

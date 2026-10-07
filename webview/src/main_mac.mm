@@ -122,6 +122,9 @@ void EnsureEditMenu(NSMenu* menubar) {
   // either is released before Shutdown waits for it.
   laufey_common::UiLoopEnded();
   RuntimeLoader::GetInstance()->Shutdown();
+  // What the pages stored goes to disk before the process ends.
+  if (self.backend)
+    self.backend->FlushWebStorage();
   delete self.backend;
   self.backend = nullptr;
 }
@@ -323,5 +326,6 @@ int main(int argc, char* argv[]) {
     [delegate shutDownRuntime];
   }
 
-  return 0;
+  // exit_app's code (API 46), else 0.
+  return laufey_common::RequestedExitCode();
 }

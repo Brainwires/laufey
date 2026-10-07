@@ -17,6 +17,22 @@
 //! `LAUFEY_E2E_STORAGE_HOLD_MS` keeps the launch alive that long before it
 //! quits (used to start a second instance against a running one).
 //!
+//! `LAUFEY_E2E_STORAGE_EXIT` picks how the launch ends (default `quit`), and
+//! any value but `quit` also drops the pause the write mode otherwise takes
+//! before it ends, so what was written just before is what must survive:
+//!
+//!   quit            close the window, then `laufey::quit()`.
+//!   close           close the window only: the last window closing ends the
+//!                   app.
+//!   exit:<code>     `laufey::exit(code)` (API 46), then block this thread
+//!                   for good, as `Deno.exit()` does.
+//!   process-exit:<code>
+//!                   `std::process::exit(code)` from this thread while the
+//!                   engine still runs (how a runtime ended before API 46).
+//!
+//! `scripts/exit-e2e-run.sh` relaunches with each of them and checks the
+//! exit code and that the next launch reads the value back.
+//!
 //! `LAUFEY_E2E_STORAGE_SCHEME=<name>` serves the page over that custom scheme
 //! (`<name>://app/`, registered with `register_scheme_handler`) instead of
 //! loopback HTTP, and also requires it to be a secure context. Used for CEF,
@@ -233,6 +249,8 @@ fn e2e_main() {
       .and_then(|p| p.parse().ok())
       .unwrap_or(0);
     let scheme = env("LAUFEY_E2E_STORAGE_SCHEME");
+    let exit_mode =
+      env("LAUFEY_E2E_STORAGE_EXIT").unwrap_or_else(|| "quit".to_string());
     eprintln!(
       "[e2e] storage mode={mode} port={port} scheme={scheme:?} LAUFEY_APP_ID={:?} LAUFEY_DATA_DIR={:?}",
       env("LAUFEY_APP_ID"),
@@ -356,8 +374,11 @@ fn e2e_main() {
               !value.is_empty() && cookie == value,
             );
           }
-          // Give the engine a moment to commit before the normal quit below.
-          tokio::time::sleep(Duration::from_millis(1500)).await;
+          // Give the engine a moment to commit before the normal quit below
+          // (not before an exit mode: those must flush it themselves).
+          if exit_mode == "quit" {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+          }
         }
         "read" => {
           let t = Instant::now();
@@ -397,12 +418,46 @@ fn e2e_main() {
     eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
     let _ = std::io::stderr().flush();
 
+    end(&win, &exit_mode).await;
+  });
+}
+
+/// Ends the launch the way `LAUFEY_E2E_STORAGE_EXIT` says (see the module
+/// docs). `quit` and `close` return, which lets the backend join this thread.
+async fn end(win: &Window, mode: &str) {
+  let code = |prefix: &str| {
+    mode
+      .strip_prefix(prefix)
+      .and_then(|c| c.parse::<i32>().ok())
+  };
+  eprintln!("[e2e] ending with {mode}");
+  let _ = std::io::stderr().flush();
+  if mode == "close" {
+    // The last window closing ends the app (quit on last window closed is
+    // on by default).
+    win.close();
+  } else if let Some(c) = code("exit:") {
+    if laufey::exit(c) {
+      // As Deno.exit(): this thread never returns. The backend ends the
+      // process without waiting for it.
+      loop {
+        std::thread::park();
+      }
+    }
+    eprintln!("[e2e] FAIL laufey::exit is not supported by this backend");
+    laufey::quit();
+  } else if let Some(c) = code("process-exit:") {
+    std::process::exit(c);
+  } else {
+    if mode != "quit" {
+      eprintln!("[e2e] FAIL unknown LAUFEY_E2E_STORAGE_EXIT {mode:?}");
+    }
     // Quit through the backend's normal path so the engine shuts down and
-    // flushes storage; returning lets the backend join this thread.
+    // flushes storage.
     win.close();
     tokio::time::sleep(Duration::from_millis(300)).await;
     laufey::quit();
-  });
+  }
 }
 
 laufey::main!(e2e_main);

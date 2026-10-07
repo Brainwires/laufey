@@ -466,6 +466,30 @@ pub fn mark_quitting() {
   QUITTING.store(true, Ordering::SeqCst);
 }
 
+static EXIT_REQUESTED: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+static EXIT_CODE: std::sync::atomic::AtomicI32 =
+  std::sync::atomic::AtomicI32::new(0);
+
+/// exit_app (API 46): the app asked to end with `code`. The first request's
+/// code wins. Also marks the app quitting.
+pub fn mark_exit_requested(code: i32) {
+  if EXIT_REQUESTED
+    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+    .is_ok()
+  {
+    EXIT_CODE.store(code, Ordering::SeqCst);
+  }
+  mark_quitting();
+}
+
+/// The code exit_app asked for, if it was called.
+pub fn requested_exit_code() -> Option<i32> {
+  EXIT_REQUESTED
+    .load(Ordering::SeqCst)
+    .then(|| EXIT_CODE.load(Ordering::SeqCst))
+}
+
 /// Whether closing the last window should end the event loop.
 pub fn should_end_loop_after_last_window() -> bool {
   QUITTING.load(Ordering::SeqCst) || QUIT_ON_LAST_WINDOW.load(Ordering::SeqCst)

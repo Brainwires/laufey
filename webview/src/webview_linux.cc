@@ -969,6 +969,7 @@ class WebKitGTKBackend : public LaufeyBackend {
                        laufey::ValuePtr error) override;
 
   void Run() override;
+  void FlushWebStorage() override;
 
   void RegisterSchemeHandler(const std::string& scheme) override;
 
@@ -2294,6 +2295,85 @@ void WebKitGTKBackend::RespondToJsCall(uint32_t window_id, uint64_t call_id,
 
 void WebKitGTKBackend::Run() {
   gtk_main();
+}
+
+// How long the flush may hold the end of the app, and how long WebKit keeps a
+// localStorage transaction open after a write (SQLiteStorageArea's
+// transactionDuration, 500 ms) plus a margin.
+static constexpr gint64 kFlushWebStorageUs = 2 * G_USEC_PER_SEC;
+static constexpr gint64 kLocalStorageCommitUs = 600 * 1000;
+
+namespace {
+
+struct FetchDone {
+  std::atomic<bool> done{false};
+};
+
+void OnLocalStorageFetched(GObject* source, GAsyncResult* result,
+                           gpointer data) {
+  GError* error = nullptr;
+  GList* records = webkit_website_data_manager_fetch_finish(
+      WEBKIT_WEBSITE_DATA_MANAGER(source), result, &error);
+  g_list_free_full(records,
+                   reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
+  if (error)
+    g_error_free(error);
+  static_cast<FetchDone*>(data)->done.store(true);
+}
+
+// Runs the default main context until `until` (monotonic, us) or `done`.
+void RunMainContextUntil(gint64 until, const std::atomic<bool>* done) {
+  while ((!done || !done->load()) && g_get_monotonic_time() < until) {
+    if (!g_main_context_iteration(nullptr, FALSE))
+      g_usleep(5000);
+  }
+}
+
+// One localStorage fetch, to its answer or `deadline`. The network process
+// runs it on its storage queue, after every write queued there before it.
+bool FetchLocalStorage(WebKitWebsiteDataManager* manager, gint64 deadline) {
+  // Heap-held: should the deadline pass first, the answer still has somewhere
+  // to land (leaked then).
+  auto* state = new FetchDone();
+  webkit_website_data_manager_fetch(manager, WEBKIT_WEBSITE_DATA_LOCAL_STORAGE,
+                                    nullptr, OnLocalStorageFetched, state);
+  RunMainContextUntil(deadline, &state->done);
+  bool done = state->done.load();
+  if (done)
+    delete state;
+  return done;
+}
+
+}  // namespace
+
+// WebKitGTK writes localStorage from its network process, in an SQLite
+// transaction it commits 500 ms after the first write (SQLiteStorageArea), and
+// its API has no call that commits it. The process does commit when this one
+// closes its connection, but only after this process is gone, so a launch
+// right after can read the previous value. So: a fetch of the localStorage
+// records, which the network process answers from its storage queue after the
+// writes queued before it (each of which armed its commit by then); the commit
+// time; and a second fetch, queued behind that commit.
+void WebKitGTKBackend::FlushWebStorage() {
+  if (!any_web_view_created_.load())
+    return;
+  WebKitWebsiteDataManager* manager =
+      webkit_web_context_get_website_data_manager(LaufeyWebContext());
+  if (!manager)
+    return;
+  gint64 deadline = g_get_monotonic_time() + kFlushWebStorageUs;
+  bool done = FetchLocalStorage(manager, deadline);
+  if (done) {
+    RunMainContextUntil(
+        std::min(deadline, g_get_monotonic_time() + kLocalStorageCommitUs),
+        nullptr);
+    done = FetchLocalStorage(manager, deadline);
+  }
+  if (!done) {
+    std::cerr << "laufey: localStorage was not confirmed written within "
+              << kFlushWebStorageUs / G_USEC_PER_SEC << " s of the app ending"
+              << std::endl;
+  }
 }
 
 // Whether `a` and `b` are equal, in time that depends only on their lengths.

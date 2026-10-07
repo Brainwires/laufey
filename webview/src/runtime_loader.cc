@@ -7,6 +7,7 @@
 #include "laufey_platform_features.h"
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
+#include "laufey_window.h"
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -144,6 +145,15 @@ static void Backend_Quit(void* data) {
   if (backend) {
     backend->Quit();
   }
+}
+
+// exit_app (API 46): quit() with an exit code. The host returns it once its
+// loop has ended and the web views are released (on Windows through
+// laufey_common::EndProcess), and Shutdown doesn't wait for a runtime thread
+// that may be blocked for good in its exit().
+static void Backend_ExitApp(void* data, int exit_code) {
+  laufey_common::MarkExitRequested(exit_code);
+  Backend_Quit(data);
 }
 
 static void Backend_SetWindowSize(void* data, uint32_t window_id, int width,
@@ -1404,6 +1414,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.tray_unavailable_reason = Backend_TrayUnavailableReason;
   backend_api_.set_platform_features_changed_handler =
       Backend_SetPlatformFeaturesChangedHandler;
+  backend_api_.exit_app = Backend_ExitApp;
 
   backend_api_.register_scheme_handler = Backend_RegisterSchemeHandler;
   backend_api_.scheme_request_read_body = Backend_SchemeRequestReadBody;
@@ -1715,6 +1726,15 @@ void RuntimeLoader::Shutdown() {
   }
 
   if (runtime_thread_.joinable()) {
+    // The app asked to exit (exit_app): its thread may never return (an
+    // exit() that blocks for good, as Deno.exit()), and the process ends
+    // with the code it asked for without it. A runtime that does return is
+    // given a moment to.
+    if (laufey_common::ExitRequested() &&
+        !runtime_exit_.WaitFor(kRuntimeExitGrace)) {
+      runtime_thread_.detach();
+      return;
+    }
     // The loop has ended (UiLoopEnded), so the runtime's synchronous UI calls
     // already return. A runtime that still ignores the shutdown is abandoned
     // after the timeout, as on Winit, rather than hanging the exit.

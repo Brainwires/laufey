@@ -44,7 +44,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 45;
+pub const LAUFEY_API_VERSION: u32 = 46;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -867,6 +867,8 @@ pub struct LaufeyBackendApi {
       *mut c_void,
     ),
   >,
+  // --- Exit with a code (API >= 46) ---
+  pub exit_app: Option<unsafe extern "C" fn(*mut c_void, c_int)>,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1757,6 +1759,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     platform_features: None,
     tray_unavailable_reason: None,
     set_platform_features_changed_handler: None,
+    // API 46: filled in by fill_common_api.
+    exit_app: None,
   }
 }
 
@@ -2644,6 +2648,16 @@ macro_rules! define_common_backend_fns {
           ),
         );
       }
+    }
+
+    // exit_app (API 46): quit() with an exit code, which the host's main
+    // ends the process with once the loop is over (see shutdown_runtime).
+    unsafe extern "C" fn backend_exit_app(
+      data: *mut ::std::ffi::c_void,
+      exit_code: ::std::ffi::c_int,
+    ) {
+      $crate::window_api::mark_exit_requested(exit_code);
+      unsafe { backend_quit(data) };
     }
 
     unsafe extern "C" fn backend_set_window_size(
@@ -3918,6 +3932,7 @@ macro_rules! fill_common_api {
     $api.close_window = Some(backend_close_window);
     $api.set_title = Some(backend_set_title);
     $api.quit = Some(backend_quit);
+    $api.exit_app = Some(backend_exit_app);
     $api.set_window_size = Some(backend_set_window_size);
     $api.get_window_size = Some(backend_get_window_size);
     $api.get_window_outer_size = Some(backend_get_window_outer_size);
@@ -5558,6 +5573,13 @@ pub fn shutdown_runtime(timeout: std::time::Duration) {
   }
   let Some(handle) = RUNTIME_THREAD.lock().unwrap().take() else {
     return;
+  };
+  // After exit_app the runtime's thread may never return (an exit() that
+  // blocks for good, as Deno.exit()): give it only a moment.
+  let timeout = if window_api::requested_exit_code().is_some() {
+    timeout.min(std::time::Duration::from_millis(200))
+  } else {
+    timeout
   };
   let (tx, rx) = std::sync::mpsc::channel();
   thread::spawn(move || {
