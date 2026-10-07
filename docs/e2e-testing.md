@@ -197,10 +197,13 @@ Chromium's checks on: the custom-scheme page's cross-origin fetch and its
 WebSocket to the loopback echo server must get through (laufey grants local
 network access to the embedder's declared schemes, see
 [custom-schemes.md](custom-schemes.md)), on every engine. On CEF a page on any
-other origin must still be refused at once: the script declares a loopback port
-public (`--ip-address-space-overrides=127.0.0.1:<port>=public`, the port in
-`LAUFEY_E2E_PUBLIC_PORT`), serves a page there, and its fetch to the echo server
-must fail within five seconds instead of waiting for a prompt.
+other origin must still be refused at once: the script declares three loopback
+ports public (`--ip-address-space-overrides=127.0.0.1:<port>=public,…`, the
+ports in `LAUFEY_E2E_PUBLIC_PORT`, comma-separated), the battery serves a page
+on the first one it can bind, and its fetch to the echo server must fail within
+five seconds instead of waiting for a prompt. The ports come from 20000-32767,
+below every OS's ephemeral port range, so a port the OS gave an outgoing
+connection or a server bound to port 0 is never one of them.
 
 `--network-quiet` (`network_quiet_checks.rs`) checks that the CEF host makes no
 request of its own (see [Backends](backends.md#no-network-requests-of-its-own)):

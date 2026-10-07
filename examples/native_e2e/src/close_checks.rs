@@ -37,8 +37,14 @@ pub async fn run() {
   }
 
   // A JS call from the page, left pending across the close (web engines).
+  // Asked for until the page makes it, for up to 60 s: the window exists
+  // well before its page does, and on a busy machine the page took up to
+  // 21 s to start loading (windows-ci WebView2 with both cores busy: the
+  // page answered nothing until 15-21 s in 3 of 20 runs, then made the call
+  // within 0.6 s), which the old 10 s budget read as a call never made.
   if laufey::scheme_handlers_supported() {
-    for _ in 0..100 {
+    let asked = std::time::Instant::now();
+    while asked.elapsed() < Duration::from_secs(60) {
       if held.lock().unwrap().is_some() {
         break;
       }
@@ -50,7 +56,10 @@ pub async fn run() {
       tokio::time::sleep(Duration::from_millis(100)).await;
     }
     check(
-      "the page's JS call is pending before the user close",
+      &format!(
+        "the page's JS call is pending before the user close (after {} ms)",
+        asked.elapsed().as_millis()
+      ),
       held.lock().unwrap().is_some(),
     );
   }

@@ -275,11 +275,24 @@ fi
 # checks ON: laufey grants local network access to the app's own declared
 # schemes. The negative check needs a page on an origin that is neither the
 # app's nor loopback: a loopback port this run declares public, which must be
-# known at launch. Skipped when that port is taken.
+# known at launch. The battery serves that page on the first of the ports
+# that it can bind. They come from 20000-32767, below every OS's ephemeral
+# range (Windows and macOS 49152-65535, Linux 32768-60999): a port the OS
+# hands out for an outgoing connection (the engine's own, a server bound to
+# port 0) is never one of them. Ports from 40000-59999 collided with those on
+# Windows runners, whose ephemeral ports had reached 49700-49900 by then.
 args=()
 if [ "$backend" = "cef" ]; then
-  export LAUFEY_E2E_PUBLIC_PORT="${LAUFEY_E2E_PUBLIC_PORT:-$((40000 + RANDOM % 20000))}"
-  args+=("--ip-address-space-overrides=127.0.0.1:${LAUFEY_E2E_PUBLIC_PORT}=public")
+  if [ -z "${LAUFEY_E2E_PUBLIC_PORT:-}" ]; then
+    base=$((20000 + RANDOM % 12000))
+    LAUFEY_E2E_PUBLIC_PORT="$base,$((base + 251)),$((base + 503))"
+  fi
+  export LAUFEY_E2E_PUBLIC_PORT
+  overrides=""
+  for p in ${LAUFEY_E2E_PUBLIC_PORT//,/ }; do
+    overrides="${overrides:+$overrides,}127.0.0.1:$p=public"
+  done
+  args+=("--ip-address-space-overrides=$overrides")
   # Chromium's password store would ask the private session bus's keyring
   # to unlock: gnome-keyring then shows gcr-prompter, which grabs the
   # pointer and keyboard for the rest of the run, so real X input (xdotool)

@@ -549,6 +549,30 @@ async fn devtools_checks(caps: &laufey::SystemCapabilities, expect_on: bool) {
       "toggle_devtools closes them again",
       wait_for(|| !w.is_devtools_open(), 300, 50).await,
     );
+    // Closed while still opening: the engine may finish opening them after
+    // the call returns (WebKitGTK shows the inspector once its web process
+    // answers), and that must not bring them back.
+    w.open_devtools();
+    w.close_devtools();
+    check(
+      "DevTools closed right after open read as closed",
+      !w.is_devtools_open(),
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    check(
+      "DevTools closed right after open stay closed",
+      !w.is_devtools_open(),
+    );
+    w.toggle_devtools();
+    check(
+      "toggle_devtools opens them after that",
+      wait_for(|| w.is_devtools_open(), 300, 50).await,
+    );
+    w.close_devtools();
+    check(
+      "close_devtools closes them after that",
+      wait_for(|| !w.is_devtools_open(), 300, 50).await,
+    );
   } else {
     w.open_devtools();
     w.toggle_devtools();

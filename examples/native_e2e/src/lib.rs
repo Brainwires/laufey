@@ -944,20 +944,35 @@ fn e2e_main() {
     // the first Resized; inner position used to be the frame origin.
     let early_scale = win.get_scale_factor();
     check("early scale factor is positive", early_scale > 0.0);
+    // WebView2 creates the HWND on its UI thread after create_window
+    // returns, at a default size the queued set_window_size then corrects;
+    // get_size is answered there too, after both, so it never reads the
+    // default's client area (784x561 at 100 %) or 0x0 in between.
     let (early_w, early_h) = win.get_size();
-    if (early_w, early_h) == (0, 0)
-      && cfg!(target_os = "windows")
-      && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
-    {
-      // WebView2 creates the HWND on its UI thread after create_window
-      // returns; until then there is no size to read.
-      na("constructor size is readable immediately (WebView2 creates the window asynchronously)");
-    } else {
-      check(
-        "constructor size is readable immediately",
-        (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
-      );
+    check(
+      &format!(
+        "constructor size is readable immediately (got {early_w}x{early_h})"
+      ),
+      (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
+    );
+    // And every read while the backend creates it is that size (or none
+    // yet), never the default it creates the OS window at.
+    let creating = std::time::Instant::now();
+    let mut odd = None;
+    while creating.elapsed() < std::time::Duration::from_millis(1500) {
+      let (w, h) = win.get_size();
+      if (w, h) != (0, 0) && ((w - 800).abs() > 2 || (h - 600).abs() > 2) {
+        odd = Some((w, h));
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+    check(
+      &format!(
+        "the size reads as set while the window is created (odd read {odd:?})"
+      ),
+      odd.is_none(),
+    );
 
     let decorated = Window::new(400, 300).title("native-e2e-chrome");
     decorated.set_position(240, 160);
@@ -3078,6 +3093,27 @@ async fn passkey_checks(window_id: u32) {
     ),
     freed,
   );
+  if !freed {
+    // Rare on windows-11-arm (2 of about 40 runs): the OS call ended neither
+    // when cancelled nor at its own deadline. Say whether it ever does.
+    let mut later = None;
+    while started.elapsed() < std::time::Duration::from_secs(75) {
+      let env = passkey_answer(
+        "passkey get after a held slot",
+        laufey::passkey_get(
+          window_id,
+          &passkey_get_options("example.com", 1000),
+        ),
+      )
+      .await;
+      if !env.contains("already in progress") {
+        later = Some(started.elapsed().as_millis());
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    eprintln!("[e2e] INFO the held passkey slot freed after {later:?} ms");
+  }
 }
 
 /// Report the overall result and exit immediately (see "shutdown" above).
@@ -3086,13 +3122,37 @@ fn finish() -> ! {
   eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
   let _ = std::io::Write::flush(&mut std::io::stderr());
   // _exit avoids running C++ static destructors / atexit handlers in the
-  // backend, which is where the teardown crash lives.
+  // backend, which is where the teardown crash lives (on Windows it ends
+  // the process outright, see libc_exit).
   unsafe { libc_exit(if failed { 1 } else { 0 }) };
 }
 
+#[cfg(not(windows))]
 extern "C" {
   #[link_name = "_exit"]
   fn libc_exit(code: i32) -> !;
+}
+
+/// Windows: `_exit` is ExitProcess, which still runs every DLL's
+/// DLL_PROCESS_DETACH and its static destructors, after it has ended the
+/// process's other threads, and one of them can wait there forever on a
+/// COM call into an apartment whose thread is already gone. Minidumps of
+/// two CEF runs stuck after their OVERALL line: the one thread left waits
+/// in combase's MTAThreadWaitForCall (a cross-apartment call), and its stack
+/// below holds Windows.Media.dll, ucrtbase's exit-time callbacks and
+/// ntdll's process shutdown, under this library's exit. Such a process
+/// can't be killed either and keeps its profile locked, so every later run
+/// with that profile fails at start. End the process without running any
+/// of it.
+#[cfg(windows)]
+unsafe fn libc_exit(code: i32) -> ! {
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    fn TerminateProcess(process: *mut std::ffi::c_void, code: u32) -> i32;
+  }
+  TerminateProcess(GetCurrentProcess(), code as u32);
+  unreachable!("TerminateProcess returned")
 }
 
 // What this library's `.init_array` function saw of argv (Linux): the C

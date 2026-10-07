@@ -79,7 +79,10 @@ stop working. `native_e2e --devtools-off` checks that they still do.
 - **WKWebView:** the inspector is WebKit's `_WKInspector` (what Safari's Develop
   menu drives): `show`, `close` and `isVisible`. It is a private API on every
   macOS version laufey supports. Safari's Develop menu also lists inspectable
-  web views from outside the app.
+  web views from outside the app. As on WebKitGTK (below), `show` opens the
+  inspector only once the page's web process answers, so a `close` while it is
+  connected but not yet visible is remembered (for 10 s): it reads as closed
+  meanwhile and is closed again once it has opened.
 - **WebView2:** the DevTools open in a separate top-level window of the browser
   process, and WebView2 has no API to close them or ask whether they are open.
   laufey remembers the DevTools window `open_devtools` brought up (a new
@@ -88,9 +91,16 @@ stop working. `native_e2e --devtools-off` checks that they still do.
   open while that window exists. DevTools the user opened with F12 or the
   context menu are found the same way when the app has a single window; with
   several windows sharing a browser process they can't be attributed to a
-  window, and `is_devtools_open` reports only those opened through the API.
+  window, and `is_devtools_open` reports only those opened through the API. The
+  window appears a moment after `OpenDevToolsWindow`; a `close_devtools` before
+  that closes it as soon as it is found (and the DevTools read as closed
+  meanwhile), instead of finding nothing to close.
 - **WebKitGTK:** `webkit_web_inspector_show` / `_close`; a window's inspector is
-  open while it has an inspector web view.
+  open while it has an inspector web view. `show` makes that web view at once
+  but opens the inspector only when the page's web process answers, and that
+  answer arrives even after a `close`: DevTools closed while still opening came
+  back on their own. laufey remembers such a close (for 10 s), reports the
+  inspector closed meanwhile, and closes it again once it has opened.
 - **CEF:** `CefBrowserHost::ShowDevTools`, `CloseDevTools` and `HasDevTools`. On
   Windows the DevTools open in a popup window.
 
@@ -98,7 +108,8 @@ stop working. `native_e2e --devtools-off` checks that they still do.
 
 `native_e2e --system` checks, on every backend, that DevTools are enabled (the
 launch setting and the engine's own setting) and that open, close and two
-toggles each change `is_devtools_open`. `native_e2e --devtools-off` runs under
-`LAUFEY_INSPECTABLE=0` and checks the engine reports them off and that
-`open_devtools` / `toggle_devtools` open nothing (and, on CEF, that
-`print_to_pdf` still works).
+toggles each change `is_devtools_open`, and that DevTools closed right after
+`open_devtools` (before they finished opening) stay closed.
+`native_e2e --devtools-off` runs under `LAUFEY_INSPECTABLE=0` and checks the
+engine reports them off and that `open_devtools` / `toggle_devtools` open
+nothing (and, on CEF, that `print_to_pdf` still works).

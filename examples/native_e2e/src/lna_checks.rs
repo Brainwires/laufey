@@ -189,11 +189,9 @@ fetch({echo_url:?}, {{ mode: 'cors' }})
 }
 
 /// Serves `html` to every request on `port` (loopback) from a thread per
-/// connection; false if the port can't be bound.
-fn serve_page(port: u16, html: String) -> bool {
-  let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
-    return false;
-  };
+/// connection; the bind error if the port can't be bound.
+fn serve_page(port: u16, html: String) -> std::io::Result<()> {
+  let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
   std::thread::spawn(move || {
     for stream in listener.incoming() {
       let Ok(mut stream) = stream else { continue };
@@ -219,7 +217,7 @@ fn serve_page(port: u16, html: String) -> bool {
       });
     }
   });
-  true
+  Ok(())
 }
 
 /// LAUFEY_E2E_ONLY=lna: the custom-scheme page (its cross-origin fetch and
@@ -312,19 +310,38 @@ pub async fn other_origin_blocked(echo_url: Option<&str>) {
     na("Local Network Access for other origins (no loopback echo server)");
     return;
   };
-  let Some(port) = std::env::var("LAUFEY_E2E_PUBLIC_PORT")
-    .ok()
-    .and_then(|p| p.parse::<u16>().ok())
-  else {
+  // The ports the run declared public (native-e2e-run.sh): the page is
+  // served on the first one that is free.
+  let ports: Vec<u16> = std::env::var("LAUFEY_E2E_PUBLIC_PORT")
+    .unwrap_or_default()
+    .split(',')
+    .filter_map(|p| p.trim().parse::<u16>().ok())
+    .collect();
+  if ports.is_empty() {
     na(
       "Local Network Access for other origins (LAUFEY_E2E_PUBLIC_PORT unset; \
        native-e2e-run.sh sets it)",
     );
     return;
-  };
-  if !serve_page(port, public_page_html(echo)) {
-    check(&format!("the public page server binds port {port}"), false);
+  }
+  let mut errors = Vec::new();
+  let Some(port) = ports.iter().copied().find(|&p| {
+    match serve_page(p, public_page_html(echo)) {
+      Ok(()) => true,
+      Err(e) => {
+        errors.push(format!("{p}: {e}"));
+        false
+      }
+    }
+  }) else {
+    check(
+      &format!("the public page server binds a declared port ({errors:?})"),
+      false,
+    );
     return;
+  };
+  if !errors.is_empty() {
+    eprintln!("[e2e] INFO public ports taken: {errors:?}");
   }
   let result: Arc<Mutex<Option<(String, i32, String)>>> =
     Arc::new(Mutex::new(None));

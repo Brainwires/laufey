@@ -3391,9 +3391,13 @@ bool RuntimeLoader::Load(const std::string& path) {
   // them. Allow nestable tasks for the length of the loop (laufey_menu.h).
   // The menu code is reentrancy safe for this: a task that shows another
   // menu ends the open one first (win32_menu.h), and one that closes the
-  // window ends it too.
-  laufey_common::SetNativeModalLoopHook(
-      [](bool entering) { CefSetNestableTasksAllowed(entering); });
+  // window ends it too. Chromium's pump takes a message from the queue each
+  // time it gets a slice in such a loop, which would take the menu's own
+  // keys and clicks from it: those stay the menu's (app.h).
+  laufey_common::SetNativeModalLoopHook([](bool entering) {
+    LaufeyGuardModalLoopInput(entering);
+    CefSetNestableTasksAllowed(entering);
+  });
 #endif
 #ifndef _WIN32
   library_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);

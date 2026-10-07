@@ -202,6 +202,9 @@ async fn eval(win: &Window, script: &str, wait: Duration) -> Eval {
 /// read that as "no value" and quit before the write had run.
 const SCRIPT_WAIT: Duration = Duration::from_secs(30);
 
+/// How long a launch's page may take to load (see the page check).
+const PAGE_WAIT: Duration = Duration::from_secs(60);
+
 /// `"<localStorage value>|<cookie value>"`, each "" when absent.
 const READ_JS: &str = r#"(() => {
   const m = document.cookie.match(/(?:^|; )laufey_e2e_storage=([^;]*)/);
@@ -257,20 +260,38 @@ fn e2e_main() {
     // page). Polled rather than via on_page_load, which CEF doesn't fire. A
     // poll sent while the first navigation commits can go unanswered; the
     // next one follows its 5 s wait.
+    //
+    // Up to PAGE_WAIT: on Windows, Chromium holds every request that goes
+    // through its proxy resolution, loopback ones included, until the
+    // system's proxy auto-detect (WPAD, on by default) has finished, and on
+    // CI runners that took up to 7.6 s in a net log of this launch
+    // (PROXY_RESOLUTION_SERVICE_WAITING_FOR_INIT_PAC while
+    // WPAD_DHCP_WIN_GET_ADAPTERS ran) and over 22 s once, which the old
+    // budget of 100 polls (about 22 s) read as a page that never loaded.
+    // Custom-scheme pages don't go through it.
     let started = Instant::now();
     let mut ready = false;
     let mut polls = 0;
     let mut unanswered = 0;
+    let mut last = String::new();
     if served {
-      for _ in 0..100 {
+      while started.elapsed() < PAGE_WAIT {
         polls += 1;
-        match eval(&win, "location.origin", Duration::from_secs(5)).await {
-          Eval::String(o) if o == origin => {
+        match eval(&win, "location.href", Duration::from_secs(5)).await {
+          Eval::String(href) if href.starts_with(&format!("{origin}/")) => {
             ready = true;
             break;
           }
           Eval::Timeout(_) => unanswered += 1,
-          _ => {}
+          // Another document (about:blank, an error page): say which, once
+          // per change, so a page that never loads shows where it stayed.
+          other => {
+            let now = other.to_string();
+            if now != last {
+              eprintln!("[e2e] page check {polls}: {now}");
+              last = now;
+            }
+          }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
       }
@@ -279,7 +300,10 @@ fn e2e_main() {
       "[e2e] page check: {} ms, {polls} polls, {unanswered} unanswered",
       started.elapsed().as_millis()
     );
-    check(&format!("page loaded at {origin}"), ready);
+    check(
+      &format!("page loaded at {origin} (last answer: {last})"),
+      ready,
+    );
     if ready && scheme.is_some() {
       let t = Instant::now();
       let result =
