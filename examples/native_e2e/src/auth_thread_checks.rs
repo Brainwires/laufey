@@ -274,6 +274,95 @@ fn kind(r: &Option<Result<String, laufey::AuthSessionError>>) -> String {
   }
 }
 
+/// How many times `cancel_restart_stress` cancels a session and starts the
+/// next one at once (`LAUFEY_E2E_AUTH_STRESS`, default 10).
+fn stress_iterations() -> usize {
+  std::env::var("LAUFEY_E2E_AUTH_STRESS")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(10)
+}
+
+/// The number of times the sign-in server was asked for `path` so far.
+fn idp_hits(path: &str) -> usize {
+  IDP_HITS
+    .lock()
+    .map(|h| h.iter().filter(|p| p.as_str() == path).count())
+    .unwrap_or(0)
+}
+
+/// A session cancelled by the app (auth_session_cancel) while its sheet is
+/// up, and the next one started at once, over and over: every next session
+/// must be presented and answered. ASWebAuthenticationSession is still
+/// dismissing the cancelled sheet then, and a session started meanwhile was
+/// now and then never presented and never answered, its slot held for good
+/// (about 2% of macOS CI legs, where the battery did this once). The time
+/// from the sheet's page loading to the cancel varies, to cover the
+/// dismissal at different points.
+async fn cancel_restart_stress(anchor_id: u32, idp: &str) {
+  let n = stress_iterations();
+  if n == 0 {
+    na("auth session cancel / restart stress (LAUFEY_E2E_AUTH_STRESS=0)");
+    return;
+  }
+  let mut unanswered = 0usize;
+  let mut wrong = 0usize;
+  let mut slowest = Duration::ZERO;
+  for i in 0..n {
+    let loaded = idp_hits("/auth/wait");
+    let pending = laufey::auth_session_start(
+      anchor_id,
+      &format!("{idp}/auth/wait"),
+      CALLBACK_SCHEME,
+      true,
+    );
+    // The sheet is up once its page was asked for.
+    let up = wait_for(|| idp_hits("/auth/wait") > loaded, 200, 50).await;
+    tokio::time::sleep(Duration::from_millis((i as u64 * 97) % 400)).await;
+    let cancelled = laufey::auth_session_cancel();
+    let state = format!("stress{i}");
+    let t = Instant::now();
+    let next = laufey::auth_session_start(
+      anchor_id,
+      &format!("{idp}/auth/redirect?state={state}"),
+      CALLBACK_SCHEME,
+      true,
+    );
+    let first = tokio::time::timeout(Duration::from_secs(10), pending).await;
+    let next = tokio::time::timeout(Duration::from_secs(30), next).await;
+    slowest = slowest.max(t.elapsed());
+    match &next {
+      Ok(Ok(url)) if url.ends_with(&format!("state={state}")) => {}
+      Err(_) => {
+        unanswered += 1;
+        let hits = IDP_HITS.lock().map(|h| h.len()).unwrap_or(0);
+        eprintln!(
+          "[e2e] INFO stress #{i}: the session after the cancel never answered (sheet up {up}, cancel {cancelled}, cancelled one {first:?}, {hits} sign-in requests so far)"
+        );
+        // Free the slot for the next iteration.
+        laufey::auth_session_cancel();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+      }
+      Ok(other) => {
+        wrong += 1;
+        eprintln!(
+          "[e2e] INFO stress #{i}: the session after the cancel answered {other:?} (sheet up {up}, cancel {cancelled}, cancelled one {first:?})"
+        );
+      }
+    }
+  }
+  eprintln!(
+    "[e2e] INFO auth cancel / restart stress: {n} runs, {unanswered} never answered, {wrong} answered wrongly, slowest next session {} ms",
+    slowest.as_millis()
+  );
+  check(
+    &format!(
+      "a session started right after auth_session_cancel() is presented and answered, {n} times over ({unanswered} never answered, {wrong} wrong)"
+    ),
+    unanswered == 0 && wrong == 0,
+  );
+}
+
 async fn auth_session_checks(anchor: Option<&Window>) {
   let caps = laufey::auth_session_capabilities();
   let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
@@ -476,6 +565,8 @@ async fn auth_session_checks(anchor: Option<&Window>) {
     let freed = laufey::auth_session_cancel();
     eprintln!("[e2e] INFO cancelled the unanswered session: {freed}");
   }
+
+  cancel_restart_stress(anchor_id, &idp).await;
 
   // The anchor window closing ends the session cancelled.
   let w = Window::new(320, 240).title("native-e2e-auth-anchor");
