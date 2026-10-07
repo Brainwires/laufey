@@ -744,12 +744,19 @@ struct PortalRequest {
       g_object_unref(bus);
   }
 
+  // Request.Close on the request object: the one the portal named, or,
+  // before it answered the call, the path it will use (the handle_token's),
+  // which works once the portal has exported it; OnCalled closes the named
+  // one again when the answer comes. Flushed at once, so the Close is on the
+  // wire before the cancel is reported.
   void Close() {
-    if (handle.empty())
+    const std::string& path = handle.empty() ? subscribed : handle;
+    if (path.empty())
       return;
-    g_dbus_connection_call(bus, kPortalName, handle.c_str(), kRequestInterface,
+    g_dbus_connection_call(bus, kPortalName, path.c_str(), kRequestInterface,
                            "Close", nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE,
                            -1, nullptr, nullptr, nullptr);
+    g_dbus_connection_flush_sync(bus, nullptr, nullptr);
   }
 
   void Finish(int status, const std::vector<std::string>& paths) {
@@ -1001,6 +1008,9 @@ class LinuxChooserDialog : public FileDialogPlatform {
     g_variant_unref(r);
     state->handle = path;
     if (state->cancelled) {
+      // Cancelled before the answer: the Close sent then may have come before
+      // the portal exported the request (or went to the token's path, which
+      // a portal older than 0.9 doesn't use). Close the named one now.
       state->Close();
       return;
     }

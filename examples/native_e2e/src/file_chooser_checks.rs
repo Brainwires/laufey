@@ -90,6 +90,11 @@ pub(crate) async fn run() {
   // The slot is free again.
   let next = laufey::show_file_dialog(0, &FileDialogOptions::default());
   check("the next dialog opens", next.id != 0);
+  // Cancelled once it is up: the portal closes a request it has exported
+  // and named (a dialog cancelled in the instant before that is closed when
+  // the answer naming it arrives, which needs the app still running).
+  tokio::time::sleep(Duration::from_millis(1500)).await;
   laufey::cancel_file_dialog(next.id);
   let _ = tokio::time::timeout(Duration::from_secs(10), next.outcome).await;
+  tokio::time::sleep(Duration::from_millis(500)).await;
 }
