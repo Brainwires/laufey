@@ -787,6 +787,18 @@ jobs:
         shell: bash
         run: scripts/single-instance-e2e-run.sh ${{ matrix.backend }}
 
+      # SIGTERM / SIGINT / SIGHUP end the Linux CEF app through its own quit
+      # (runtime shut down, CefShutdown), not Chromium's session-end _exit:
+      # status 0, no process left, the profile's exit_type "Normal", no core
+      # or crash report.
+      - name: Termination signals (Linux, cef)
+        if: runner.os == 'Linux' && matrix.backend == 'cef'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          cargo build --release -p hello_runtime
+          scripts/signal-exit-e2e-run.sh
+
       # HiDPI: the window-API battery at a device scale factor of 2 (Linux:
       # CEF --force-device-scale-factor=2, WebKitGTK GDK_SCALE=2; Windows:
       # the display's own scale, raised first). Sizes and positions must stay

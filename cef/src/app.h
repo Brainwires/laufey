@@ -436,6 +436,11 @@ void LaufeyQuitMainLoopMac();
 // macOS, CefQuitMessageLoop elsewhere). UI thread.
 void LaufeyQuitMainLoop();
 
+// The app's own quit() (runtime_loader.cc): every window is closed and the
+// loop ends, so the host goes on to the runtime's shutdown and CefShutdown.
+// Any thread. The Linux host calls it for SIGTERM, SIGINT and SIGHUP.
+void LaufeyRequestQuit();
+
 // Window-state bookkeeping (API 38; runtime_loader.cc). Recheck reads the
 // window's state back from CefWindow on the UI thread and reports a change;
 // Schedule does that now and a few times over the next ~1.5 s, from any

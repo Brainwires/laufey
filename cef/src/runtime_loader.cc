@@ -275,6 +275,10 @@ static void Backend_Quit(void* data) {
               }));
 }
 
+void LaufeyRequestQuit() {
+  Backend_Quit(nullptr);
+}
+
 // Window sizes are the page area, the browser view (as window.innerWidth /
 // innerHeight see it), in DIP; CefWindow's size is the whole window, so the
 // frame around the page is added when resizing. UI thread.
