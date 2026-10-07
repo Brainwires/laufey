@@ -219,6 +219,31 @@ set_target_properties(laufey_backend_common PROPERTIES
 # framework). The parent project calls enable_testing() so these show up in
 # `ctest --test-dir <build>`; -DLAUFEY_BUILD_TESTS=OFF skips them.
 option(LAUFEY_BUILD_TESTS "Build backend-common unit tests" ON)
+
+# A host's headless launch (`<host> run <script>`: a forked worker, the
+# full-app updater's helper) runs its runtime to the end, past the bounded
+# wait a windowed app's runtime gets (tests/headless_launch_test.cc, with a
+# stand-in runtime library). Each host's CMakeLists (webview, cef) calls this
+# with its target and the executable a launch starts.
+function(laufey_add_headless_launch_test host_target host_executable)
+  if(NOT LAUFEY_BUILD_TESTS)
+    return()
+  endif()
+  add_library(laufey_headless_runtime MODULE
+              ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/headless_runtime_lib.cc)
+  add_executable(laufey_headless_launch_test
+                 ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/headless_launch_test.cc)
+  target_compile_features(laufey_headless_launch_test PRIVATE cxx_std_17)
+  target_compile_definitions(laufey_headless_launch_test PRIVATE
+    LAUFEY_HOST="${host_executable}"
+    LAUFEY_HEADLESS_RUNTIME="$<TARGET_FILE:laufey_headless_runtime>"
+  )
+  add_dependencies(laufey_headless_launch_test
+                   ${host_target} laufey_headless_runtime)
+  add_test(NAME laufey_headless_launch_test
+           COMMAND laufey_headless_launch_test)
+  set_tests_properties(laufey_headless_launch_test PROPERTIES TIMEOUT 180)
+endfunction()
 if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_scheme_registry_test tests/scheme_registry_test.cc)
   target_link_libraries(laufey_scheme_registry_test PRIVATE

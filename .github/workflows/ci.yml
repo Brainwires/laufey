@@ -1172,6 +1172,14 @@ jobs:
 
       - run: make cef
 
+      # The host runs a headless launch (`run <script>`: a forked worker, the
+      # full-app updater's helper) to its end, past the bounded wait a
+      # windowed app's runtime gets (backend-common/tests/
+      # headless_launch_test.cc). It never loads CEF: no display needed.
+      - name: Headless launch test (ctest)
+        shell: bash
+        run: ctest --test-dir cef/build -R '^laufey_headless_launch_test$' --no-tests=error --output-on-failure
+
       - name: Package
         shell: bash
         run: |
