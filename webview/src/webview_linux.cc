@@ -1246,7 +1246,7 @@ static gboolean on_script_dialog(WebKitWebView* webview,
     GtkWidget* dlg =
         gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
                                GTK_BUTTONS_OK, "%s", message);
-    gtk_dialog_run(GTK_DIALOG(dlg));
+    laufey_common::RunGtkDialog(dlg);
     gtk_widget_destroy(dlg);
     webkit_script_dialog_confirm_set_confirmed(dialog, TRUE);
     return TRUE;
@@ -1256,7 +1256,7 @@ static gboolean on_script_dialog(WebKitWebView* webview,
     GtkWidget* dlg =
         gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION,
                                GTK_BUTTONS_OK_CANCEL, "%s", message);
-    gint result = gtk_dialog_run(GTK_DIALOG(dlg));
+    gint result = laufey_common::RunGtkDialog(dlg);
     gtk_widget_destroy(dlg);
     webkit_script_dialog_confirm_set_confirmed(dialog,
                                                result == GTK_RESPONSE_OK);
@@ -1276,7 +1276,7 @@ static gboolean on_script_dialog(WebKitWebView* webview,
     }
     gtk_container_add(GTK_CONTAINER(content), entry);
     gtk_widget_show(entry);
-    gint result = gtk_dialog_run(GTK_DIALOG(dlg));
+    gint result = laufey_common::RunGtkDialog(dlg);
     if (result == GTK_RESPONSE_OK) {
       webkit_script_dialog_prompt_set_text(
           dialog, gtk_entry_get_text(GTK_ENTRY(entry)));
@@ -1678,6 +1678,10 @@ void WebKitGTKBackend::ExecuteJs(uint32_t window_id, const std::string& script,
 
 void WebKitGTKBackend::Quit() {
   laufey_common::MarkQuitting();
+  // A GTK modal (an alert, a script dialog) is a nested loop on the GTK
+  // thread that would keep gtk_main from returning until someone dismissed
+  // it: end it, as a cancel.
+  laufey_common::CancelGtkDialogsForQuit();
   g_idle_add(
       [](gpointer) -> gboolean {
         gtk_main_quit();

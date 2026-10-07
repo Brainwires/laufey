@@ -32,6 +32,13 @@ dialog modal to the page's window: the dialog is transient for it on X11, and
 the browser view takes no input while it is open (Chromium's window is not a GTK
 window, so GTK's own modality would not reach it).
 
+On Linux, quitting while a GTK dialog of the CEF or WebView backend is open
+(`laufey::quit()`, `laufey::exit()`, a termination signal) ends the dialog as a
+cancel: `alert` returns, `confirm` returns `false` and `prompt` returns `None`
+(a page's own dialog answers the same). The dialog is a nested loop on the UI
+thread, and the app could not end until someone dismissed it. A dialog asked for
+once the app is quitting is not shown, and returns as cancelled.
+
 On Linux the Winit backend shows all three dialogs from the first provider the
 session has, in the same order: `kdialog` (Plasma), then `zenity` (GNOME), then
 an in-process GTK dialog. The GTK dialog is the main path where neither tool is

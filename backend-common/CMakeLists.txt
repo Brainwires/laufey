@@ -103,6 +103,7 @@ elseif(UNIX)
     src/cookie_db_linux.cc
     src/title_bar_linux.cc
     src/secret_store_linux.cc
+    src/termination_signals_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -556,6 +557,29 @@ if(LAUFEY_BUILD_TESTS)
 
     # The UI-thread exit guard: exit() from another thread parks the UI
     # thread before the libraries' destructors run.
+    # Quitting ends the GTK dialogs as a cancel, from the UI thread or
+    # another one, nested ones too, and none is shown once quitting (private
+    # Xvfb; skipped without it).
+    add_executable(laufey_dialog_quit_test tests/dialog_quit_test.cc)
+    target_link_libraries(laufey_dialog_quit_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_dialog_quit_test COMMAND laufey_dialog_quit_test)
+    set_tests_properties(laufey_dialog_quit_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # SIGTERM / SIGINT / SIGHUP: the first quits through the callback on
+    # the loop's thread, a second takes the default action.
+    add_executable(laufey_termination_signals_test
+                   tests/termination_signals_test.cc)
+    target_link_libraries(laufey_termination_signals_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_termination_signals_test
+             COMMAND laufey_termination_signals_test)
+
     add_executable(laufey_exit_guard_test tests/exit_guard_test.cc)
     target_link_libraries(laufey_exit_guard_test PRIVATE
       laufey_backend_common

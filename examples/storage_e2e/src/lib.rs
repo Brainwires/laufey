@@ -29,9 +29,21 @@
 //!   process-exit:<code>
 //!                   `std::process::exit(code)` from this thread while the
 //!                   engine still runs (how a runtime ended before API 46).
+//!   wait            nothing: the launch runs until something else ends the
+//!                   app (`scripts/signal-exit-e2e-run.sh` sends it a
+//!                   termination signal).
 //!
-//! `scripts/exit-e2e-run.sh` relaunches with each of them and checks the
-//! exit code and that the next launch reads the value back.
+//! `LAUFEY_E2E_STORAGE_DIALOG` (with `wait`) then also puts up a dialog from
+//! a thread of its own, as Deno's uncaught-error handler does, and prints
+//! `[e2e] dialog <kind> up` first and `[e2e] dialog <kind> returned <result>`
+//! once it is gone:
+//!
+//!   alert           `laufey::alert`, then `laufey::exit(1)` (Deno.exit(1)).
+//!   confirm         `laufey::confirm` (the result is printed: a quit must
+//!                   end it as a cancel, `false`).
+//!
+//! `scripts/exit-e2e-run.sh` relaunches with each of the first four and
+//! checks the exit code and that the next launch reads the value back.
 //!
 //! `LAUFEY_E2E_STORAGE_SCHEME=<name>` serves the page over that custom scheme
 //! (`<name>://app/`, registered with `register_scheme_handler`) instead of
@@ -242,7 +254,7 @@ fn split(pair: &str) -> (String, String) {
 fn e2e_main() {
   let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
   rt.block_on(async move {
-    tokio::spawn(async { laufey::run().await });
+    let running = tokio::spawn(async { laufey::run().await });
 
     let mode = env("LAUFEY_E2E_STORAGE_MODE").unwrap_or_default();
     let port: u16 = env("LAUFEY_E2E_STORAGE_PORT")
@@ -418,7 +430,46 @@ fn e2e_main() {
     eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
     let _ = std::io::stderr().flush();
 
+    if exit_mode == "wait" {
+      if let Some(kind) = env("LAUFEY_E2E_STORAGE_DIALOG") {
+        show_dialog(kind);
+      }
+      eprintln!("[e2e] waiting for the app to be ended");
+      let _ = std::io::stderr().flush();
+      let _ = running.await;
+      return;
+    }
     end(&win, &exit_mode).await;
+  });
+}
+
+/// Puts up the `LAUFEY_E2E_STORAGE_DIALOG` dialog on a thread of its own
+/// (see the module docs).
+fn show_dialog(kind: String) {
+  std::thread::spawn(move || {
+    eprintln!("[e2e] dialog {kind} up");
+    let _ = std::io::stderr().flush();
+    match kind.as_str() {
+      "alert" => {
+        laufey::alert("Application Error", "storage-e2e: an uncaught error");
+        eprintln!("[e2e] dialog alert returned");
+        let _ = std::io::stderr().flush();
+        // As Deno's handler: exit once the dialog is gone.
+        if laufey::exit(1) {
+          loop {
+            std::thread::park();
+          }
+        }
+      }
+      "confirm" => {
+        let ok = laufey::confirm("storage-e2e", "Quit?");
+        eprintln!("[e2e] dialog confirm returned {ok}");
+      }
+      other => {
+        eprintln!("[e2e] FAIL unknown LAUFEY_E2E_STORAGE_DIALOG {other:?}")
+      }
+    }
+    let _ = std::io::stderr().flush();
   });
 }
 

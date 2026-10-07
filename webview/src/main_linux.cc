@@ -1,5 +1,6 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
+#include "laufey_backend_common.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
@@ -36,6 +37,18 @@ static void ActivateApp(void*) {
   g_list_free(toplevels);
   if (target)
     gtk_window_present(target);
+}
+
+// The backend whose Quit a termination signal calls (GTK main thread).
+static LaufeyBackend* g_backend = nullptr;
+
+// SIGTERM, SIGINT and SIGHUP end the app through quit()'s path: the loop
+// ends, the runtime is shut down and what the pages stored is written to
+// disk (laufey_common::InstallTerminationSignalHandlers), instead of the
+// default action killing the process without either.
+static void RequestQuit() {
+  if (g_backend)
+    g_backend->Quit();
 }
 
 // A headless worker (laufey_common::IsHeadlessWorkerLaunch): the runtime runs
@@ -228,7 +241,14 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  g_backend = backend;
+  laufey_common::InstallTerminationSignalHandlers(RequestQuit);
+
   backend->Run();
+
+  // A signal from here on takes its default action.
+  laufey_common::RemoveTerminationSignalHandlers();
+  g_backend = nullptr;
 
   // The loop is over: UI tasks still queued are answered "not run" and an
   // auth session in progress ends cancelled, so a runtime thread waiting on

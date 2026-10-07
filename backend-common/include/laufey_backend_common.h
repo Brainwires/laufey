@@ -192,6 +192,31 @@ int ShowDialogWin(int dialog_type, const std::string& title,
 int ShowDialogLinux(int dialog_type, const std::string& title,
                     const std::string& message,
                     const std::string& default_value, char** out_input_value);
+
+// gtk_dialog_run for every GTK modal laufey shows (ShowDialogLinux and both
+// backends' script dialogs), so quitting can end it. gtk_dialog_run is a
+// nested main loop on the UI thread: while it runs, the loop that quit()
+// ends can't return, so a quit (quit(), exit_app, a termination signal)
+// would wait for someone to dismiss the dialog. `dialog` is a GtkDialog*.
+// Once the app is quitting (IsQuitting) the dialog isn't run at all. Returns
+// gtk_dialog_run's response, GTK_RESPONSE_CANCEL for a dialog quitting
+// ended or skipped. UI thread.
+int RunGtkDialog(void* dialog);
+
+// Ends every dialog RunGtkDialog is running with GTK_RESPONSE_CANCEL (as if
+// the user cancelled it), so the nested loops return and a quit can end the
+// app. Called by quit() after MarkQuitting. Any thread: the dialogs are
+// ended on the UI thread (the default main context), next time it iterates.
+void CancelGtkDialogsForQuit();
+
+// SIGTERM, SIGINT and SIGHUP end the app through `quit`, the backend's own
+// quit (as quit() from the runtime): GLib sources on the default main
+// context, so `quit` runs on the UI thread. The first signal removes all
+// three handlers, which gives them their default action back: a second
+// signal ends a quit that hangs. UI thread, once the loop's context is set up.
+void InstallTerminationSignalHandlers(void (*quit)());
+// Removes them (a signal from then on takes its default action). UI thread.
+void RemoveTerminationSignalHandlers();
 #endif
 
 // ---------------------------------------------------------------------------
