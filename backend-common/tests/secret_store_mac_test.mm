@@ -246,6 +246,28 @@ int main() {
     EXPECT(SecretDelete(g_service, "legacy", kTimeout, &reason) ==
            SecretStatus::kOk);
 
+    // A delete macOS refused wipes the value and marks the item deleted (see
+    // DeleteIn): such an item reads as "not found", and a store reuses it.
+    NSDictionary* wiped = @{
+      (id)kSecClass : (id)kSecClassGenericPassword,
+      (id)kSecAttrService : @(g_service.c_str()),
+      (id)kSecAttrAccount : @"a",
+      (id)kSecAttrCreator : @((FourCharCode)'Lfy1'),
+      (id)kSecAttrComment : @"laufey:deleted",
+      (id)kSecValueData : [NSData data],
+    };
+    EXPECT(SecItemAdd((__bridge CFDictionaryRef)wiped, nullptr) ==
+           errSecSuccess);
+    EXPECT(SecretLookup(g_service, "a", kTimeout, &value, &reason) ==
+           SecretStatus::kNotFound);
+    EXPECT(SecretStore(g_service, "a", "", "back", kTimeout, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(SecretLookup(g_service, "a", kTimeout, &value, &reason) ==
+               SecretStatus::kOk &&
+           value == "back");
+    EXPECT(SecretDelete(g_service, "a", kTimeout, &reason) ==
+           SecretStatus::kOk);
+
     // The C ABI: out strings malloc'd, NULL out pointers allowed.
     char* out = nullptr;
     char* why = nullptr;

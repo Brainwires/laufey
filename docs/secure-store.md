@@ -58,6 +58,12 @@ after its timeout (`UNAVAILABLE`); the prompt stays up for the person. A call
 still queued when its caller gave up never runs, so nothing is written after the
 call gave up.
 
+A delete that macOS refuses without asking (only an item's owner may remove a
+login-keychain item, and an ad-hoc signed CEF bundle isn't always taken for it,
+although its access list lets it change the value) wipes the value instead: the
+item is left empty, marked deleted (`kSecAttrComment` `laufey:deleted`), reads
+as `NOT_FOUND`, and the next store reuses it.
+
 There is never a plaintext fallback.
 
 ## Linux

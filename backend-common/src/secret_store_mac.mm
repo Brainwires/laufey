@@ -30,6 +30,11 @@
 // it: lookup is "not found"), and a store refuses while it is in the way.
 // The embedder moves such items over with the tool that wrote them.
 //
+// A delete macOS refuses without asking (only the item's owner may remove a
+// login-keychain item, and an ad-hoc signed CEF bundle isn't always taken for
+// it) wipes the value instead: empty, marked deleted (kSecAttrComment), read
+// as "not found", reused by the next store.
+//
 // Every call runs on one serial queue. A store or delete never prompts
 // (user interaction is off while it runs: a locked keychain is refused);
 // a lookup may (an unlock, or "allow" for a rebuilt ad-hoc app), and the
@@ -63,6 +68,10 @@ namespace {
 
 // kSecAttrCreator of the items written here.
 constexpr FourCharCode kCreator = 'Lfy1';
+
+// kSecAttrComment of an item a delete could not remove (see DeleteIn): its
+// value is emptied and it reads as "not found" until a store reuses it.
+NSString* const kDeletedMarker = @"laufey:deleted";
 
 uint32_t TimeoutOrDefault(uint32_t timeout_ms) {
   return timeout_ms ? timeout_ms : kSecretDefaultTimeoutMs;
@@ -210,6 +219,7 @@ SecretStatus LookupIn(NSString* service, NSString* account, bool dp,
                       OSStatus* raw = nullptr) {
   NSMutableDictionary* q = Query(service, account, dp);
   q[(id)kSecReturnData] = @YES;
+  q[(id)kSecReturnAttributes] = @YES;
   q[(id)kSecMatchLimit] = (id)kSecMatchLimitOne;
   CFTypeRef out = nullptr;
   OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)q, &out);
@@ -219,7 +229,10 @@ SecretStatus LookupIn(NSString* service, NSString* account, bool dp,
     return SecretStatus::kNotFound;
   if (status != errSecSuccess)
     return Refused(status, "read the item", reason);
-  NSData* data = CFBridgingRelease(out);
+  NSDictionary* item = CFBridgingRelease(out);
+  if ([item[(id)kSecAttrComment] isEqual:kDeletedMarker])
+    return SecretStatus::kNotFound;
+  NSData* data = item[(id)kSecValueData] ?: [NSData data];
   NSString* text = [[NSString alloc] initWithData:data
                                          encoding:NSUTF8StringEncoding];
   if (!text) {
@@ -239,6 +252,7 @@ SecretStatus StoreIn(NSString* service, NSString* account, NSString* label,
       (__bridge CFDictionaryRef) @{
         (id)kSecValueData : data,
         (id)kSecAttrLabel : label,
+        (id)kSecAttrComment : @"",
       });
   if (raw)
     *raw = status;
@@ -284,6 +298,24 @@ SecretStatus DeleteIn(NSString* service, NSString* account, bool dp,
     *raw = status;
   if (status == errSecSuccess || status == errSecItemNotFound)
     return SecretStatus::kOk;
+  if (!dp &&
+      (status == errSecInvalidOwnerEdit || status == errSecAuthFailed)) {
+    // The login keychain lets only the item's owner remove it, and macOS may
+    // not take this process for it without asking (seen with an ad-hoc
+    // signed CEF bundle) even though the item's access list lets it change
+    // the value. Then the value is wiped instead: empty, marked deleted, read
+    // as "not found", reused by the next store.
+    OSStatus wiped = SecItemUpdate(
+        (__bridge CFDictionaryRef)Query(service, account, dp),
+        (__bridge CFDictionaryRef) @{
+          (id)kSecValueData : [NSData data],
+          (id)kSecAttrComment : kDeletedMarker,
+        });
+    if (raw)
+      *raw = wiped;
+    if (wiped == errSecSuccess)
+      return SecretStatus::kOk;
+  }
   return Refused(status, "delete the item", reason);
 }
 
