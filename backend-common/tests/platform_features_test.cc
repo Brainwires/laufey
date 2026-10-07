@@ -153,6 +153,56 @@ int main() {
     EXPECT(picks({{"DESKTOP_SESSION", "default"}, {"KDE_FULL_SESSION", ""}}));
   }
 
+  // Which kwalletd it asks (M149 FreedesktopSecretKeyProvider::GetKey over
+  // GetDesktopEnvironment): KDE_SESSION_VERSION "6" kwalletd6, "5"
+  // kwalletd5, anything else (unset included) KDE 4's org.kde.kwalletd;
+  // DESKTOP_SESSION and KDE_FULL_SESSION only ever KDE 4 / 3.
+  {
+    auto service = [](std::map<std::string, std::string> vars) {
+      return ChromiumKWalletService([&vars](const char* name) -> const char* {
+        auto it = vars.find(name);
+        return it == vars.end() ? nullptr : it->second.c_str();
+      });
+    };
+    const KWalletService k4 = KWalletService::kKWalletd;
+    const KWalletService k5 = KWalletService::kKWalletd5;
+    const KWalletService k6 = KWalletService::kKWalletd6;
+    const KWalletService none = KWalletService::kNone;
+    // Plasma 6 launched without KDE_SESSION_VERSION (ssh, a systemd unit,
+    // a wrapper): KDE 4's daemon, the bug's trigger.
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "KDE"}}) == k4);
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "KDE"},
+                    {"KDE_SESSION_VERSION", "6"}}) == k6);
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "KDE"},
+                    {"KDE_SESSION_VERSION", "5"}}) == k5);
+    // Compared as is: no trimming, no other versions.
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "KDE"},
+                    {"KDE_SESSION_VERSION", " 6"}}) == k4);
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "KDE"},
+                    {"KDE_SESSION_VERSION", "7"}}) == k4);
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "KDE"},
+                    {"KDE_SESSION_VERSION", ""}}) == k4);
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "Hyprland: KDE"},
+                    {"KDE_SESSION_VERSION", "6"}}) == k6);
+    EXPECT(service({{"XDG_CURRENT_DESKTOP", "GNOME"},
+                    {"KDE_SESSION_VERSION", "6"}}) == none);
+    EXPECT(service({}) == none);
+    // DESKTOP_SESSION kde-plasma / kde4 / kde and KDE_FULL_SESSION: KDE 4
+    // (or 3), whatever KDE_SESSION_VERSION says.
+    EXPECT(service({{"DESKTOP_SESSION", "kde-plasma"},
+                    {"KDE_SESSION_VERSION", "6"}}) == k4);
+    EXPECT(service({{"DESKTOP_SESSION", "kde"}}) == k4);
+    EXPECT(service({{"KDE_FULL_SESSION", "true"},
+                    {"KDE_SESSION_VERSION", "6"}}) == k4);
+    EXPECT(service({{"DESKTOP_SESSION", "plasma"},
+                    {"KDE_SESSION_VERSION", "6"}}) == none);
+    // The switch value that names each daemon to Chromium.
+    EXPECT(std::string(KWalletPasswordStore(k4)) == "kwallet");
+    EXPECT(std::string(KWalletPasswordStore(k5)) == "kwallet5");
+    EXPECT(std::string(KWalletPasswordStore(k6)) == "kwallet6");
+    EXPECT(KWalletPasswordStore(none) == nullptr);
+  }
+
   // macOS and Windows: the OS keystore.
   PlatformFeatures mac;
   mac.os = "macos";
@@ -243,6 +293,41 @@ int main() {
     c = ChoosePasswordStore(nullptr, "", kNone, probe_kwallet_closed);
     EXPECT(c.store == "basic" && c.append_basic && !c.wait);
     EXPECT(Contains(c.reason, "KWallet"));
+    // KWallet: the OS store is pinned to the daemon the probe found, the
+    // wait included (Chromium waits on that daemon rather than one picked
+    // from the environment that may not answer). No daemon, no pin; basic
+    // and the Secret Service, no pin.
+    {
+      PlatformFeatures kwallet_open = Linux();
+      kwallet_open.kwallet = true;
+      kwallet_open.kwallet_state = KWalletState::kOpen;
+      kwallet_open.kwallet_service = KWalletService::kKWalletd6;
+      auto probe_kwallet_open = [&] { return kwallet_open; };
+      for (ProfileCookieKeys keys : {kNone, kOsKey, kUnknown}) {
+        for (const char* marker : {"os", ""}) {
+          c = ChoosePasswordStore(nullptr, marker, keys, probe_kwallet_open);
+          EXPECT(c.store == "os" && !c.append_basic && !c.wait);
+          EXPECT(c.append_store == "kwallet6");
+        }
+      }
+      kwallet_open.kwallet_service = KWalletService::kKWalletd5;
+      c = ChoosePasswordStore(nullptr, "", kNone, probe_kwallet_open);
+      EXPECT(c.append_store == "kwallet5");
+      kwallet_closed.kwallet_service = KWalletService::kKWalletd6;
+      c = ChoosePasswordStore(nullptr, "", kOsKey, probe_kwallet_closed);
+      EXPECT(c.store == "os" && c.wait && c.append_store == "kwallet6");
+      c = ChoosePasswordStore(nullptr, "", kNone, probe_kwallet_closed);
+      EXPECT(c.store == "basic" && c.append_basic && c.append_store.empty());
+      kwallet_closed.kwallet_service = KWalletService::kNone;
+      kwallet_closed.kwallet_state = KWalletState::kNotRunning;
+      c = ChoosePasswordStore(nullptr, "", kOsKey, probe_kwallet_closed);
+      EXPECT(c.store == "os" && c.wait && c.append_store.empty());
+      kwallet_closed.kwallet_state = KWalletState::kClosed;
+      c = ChoosePasswordStore(nullptr, "", kOsKey, probe_unlocked);
+      EXPECT(c.store == "os" && c.append_store.empty());
+      c = ChoosePasswordStore(nullptr, "", kOsKey, probe_locked);
+      EXPECT(c.store == "os" && c.wait && c.append_store.empty());
+    }
     // An explicit --password-store wins and is not appended again (Chromium
     // reads it). An OS store is recorded when the profile lacks it; basic
     // never is, and leaves an "os" marker alone. The probe doesn't run.
@@ -463,7 +548,8 @@ int main() {
 
   json = PlatformFeaturesToJson(mac);
   EXPECT(Contains(json, "\"sessionType\":null"));
-  EXPECT(Contains(json, "\"notificationServer\":null,\"notificationReason\":null"));
+  EXPECT(Contains(json,
+                  "\"notificationServer\":null,\"notificationReason\":null"));
   EXPECT(Contains(json, "\"secretService\":\"os\""));
   // Linux-only notification facts are null elsewhere.
   EXPECT(Contains(json, "\"notificationColdStart\":null"));

@@ -143,10 +143,26 @@ const char* SecretServiceStateName(SecretServiceState state) {
   return "absent";
 }
 
-bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env) {
+const char* KWalletPasswordStore(KWalletService service) {
+  switch (service) {
+    case KWalletService::kNone:
+      return nullptr;
+    case KWalletService::kKWalletd:
+      return "kwallet";
+    case KWalletService::kKWalletd5:
+      return "kwallet5";
+    case KWalletService::kKWalletd6:
+      return "kwallet6";
+  }
+  return nullptr;
+}
+
+KWalletService ChromiumKWalletService(
+    const std::function<const char*(const char*)>& env) {
   // base::nix::GetDesktopEnvironment: XDG_CURRENT_DESKTOP's values in
-  // priority order; the first one Chromium knows decides. os_crypt's
-  // SelectBackend maps KDE3 / KDE4 / KDE5 / KDE6 to KWallet.
+  // priority order; the first one Chromium knows decides. os_crypt_async's
+  // FreedesktopSecretKeyProvider::GetKey maps KDE3 / KDE4 to kwalletd, KDE5
+  // to kwalletd5, KDE6 to kwalletd6, everything else to the Secret Service.
   static const char* const kKnown[] = {
       "Unity", "Deepin", "GNOME", "X-Cinnamon", "Pantheon",
       "XFCE",  "UKUI",   "LXQt",  "COSMIC",
@@ -168,26 +184,39 @@ bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env) {
     size_t b = value.find_first_not_of(" \t\r\n");
     size_t e = value.find_last_not_of(" \t\r\n");
     value = b == std::string::npos ? "" : value.substr(b, e - b + 1);
-    if (value == "KDE")
-      return true;  // KDE4 / KDE5 / KDE6: KWallet
+    if (value == "KDE") {
+      // KDE_SESSION_VERSION as is (no trimming): "5" and "6" only; anything
+      // else, unset included, is KDE 4.
+      std::string version = value_of("KDE_SESSION_VERSION");
+      if (version == "5")
+        return KWalletService::kKWalletd5;
+      if (version == "6")
+        return KWalletService::kKWalletd6;
+      return KWalletService::kKWalletd;
+    }
     for (const char* known : kKnown) {
       if (value == known)
-        return false;
+        return KWalletService::kNone;
     }
     start = end + 1;
   }
-  // DESKTOP_SESSION, then the older variables.
+  // DESKTOP_SESSION, then the older variables: KDE 4 or KDE 3 only, whatever
+  // KDE_SESSION_VERSION says.
   std::string session = value_of("DESKTOP_SESSION");
   if (session == "kde4" || session == "kde-plasma" || session == "kde")
-    return true;  // "kde" is KDE4 with KDE_SESSION_VERSION, else KDE3
+    return KWalletService::kKWalletd;
   if (session == "deepin" || session == "gnome" || session == "mate" ||
       session.find("xfce") != std::string::npos || session == "xubuntu" ||
       session == "ukui")
-    return false;
+    return KWalletService::kNone;
   if (has("GNOME_DESKTOP_SESSION_ID"))
-    return false;
-  // KDE_FULL_SESSION: KDE4 with KDE_SESSION_VERSION, else KDE3.
-  return has("KDE_FULL_SESSION");
+    return KWalletService::kNone;
+  return has("KDE_FULL_SESSION") ? KWalletService::kKWalletd
+                                 : KWalletService::kNone;
+}
+
+bool ChromiumPicksKWallet(const std::function<const char*(const char*)>& env) {
+  return ChromiumKWalletService(env) != KWalletService::kNone;
 }
 
 bool NeedsBasicPasswordStore(const PlatformFeatures& f) {
@@ -379,8 +408,8 @@ std::string ReadPasswordStoreMarker(const std::string& root_cache_dir) {
   size_t n = std::fread(buf, 1, sizeof(buf) - 1, file);
   std::fclose(file);
   std::string value(buf, n);
-  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
-                            value.back() == ' '))
+  while (!value.empty() &&
+         (value.back() == '\n' || value.back() == '\r' || value.back() == ' '))
     value.pop_back();
   return value == "os" ? value : "";
 }
@@ -468,6 +497,15 @@ PasswordStoreChoice ChoosePasswordStore(
   bool unreachable = NeedsBasicPasswordStore(f);
   if (unreachable)
     choice.reason = BasicPasswordStoreReason(f);
+  // The OS store on KWallet goes to the daemon the probe asked: Chromium's
+  // own pick from the environment can be one that doesn't answer (KDE 4's
+  // org.kde.kwalletd under Plasma 6 without KDE_SESSION_VERSION), and then
+  // it falls back to basic and drops the profile's OS-key cookies.
+  auto pin = [&f, &choice] {
+    const char* store =
+        f.kwallet ? KWalletPasswordStore(f.kwallet_service) : nullptr;
+    choice.append_store = store ? store : "";
+  };
   if (unreachable && holds_os_cookies) {
     // Basic would make Chromium delete the OS-key cookies: keep the OS
     // store and wait for the key.
@@ -475,12 +513,15 @@ PasswordStoreChoice ChoosePasswordStore(
     choice.source = "cookies";
     choice.wait = true;
     choice.record = marker != "os";
+    pin();
     return choice;
   }
   choice.store = unreachable ? "basic" : "os";
   choice.append_basic = unreachable;
   choice.record = !unreachable && marker != "os";
   choice.source = !unreachable && marker == "os" ? "profile" : "probe";
+  if (!unreachable)
+    pin();
   return choice;
 }
 

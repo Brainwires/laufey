@@ -32,7 +32,7 @@ may wait a few seconds for xdg-desktop-portal to start.
 | `trayTooltip`                     | The tooltip shows (on Linux, as the indicator's title).                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `secretService`                   | Linux: `"available"` (the default collection is unlocked), `"locked"` (locked, or missing: using it means a prompt), `"activatable"` (not running; D-Bus can start it), `"absent"`, `"no-session-bus"`. `"os"` on macOS and Windows.                                                                                                                                                                                                                                                                                                 |
 | `secretServicePrompt`             | Someone could answer an unlock prompt: `sessionType` is `x11` or `wayland` with a display and, where logind can say, the process's logind session is an active x11 / wayland one; and, where gnome-keyring is the provider, its prompter exists. A display alone (Xvfb, cron, `xvfb-run` under systemd) never counts.                                                                                                                                                                                                                |
-| `kwallet`                         | Linux, where Chromium's cookie store would use KWallet (a KDE desktop by Chromium's own rule, see below): `"open"` (kwalletd runs and its local wallet is open), `"closed"`, `"disabled"` or `"not-running"`, read from kwalletd without starting it. `null` elsewhere, and on Winit.                                                                                                                                                                                                                                                |
+| `kwallet`                         | Linux, where Chromium's cookie store would use KWallet (a KDE desktop by Chromium's own rule, see below): `"open"` (kwalletd runs and its network wallet is open), `"closed"`, `"disabled"` or `"not-running"` (no kwalletd answers at its own object path), read from kwalletd without starting it: the one Chromium would ask when it answers, else another that runs (see below). `null` elsewhere, and on Winit.                                                                                                                                                                                                                                                |
 | `notificationServer`              | Linux: the name of the server that owns `org.freedesktop.Notifications` right now (its `GetServerInformation` name, `"unknown"` when it doesn't say), or `null` when nothing owns it. Read live. The Notification portal's version is no proof that notifications show: on Sway with no daemon the portal still offers it. `null` elsewhere.                                                                                                                                                                                         |
 | `notificationReason`              | Why notifications may not show when `notificationServer` is `null` on Linux (no server; or one D-Bus can start, which is tried when notifications are first used: the notification permission then answers `unsupported` if it fails to start), otherwise `null`.                                                                                                                                                                                                                                                                    |
 | `portalVersions`                  | Linux: `{ "Notification": 2, "FileChooser": 4, "GlobalShortcuts": 1, "Settings": 2 }` for the xdg-desktop-portal interfaces the portal offers; an interface it lacks is absent. `{}` elsewhere.                                                                                                                                                                                                                                                                                                                                      |
@@ -72,6 +72,21 @@ WebSocket handshakes) waits with it:
   never answered, with a person in front or not, so a prompter doesn't count
   there. On any other desktop Chromium uses the Secret Service, even with
   kwalletd running.
+
+Which kwalletd Chromium asks also comes from the environment alone:
+`XDG_CURRENT_DESKTOP=KDE` with `KDE_SESSION_VERSION=6` is `org.kde.kwalletd6`
+at `/modules/kwalletd6`, with `5` `org.kde.kwalletd5`, and with anything else,
+unset included, KDE 4's `org.kde.kwalletd` at `/modules/kwalletd` (as are the
+`DESKTOP_SESSION` and `KDE_FULL_SESSION` cases). Plasma 6's kwalletd6 owns
+`org.kde.kwalletd` but has no `/modules/kwalletd`, so an app started there
+without `KDE_SESSION_VERSION` (over ssh, from a systemd unit or cron, by a
+wrapper that copies part of the environment) would have Chromium's KWallet
+start fail. Chromium then falls back to `basic` and deletes the profile's OS-key
+cookies. So the probe asks Chromium's daemon first and counts a daemon only
+where it answers at its own object path, else takes another that does, and
+the CEF backend pins the OS store to the daemon it asked:
+`--password-store=kwallet6` (or `kwallet5`, `kwallet`). The waiting case below
+is pinned the same way.
 
 The CEF backend checks this before Chromium starts. What it does then depends on
 the profile's own cookie database (`<root cache>/Default/Cookies`, read

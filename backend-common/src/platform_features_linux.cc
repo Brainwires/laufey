@@ -14,9 +14,10 @@
 //     no unlock, no prompt), and whether anyone could answer an unlock
 //     prompt (a graphical session, and gnome-keyring's prompter where
 //     gnome-keyring is the provider); and whether Chromium would use
-//     KWallet instead (a KDE desktop by Chromium's own rule), and then
-//     whether its wallet is open (kwalletd's isEnabled / localWallet /
-//     isOpen: only an open wallet answers Chromium);
+//     KWallet instead (a KDE desktop by Chromium's own rule), which
+//     kwalletd answers (the one Chromium's rule names first, at its own
+//     object path), and whether its wallet is open (kwalletd's isEnabled /
+//     networkWallet / isOpen: only an open wallet answers Chromium);
 //   - the session type: XDG_SESSION_TYPE as set, never guessed from the
 //     display variables (Xvfb, cron and systemd services that run
 //     `xvfb-run` have a $DISPLAY and no one in front of it). A session is
@@ -44,6 +45,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "laufey_backend_common.h"
 #include "laufey_notifications.h"
@@ -61,12 +63,19 @@ constexpr char kWatcherName[] = "org.kde.StatusNotifierWatcher";
 constexpr char kSecretsName[] = "org.freedesktop.secrets";
 constexpr char kGnomeKeyringName[] = "org.gnome.keyring";
 constexpr char kGcrPrompterName[] = "org.gnome.keyring.SystemPrompter";
-// kwalletd's names and object paths, newest first (Plasma 6 runs
-// kwalletd6, Plasma 5 kwalletd5, KDE 4 kwalletd).
-constexpr const char* kKWalletServices[][2] = {
-    {"org.kde.kwalletd6", "/modules/kwalletd6"},
-    {"org.kde.kwalletd5", "/modules/kwalletd5"},
-    {"org.kde.kwalletd", "/modules/kwalletd"},
+// kwalletd's names and object paths, as Chromium addresses them, newest
+// first (Plasma 6 runs kwalletd6, Plasma 5 kwalletd5, KDE 4 kwalletd). A
+// daemon answers only at its own path: kwalletd6 also owns
+// org.kde.kwalletd, with no /modules/kwalletd object.
+struct KWalletDaemon {
+  KWalletService service;
+  const char* name;
+  const char* path;
+};
+constexpr KWalletDaemon kKWalletDaemons[] = {
+    {KWalletService::kKWalletd6, "org.kde.kwalletd6", "/modules/kwalletd6"},
+    {KWalletService::kKWalletd5, "org.kde.kwalletd5", "/modules/kwalletd5"},
+    {KWalletService::kKWalletd, "org.kde.kwalletd", "/modules/kwalletd"},
 };
 constexpr char kKWalletInterface[] = "org.kde.KWallet";
 constexpr char kNotificationsName[] = "org.freedesktop.Notifications";
@@ -339,26 +348,41 @@ GVariant* KWalletCall(GDBusConnection* bus, const char* name, const char* path,
   return r;
 }
 
-// KWallet's state, from the first kwalletd that runs: enabled, and whether
-// its local wallet (the one Chromium uses) is open. Reads only: nothing is
-// opened, nothing prompts.
+// KWallet's state, from the daemon Chromium's choice names (`chromium`,
+// ChromiumKWalletService) when it answers, else from the first other one
+// that does: enabled, and whether its network wallet (the one Chromium
+// opens) is open. A daemon counts only when isEnabled answers at its object
+// path: a name with nothing there (kwalletd6's org.kde.kwalletd) is no
+// daemon, as Chromium finds. `*service` is the daemon that answered (kNone:
+// none did), the one the cookie store is pinned to. Reads only: nothing is
+// opened, nothing prompts, nothing is started.
 KWalletState ProbeKWallet(GDBusConnection* bus,
-                          const std::set<std::string>& owned) {
-  for (const auto& service : kKWalletServices) {
-    const char* name = service[0];
-    const char* path = service[1];
+                          const std::set<std::string>& owned,
+                          KWalletService chromium, KWalletService* service) {
+  *service = KWalletService::kNone;
+  std::vector<const KWalletDaemon*> order;
+  for (const auto& daemon : kKWalletDaemons) {
+    if (daemon.service == chromium)
+      order.insert(order.begin(), &daemon);
+    else
+      order.push_back(&daemon);
+  }
+  for (const KWalletDaemon* daemon : order) {
+    const char* name = daemon->name;
+    const char* path = daemon->path;
     if (!owned.count(name))
       continue;
     GVariant* r = KWalletCall(bus, name, path, "isEnabled", nullptr, "(b)");
+    if (!r)
+      continue;  // no object there (or no answer): not this daemon
     gboolean enabled = FALSE;
-    if (r) {
-      g_variant_get(r, "(b)", &enabled);
-      g_variant_unref(r);
-    }
+    g_variant_get(r, "(b)", &enabled);
+    g_variant_unref(r);
+    *service = daemon->service;
     if (!enabled)
       return KWalletState::kDisabled;
     std::string wallet;
-    r = KWalletCall(bus, name, path, "localWallet", nullptr, "(s)");
+    r = KWalletCall(bus, name, path, "networkWallet", nullptr, "(s)");
     if (r) {
       const gchar* w = nullptr;
       g_variant_get(r, "(&s)", &w);
@@ -426,10 +450,15 @@ void ProbeSecretServiceOn(GDBusConnection* bus, const std::string& session,
   // KWallet only where Chromium would pick it: a KDE desktop by Chromium's
   // own rule (GetDesktopEnvironment). On any other desktop it uses the
   // Secret Service, with kwalletd running or not.
-  out->kwallet = ChromiumPicksKWallet(
+  // The environment read here is the process's own, the one Chromium reads
+  // in this (the browser) process.
+  KWalletService chromium = ChromiumKWalletService(
       [](const char* name) -> const char* { return std::getenv(name); });
+  out->kwallet = chromium != KWalletService::kNone;
+  out->kwallet_service = KWalletService::kNone;
   out->kwallet_state =
-      out->kwallet ? ProbeKWallet(bus, owned) : KWalletState::kNotUsed;
+      out->kwallet ? ProbeKWallet(bus, owned, chromium, &out->kwallet_service)
+                   : KWalletState::kNotUsed;
   // gnome-keyring asks through gcr's prompter (gnome-shell's own, or
   // gcr-prompter); KWallet's provider prompts by itself.
   bool needs_gcr = known(kGnomeKeyringName);
@@ -610,6 +639,7 @@ void ProbeSecretService(PlatformFeatures* out) {
   out->secret_prompter = s.base.secret_prompter;
   out->kwallet = s.base.kwallet;
   out->kwallet_state = s.base.kwallet_state;
+  out->kwallet_service = s.base.kwallet_service;
 }
 
 void ProbeTray(PlatformFeatures* out) {
