@@ -21,6 +21,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "laufey_platform_features.h"
 
@@ -206,12 +207,17 @@ Provider FindProvider(GDBusConnection* bus) {
   return p;
 }
 
-// SearchItems: how many matching items are unlocked / locked. Never prompts
-// (it may start an activatable provider). False when the service didn't
-// answer in time.
+// SearchItems: the matching items, unlocked and locked (their paths). Never
+// prompts (it may start an activatable provider). False when the service
+// didn't answer in time.
+struct Search {
+  int unlocked = 0;
+  std::vector<std::string> locked;
+};
+
 bool SearchItems(GDBusConnection* bus, const std::string& service,
-                 const std::string& account, int timeout_ms, int* unlocked,
-                 int* locked, std::string* error_text) {
+                 const std::string& account, int timeout_ms, Search* out,
+                 std::string* error_text) {
   GVariantBuilder attrs;
   g_variant_builder_init(&attrs, G_VARIANT_TYPE("a{ss}"));
   g_variant_builder_add(&attrs, "{ss}", "service", service.c_str());
@@ -229,12 +235,32 @@ bool SearchItems(GDBusConnection* bus, const std::string& service,
   }
   GVariant* u = g_variant_get_child_value(r, 0);
   GVariant* l = g_variant_get_child_value(r, 1);
-  *unlocked = static_cast<int>(g_variant_n_children(u));
-  *locked = static_cast<int>(g_variant_n_children(l));
+  out->unlocked = static_cast<int>(g_variant_n_children(u));
+  out->locked.clear();
+  GVariantIter iter;
+  const gchar* path = nullptr;
+  g_variant_iter_init(&iter, l);
+  while (g_variant_iter_next(&iter, "&o", &path))
+    out->locked.emplace_back(path);
   g_variant_unref(u);
   g_variant_unref(l);
   g_variant_unref(r);
   return true;
+}
+
+// The default collection's path, or "" when there is none.
+std::string DefaultCollection(GDBusConnection* bus, int timeout_ms) {
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, kSecretsName, kSecretsPath, kServiceInterface, "ReadAlias",
+      g_variant_new("(s)", "default"), G_VARIANT_TYPE("(o)"),
+      G_DBUS_CALL_FLAGS_NONE, timeout_ms, nullptr, nullptr);
+  if (!r)
+    return "";
+  const gchar* path = nullptr;
+  g_variant_get(r, "(&o)", &path);
+  std::string out = path && std::string(path) != "/" ? path : "";
+  g_variant_unref(r);
+  return out;
 }
 
 // The default collection's Locked property: 1 locked, 0 unlocked, -1 none
@@ -264,6 +290,152 @@ bool PrompterHere() {
   PlatformFeatures f;
   ProbeSecretService(&f);
   return f.secret_prompter;
+}
+
+// --- Unlocking -------------------------------------------------------------
+//
+// An unlock prompt is never dismissed from here: gnome-keyring (48) aborts
+// when a client dismisses its unlock prompt while it is up
+// (gkd-secret-unlock.c perform_next_unlock: assertion `!self->current`),
+// which is what libsecret does when its call is cancelled. So the unlock is
+// asked for on a thread of its own, without a deadline (the person in front
+// answers the prompt, or closes it), and a call that can't wait any longer
+// gives up on its own: it reports the keyring as locked and does nothing
+// once the unlock comes later. One unlock is in flight at a time; a call that
+// comes while one is pending waits for that one instead of stacking a
+// second prompt.
+
+// 1: unlocked; 0: dismissed or failed; -1: still pending.
+struct UnlockFlight {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool pending = false;
+  int result = -1;
+  uint64_t generation = 0;
+};
+
+UnlockFlight& Flight() {
+  static UnlockFlight* f = new UnlockFlight();
+  return *f;
+}
+
+// Asks the Secret Service to unlock `objects` and waits (with no deadline)
+// for the prompt's answer. On the unlock thread.
+int UnlockNow(const std::vector<std::string>& objects) {
+  GMainContext* ctx = g_main_context_new();
+  g_main_context_push_thread_default(ctx);
+  int result = 0;
+  GDBusConnection* bus = SessionBus();
+  if (bus) {
+    std::vector<const char*> paths;
+    for (const auto& o : objects)
+      paths.push_back(o.c_str());
+    GVariant* r = g_dbus_connection_call_sync(
+        bus, kSecretsName, kSecretsPath, kServiceInterface, "Unlock",
+        g_variant_new("(@ao)",
+                      g_variant_new_objv(paths.data(),
+                                         static_cast<gssize>(paths.size()))),
+        G_VARIANT_TYPE("(aoo)"), G_DBUS_CALL_FLAGS_NONE, kQuickTimeoutMs * 5,
+        nullptr, nullptr);
+    if (r) {
+      GVariant* unlocked = g_variant_get_child_value(r, 0);
+      const gchar* prompt = nullptr;
+      g_variant_get_child(r, 1, "&o", &prompt);
+      std::string prompt_path = prompt ? prompt : "/";
+      result = g_variant_n_children(unlocked) > 0 ? 1 : 0;
+      g_variant_unref(unlocked);
+      g_variant_unref(r);
+      if (prompt_path != "/") {
+        struct Wait {
+          bool done = false;
+          bool dismissed = true;
+          GMainLoop* loop;
+        } wait{false, true, g_main_loop_new(ctx, FALSE)};
+        guint completed = g_dbus_connection_signal_subscribe(
+            bus, kSecretsName, "org.freedesktop.Secret.Prompt", "Completed",
+            prompt_path.c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+            [](GDBusConnection*, const gchar*, const gchar*, const gchar*,
+               const gchar*, GVariant* params, gpointer data) {
+              auto* w = static_cast<Wait*>(data);
+              gboolean dismissed = TRUE;
+              if (g_variant_is_of_type(params, G_VARIANT_TYPE("(bv)")))
+                g_variant_get(params, "(bv)", &dismissed, nullptr);
+              w->dismissed = dismissed;
+              w->done = true;
+              g_main_loop_quit(w->loop);
+            },
+            &wait, nullptr);
+        // The provider going away ends the wait too.
+        guint gone = g_dbus_connection_signal_subscribe(
+            bus, "org.freedesktop.DBus", "org.freedesktop.DBus",
+            "NameOwnerChanged", "/org/freedesktop/DBus", kSecretsName,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            [](GDBusConnection*, const gchar*, const gchar*, const gchar*,
+               const gchar*, GVariant* params, gpointer data) {
+              const gchar* name = nullptr;
+              const gchar* now = nullptr;
+              g_variant_get(params, "(&s&s&s)", &name, nullptr, &now);
+              if (now && *now)
+                return;
+              auto* w = static_cast<Wait*>(data);
+              w->done = true;
+              g_main_loop_quit(w->loop);
+            },
+            &wait, nullptr);
+        GVariant* shown = g_dbus_connection_call_sync(
+            bus, kSecretsName, prompt_path.c_str(),
+            "org.freedesktop.Secret.Prompt", "Prompt", g_variant_new("(s)", ""),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, kQuickTimeoutMs * 5, nullptr,
+            nullptr);
+        if (shown) {
+          g_variant_unref(shown);
+          if (!wait.done)
+            g_main_loop_run(wait.loop);
+          result = wait.done && !wait.dismissed ? 1 : 0;
+        } else {
+          result = 0;
+        }
+        g_dbus_connection_signal_unsubscribe(bus, completed);
+        g_dbus_connection_signal_unsubscribe(bus, gone);
+        g_main_loop_unref(wait.loop);
+      }
+    }
+    g_object_unref(bus);
+  }
+  while (g_main_context_iteration(ctx, FALSE)) {
+  }
+  g_main_context_pop_thread_default(ctx);
+  g_main_context_unref(ctx);
+  return result;
+}
+
+// Unlocks `objects` (or joins the unlock in flight) and waits up to
+// `timeout_ms`: 1 unlocked, 0 dismissed or failed, -1 not answered yet (the
+// prompt stays up; nothing more happens when it is answered).
+int UnlockWithin(const std::vector<std::string>& objects, int timeout_ms) {
+  UnlockFlight& f = Flight();
+  std::unique_lock<std::mutex> lock(f.mutex);
+  if (!f.pending) {
+    f.pending = true;
+    f.result = -1;
+    uint64_t generation = ++f.generation;
+    std::thread([objects, generation] {
+      int result = UnlockNow(objects);
+      UnlockFlight& fl = Flight();
+      {
+        std::lock_guard<std::mutex> l(fl.mutex);
+        if (fl.generation == generation) {
+          fl.result = result;
+          fl.pending = false;
+        }
+      }
+      fl.cv.notify_all();
+    }).detach();
+  }
+  uint64_t mine = f.generation;
+  f.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                [&] { return !f.pending || f.generation != mine; });
+  return f.pending ? -1 : f.result;
 }
 
 GHashTable* Attributes(const std::string& service, const std::string& account) {
@@ -428,22 +600,29 @@ SecretStatus SecretLookup(const std::string& service,
   GDBusConnection* bus = Prepare(&provider, reason);
   if (!bus)
     return SecretStatus::kUnavailable;
-  int unlocked = 0, locked = 0;
+  Search found;
   std::string error_text;
-  bool answered =
-      SearchItems(bus, service, account, Remaining(timeout_ms, start),
-                  &unlocked, &locked, &error_text);
+  bool answered = SearchItems(
+      bus, service, account, Remaining(timeout_ms, start), &found, &error_text);
   g_object_unref(bus);
   if (!answered) {
     *reason = NoAnswerReason(provider, error_text);
     return SecretStatus::kUnavailable;
   }
-  if (unlocked == 0 && locked == 0)
+  if (found.unlocked == 0 && found.locked.empty())
     return SecretStatus::kNotFound;
-  bool prompter = PrompterHere();
-  if (unlocked == 0 && !prompter) {
-    *reason = LockedSecretReason(provider.name, false, false, 0);
-    return SecretStatus::kUnavailable;
+  if (found.unlocked == 0) {
+    // Only locked items: unlocked first (by the person in front), or refused.
+    if (!PrompterHere()) {
+      *reason = LockedSecretReason(provider.name, false, false, 0);
+      return SecretStatus::kUnavailable;
+    }
+    int unlocked = UnlockWithin(found.locked, Remaining(timeout_ms, start));
+    if (unlocked != 1) {
+      *reason =
+          LockedSecretReason(provider.name, true, unlocked < 0, Elapsed(start));
+      return SecretStatus::kUnavailable;
+    }
   }
   const Libsecret* lib = LoadLibsecret();
   gchar* secret = nullptr;
@@ -462,12 +641,8 @@ SecretStatus SecretLookup(const std::string& service,
     return SecretStatus::kOk;
   }
   SecretStatus status = SecretStatus::kUnavailable;
-  if (timed_out && unlocked > 0) {
+  if (timed_out) {
     *reason = NoAnswerReason(provider, "no answer in time");
-  } else if (timed_out || (!error && locked > 0)) {
-    // The unlock prompt was dismissed or never answered.
-    *reason =
-        LockedSecretReason(provider.name, true, timed_out, Elapsed(start));
   } else if (error) {
     *reason = std::string("the Secret Service failed: ") + error->message;
   } else {
@@ -495,36 +670,53 @@ SecretStatus SecretStore(const std::string& service, const std::string& account,
   GDBusConnection* bus = Prepare(&provider, reason);
   if (!bus)
     return SecretStatus::kUnavailable;
-  int unlocked = 0, locked = 0;
+  Search found;
   std::string error_text;
-  bool answered =
-      SearchItems(bus, service, account, Remaining(timeout_ms, start),
-                  &unlocked, &locked, &error_text);
+  bool answered = SearchItems(
+      bus, service, account, Remaining(timeout_ms, start), &found, &error_text);
+  std::string collection =
+      answered ? DefaultCollection(bus, kQuickTimeoutMs) : "";
   int collection_locked =
-      answered ? DefaultCollectionLocked(bus, kQuickTimeoutMs) : -1;
+      collection.empty() ? -1 : DefaultCollectionLocked(bus, kQuickTimeoutMs);
   g_object_unref(bus);
   if (!answered) {
     *reason = NoAnswerReason(provider, error_text);
     return SecretStatus::kUnavailable;
   }
-  // A locked default collection, or none (creating one asks for a
-  // password), means a prompt.
-  bool prompter = PrompterHere();
-  if (collection_locked != 0 && !prompter) {
-    *reason = LockedSecretReason(provider.name, false, false, 0);
+  if (collection.empty()) {
+    // Creating a default keyring asks for a new password: left to the
+    // desktop's keyring manager, never prompted for from here.
+    *reason =
+        "the Secret Service has no default keyring: create one (GNOME's "
+        "Passwords and Keys, or KWallet)";
     return SecretStatus::kUnavailable;
+  }
+  if (collection_locked != 0) {
+    if (!PrompterHere()) {
+      *reason = LockedSecretReason(provider.name, false, false, 0);
+      return SecretStatus::kUnavailable;
+    }
+    std::vector<std::string> objects = {collection};
+    objects.insert(objects.end(), found.locked.begin(), found.locked.end());
+    int unlocked = UnlockWithin(objects, Remaining(timeout_ms, start));
+    if (unlocked != 1) {
+      *reason =
+          LockedSecretReason(provider.name, true, unlocked < 0, Elapsed(start));
+      return SecretStatus::kUnavailable;
+    }
   }
   const Libsecret* lib = LoadLibsecret();
   gboolean stored = FALSE;
   GError* error = nullptr;
   GHashTable* attrs = Attributes(service, account);
+  int items = found.unlocked + static_cast<int>(found.locked.size());
   bool timed_out =
       WithDeadline(static_cast<uint32_t>(Remaining(timeout_ms, start)),
                    [&](GCancellable* c) {
                      // Several items with these attributes (written before, in
                      // other collections): clear them, so the next read can't
                      // find an old one.
-                     if (unlocked + locked > 1)
+                     if (items > 1)
                        lib->clearv_sync(&kSchema, attrs, c, nullptr);
                      stored = lib->storev_sync(
                          &kSchema, attrs, nullptr,
@@ -536,11 +728,8 @@ SecretStatus SecretStore(const std::string& service, const std::string& account,
     g_clear_error(&error);
     return SecretStatus::kOk;
   }
-  if (timed_out && collection_locked == 0) {
+  if (timed_out) {
     *reason = NoAnswerReason(provider, "no answer in time");
-  } else if (timed_out || (!error && collection_locked != 0)) {
-    *reason =
-        LockedSecretReason(provider.name, true, timed_out, Elapsed(start));
   } else {
     *reason = std::string("the Secret Service refused the write: ") +
               (error ? error->message : "no reason given");
@@ -561,25 +750,32 @@ SecretStatus SecretDelete(const std::string& service,
   GDBusConnection* bus = Prepare(&provider, reason);
   if (!bus)
     return SecretStatus::kUnavailable;
-  int unlocked = 0, locked = 0;
+  Search found;
   std::string error_text;
-  bool answered =
-      SearchItems(bus, service, account, Remaining(timeout_ms, start),
-                  &unlocked, &locked, &error_text);
+  bool answered = SearchItems(
+      bus, service, account, Remaining(timeout_ms, start), &found, &error_text);
   if (!answered) {
     g_object_unref(bus);
     *reason = NoAnswerReason(provider, error_text);
     return SecretStatus::kUnavailable;
   }
-  if (unlocked == 0 && locked == 0) {
+  if (found.unlocked == 0 && found.locked.empty()) {
     g_object_unref(bus);
     return SecretStatus::kOk;  // nothing to delete
   }
-  bool prompter = PrompterHere();
-  if (locked > 0 && !prompter) {
-    g_object_unref(bus);
-    *reason = LockedSecretReason(provider.name, false, false, 0);
-    return SecretStatus::kUnavailable;
+  if (!found.locked.empty()) {
+    if (!PrompterHere()) {
+      g_object_unref(bus);
+      *reason = LockedSecretReason(provider.name, false, false, 0);
+      return SecretStatus::kUnavailable;
+    }
+    int unlocked = UnlockWithin(found.locked, Remaining(timeout_ms, start));
+    if (unlocked != 1) {
+      g_object_unref(bus);
+      *reason =
+          LockedSecretReason(provider.name, true, unlocked < 0, Elapsed(start));
+      return SecretStatus::kUnavailable;
+    }
   }
   const Libsecret* lib = LoadLibsecret();
   GError* error = nullptr;
@@ -588,19 +784,20 @@ SecretStatus SecretDelete(const std::string& service,
       static_cast<uint32_t>(Remaining(timeout_ms, start)),
       [&](GCancellable* c) { lib->clearv_sync(&kSchema, attrs, c, &error); });
   g_hash_table_unref(attrs);
-  // Whatever libsecret says, the store decides: anything left (a locked item
-  // whose unlock was dismissed) is not deleted.
-  int left_unlocked = 0, left_locked = 0;
-  bool checked = SearchItems(bus, service, account, kQuickTimeoutMs,
-                             &left_unlocked, &left_locked, nullptr);
+  // Whatever libsecret says, the store decides: anything left is not
+  // deleted.
+  Search left;
+  bool checked =
+      SearchItems(bus, service, account, kQuickTimeoutMs, &left, nullptr);
   g_object_unref(bus);
-  if (checked && left_unlocked == 0 && left_locked == 0) {
+  if (checked && left.unlocked == 0 && left.locked.empty()) {
     g_clear_error(&error);
     return SecretStatus::kOk;
   }
-  if (timed_out || left_locked > 0) {
-    *reason =
-        LockedSecretReason(provider.name, true, timed_out, Elapsed(start));
+  if (!left.locked.empty()) {
+    *reason = LockedSecretReason(provider.name, true, false, Elapsed(start));
+  } else if (timed_out) {
+    *reason = NoAnswerReason(provider, "no answer in time");
   } else {
     *reason = std::string("the Secret Service didn't delete it") +
               (error ? std::string(": ") + error->message : std::string());

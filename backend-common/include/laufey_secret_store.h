@@ -13,9 +13,16 @@
 //   - locked: the items (or the default collection, for a write) are looked
 //     up with SearchItems / the Locked property first. Where no one can
 //     answer an unlock prompt (no graphical session, no prompter) the call
-//     is refused at once; otherwise libsecret asks to unlock, bounded by the
-//     caller's timeout: an unlock nobody answers is "unavailable", never a
-//     hang and never "not found";
+//     is refused at once; otherwise the Secret Service is asked to unlock
+//     (its own prompt, on a thread of its own) and the call waits up to its
+//     timeout: an unlock nobody answers is "unavailable", never a hang and
+//     never "not found". The prompt is never dismissed from here (gnome-
+//     keyring aborts when its unlock prompt is dismissed while it is up): it
+//     stays up for the person to answer, and a later answer only unlocks;
+//     nothing is written after the call gave up. One unlock is in flight at
+//     a time;
+//   - no default keyring (a write): refused; creating one is the desktop's
+//     keyring manager's job;
 //   - a lookup that finds nothing (and nothing locked) is "not found".
 //
 // Items are stored with the attributes `service` and `account` (the label is

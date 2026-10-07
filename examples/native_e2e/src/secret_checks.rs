@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! LAUFEY_E2E_EXPECT_SECRET=ok           a full round trip works here
-//! LAUFEY_E2E_EXPECT_SECRET=unavailable  every call is refused, with a reason
+//! LAUFEY_E2E_EXPECT_SECRET=unavailable  a write is refused, with a reason
 //! LAUFEY_E2E_EXPECT_SECRET_REASON="…"   a substring of that reason
 //! LAUFEY_E2E_SECRET_TIMEOUT_MS=5000     the bound passed to each call
 //! ```
@@ -64,24 +64,35 @@ pub(crate) async fn run() {
     },
   );
   let want = expect("LAUFEY_E2E_EXPECT_SECRET");
-  if let Err(SecretError::Unavailable(reason)) = &first {
-    check(
-      "unavailable here as expected",
-      want.as_deref().is_none_or(|w| w == "unavailable"),
-    );
-    if let Some(part) = expect("LAUFEY_E2E_EXPECT_SECRET_REASON") {
-      check(&format!("the reason says {part:?}"), reason.contains(&part));
-    }
+  // A write: refused (with a reason, within its timeout) where the store
+  // can't answer; a locked keyring still answers a lookup of a key that was
+  // never stored ("not found").
+  if matches!(first, Err(SecretError::Unavailable(_)))
+    || want.as_deref() == Some("unavailable")
+  {
     let a = account.clone();
+    let start = Instant::now();
     let stored = tokio::task::spawn_blocking(move || {
       laufey::secret_store(service, &a, "laufey e2e", "v", t)
     })
     .await
     .expect("the store thread");
+    let took = start.elapsed();
+    eprintln!("[e2e] secret store ({took:?}): {stored:?}");
     check(
-      "a write is refused too (never a plaintext fallback)",
-      matches!(stored, Err(SecretError::Unavailable(_))),
+      "unavailable here as expected",
+      want.as_deref().is_none_or(|w| w == "unavailable"),
     );
+    check(
+      "a write is refused (never a plaintext fallback), within its timeout",
+      matches!(stored, Err(SecretError::Unavailable(_)))
+        && took < timeout + Duration::from_secs(3),
+    );
+    if let (Some(part), Err(SecretError::Unavailable(reason))) =
+      (expect("LAUFEY_E2E_EXPECT_SECRET_REASON"), &stored)
+    {
+      check(&format!("the reason says {part:?}"), reason.contains(&part));
+    }
     return;
   }
   check(

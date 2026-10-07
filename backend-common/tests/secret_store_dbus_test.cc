@@ -17,7 +17,9 @@
 //     delete round trips,
 //     non-ASCII text, a missing item is "not found", deleting nothing is
 //     fine; locked: refused at once without a prompter, and with one that
-//     never answers, unavailable after the timeout (not a hang).
+//     never answers, unavailable after the timeout (not a hang), the prompt
+//     never dismissed (gnome-keyring stays up) and a second call joining the
+//     pending unlock instead of a second prompt.
 // Exits 77 (skipped) without dbus-daemon or libsecret; the gnome-keyring
 // part is skipped without gnome-keyring-daemon.
 
@@ -76,6 +78,9 @@ const char kXml[] =
     "   <arg type='a{ss}' direction='in'/>"
     "   <arg type='ao' direction='out'/><arg type='ao' direction='out'/>"
     "  </method>"
+    "  <method name='ReadAlias'>"
+    "   <arg type='s' direction='in'/><arg type='o' direction='out'/>"
+    "  </method>"
     " </interface>"
     " <interface name='org.freedesktop.Secret.Collection'>"
     "  <property name='Locked' type='b' access='read'/>"
@@ -89,8 +94,14 @@ std::atomic<bool> g_hang{false};
 std::atomic<int> g_searches{0};
 
 void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
-                const gchar*, GVariant*, GDBusMethodInvocation* invocation,
-                gpointer) {
+                const gchar* method, GVariant*,
+                GDBusMethodInvocation* invocation, gpointer) {
+  if (strcmp(method, "ReadAlias") == 0) {
+    g_dbus_method_invocation_return_value(
+        invocation,
+        g_variant_new("(o)", "/org/freedesktop/secrets/aliases/default"));
+    return;
+  }
   g_searches++;
   if (g_hang) {
     // Never answered (the invocation leaks on purpose: the caller waits).
@@ -231,6 +242,13 @@ bool StartGnomeKeyring(const std::string& home) {
   for (int i = 0; i < 500 && !HasOwner("org.freedesktop.secrets"); ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   return HasOwner("org.freedesktop.secrets");
+}
+
+// The gnome-keyring-daemon this test started is still running (not exited,
+// not a zombie: it is our child).
+bool KeyringAlive() {
+  int status = 0;
+  return g_keyring > 0 && waitpid(g_keyring, &status, WNOHANG) == 0;
 }
 
 // Locks every collection of the running Secret Service (no prompt).
@@ -479,8 +497,22 @@ int main() {
            SecretStatus::kUnavailable);
     long took = Ms(start);
     EXPECT(took >= 1500 && took < 8000);
-    EXPECT(g_prompts > 0);
+    EXPECT(g_prompts == 1);
     EXPECT(Contains(reason, "its unlock prompt went unanswered"));
+    // The prompt was never dismissed from here: gnome-keyring is still up
+    // (it aborts when its unlock prompt is dismissed while it is shown).
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    EXPECT(KeyringAlive());
+    EXPECT(HasOwner("org.freedesktop.secrets"));
+    // A call while that unlock is still pending waits for it: no second
+    // prompt, and a write is refused the same way.
+    start = Clock::now();
+    EXPECT(SecretStore(service, "bob", "", "x", 1500, &reason) ==
+           SecretStatus::kUnavailable);
+    EXPECT(Contains(reason, "its unlock prompt went unanswered"));
+    EXPECT(Ms(start) < 6000);
+    EXPECT(g_prompts == 1);
+    EXPECT(KeyringAlive());
     std::printf("  locked with an unanswered prompt: %ld ms: %s\n", took,
                 reason.c_str());
   }
