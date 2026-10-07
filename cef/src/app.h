@@ -364,6 +364,15 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
   void OnBeforeCommandLineProcessing(
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
+    // macOS: Chromium's mock keychain. Without it OSCrypt keeps its key in
+    // the login Keychain item "Chromium Safe Storage", a name fixed at
+    // Chromium's build time (CEF has no setting for it) and shared by every
+    // unbranded Chromium and CEF app: the second such app is asked whether it
+    // may read another app's item, a denial deletes its cookies, and a
+    // profile written with the mock key loses its cookies at the switch
+    // (Chromium deletes what it can't decrypt). With it the key is the same
+    // on every install, so platform_features reports
+    // "cookieEncryption": "basic" (runtime_loader.cc), not "os".
     command_line->AppendSwitch("use-mock-keychain");
 
     // Silence Chromium's background networking. The GCM (Google Cloud

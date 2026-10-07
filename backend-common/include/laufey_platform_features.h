@@ -131,7 +131,8 @@ struct PlatformFeatures {
   std::string file_chooser_reason;
 
   // CEF only: "os" (OSCrypt keeps its key in the OS keystore) or "basic"
-  // (--password-store=basic: the key is fixed, cookies are only obfuscated).
+  // (the key is fixed, cookies are only obfuscated: --password-store=basic on
+  // Linux, Chromium's mock keychain on macOS).
   // Empty on engines that don't encrypt with an OS key (WebKit, Winit).
   std::string cookie_encryption;
   // CEF only: why this launch keeps the OS key store although no one may be
