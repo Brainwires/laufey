@@ -139,6 +139,11 @@ struct PlatformFeatures {
   // which basic would delete): requests that carry cookies wait until the
   // keystore is unlocked. Empty otherwise.
   std::string cookie_encryption_wait;
+  // CEF on Linux: the Chromium sandbox this launch runs web content in
+  // ("namespace", "setuid", "chromium": on, Chromium picks the layer; "off")
+  // and why (laufey_cef_sandbox.h). Empty elsewhere.
+  std::string sandbox;
+  std::string sandbox_reason;
 };
 
 // --- The probe
@@ -294,6 +299,10 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f);
 // waits for the OS key (PasswordStoreChoice::wait; nullptr: it doesn't);
 // reported by PlatformFeaturesJsonForAbi. Any thread.
 void SetCookieEncryption(const char* value, const char* wait = nullptr);
+
+// The Chromium sandbox a CEF backend chose (LinuxSandboxModeName) and why;
+// reported by PlatformFeaturesJsonForAbi. Any thread.
+void SetSandboxMode(const char* mode, const char* reason);
 
 // ProbePlatformFeatures() as JSON, malloc'd for the C ABI (freed with the
 // backend's string_free). Any thread.

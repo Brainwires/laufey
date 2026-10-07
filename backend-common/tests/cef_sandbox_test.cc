@@ -181,8 +181,32 @@ static void TestProbe() {
 }
 #endif
 
+// An app that requires the sandbox refuses to start only where it would be
+// off; one that doesn't always starts.
+static void TestRefuseUnsandboxedStart() {
+  LinuxSandboxDecision decision;
+  decision.mode = LinuxSandboxMode::kOff;
+  decision.reason = "no chrome-sandbox helper";
+  std::string message;
+  EXPECT(!RefuseUnsandboxedStart(decision, false, &message));
+  EXPECT(message.empty());
+  EXPECT(RefuseUnsandboxedStart(decision, true, &message));
+  EXPECT(Has(message, "requires the Chromium sandbox"));
+  EXPECT(Has(message, "no chrome-sandbox helper"));
+  for (LinuxSandboxMode on :
+       {LinuxSandboxMode::kNamespace, LinuxSandboxMode::kSetuid,
+        LinuxSandboxMode::kChromium}) {
+    decision.mode = on;
+    message.clear();
+    EXPECT(!RefuseUnsandboxedStart(decision, true, &message));
+    EXPECT(message.empty());
+  }
+  EXPECT(kSandboxRequiredExitCode == 78);
+}
+
 int main() {
   TestDecision();
+  TestRefuseUnsandboxedStart();
   TestInspectSetuidHelper();
   TestSetuidHelperBlockers();
 #if defined(__linux__)

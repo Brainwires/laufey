@@ -21,6 +21,7 @@
 //     "dataDir": "/absolute/path",
 //     "singleInstance": true,
 //     "inspectable": false,
+//     "requireSandbox": true,
 //     "passkeyRpIds": ["example.com"] }
 //
 // Every key is optional. Each key stands in for its environment variable: an
@@ -28,8 +29,9 @@
 // key, so a launcher can still force a value. Except for the keys that
 // isolate or lock down the installed app, where the shipped file wins:
 // "appId" and "dataDir" (an environment inherited from another app, e.g. one
-// that launched this one, must not move this app into its profile), and an
-// "inspectable": false (the environment can't turn DevTools back on). A file
+// that launched this one, must not move this app into its profile), an
+// "inspectable": false (the environment can't turn DevTools back on), and a
+// "requireSandbox": true (the environment can't let it start unsandboxed). A file
 // that pins "appId" pins the rest of the app's identity with it: dataDir
 // comes from the file or the app id, and customSchemes and singleInstance
 // from the file alone; LAUFEY_DATA_DIR, LAUFEY_CUSTOM_SCHEMES and
@@ -65,6 +67,10 @@ struct LaunchConfig {
   bool single_instance = false;
   bool has_inspectable = false;
   bool inspectable = true;
+  // "requireSandbox": CEF on Linux refuses to start when it would run web
+  // content without the Chromium sandbox (laufey_cef_sandbox.h).
+  bool has_require_sandbox = false;
+  bool require_sandbox = false;
   // "bridgeOrigins" (API 44): the documents the JS bridge serves, as kept
   // entries ("*", "<scheme>://*" or an origin); see laufey_bridge_origin.h.
   bool has_bridge_origins = false;
@@ -204,6 +210,19 @@ bool LaunchInspectableFrom(const std::string& env_value, bool file_has,
 // invalid environment value is reported on stderr and ignored. Read once per
 // process (the engines take it at startup).
 bool LaunchInspectable();
+
+// Precedence step behind LaunchRequireSandbox, exposed for tests: true when
+// the file says true (an environment value of "0"/"false" is then reported
+// in `warning`); otherwise LaunchBoolSettingFrom with the default off.
+bool LaunchRequireSandboxFrom(const std::string& env_value, bool file_has,
+                              bool file_value, std::string* warning);
+
+// Whether the app must not run web content unsandboxed (CEF on Linux, where
+// the sandbox depends on the machine: see laufey_cef_sandbox.h): on when the
+// launch file says "requireSandbox": true (whatever the environment says),
+// else LAUFEY_REQUIRE_SANDBOX ("1"/"0", also "true"/"false") if set, else
+// off. An invalid or ignored environment value is reported on stderr.
+bool LaunchRequireSandbox();
 
 }  // namespace laufey_common
 

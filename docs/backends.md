@@ -138,12 +138,21 @@ session; a deep-link launch drops that switch with every other Chromium switch
   ```
 
   That is the case for a tarball or an AppImage (mounted `nosuid`) on Ubuntu
-  23.10 and later. The decision rests on the machine and the installed files
-  only, never on the command line (`CHROME_DEVEL_SANDBOX`, Chromium's override
-  of the helper's path, can only make Chromium abort on a bad helper, never turn
-  the sandbox off). The GPU process's seccomp sandbox is Chromium's own
-  decision: Chromium skips it when the GL driver started threads before the
-  sandbox, as Mesa's llvmpipe (software GL, e.g. under Xvfb) does.
+  23.10 and later. The mode and the reason are also platform facts, `sandbox`
+  and `sandboxReason` ([Platform features](platform-features.md)). By default
+  the app then runs with web content unsandboxed; an app that would rather not
+  start sets `"requireSandbox": true` in its launch file (or the launcher sets
+  `LAUFEY_REQUIRE_SANDBOX=1`): where the mode would be `off`, the host prints
+  `laufey: this app requires the Chromium sandbox (requireSandbox), which is not
+  available here: <reason>`
+  and exits with status 78 before CEF or the runtime loads
+  ([Launch configuration](launch-config.md)). The decision rests on the machine
+  and the installed files only, never on the command line
+  (`CHROME_DEVEL_SANDBOX`, Chromium's override of the helper's path, can only
+  make Chromium abort on a bad helper, never turn the sandbox off). The GPU
+  process's seccomp sandbox is Chromium's own decision: Chromium skips it when
+  the GL driver started threads before the sandbox, as Mesa's llvmpipe (software
+  GL, e.g. under Xvfb) does.
 - **Windows.** CEF 149's Windows sandbox comes with the bootstrap model
   (`USE_SANDBOX=ON`, CEF's default, defines `CEF_USE_BOOTSTRAP`): the sandbox
   information is created by the distribution's `bootstrap.exe`

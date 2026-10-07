@@ -30,6 +30,7 @@ The directory comes from the running executable's real path
   "dataDir": "/absolute/path",
   "singleInstance": true,
   "inspectable": false,
+  "requireSandbox": true,
   "bridgeOrigins": ["myapp://app"],
   "passkeyRpIds": ["example.com"]
 }
@@ -45,6 +46,7 @@ stands in for one environment variable:
 | `dataDir`        | `LAUFEY_DATA_DIR`        | absolute path                                                     |
 | `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `inspectable`    | `LAUFEY_INSPECTABLE`     | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
+| `requireSandbox` | `LAUFEY_REQUIRE_SANDBOX` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `bridgeOrigins`  | none (file only)         | array of origins, `<scheme>://*` or `*` (see below)               |
 | `passkeyRpIds`   | none (file only)         | array of RP IDs: domain names, no scheme, port or path            |
 
@@ -71,6 +73,14 @@ what its variable does:
   no remote debugging, and `open_devtools` does nothing
   ([DevTools](devtools.md)). Release builds of an app usually ship it `false`.
   The WebView and CEF backends read it.
+- `requireSandbox` (default `false`) set to `true` makes the Linux CEF host
+  refuse to start (exit status 78, one line on stderr) where it would run web
+  content without the Chromium sandbox: no user namespaces and no usable
+  `chrome-sandbox` helper, as for a tarball or an AppImage on Ubuntu 23.10 and
+  later ([Backends](backends.md), "The Chromium sandbox"). Off, the app starts
+  unsandboxed there and reports `"sandbox": "off"`
+  ([Platform features](platform-features.md)). Other backends and platforms
+  ignore it.
 - `passkeyRpIds` lists the relying parties the app's native
   [passkey](passkeys.md) ceremonies may name. With the key, a request whose RP
   ID (`rp.id` for a registration, `rpId` for an authentication) is not in the
@@ -121,6 +131,9 @@ them the shipped file wins:
   the lock that routes a second launch to the running instance.
 - `inspectable: false`: `LAUFEY_INSPECTABLE=1` cannot turn DevTools back on (it
   is reported and ignored); `LAUFEY_INSPECTABLE=0` still turns them off.
+- `requireSandbox: true`: `LAUFEY_REQUIRE_SANDBOX=0` cannot let the app start
+  unsandboxed (it is reported and ignored); `LAUFEY_REQUIRE_SANDBOX=1` still
+  requires it when the file is silent or says `false`.
 
 Without `appId` in the file, the keys are resolved one at a time before they are
 combined. For example, a file with `dataDir` launched with `LAUFEY_APP_ID` set

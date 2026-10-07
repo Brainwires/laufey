@@ -25,7 +25,8 @@
 //! On Linux, `LAUFEY_E2E_EXPECT_SANDBOX_MODE=namespace|setuid|off` also names
 //! the layer-1 sandbox the renderers must be in (a user namespace of their
 //! own, or only the helper's PID namespace); native-e2e-run.sh checks the
-//! host's `laufey: sandbox: <mode>` line against it.
+//! host's `laufey: sandbox: <mode>` line against it, and these checks the
+//! `sandbox` platform fact.
 
 use std::time::Duration;
 
@@ -82,7 +83,40 @@ pub async fn run() {
     answered,
   );
   os_checks().await;
+  #[cfg(target_os = "linux")]
+  platform_fact_checks();
   let _ = &win;
+}
+
+/// The host reports the sandbox it chose as a platform fact (`sandbox`,
+/// `sandboxReason`): the mode the run expects, with a reason.
+#[cfg(target_os = "linux")]
+fn platform_fact_checks() {
+  let json = laufey::platform_features().unwrap_or_default();
+  let mode = json
+    .split("\"sandbox\":\"")
+    .nth(1)
+    .and_then(|rest| rest.split('"').next())
+    .map(str::to_owned);
+  let want = expect_mode();
+  check(
+    &format!(
+      "sandbox: platform_features reports the sandbox mode ({mode:?}, \
+       expected {})",
+      want.as_deref().unwrap_or("any")
+    ),
+    match (&mode, &want) {
+      (Some(m), Some(w)) => m == w,
+      (Some(m), None) => {
+        ["namespace", "setuid", "chromium", "off"].contains(&m.as_str())
+      }
+      _ => false,
+    },
+  );
+  check(
+    "sandbox: platform_features says why (sandboxReason)",
+    json.contains("\"sandboxReason\":\""),
+  );
 }
 
 async fn page_answers(win: &Window) -> bool {

@@ -253,6 +253,17 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
       }
       config.has_inspectable = true;
       config.inspectable = value.boolean;
+    } else if (key == "requireSandbox") {
+      config.has_require_sandbox = false;
+      config.require_sandbox = false;
+      if (value.type != JsonValue::Type::kBool) {
+        Warn(warnings,
+             std::string("\"requireSandbox\" must be a boolean, not ") +
+                 TypeName(value.type) + "; ignoring it");
+        continue;
+      }
+      config.has_require_sandbox = true;
+      config.require_sandbox = value.boolean;
     } else if (key == "bridgeOrigins") {
       config.has_bridge_origins = false;
       config.bridge_origins.clear();
@@ -550,6 +561,29 @@ bool LaunchInspectable() {
     return on;
   }();
   return inspectable;
+}
+
+bool LaunchRequireSandboxFrom(const std::string& env_value, bool file_has,
+                              bool file_value, std::string* warning) {
+  if (file_has && file_value) {
+    if (warning && (env_value == "0" || env_value == "false"))
+      *warning = "LAUFEY_REQUIRE_SANDBOX=" + env_value +
+                 " is ignored: the app's launch file requires the sandbox";
+    return true;
+  }
+  return LaunchBoolSettingFrom("LAUFEY_REQUIRE_SANDBOX", env_value, file_has,
+                               file_value, warning);
+}
+
+bool LaunchRequireSandbox() {
+  const LaunchConfig& file = ProcessLaunchConfig();
+  std::string warning;
+  bool on = LaunchRequireSandboxFrom(GetEnvUtf8("LAUFEY_REQUIRE_SANDBOX"),
+                                     file.has_require_sandbox,
+                                     file.require_sandbox, &warning);
+  if (!warning.empty())
+    std::cerr << "laufey: " << warning << std::endl;
+  return on;
 }
 
 bool LaunchSingleInstance() {

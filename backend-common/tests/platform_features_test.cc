@@ -390,6 +390,7 @@ int main() {
          "\"notificationServer\":\"Plasma\",\"notificationReason\":null,"
          "\"portalVersions\":{\"Notification\":2,\"Settings\":2},"
          "\"cookieEncryption\":\"os\",\"cookieEncryptionWait\":null,"
+         "\"sandbox\":null,\"sandboxReason\":null,"
          "\"notificationTransport\":null,\"notificationColdStart\":false,"
          "\"notificationColdStartReason\":null,"
          "\"notificationScheduleWhileClosed\":false,"
@@ -500,6 +501,17 @@ int main() {
                          "locked\""));
   std::free(abi);
   SetCookieEncryption(nullptr);
+  // The CEF host's sandbox choice (Linux) and why.
+  SetSandboxMode("off", "no chrome-sandbox helper");
+  abi = PlatformFeaturesJsonForAbi();
+  EXPECT(abi && Contains(abi,
+                         "\"sandbox\":\"off\","
+                         "\"sandboxReason\":\"no chrome-sandbox helper\""));
+  std::free(abi);
+  SetSandboxMode(nullptr, nullptr);
+  abi = PlatformFeaturesJsonForAbi();
+  EXPECT(abi && Contains(abi, "\"sandbox\":null,\"sandboxReason\":null"));
+  std::free(abi);
 
   std::printf("laufey_platform_features_test: OK\n");
   return 0;

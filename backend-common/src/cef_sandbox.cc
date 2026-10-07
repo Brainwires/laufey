@@ -85,6 +85,19 @@ const char* LinuxSandboxModeName(LinuxSandboxMode mode) {
   return "off";
 }
 
+bool RefuseUnsandboxedStart(const LinuxSandboxDecision& decision,
+                            bool require_sandbox, std::string* message) {
+  if (!require_sandbox || decision.enabled())
+    return false;
+  if (message) {
+    *message =
+        "laufey: this app requires the Chromium sandbox (requireSandbox), "
+        "which is not available here: " +
+        decision.reason;
+  }
+  return true;
+}
+
 SetuidHelperState InspectSetuidHelper(const std::string& path) {
   SetuidHelperState state;
 #if !defined(_WIN32)

@@ -983,6 +983,32 @@ jobs:
           sudo chmod 0755 cef/build/Release/chrome-sandbox
           scripts/native-e2e-run.sh cef --sandbox
 
+      # An app that requires the sandbox (LAUFEY_REQUIRE_SANDBOX, or
+      # "requireSandbox" in its launch file) refuses to start where it would
+      # be off, before CEF or the runtime loads; where it is on it starts.
+      - name: off, required (the host refuses to start)
+        timeout-minutes: 5
+        run: |
+          set +e
+          LAUFEY_REQUIRE_SANDBOX=1 LAUFEY_RUNTIME_PATH="$PWD/target/release/libnative_e2e_runtime.so" \
+            timeout 60 xvfb-run -a cef/build/Release/laufey > require.log 2>&1
+          status=$?
+          set -e
+          cat require.log
+          [ "$status" = 78 ] || { echo "FAIL exit status $status, expected 78"; exit 1; }
+          grep -q '^laufey: sandbox: off (' require.log
+          grep -q '^laufey: this app requires the Chromium sandbox' require.log
+          ! grep -q '^\[e2e\]' require.log || { echo "FAIL the runtime ran"; exit 1; }
+
+      - name: namespace, required (starts)
+        timeout-minutes: 10
+        env:
+          LAUFEY_E2E_EXPECT_SANDBOX_MODE: namespace
+          LAUFEY_REQUIRE_SANDBOX: "1"
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          scripts/native-e2e-run.sh cef --sandbox
+
   e2e-cef-linux:
     name: e2e / cef / x86_64-unknown-linux-gnu (Xvfb)
     runs-on: ubuntu-latest
