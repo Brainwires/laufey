@@ -2420,7 +2420,10 @@ async fn window_api_checks() {
 
     // minimize / restore
     w.minimize();
-    if wait_state(&w, |s| s.minimized, 6000).await {
+    let minimize_applied = wait_state(&w, |s| s.minimized, 6000).await;
+    #[cfg(not(target_os = "linux"))]
+    let _ = minimize_applied;
+    if minimize_applied {
       check("minimize -> is_minimized", true);
       check(
         "minimize fires a state event",
@@ -2511,8 +2514,11 @@ async fn window_api_checks() {
       // Minimize right after leaving fullscreen (X11 window managers apply
       // both asynchronously; xfwm4 and Cinnamon's muffin used to leave the
       // window reported, or left, not minimized).
+      // Only where a window manager applied the minimize above.
       #[cfg(target_os = "linux")]
-      {
+      if !minimize_applied {
+        na("minimize right after leaving fullscreen (no window manager minimizes)");
+      } else {
         w.set_fullscreen(true);
         if wait_state(&w, |s| s.fullscreen, 10000).await {
           w.set_fullscreen(false);
