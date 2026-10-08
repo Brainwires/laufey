@@ -639,10 +639,13 @@ jobs:
 
       # API 47: the secure store answers within its timeout (Linux: the
       # private bus may have no provider, or a keyring no one can unlock:
-      # unavailable with a reason); NULL elsewhere.
+      # unavailable with a reason; macOS: the round trip in the login
+      # keychain); NULL elsewhere.
       - name: Secure store
         timeout-minutes: 10
         shell: bash
+        env:
+          LAUFEY_E2E_EXPECT_SECRET: ${{ runner.os == 'macOS' && matrix.backend != 'winit' && 'ok' || '' }}
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --secret-store
 
       # API 47 (Linux): the file chooser report agrees with the portal's
@@ -945,8 +948,13 @@ jobs:
 
       # backend-common's C++ unit tests (scheme registry) — built alongside
       # the backend, run here. No display needed.
+      # macOS: laufey_secret_store_mac_test must find a usable login
+      # keychain here, and checks `security find-generic-password -w` too.
       - name: Unit tests (ctest)
         shell: bash
+        env:
+          LAUFEY_SECRET_TEST_REQUIRE: ${{ runner.os == 'macOS' && '1' || '' }}
+          LAUFEY_SECRET_TEST_SECURITY_CLI: ${{ runner.os == 'macOS' && '1' || '' }}
         run: ctest --test-dir webview/build --output-on-failure
 
       - name: Package

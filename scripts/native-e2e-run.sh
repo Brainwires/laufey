@@ -67,9 +67,10 @@
 # file dialogs use (the portal's FileChooser where the portal offers one,
 # GTK's otherwise) agrees with platform_features, and a real dialog closes
 # with cancel_file_dialog.
-# --secret-store (API 47; secret_checks.rs): on Linux every secure-store
-# call answers within its timeout (a value, not found, or unavailable with a
-# reason); LAUFEY_E2E_EXPECT_SECRET=ok|unavailable for a real session.
+# --secret-store (API 47; secret_checks.rs): on Linux and macOS every
+# secure-store call answers within its timeout (a value, not found, or
+# unavailable with a reason); LAUFEY_E2E_EXPECT_SECRET=ok|unavailable for a
+# real session (macOS CI: ok, the round trip in the login keychain).
 # --sandbox runs only the CEF sandbox checks (sandbox_checks.rs): the
 # renderer and GPU processes run in Chromium's sandbox, as the OS reports
 # them (LAUFEY_E2E_EXPECT_SANDBOX=0 expects the host to have turned it off;

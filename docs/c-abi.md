@@ -155,9 +155,12 @@ The pointers group into:
   that answer changes). See [title-bar.md](title-bar.md).
 - **Secure store** (API ≥ 47) — `secret_lookup`, `secret_store`,
   `secret_delete`: a small secret per (service, account) in the Secret Service
-  on Linux (CEF and WebView), blocking with a timeout; a missing provider or a
-  locked keyring is `LAUFEY_SECRET_UNAVAILABLE` with a reason, never "not found"
-  and never a hang. `NULL` elsewhere. See [secure-store.md](secure-store.md).
+  on Linux and in the Keychain on macOS, as an item only the app may read
+  without a prompt (CEF and WebView; what another program can write, and what an
+  unsigned or ad-hoc build shares, in secure-store.md), blocking with a timeout;
+  a missing provider or a locked keyring is `LAUFEY_SECRET_UNAVAILABLE` with a
+  reason, never "not found" and never a hang. `NULL` elsewhere. See
+  [secure-store.md](secure-store.md).
 - **Notifications** — `show_notification`, `close_notification`, and from API 41
   the `"schedule_at"` and `"data"` options, `notification_capabilities`,
   `set_notification_response_handler` (clicks no live callback owns, buffered

@@ -2,8 +2,9 @@
 
 //! The secure store (API 47): a small secret per (service, account) in the
 //! OS's secret store. On Linux the CEF and WebView backends use the Secret
-//! Service through libsecret; elsewhere (and on Winit) the entry points are
-//! NULL and every call answers [`SecretError::NotSupported`]. Each call
+//! Service through libsecret; on macOS they use the Keychain (items only the
+//! app may read); elsewhere (Windows, and Winit) the entry points are NULL
+//! and every call answers [`SecretError::NotSupported`]. Each call
 //! blocks the calling thread for at most about `timeout` (`Duration::ZERO`:
 //! the backend's default, 20 s); call it off the UI thread and off an async
 //! runtime's workers. See `docs/secure-store.md`.
@@ -17,11 +18,12 @@ use crate::{api, LaufeyBackendApi};
 /// Why a secure-store call didn't do what was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretError {
-  /// This backend has no secure store (not Linux, Winit, older than API 47).
+  /// This backend has no secure store (Windows, Winit, older than API 47).
   NotSupported,
   /// The store can't answer: no provider, a locked keyring no one unlocked,
-  /// no session bus, libsecret missing. The reason says which, and what to
-  /// do.
+  /// no session bus, libsecret missing (Linux); a locked keychain, access
+  /// refused, an item another program wrote in the way (macOS). The reason
+  /// says which, and what to do.
   Unavailable(String),
   /// Bad arguments (empty strings, a NUL byte).
   Failed(String),
@@ -69,7 +71,8 @@ fn error_of(
   }
 }
 
-/// Whether this backend has a secure store (API 47, Linux CEF / WebView).
+/// Whether this backend has a secure store (API 47, Linux and macOS CEF /
+/// WebView).
 pub fn secret_store_supported() -> bool {
   let api = api();
   api.secret_lookup.is_some()
