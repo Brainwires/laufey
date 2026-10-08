@@ -2191,16 +2191,24 @@ struct laufey_backend_api {
   // through libsecret. Items carry the attributes `service` and `account`
   // (as `secret-tool store … service S account A` writes them, so either
   // reads the other's); a store replaces what is there. On macOS the
-  // Keychain, as a generic password (kSecAttrService / kSecAttrAccount) only
-  // this app may read: the data-protection keychain when the app is signed
-  // with a keychain access group, else the login keychain with an access
-  // list naming only this app (other programs get macOS's prompt). Items
-  // another program wrote are never read there (NOT_FOUND) and refuse a
-  // store (UNAVAILABLE). A lookup may show macOS's prompt (a locked
-  // keychain, a rebuilt unsigned app); a store or delete never does. Each
-  // call BLOCKS the
-  // calling thread for at most about `timeout_ms` (0: 20 s) and must not be
-  // made on the UI thread. Returns a LAUFEY_SECRET_* status:
+  // Keychain, as a generic password (kSecAttrService / kSecAttrAccount) that
+  // only this app reads (code injected into its process aside): the
+  // data-protection keychain when the app is signed with a keychain access
+  // group, else the login keychain with an access list naming only this
+  // app's host executable (its designated requirement when signed, its code
+  // hash when unsigned or ad-hoc, so such builds with byte-identical hosts
+  // read each other's items); other programs get macOS's prompt. Another
+  // program of the user can write a login-keychain item without a prompt
+  // (replace its value, or plant one): an Apple- or team-signed app reads
+  // such an item as NOT_FOUND and refuses to store into it (UNAVAILABLE); an
+  // ad-hoc build gets macOS's prompt for it, and an unsigned one reads it.
+  // Items another tool wrote without the store's creator code are never
+  // read (NOT_FOUND) and refuse a store (UNAVAILABLE). A lookup may show
+  // macOS's prompt (a locked keychain, an ad-hoc build rebuilt since it
+  // stored the item); a store or delete never does. See
+  // docs/secure-store.md. Each call BLOCKS the calling thread for at most
+  // about `timeout_ms` (0: 20 s) and must not be made on the UI thread.
+  // Returns a LAUFEY_SECRET_* status:
   //   OK           lookup: `*value` is the secret; store / delete: done
   //                (deleting nothing is OK)
   //   NOT_FOUND    lookup: no such item (nothing locked matched either)

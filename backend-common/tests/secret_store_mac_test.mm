@@ -15,6 +15,16 @@
 //     with LAUFEY_SECRET_TEST_SECURITY_CLI=1 `security find-generic-password
 //     -w` doesn't print it (it is denied, or waits on macOS's prompt until
 //     it is killed). Off by default: on a desktop the prompt is on screen.
+//   - an item is this app's by the partition list macOS stamps on it: the
+//     store's item carries SecretOwnPartitionId(); one another program of
+//     the user replaced (SecKeychainItemModifyContent, what `security
+//     add-generic-password -U` does; it succeeds without a prompt and
+//     re-stamps the partition) or planted (the store's creator code, an
+//     access list trusting this program) is, for an Apple- or team-signed
+//     app (SecretRequireOwnPartitionForTesting here), "not found" without a
+//     prompt, and a store refuses it. Every unsigned program shares the
+//     partition "unsigned:", so an unsigned build reads both (the limit
+//     docs/secure-store.md states). With prompts off throughout.
 //
 // Exits 77 (skipped) when there is no usable login keychain (locked, or none)
 // unless LAUFEY_SECRET_TEST_REQUIRE=1.
@@ -25,12 +35,15 @@
 #import <Security/Security.h>
 
 #include <fcntl.h>
+#include <mach-o/dyld.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -39,6 +52,10 @@
 #include <vector>
 
 extern char** environ;
+
+// SecKeychainItemCopyAccess / SecACL* / SecKeychainSetUserInteractionAllowed:
+// the login keychain's own (deprecated, still working) API.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 using laufey_common::SecretDelete;
 using laufey_common::SecretLookup;
@@ -118,13 +135,88 @@ Ran SecurityCli(std::vector<std::string> args, int timeout_ms = 10000) {
 }
 
 void Cleanup() {
-  for (const char* account : {"a", "legacy"}) {
+  for (const char* account : {"a", "legacy", "r", "planted"}) {
     std::string ignored;
     SecretDelete(g_service, account, kTimeout, &ignored);
   }
   // Each program deletes its own items (another's would need a prompt).
   SecurityCli({"delete-generic-password", "-s", g_service, "-a", "legacy"});
   Run({LAUFEY_SECRET_READER, g_service, "reader", "--delete"}, 10000);
+  Run({LAUFEY_SECRET_READER, g_service, "planted", "--delete"}, 10000);
+}
+
+// This program's own path (what an access list naming it names).
+std::string SelfPath() {
+  char buf[PATH_MAX];
+  uint32_t size = sizeof buf;
+  if (_NSGetExecutablePath(buf, &size) != 0)
+    return "";
+  char real[PATH_MAX];
+  return realpath(buf, real) ? real : buf;
+}
+
+// The partition list of the store's item for `account` (its access list's
+// ACLAuthorizationPartitionID entry: a hex-encoded plist {Partitions: [..]}),
+// read without authorization; printed.
+std::vector<std::string> Partitions(const char* account) {
+  std::vector<std::string> out;
+  NSDictionary* query = @{
+    (id)kSecClass : (id)kSecClassGenericPassword,
+    (id)kSecAttrService : @(g_service.c_str()),
+    (id)kSecAttrAccount : @(account),
+    (id)kSecAttrCreator : @((FourCharCode)'Lfy1'),
+    (id)kSecReturnRef : @YES,
+  };
+  CFTypeRef item = nullptr;
+  SecAccessRef access = nullptr;
+  if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &item) ==
+      errSecSuccess) {
+    SecKeychainItemCopyAccess((SecKeychainItemRef)item, &access);
+    CFRelease(item);
+  }
+  CFArrayRef acls = nullptr;
+  if (access && SecAccessCopyACLList(access, &acls) == errSecSuccess) {
+    for (id entry in (__bridge NSArray*)acls) {
+      SecACLRef acl = (__bridge SecACLRef)entry;
+      NSArray* auths = CFBridgingRelease(SecACLCopyAuthorizations(acl));
+      if (![auths containsObject:(id)kSecACLAuthorizationPartitionID])
+        continue;
+      CFArrayRef apps = nullptr;
+      CFStringRef desc = nullptr;
+      SecKeychainPromptSelector selector = 0;
+      SecACLCopyContents(acl, &apps, &desc, &selector);
+      if (apps)
+        CFRelease(apps);
+      NSString* hex = CFBridgingRelease(desc);
+      NSMutableData* bytes = [NSMutableData data];
+      for (NSUInteger i = 0; i + 1 < hex.length; i += 2) {
+        unsigned value = 0;
+        sscanf([hex substringWithRange:NSMakeRange(i, 2)].UTF8String, "%2x",
+               &value);
+        uint8_t b = static_cast<uint8_t>(value);
+        [bytes appendBytes:&b length:1];
+      }
+      NSDictionary* plist =
+          [NSPropertyListSerialization propertyListWithData:bytes
+                                                    options:0
+                                                     format:nullptr
+                                                      error:nil];
+      for (NSString* p in plist[@"Partitions"])
+        out.push_back(p.UTF8String);
+    }
+    CFRelease(acls);
+  }
+  if (access)
+    CFRelease(access);
+  std::printf("partitions of %s:", account);
+  for (const std::string& p : out)
+    std::printf(" %s", p.c_str());
+  std::printf("\n");
+  return out;
+}
+
+bool Has(const std::vector<std::string>& list, const std::string& item) {
+  return std::find(list.begin(), list.end(), item) != list.end();
 }
 
 bool Env(const char* name) {
@@ -233,6 +325,76 @@ int main() {
                   cli.status);
       EXPECT(cli.out.find("laufey") == std::string::npos);
       EXPECT(cli.timed_out || cli.status != 0);
+    }
+
+    // The item is this app's by its partition (see the top). Prompts off:
+    // a lookup that would have to ask is refused instead.
+    {
+      SecKeychainSetUserInteractionAllowed(false);
+      const std::string own = laufey_common::SecretOwnPartitionId();
+      std::printf("own partition: %s\n", own.c_str());
+      EXPECT(!own.empty());
+      const bool shared = own == "unsigned:";
+      reason.clear();
+      EXPECT(SecretStore(g_service, "r", "", "mine", kTimeout, &reason) ==
+             SecretStatus::kOk);
+      EXPECT(Has(Partitions("r"), own));
+      laufey_common::SecretRequireOwnPartitionForTesting(true);
+      value.clear();
+      EXPECT(SecretLookup(g_service, "r", kTimeout, &value, &reason) ==
+                 SecretStatus::kOk &&
+             value == "mine");
+
+      // Replaced by another program: it can, without a prompt.
+      Ran modified = Run({LAUFEY_SECRET_READER, g_service, "r", "--modify",
+                          "replaced"},
+                         10000);
+      std::printf("replaced by another program: %s", modified.out.c_str());
+      EXPECT(modified.out.find("status 0") != std::string::npos);
+      std::vector<std::string> after = Partitions("r");
+      value.clear();
+      reason.clear();
+      SecretStatus replaced =
+          SecretLookup(g_service, "r", kTimeout, &value, &reason);
+      std::printf("lookup of the replaced item: %d %s %s\n",
+                  static_cast<int>(replaced), value.c_str(), reason.c_str());
+      if (shared) {
+        EXPECT(replaced == SecretStatus::kOk && value == "replaced");
+      } else {
+        EXPECT(!Has(after, own));
+        EXPECT(replaced == SecretStatus::kNotFound);
+        reason.clear();
+        EXPECT(SecretStore(g_service, "r", "", "again", kTimeout, &reason) ==
+               SecretStatus::kUnavailable);
+        EXPECT(reason.find("in the way") != std::string::npos);
+      }
+
+      // Planted by another program: the store's creator code, an access list
+      // trusting this program.
+      Ran planted = Run({LAUFEY_SECRET_READER, g_service, "planted",
+                         "--plant", "planted-value", SelfPath()},
+                        10000);
+      std::printf("planted by another program: %s", planted.out.c_str());
+      EXPECT(planted.out.find("status 0") != std::string::npos);
+      std::vector<std::string> theirs = Partitions("planted");
+      value.clear();
+      reason.clear();
+      SecretStatus read =
+          SecretLookup(g_service, "planted", kTimeout, &value, &reason);
+      std::printf("lookup of the planted item: %d %s %s\n",
+                  static_cast<int>(read), value.c_str(), reason.c_str());
+      if (shared) {
+        EXPECT(read == SecretStatus::kOk && value == "planted-value");
+      } else {
+        EXPECT(!Has(theirs, own));
+        EXPECT(read == SecretStatus::kNotFound);
+        reason.clear();
+        EXPECT(SecretStore(g_service, "planted", "", "secret", kTimeout,
+                           &reason) == SecretStatus::kUnavailable);
+        EXPECT(reason.find("in the way") != std::string::npos);
+      }
+      laufey_common::SecretRequireOwnPartitionForTesting(false);
+      SecKeychainSetUserInteractionAllowed(true);
     }
 
     // Delete, then it is gone; deleting nothing succeeds.

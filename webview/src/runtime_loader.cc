@@ -1436,8 +1436,9 @@ void RuntimeLoader::InitializeBackendApi() {
       Backend_SetTitleBarPreferencesChangedHandler;
 #if defined(__linux__) || (defined(__APPLE__) && !TARGET_OS_IPHONE)
   // The secure store (API 47): the Secret Service through libsecret on
-  // Linux, the Keychain (Security.framework, items only this app may read)
-  // on macOS. Windows keeps NULL (its Credential Locker is the embedder's).
+  // Linux, the Keychain (Security.framework, items only this app may read
+  // without a prompt; see docs/secure-store.md) on macOS. Windows keeps NULL
+  // (its Credential Locker is the embedder's).
   backend_api_.secret_lookup = [](void*, const char* service,
                                   const char* account, uint32_t timeout_ms,
                                   char** value, char** reason) {

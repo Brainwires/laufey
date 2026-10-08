@@ -16,16 +16,34 @@
 //     lookup.
 //   - Otherwise (Developer ID without a profile, ad-hoc, unsigned) the login
 //     keychain, with an access list whose only trusted application is this
-//     app (SecAccess + SecTrustedApplication of the calling executable: its
+//     app (SecAccess + SecTrustedApplication of the host executable: its
 //     designated requirement when signed, so updates signed by the same
-//     identity keep access; its exact code otherwise). Another program of the
-//     same user, `security find-generic-password -w` included, gets macOS's
-//     prompt (the keychain password, or the person's "Allow"), never the
-//     secret silently. A rebuilt unsigned / ad-hoc app is another program to
-//     macOS: its first lookup prompts.
+//     identity keep access; its code hash when unsigned or ad-hoc, so
+//     unsigned or ad-hoc builds whose hosts are byte-identical trust each
+//     other's items). No other program of the user reads the value without
+//     macOS's prompt (the keychain password, or the person's "Allow"):
+//     `security find-generic-password -w` included. Code injected into this
+//     app's process reads it like the app.
+//
+// The login keychain guards reading an item, not writing it: another
+// program of the user can replace an item's value without a prompt
+// (SecKeychainItemModifyContent, `security add-generic-password -U`), and
+// can create an item with this store's creator code ('Lfy1') whose access
+// list trusts this app. macOS stamps the writer's partition ID on an item
+// it creates and re-stamps it on such a replacement, and no program can
+// stamp another's without the keychain password. So an Apple- or
+// team-signed app (partition "apple:" / "teamid:<team>") takes an item for
+// its own only when its partition list names the app's partition
+// (IsAnotherProgramsItem): another program's item reads as "not found",
+// without a prompt, and a store refuses it rather than write the secret
+// into an item whose access list that program chose. An ad-hoc signed
+// build (partition "cdhash:<hex>") can't tell its own earlier build from
+// another program: macOS asks on the lookup. Every unsigned program shares
+// the partition "unsigned:": an unsigned build reads a planted or replaced
+// item without a prompt.
 //
 // Items written here carry kSecAttrCreator 'Lfy1', and every query matches it:
-// an item another program wrote for the same service and account (the
+// an item another tool wrote for the same service and account (the
 // `security` CLI an embedder used before) is never read here (no prompt for
 // it: lookup is "not found"), and a store refuses while it is in the way.
 // The embedder moves such items over with the tool that wrote them.
@@ -45,6 +63,7 @@
 #import <Security/Security.h>
 #include <dispatch/dispatch.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -53,6 +72,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "laufey_secret_store.h"
 
@@ -122,6 +142,211 @@ bool HasKeychainEntitlement() {
   }
   CFRelease(task);
   return found;
+}
+
+std::string Hex(CFDataRef data) {
+  static const char kDigits[] = "0123456789abcdef";
+  std::string out;
+  const UInt8* bytes = CFDataGetBytePtr(data);
+  for (CFIndex i = 0; i < CFDataGetLength(data); i++) {
+    out.push_back(kDigits[bytes[i] >> 4]);
+    out.push_back(kDigits[bytes[i] & 0xf]);
+  }
+  return out;
+}
+
+bool Satisfies(SecStaticCodeRef code, CFStringRef requirement) {
+  SecRequirementRef req = nullptr;
+  if (SecRequirementCreateWithString(requirement, kSecCSDefaultFlags, &req) !=
+      errSecSuccess)
+    return false;
+  OSStatus status =
+      SecStaticCodeCheckValidity(code, kSecCSBasicValidateOnly, req);
+  CFRelease(req);
+  return status == errSecSuccess;
+}
+
+// The subject's organizational unit of a certificate (a developer
+// certificate's team), or nil.
+NSString* OrganizationalUnit(SecCertificateRef cert) {
+  NSDictionary* values = CFBridgingRelease(SecCertificateCopyValues(
+      cert, (__bridge CFArrayRef) @[ (id)kSecOIDX509V1SubjectName ], nullptr));
+  NSArray* subject =
+      values[(id)kSecOIDX509V1SubjectName][(id)kSecPropertyKeyValue];
+  for (NSDictionary* component in subject) {
+    if ([component[(id)kSecPropertyKeyLabel]
+            isEqual:(id)kSecOIDOrganizationalUnitName] &&
+        [component[(id)kSecPropertyKeyValue] isKindOfClass:[NSString class]])
+      return component[(id)kSecPropertyKeyValue];
+  }
+  return nil;
+}
+
+// securityd's partitionIdForProcess (securityd/src/clientid.cpp), for this
+// process's own code: the partition ID macOS stamps on the login-keychain
+// items this process writes, and checks a reader's against.
+std::string ComputeOwnPartitionId() {
+  SecCodeRef self = nullptr;
+  if (SecCodeCopySelf(kSecCSDefaultFlags, &self) != errSecSuccess)
+    return "";
+  SecStaticCodeRef code = nullptr;
+  OSStatus status = SecCodeCopyStaticCode(self, kSecCSDefaultFlags, &code);
+  CFRelease(self);
+  if (status != errSecSuccess)
+    return "";
+  std::string partition;
+  SecRequirementRef apple = nullptr;
+  SecRequirementCreateWithString(CFSTR("anchor apple"), kSecCSDefaultFlags,
+                                 &apple);
+  OSStatus rc = apple ? SecStaticCodeCheckValidity(
+                            code, kSecCSBasicValidateOnly, apple)
+                      : errSecCSReqFailed;
+  if (apple)
+    CFRelease(apple);
+  CFDictionaryRef info = nullptr;
+  if (rc == errSecCSUnsigned) {
+    partition = "unsigned:";
+  } else if ((rc == errSecSuccess || rc == errSecCSReqFailed) &&
+             SecCodeCopySigningInformation(code, kSecCSSigningInformation,
+                                           &info) == errSecSuccess) {
+    NSDictionary* signing = (__bridge NSDictionary*)info;
+    NSString* team = signing[(id)kSecCodeInfoTeamIdentifier];
+    if (rc == errSecSuccess) {
+      partition = [signing[(id)kSecCodeInfoIdentifier]
+               isEqualToString:@"com.apple.security"]
+               ? "apple-tool:"
+               : "apple:";
+    } else if (Satisfies(code, CFSTR("anchor apple generic and certificate "
+                                     "leaf[field.1.2.840.113635.100.6.1.9]")) ||
+               Satisfies(code,
+                         CFSTR("anchor apple generic and certificate "
+                               "1[field.1.2.840.113635.100.6.2.1] exists and "
+                               "certificate "
+                               "leaf[field.1.2.840.113635.100.6.1.25.1] "
+                               "exists"))) {
+      // Mac App Store or TestFlight: the embedded team identifier.
+      partition = std::string("teamid:") + (team.UTF8String ?: "");
+    } else if (Satisfies(
+                   code,
+                   CFSTR("anchor apple generic and certificate "
+                         "1[field.1.2.840.113635.100.6.2.6] and certificate "
+                         "leaf[field.1.2.840.113635.100.6.1.13] or anchor "
+                         "apple generic and certificate "
+                         "1[field.1.2.840.113635.100.6.2.1] and certificate "
+                         "leaf[field.1.2.840.113635.100.6.1.12] or anchor "
+                         "apple generic and certificate "
+                         "1[field.1.2.840.113635.100.6.2.1] and certificate "
+                         "leaf[field.1.2.840.113635.100.6.1.7]"))) {
+      // Developer ID, development or distribution: the signing
+      // certificate's organizational unit (the team).
+      NSArray* certs = signing[(id)kSecCodeInfoCertificates];
+      NSString* unit = certs.count ? OrganizationalUnit((
+                                         __bridge SecCertificateRef)certs[0])
+                                   : nil;
+      partition = std::string("teamid:") + ((unit ?: team).UTF8String ?: "");
+    } else if (NSData* cdhash = signing[(id)kSecCodeInfoUnique]) {
+      partition = "cdhash:" + Hex((__bridge CFDataRef)cdhash);
+    }
+    CFRelease(info);
+  }
+  CFRelease(code);
+  return partition;
+}
+
+// Only touched on the queue.
+bool g_own_partition_decided = false;
+std::string g_own_partition;
+bool g_require_own_partition_for_testing = false;
+
+const std::string& OwnPartitionId() {
+  if (!g_own_partition_decided) {
+    g_own_partition = ComputeOwnPartitionId();
+    g_own_partition_decided = true;
+  }
+  return g_own_partition;
+}
+
+// An Apple- or team-signed app takes a login-keychain item for its own only
+// when the item's partition list names this app's partition (see
+// IsAnotherProgramsItem). An ad-hoc signed or unsigned build can't tell its
+// own earlier build from another program, and leaves it to macOS's prompt
+// (ad-hoc) or reads it (unsigned: every unsigned program shares the
+// partition).
+bool RequireOwnPartition() {
+  const std::string& own = OwnPartitionId();
+  if (g_require_own_partition_for_testing)
+    return true;
+  return own.rfind("teamid:", 0) == 0 || own.rfind("apple:", 0) == 0 ||
+         own.rfind("apple-tool:", 0) == 0;
+}
+
+// The partition list macOS stamped on a login-keychain item (its access
+// list's ACLAuthorizationPartitionID entry, a hex-encoded plist
+// {Partitions: [...]}), read without authorization. False when it has none.
+bool ItemPartitions(SecKeychainItemRef item, std::vector<std::string>* out) {
+  SecAccessRef access = nullptr;
+  if (SecKeychainItemCopyAccess(item, &access) != errSecSuccess || !access)
+    return false;
+  bool found = false;
+  CFArrayRef acls = nullptr;
+  if (SecAccessCopyACLList(access, &acls) == errSecSuccess && acls) {
+    for (id entry in (__bridge NSArray*)acls) {
+      SecACLRef acl = (__bridge SecACLRef)entry;
+      NSArray* auths = CFBridgingRelease(SecACLCopyAuthorizations(acl));
+      if (![auths containsObject:(id)kSecACLAuthorizationPartitionID])
+        continue;
+      CFArrayRef apps = nullptr;
+      CFStringRef desc = nullptr;
+      SecKeychainPromptSelector selector = 0;
+      if (SecACLCopyContents(acl, &apps, &desc, &selector) != errSecSuccess)
+        continue;
+      if (apps)
+        CFRelease(apps);
+      NSString* hex = CFBridgingRelease(desc);
+      NSMutableData* bytes = [NSMutableData dataWithCapacity:hex.length / 2];
+      const char* text = hex.UTF8String ?: "";
+      for (size_t i = 0; text[i] && text[i + 1]; i += 2) {
+        char pair[3] = {text[i], text[i + 1], 0};
+        uint8_t b = static_cast<uint8_t>(std::strtoul(pair, nullptr, 16));
+        [bytes appendBytes:&b length:1];
+      }
+      NSDictionary* plist =
+          [NSPropertyListSerialization propertyListWithData:bytes
+                                                    options:0
+                                                     format:nullptr
+                                                      error:nil];
+      if (![plist isKindOfClass:[NSDictionary class]])
+        continue;
+      found = true;
+      for (id p in plist[@"Partitions"]) {
+        if ([p isKindOfClass:[NSString class]])
+          out->push_back([p UTF8String]);
+      }
+    }
+    CFRelease(acls);
+  }
+  CFRelease(access);
+  return found;
+}
+
+// Whether a login-keychain item with this store's creator code, service and
+// account is another program's, for an app that takes only its own
+// (RequireOwnPartition). macOS stamps the writer's partition on an item it
+// creates, and re-stamps it when another program replaces the value
+// (SecKeychainItemModifyContent, `security add-generic-password -U`, which
+// needs no prompt); a program can't put another's partition on it without
+// the keychain password. So an item planted by another program (whatever
+// access list it gave it) or replaced by one lacks this app's partition.
+bool IsAnotherProgramsItem(SecKeychainItemRef item) {
+  if (!RequireOwnPartition())
+    return false;
+  const std::string& own = OwnPartitionId();
+  std::vector<std::string> partitions;
+  if (!item || !ItemPartitions(item, &partitions))
+    return true;
+  return own.empty() ||
+         std::find(partitions.begin(), partitions.end(), own) ==
+             partitions.end();
 }
 
 // Only touched on the queue.
@@ -218,7 +443,9 @@ SecretStatus LookupIn(NSString* service, NSString* account, bool dp,
                       std::string* value, std::string* reason,
                       OSStatus* raw = nullptr) {
   NSMutableDictionary* q = Query(service, account, dp);
-  q[(id)kSecReturnData] = @YES;
+  // The login keychain: the item and its attributes first, without its
+  // value (no decryption, so no prompt), to see whose it is.
+  q[dp ? (id)kSecReturnData : (id)kSecReturnRef] = @YES;
   q[(id)kSecReturnAttributes] = @YES;
   q[(id)kSecMatchLimit] = (id)kSecMatchLimitOne;
   CFTypeRef out = nullptr;
@@ -233,6 +460,26 @@ SecretStatus LookupIn(NSString* service, NSString* account, bool dp,
   if ([item[(id)kSecAttrComment] isEqual:kDeletedMarker])
     return SecretStatus::kNotFound;
   NSData* data = item[(id)kSecValueData] ?: [NSData data];
+  if (!dp) {
+    SecKeychainItemRef ref = (__bridge SecKeychainItemRef)item[(id)kSecValueRef];
+    // Another program's (planted, or its value replaced): not this app's
+    // secret, and never a prompt for it.
+    if (IsAnotherProgramsItem(ref))
+      return SecretStatus::kNotFound;
+    UInt32 length = 0;
+    void* bytes = nullptr;
+    status = ref ? SecKeychainItemCopyContent(ref, nullptr, nullptr, &length,
+                                              &bytes)
+                 : errSecItemNotFound;
+    if (raw)
+      *raw = status;
+    if (status == errSecItemNotFound)
+      return SecretStatus::kNotFound;
+    if (status != errSecSuccess)
+      return Refused(status, "read the item", reason);
+    data = [NSData dataWithBytes:bytes length:length];
+    SecKeychainItemFreeContent(nullptr, bytes);
+  }
   NSString* text = [[NSString alloc] initWithData:data
                                          encoding:NSUTF8StringEncoding];
   if (!text) {
@@ -247,6 +494,27 @@ SecretStatus StoreIn(NSString* service, NSString* account, NSString* label,
                      NSData* data, bool dp, std::string* reason,
                      OSStatus* raw = nullptr) {
   NSMutableDictionary* q = Query(service, account, dp);
+  if (!dp) {
+    // Never this app's secret into another program's item (planted, or its
+    // value replaced): its access list may let that program read it.
+    NSMutableDictionary* find = Query(service, account, dp);
+    find[(id)kSecReturnRef] = @YES;
+    find[(id)kSecMatchLimit] = (id)kSecMatchLimitOne;
+    CFTypeRef found = nullptr;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)find, &found) ==
+        errSecSuccess) {
+      bool theirs = IsAnotherProgramsItem((SecKeychainItemRef)found);
+      CFRelease(found);
+      if (theirs) {
+        *reason =
+            "another program's keychain item for this service and account is "
+            "in the way (one it planted, or this app's whose value it "
+            "replaced): delete it (Keychain Access, or `security "
+            "delete-generic-password`) first";
+        return SecretStatus::kUnavailable;
+      }
+    }
+  }
   OSStatus status = SecItemUpdate(
       (__bridge CFDictionaryRef)q,
       (__bridge CFDictionaryRef) @{
@@ -552,6 +820,20 @@ int SecretDeleteForAbi(const char* service, const char* account,
   SecretStatus status = SecretDelete(service ? service : "",
                                      account ? account : "", timeout_ms, &r);
   return Answer(status, r, reason);
+}
+
+std::string SecretOwnPartitionId() {
+  __block std::string id;
+  dispatch_sync(Queue(), ^{
+    id = OwnPartitionId();
+  });
+  return id;
+}
+
+void SecretRequireOwnPartitionForTesting(bool on) {
+  dispatch_sync(Queue(), ^{
+    g_require_own_partition_for_testing = on;
+  });
 }
 
 const char* SecretKeychainKind() {

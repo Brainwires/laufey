@@ -28,11 +28,14 @@ the app's own process through Security.framework (`SecItemAdd` /
 to the app, not to a tool it ran. Which keychain depends on how the app is
 signed:
 
-| The app                                                                                                                                                                   | Keychain                                                                                                                                                                        | Who can read the item                                                                                                                                                                                                                                              |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Signed with a keychain access group: the `com.apple.application-identifier` or `keychain-access-groups` entitlement, which macOS honours only with a provisioning profile | The data-protection keychain (`kSecUseDataProtectionKeychain`), in the app's default access group, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`                           | The app (and apps the developer put in the same access group). No other program, with or without a prompt; `security` doesn't list it.                                                                                                                             |
-| Signed with a Developer ID, no profile                                                                                                                                    | The login keychain, with an access list (`SecAccessCreate`) whose only trusted application is the app (`SecTrustedApplicationCreateFromPath(NULL)`: its designated requirement) | The app, and its updates signed by the same identity, without a prompt. Any other program of the user, `security find-generic-password -w` included, gets macOS's prompt (the keychain password, or the person's Allow / Always Allow), never the secret silently. |
-| Ad-hoc signed or unsigned (a development build)                                                                                                                           | The same                                                                                                                                                                        | The same, but the access list names this exact build: a rebuilt app is another program to macOS, so its first lookup shows the prompt (Always Allow adds it). Other programs are refused as above.                                                                 |
+| The app                                                                                                                                                                   | Keychain                                                                                                                                                                                                        | Who can read the item                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Signed with a keychain access group: the `com.apple.application-identifier` or `keychain-access-groups` entitlement, which macOS honours only with a provisioning profile | The data-protection keychain (`kSecUseDataProtectionKeychain`), in the app's default access group, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`                                                           | The app (and apps the developer put in the same access group). No other program, with or without a prompt; `security` doesn't list it.                                                                                                                                                                           |
+| Signed with a Developer ID, no profile                                                                                                                                    | The login keychain, with an access list (`SecAccessCreate`) whose only trusted application is the app's host executable (`SecTrustedApplicationCreateFromPath(NULL)`), identified by its designated requirement | The app, and its updates signed by the same identity, without a prompt. Any other program of the user, `security find-generic-password -w` included, gets macOS's prompt (the keychain password, or the person's Allow / Always Allow), never the secret silently.                                               |
+| Ad-hoc signed or unsigned (a development build)                                                                                                                           | The same, the host executable identified by its code hash                                                                                                                                                       | The same, but the access list names this exact build: a rebuilt app is another program to macOS, so its first lookup shows the prompt (Always Allow adds it). Builds whose host executables are byte-identical are the same program to macOS: they read each other's items. Other programs are refused as above. |
+
+In every case, code injected into the app's process (a loaded library, a
+debugger attached to it) reads the secret as the app does.
 
 The entitlement is read from the running app's signature
 (`SecTaskCopyValueForEntitlement`); if the data-protection keychain refuses it
@@ -41,8 +44,8 @@ item the app wrote to the login keychain before it had the entitlement moves to
 the data-protection keychain on its first lookup.
 
 Items written here carry `kSecAttrCreator` `'Lfy1'`, and every query matches it.
-An item another program wrote for the same service and account (for instance
-with `security add-generic-password`, which makes `/usr/bin/security` the item's
+An item another tool wrote for the same service and account (for instance with
+`security add-generic-password`, which makes `/usr/bin/security` the item's
 trusted application, so every program of the user can read it through
 `security`) is never read here: a lookup is `NOT_FOUND`, without a prompt. A
 store refuses while such an item is in the way (`UNAVAILABLE`, "another
@@ -50,13 +53,36 @@ program's keychain item for this service and account is in the way"). Moving
 those items over is the embedder's job, with the tool that wrote them: read it,
 delete it, then store it here.
 
+### Another program writing the item
+
+The login keychain's access list guards reading an item, not writing it. Another
+program of the same user can, without a prompt, replace the value of the app's
+item (`SecKeychainItemModifyContent`, what `security add-generic-password -U`
+does; the access list stays as it was), or create an item with the store's
+creator code whose access list trusts the app (so the app could read a value
+that program chose, or store its secret into an item that program can also
+read). macOS stamps the writing program's partition ID on an item it creates and
+re-stamps it when another program replaces the value, and a program can't stamp
+another's without the keychain password. What the store makes of it depends on
+the app's signature:
+
+| The app                                                       | Its partition   | An item another program created or replaced                                                                                                                  |
+| ------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Developer ID, development, Mac App Store or TestFlight signed | `teamid:<team>` | Read as `NOT_FOUND`, without a prompt; a store refuses it (`UNAVAILABLE`, "in the way"). Removing it (Keychain Access) lets the app store again.             |
+| Ad-hoc signed                                                 | `cdhash:<hash>` | Can't be told from the app's own earlier build: a lookup shows macOS's prompt (the keychain password), and a store writes into it.                           |
+| Unsigned                                                      | `unsigned:`     | Shared by every unsigned program: read and written as the app's own, without a prompt. An unsigned build has no protection against another program's writes. |
+
+The data-protection keychain has none of this: no other program reaches the
+app's access group at all.
+
 Prompts: every call runs on one serial queue. A store or a delete never prompts
 (user interaction is off while it runs): a locked keychain, or an item this
 build may not change, is `UNAVAILABLE` with the reason. A lookup may show
-macOS's prompt (a locked login keychain, a rebuilt ad-hoc app), and gives up
-after its timeout (`UNAVAILABLE`); the prompt stays up for the person. A call
-still queued when its caller gave up never runs, so nothing is written after the
-call gave up.
+macOS's prompt: a locked login keychain (unlock), or an ad-hoc signed app
+rebuilt since it stored the item (Allow); it gives up after its timeout
+(`UNAVAILABLE`), and the prompt stays up for the person. A call still queued
+when its caller gave up never runs, so nothing is written after the call gave
+up.
 
 A delete that macOS refuses without asking (only an item's owner may remove a
 login-keychain item, and an ad-hoc signed CEF bundle isn't always taken for it,

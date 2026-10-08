@@ -4,8 +4,12 @@
 // OS's secret store. On macOS (secret_store_mac.mm) the Keychain through
 // Security.framework in this process: the data-protection keychain when the
 // app is signed with a keychain access group, otherwise the login keychain
-// with an access list that trusts only this app, so another program of the
-// user gets macOS's prompt, never the secret silently. Below: Linux.
+// with an access list that trusts only this app's host executable, so
+// another program of the user gets macOS's prompt, never the secret silently
+// (code injected into this app aside; unsigned or ad-hoc builds with
+// byte-identical hosts are one program to macOS). Another program can write
+// a login-keychain item without a prompt; see secret_store_mac.mm for what
+// the store makes of that. Below: Linux.
 //
 // On Linux: a small secret per (service, account)
 // in the Secret Service (org.freedesktop.secrets: gnome-keyring, KWallet's
@@ -87,6 +91,19 @@ int SecretDeleteForAbi(const char* service, const char* account,
 // Which keychain the macOS store uses in this process: "data-protection" (the
 // app is signed with a keychain access group) or "login".
 const char* SecretKeychainKind();
+
+// This process's keychain partition ID, as macOS's securityd ascribes it
+// (securityd/src/clientid.cpp, partitionIdForProcess): "apple:",
+// "teamid:<team>" (Developer ID, development, Mac App Store or TestFlight
+// signed), "cdhash:<hex>" (any other signature: ad-hoc), "unsigned:"; empty
+// when the process's code signature can't be read.
+std::string SecretOwnPartitionId();
+
+// Tests only: lookups and stores in the login keychain take an item whose
+// partition list lacks SecretOwnPartitionId() for another program's, as
+// they do in an Apple- or team-signed app, also in this (ad-hoc signed or
+// unsigned) process.
+void SecretRequireOwnPartitionForTesting(bool on);
 #endif
 
 // --- Pieces with no bus (tested on their own) --------------------------------
