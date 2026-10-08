@@ -18,9 +18,21 @@
 //            with exit's status, about 5 seconds later; with
 //            LAUFEY_EXIT_WATCHDOG_SECS=1 about a second later, and with
 //            LAUFEY_EXIT_WATCHDOG_SECS=0 not at all (no watchdog).
+//   late     a library loaded after the guard (dlopen, as the runtime and
+//            the graphics stack are) registers exit-time teardown that takes
+//            away memory the busy UI thread reads, then calls exit() from
+//            another thread. Exit handlers run in reverse order, so that
+//            teardown runs before any handler the guard registered: the UI
+//            thread must be parked before it, or it faults (as a WebKitGTK
+//            paint did on libgbm's unloaded backend).
+//   forked   a child forked without exec (from another thread, as a library
+//            may) inherits the guard but not the UI thread: its exit()
+//            parks nothing and returns at once, with its status.
 
+#include <dlfcn.h>
 #include <glib.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -117,6 +129,39 @@ void Busy() {
       nullptr);
 }
 
+// The "late" case's shared page and library (exit_guard_late_lib.cc).
+volatile int* g_shared = nullptr;
+void (*g_exit_from_library)(int) = nullptr;
+
+void BusyReadingShared() {
+  g_idle_add(
+      [](gpointer) -> gboolean {
+        g_ticks += static_cast<uint64_t>(*g_shared);
+        return G_SOURCE_CONTINUE;
+      },
+      nullptr);
+}
+
+void LoadLateLibrary() {
+  long size = sysconf(_SC_PAGESIZE);
+  void* page = mmap(nullptr, static_cast<size_t>(size), PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (page == MAP_FAILED)
+    Fail("mmap failed");
+  g_shared = static_cast<volatile int*>(page);
+  *g_shared = 1;
+  void* lib = dlopen(LAUFEY_EXIT_GUARD_LATE_LIB, RTLD_NOW | RTLD_LOCAL);
+  if (!lib)
+    Fail(dlerror());
+  auto arm = reinterpret_cast<void (*)(void*, long)>(
+      dlsym(lib, "laufey_test_arm_teardown"));
+  g_exit_from_library = reinterpret_cast<void (*)(int)>(
+      dlsym(lib, "laufey_test_exit_from_library"));
+  if (!arm || !g_exit_from_library)
+    Fail("the late library lacks its entry points");
+  arm(page, size);
+}
+
 void After(int ms, void (*fn)()) {
   std::thread([ms, fn] {
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
@@ -132,11 +177,57 @@ int RunCase(const std::string& name) {
     atexit(CheckDispatchAfterPark);
   } else if (name == "watchdog") {
     atexit(HangForever);
-  } else {
+  } else if (name != "late" && name != "forked") {
     Fail("unknown case");
   }
   laufey_common::InstallUiExitGuard();
+  if (name == "late") {
+    LoadLateLibrary();
+    BusyReadingShared();
+    // As Deno.exit() does: from another thread, through the library.
+    After(200, [] { g_exit_from_library(0); });
+    GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
+    g_main_loop_run(loop);
+    return 2;  // not reached
+  }
   Busy();
+  if (name == "forked") {
+    After(200, [] {
+      auto start = std::chrono::steady_clock::now();
+      pid_t pid = fork();
+      if (pid == 0)
+        exit(5);
+      if (pid < 0)
+        Fail("fork failed");
+      int status = 0;
+      while (waitpid(pid, &status, WNOHANG) != pid) {
+        if (std::chrono::steady_clock::now() - start >
+            std::chrono::seconds(8)) {
+          kill(pid, SIGKILL);
+          waitpid(pid, &status, 0);
+          Fail("a forked child's exit() hung");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      auto took = std::chrono::steady_clock::now() - start;
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 5)
+        Fail("a forked child's exit() lost its status");
+      if (took > std::chrono::milliseconds(500)) {
+        std::fprintf(stderr,
+                     "laufey_exit_guard_test: the forked child's exit() took "
+                     "%lld ms\n",
+                     static_cast<long long>(
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             took)
+                             .count()));
+        Fail("a forked child's exit() waited for a UI thread it lacks");
+      }
+      _exit(0);
+    });
+    GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
+    g_main_loop_run(loop);
+    return 2;  // not reached
+  }
   if (name == "nested") {
     // The UI thread enters a nested loop (a modal dialog) and is still in it
     // when exit comes.
@@ -202,6 +293,11 @@ bool Child(const char* self, const char* name, int want,
   }
   *took = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start);
+  if (WIFSIGNALED(status)) {
+    std::fprintf(stderr, "laufey_exit_guard_test: %s died of signal %d\n", name,
+                 WTERMSIG(status));
+    return false;
+  }
   if (!WIFEXITED(status) || WEXITSTATUS(status) != want) {
     std::fprintf(stderr, "laufey_exit_guard_test: %s ended with status %d\n",
                  name, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
@@ -243,7 +339,7 @@ int main(int argc, char** argv) {
   if (argc > 1)
     return RunCase(argv[1]);
   std::chrono::milliseconds took{0};
-  for (const char* name : {"busy", "nested", "dispatch"}) {
+  for (const char* name : {"busy", "nested", "dispatch", "late", "forked"}) {
     if (!Child(argv[0], name, 0, std::chrono::seconds(10), &took))
       return 1;
   }

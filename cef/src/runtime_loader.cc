@@ -258,6 +258,12 @@ static void Backend_ExecuteJs(void* data, uint32_t window_id,
 // loop is [NSApp run], which CefQuitMessageLoop does not stop.
 static void Backend_Quit(void* data) {
   laufey_common::MarkQuitting();
+#if defined(__linux__)
+  // A GTK modal (an alert, a script dialog) is a nested loop on TID_UI that
+  // would hold the end of the loop until someone dismissed it: end it, as a
+  // cancel.
+  laufey_common::CancelGtkDialogsForQuit();
+#endif
   CefPostTask(TID_UI, base::BindOnce([]() {
                 auto* loader = RuntimeLoader::GetInstance();
                 std::vector<CefRefPtr<CefBrowser>> browsers =

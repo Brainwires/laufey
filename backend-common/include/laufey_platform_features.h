@@ -264,11 +264,11 @@ std::string ReportedSessionType(const std::string& xdg_session_type,
 // renderer setting of their own (WEBKIT_DMABUF_RENDERER_FORCE_SHM,
 // WEBKIT_DISABLE_DMABUF_RENDERER or WEBKIT_DISABLE_COMPOSITING_MODE set,
 // even empty). GTK 3 can't show a GPU buffer on X11: WebKit's UI process
-// maps each GBM buffer to the CPU (gbm_bo_map) to draw it with cairo, and
-// that map crashes on some drivers (Mali / Panfrost: SIGSEGV in
-// AcceleratedBackingStore::BufferGBM::didUpdateContents, webkit2gtk 2.54).
-// With shared memory the web process does the same read back itself, so
-// the frame costs the same copy (docs/backends.md).
+// maps each GBM buffer to the CPU (gbm_bo_map) to draw it with cairo. With
+// shared memory the web process does the same read back itself, so the
+// frame costs the same copy, and the UI process doesn't use libgbm (whose
+// teardown during exit() crashed a paint before the exit guard parked the
+// UI thread first; docs/backends.md).
 bool ShouldForceWebKitShm(bool gdk_display_is_x11,
                           const std::function<const char*(const char*)>& env);
 

@@ -103,6 +103,7 @@ elseif(UNIX)
     src/cookie_db_linux.cc
     src/title_bar_linux.cc
     src/secret_store_linux.cc
+    src/termination_signals_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -196,6 +197,14 @@ elseif(UNIX)
   target_compile_options(laufey_backend_common PUBLIC
     ${LAUFEY_COMMON_GTK_CFLAGS_OTHER}
   )
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The UI exit guard's exit() (src/io_linux.cc) is exported from every
+    # executable that links this library, so a library the host loads (the
+    # runtime, with dlopen) calls it rather than the C library's.
+    target_link_options(laufey_backend_common INTERFACE
+      "LINKER:--export-dynamic-symbol=exit"
+    )
+  endif()
 endif()
 
 # The single-instance server runs on its own thread.
@@ -210,6 +219,31 @@ set_target_properties(laufey_backend_common PROPERTIES
 # framework). The parent project calls enable_testing() so these show up in
 # `ctest --test-dir <build>`; -DLAUFEY_BUILD_TESTS=OFF skips them.
 option(LAUFEY_BUILD_TESTS "Build backend-common unit tests" ON)
+
+# A host's headless launch (`<host> run <script>`: a forked worker, the
+# full-app updater's helper) runs its runtime to the end, past the bounded
+# wait a windowed app's runtime gets (tests/headless_launch_test.cc, with a
+# stand-in runtime library). Each host's CMakeLists (webview, cef) calls this
+# with its target and the executable a launch starts.
+function(laufey_add_headless_launch_test host_target host_executable)
+  if(NOT LAUFEY_BUILD_TESTS)
+    return()
+  endif()
+  add_library(laufey_headless_runtime MODULE
+              ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/headless_runtime_lib.cc)
+  add_executable(laufey_headless_launch_test
+                 ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/headless_launch_test.cc)
+  target_compile_features(laufey_headless_launch_test PRIVATE cxx_std_17)
+  target_compile_definitions(laufey_headless_launch_test PRIVATE
+    LAUFEY_HOST="${host_executable}"
+    LAUFEY_HEADLESS_RUNTIME="$<TARGET_FILE:laufey_headless_runtime>"
+  )
+  add_dependencies(laufey_headless_launch_test
+                   ${host_target} laufey_headless_runtime)
+  add_test(NAME laufey_headless_launch_test
+           COMMAND laufey_headless_launch_test)
+  set_tests_properties(laufey_headless_launch_test PROPERTIES TIMEOUT 180)
+endfunction()
 if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_scheme_registry_test tests/scheme_registry_test.cc)
   target_link_libraries(laufey_scheme_registry_test PRIVATE
@@ -554,12 +588,44 @@ if(LAUFEY_BUILD_TESTS)
     set_tests_properties(laufey_shortcuts_portal_test PROPERTIES
                          SKIP_RETURN_CODE 77)
 
+    # Quitting ends the GTK dialogs as a cancel, from the UI thread or
+    # another one, nested ones too, and none is shown once quitting (private
+    # Xvfb; skipped without it).
+    add_executable(laufey_dialog_quit_test tests/dialog_quit_test.cc)
+    target_link_libraries(laufey_dialog_quit_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_dialog_quit_test COMMAND laufey_dialog_quit_test)
+    set_tests_properties(laufey_dialog_quit_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # SIGTERM / SIGINT / SIGHUP: the first quits through the callback on
+    # the loop's thread, a second takes the default action.
+    add_executable(laufey_termination_signals_test
+                   tests/termination_signals_test.cc)
+    target_link_libraries(laufey_termination_signals_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_termination_signals_test
+             COMMAND laufey_termination_signals_test)
+
     # The UI-thread exit guard: exit() from another thread parks the UI
     # thread before the libraries' destructors run.
+    # The "late" case's library: exit-time teardown registered after the
+    # guard, and an exit() called from a library, as the runtime's is.
+    add_library(laufey_exit_guard_late_lib MODULE
+                tests/exit_guard_late_lib.cc)
     add_executable(laufey_exit_guard_test tests/exit_guard_test.cc)
     target_link_libraries(laufey_exit_guard_test PRIVATE
       laufey_backend_common
+      ${CMAKE_DL_LIBS}
     )
+    target_compile_definitions(laufey_exit_guard_test PRIVATE
+      LAUFEY_EXIT_GUARD_LATE_LIB="$<TARGET_FILE:laufey_exit_guard_late_lib>"
+    )
+    add_dependencies(laufey_exit_guard_test laufey_exit_guard_late_lib)
     add_test(NAME laufey_exit_guard_test COMMAND laufey_exit_guard_test)
 
     # The clipboard through ext-data-control against the session's own

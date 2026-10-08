@@ -352,3 +352,13 @@ elseif(OS_LINUX)
     VERBATIM
   )
 endif()
+
+# A headless launch (`run <script>`) runs its runtime to the end
+# (backend-common/CMakeLists.txt). On Windows a launch starts laufey.exe:
+# the host itself, or CEF's bootstrap in front of the host DLL.
+if(OS_WINDOWS)
+  laufey_add_headless_launch_test(${CEF_TARGET}
+    "$<TARGET_FILE_DIR:${CEF_TARGET}>/${CEF_TARGET}.exe")
+else()
+  laufey_add_headless_launch_test(${CEF_TARGET} "$<TARGET_FILE:${CEF_TARGET}>")
+endif()

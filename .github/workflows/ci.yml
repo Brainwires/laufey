@@ -815,17 +815,21 @@ jobs:
         shell: bash
         run: scripts/single-instance-e2e-run.sh ${{ matrix.backend }}
 
-      # SIGTERM / SIGINT / SIGHUP end the Linux CEF app through its own quit
-      # (runtime shut down, CefShutdown), not Chromium's session-end _exit:
-      # status 0, no process left, the profile's exit_type "Normal", no core
-      # or crash report.
-      - name: Termination signals (Linux, cef)
-        if: runner.os == 'Linux' && matrix.backend == 'cef'
-        timeout-minutes: 10
+      # SIGTERM / SIGINT / SIGHUP end the Linux app through its own quit
+      # (runtime shut down; CEF: CefShutdown, not Chromium's session-end
+      # _exit; WebKitGTK: the web storage flush, not the default kill):
+      # status 0 within seconds, no process left, what the page stored read
+      # back by the next launch, CEF's exit_type "Normal", no core or crash
+      # report. Then with a GTK dialog up (Deno's uncaught-error alert, a
+      # confirm): the quit ends it as a cancel instead of waiting for it.
+      - name: Termination signals (Linux)
+        if: runner.os == 'Linux' && matrix.backend != 'winit'
+        timeout-minutes: 15
         shell: bash
         run: |
-          cargo build --release -p hello_runtime
-          scripts/signal-exit-e2e-run.sh
+          scripts/signal-exit-e2e-run.sh ${{ matrix.backend }}
+          scripts/signal-exit-e2e-run.sh ${{ matrix.backend }} --dialog alert SIGTERM SIGINT
+          scripts/signal-exit-e2e-run.sh ${{ matrix.backend }} --dialog confirm SIGTERM
 
       # HiDPI: the window-API battery at a device scale factor of 2 (Linux:
       # CEF --force-device-scale-factor=2, WebKitGTK GDK_SCALE=2; Windows:
@@ -1167,6 +1171,14 @@ jobs:
           key: cef-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('Makefile') }}
 
       - run: make cef
+
+      # The host runs a headless launch (`run <script>`: a forked worker, the
+      # full-app updater's helper) to its end, past the bounded wait a
+      # windowed app's runtime gets (backend-common/tests/
+      # headless_launch_test.cc). It never loads CEF: no display needed.
+      - name: Headless launch test (ctest)
+        shell: bash
+        run: ctest --test-dir cef/build -R '^laufey_headless_launch_test$' --no-tests=error --output-on-failure
 
       - name: Package
         shell: bash

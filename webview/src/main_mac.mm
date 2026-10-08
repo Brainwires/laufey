@@ -197,7 +197,8 @@ static int run_headless(const std::string& path) {
     return 1;
   }
 
-  // Wait for the runtime thread to finish
+  // It ends when the runtime returns, however long that takes.
+  loader->WaitForRuntime();
   loader->Shutdown();
   return 0;
 }

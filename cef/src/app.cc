@@ -578,7 +578,8 @@ bool LaufeyHandler::OnJSDialog(CefRefPtr<CefBrowser> browser,
     const bool was_enabled = view && view->IsEnabled();
     if (was_enabled)
       view->SetEnabled(false);
-    gint result = gtk_dialog_run(GTK_DIALOG(dlg));
+    // Ended (as a cancel) when the app quits while it is up.
+    gint result = laufey_common::RunGtkDialog(dlg);
     if (was_enabled)
       view->SetEnabled(true);
     return result;

@@ -1,5 +1,6 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
+#include "laufey_backend_common.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_auth_session.h"
@@ -38,6 +39,18 @@ static void ActivateApp(void*) {
     gtk_window_present(target);
 }
 
+// The backend whose Quit a termination signal calls (GTK main thread).
+static LaufeyBackend* g_backend = nullptr;
+
+// SIGTERM, SIGINT and SIGHUP end the app through quit()'s path: the loop
+// ends, the runtime is shut down and what the pages stored is written to
+// disk (laufey_common::InstallTerminationSignalHandlers), instead of the
+// default action killing the process without either.
+static void RequestQuit() {
+  if (g_backend)
+    g_backend->Quit();
+}
+
 // A headless worker (laufey_common::IsHeadlessWorkerLaunch): the runtime runs
 // with no backend, no GTK and no window, then the process exits.
 static int run_headless(const std::string& runtimePath) {
@@ -58,6 +71,8 @@ static int run_headless(const std::string& runtimePath) {
     std::cerr << "Failed to start headless worker runtime." << std::endl;
     return 1;
   }
+  // It ends when the runtime returns, however long that takes.
+  loader->WaitForRuntime();
   loader->Shutdown();
   return 0;
 }
@@ -133,11 +148,12 @@ int main(int argc, char* argv[]) {
   // WebKitGTK on an X11 display: frames in shared memory
   // (WEBKIT_DMABUF_RENDERER_FORCE_SHM=1) unless the user chose a renderer
   // setting. GTK 3 can't show a GPU buffer on X11, so WebKit's UI process
-  // maps each GBM buffer to the CPU to draw it; that map crashes on Mali /
-  // Panfrost (SIGSEGV in AcceleratedBackingStore::BufferGBM::
-  // didUpdateContents, webkit2gtk 2.54), and shared memory moves the same
-  // read back into the web process. Before the first web view: WebKit reads
-  // it when it starts the web process. See docs/backends.md.
+  // maps each GBM buffer to the CPU to draw it; shared memory moves the same
+  // read back into the web process and keeps this process off libgbm (the
+  // BufferGBM::didUpdateContents crashes on Mali / Panfrost came from
+  // libgbm's teardown during exit(), which the exit guard now runs after
+  // parking the UI thread). Before the first web view: WebKit reads it when
+  // it starts the web process. See docs/backends.md.
   {
     GdkDisplay* display = gdk_display_get_default();
     bool x11 =
@@ -228,7 +244,14 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  g_backend = backend;
+  laufey_common::InstallTerminationSignalHandlers(RequestQuit);
+
   backend->Run();
+
+  // A signal from here on takes its default action.
+  laufey_common::RemoveTerminationSignalHandlers();
+  g_backend = nullptr;
 
   // The loop is over: UI tasks still queued are answered "not run" and an
   // auth session in progress ends cancelled, so a runtime thread waiting on

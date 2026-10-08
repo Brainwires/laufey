@@ -25,6 +25,7 @@
 #include "laufey_io.h"
 #include "laufey_ui_tasks.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
@@ -34,6 +35,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -124,7 +126,21 @@ void ArmExitWatchdog(int status) {
   pthread_attr_destroy(&attr);
 }
 
+// Set by InstallUiExitGuard: until then exit() parks nothing.
+std::atomic<bool> g_exit_guard_installed{false};
+// The process that installed the guard, whose UI thread it parks. A child
+// forked without exec inherits the guard (and the on_exit handler) but not
+// the UI thread: its exit parks nothing.
+std::atomic<pid_t> g_exit_guard_pid{0};
+// The first exit to get here parks the UI thread (exit() below, before any
+// exit handler; else the guard's own handler); a later one has nothing to do.
+std::atomic<bool> g_ui_parked_for_exit{false};
+
 void ParkUiThreadForExit(int status) {
+  if (getpid() != g_exit_guard_pid.load())
+    return;
+  if (g_ui_parked_for_exit.exchange(true))
+    return;
   ArmExitWatchdog(status);
   UiTaskDispatcher& dispatcher = UiTaskDispatcher::Get();
   // The UI thread itself exiting (main returning) has nothing to park; its
@@ -175,6 +191,23 @@ void ParkUiThreadAtExit() {
 }
 #endif
 
+using ExitFunction = void (*)(int);
+
+// The C library's exit(), the one the exit() below stands in front of.
+// Looked up as the process starts (before a CEF subprocess is sandboxed),
+// and again if something exits before that.
+ExitFunction g_libc_exit = nullptr;
+
+ExitFunction LibcExit() {
+  if (!g_libc_exit)
+    g_libc_exit = reinterpret_cast<ExitFunction>(dlsym(RTLD_NEXT, "exit"));
+  return g_libc_exit;
+}
+
+__attribute__((constructor)) void FindLibcExit() {
+  LibcExit();
+}
+
 }  // namespace
 
 void InstallUiExitGuard() {
@@ -183,12 +216,16 @@ void InstallUiExitGuard() {
   // on_exit: the watchdog ends the process with the status exit was given.
   std::call_once(once, [] {
     g_exit_watchdog_seconds = ExitWatchdogSecondsFromEnv();
+    g_exit_guard_pid.store(getpid());
     on_exit(ParkUiThreadOnExit, nullptr);
+    g_exit_guard_installed.store(true);
   });
 #else
   std::call_once(once, [] {
     g_exit_watchdog_seconds = ExitWatchdogSecondsFromEnv();
+    g_exit_guard_pid.store(getpid());
     atexit(ParkUiThreadAtExit);
+    g_exit_guard_installed.store(true);
   });
 #endif
 }
@@ -1082,3 +1119,29 @@ bool TestFileDialogRespondLinux(int action, const char* path) {
 }
 
 }  // namespace laufey_common
+
+// exit() for the whole process: the host executable exports it (see
+// backend-common/CMakeLists.txt), so the runtime library's exit() (the
+// runtime's Deno.exit() before the app started, a native addon's exit())
+// and every other library's call reach this one first. With the UI exit
+// guard installed it parks the UI thread before the C library's exit() runs
+// a single exit handler. The guard's own handler can't do that: exit
+// handlers run in reverse order, so those a library registered after the
+// guard (a static built on first use, such as WebKitGTK's GBM device, and
+// libraries loaded later, such as Mesa's) ran first, while the UI thread
+// still painted. Destroying the GBM device unloaded libgbm's backend, and
+// the next frame (AcceleratedBackingStore::BufferGBM::didUpdateContents ->
+// gbm_bo_map) called into the unmapped library. An exit the C library makes
+// itself (main returning, on the UI thread) still goes through the guard's
+// handler.
+extern "C" __attribute__((visibility("default"))) void exit(
+    int status) noexcept {
+  if (laufey_common::g_exit_guard_installed.load())
+    laufey_common::ParkUiThreadForExit(status);
+  if (laufey_common::ExitFunction libc_exit = laufey_common::LibcExit())
+    libc_exit(status);
+  // No C library exit() to call (not reached in practice): end without the
+  // exit handlers rather than not at all.
+  fflush(nullptr);
+  _exit(status);
+}

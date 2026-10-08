@@ -277,3 +277,10 @@ set_target_properties(${LAUFEY_TARGET} PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON
 )
+
+# A headless launch (`run <script>`) runs its runtime to the end, on every
+# desktop host (backend-common/CMakeLists.txt).
+if(NOT PLATFORM_IOS)
+  laufey_add_headless_launch_test(${LAUFEY_TARGET}
+                                  "$<TARGET_FILE:${LAUFEY_TARGET}>")
+endif()

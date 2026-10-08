@@ -264,15 +264,23 @@ first web view, unless the user set it, `WEBKIT_DISABLE_DMABUF_RENDERER` or
 
 GTK 3 draws with GLX on X11, which WebKit's EGL display can't share, so its UI
 process takes each frame as a GBM buffer and maps it to the CPU (`gbm_bo_map`)
-to paint it with cairo (`AcceleratedBackingStore::BufferGBM`). On Mali /
-Panfrost (Fedora 44, webkit2gtk4.1 2.54.0, XFCE and i3) that map crashes the
-app: SIGSEGV in `BufferGBM::didUpdateContents`. With shared memory the web
-process reads the frame back itself (`BufferSHM`), so the frame costs the same
-one copy to the CPU on every GPU; only the side of the process boundary changes.
-On Wayland GTK 3 shares EGL with WebKit and keeps the zero-copy `BufferEGLImage`
+to paint it with cairo (`AcceleratedBackingStore::BufferGBM`). With shared
+memory the web process reads the frame back itself (`BufferSHM`), so the frame
+costs the same one copy to the CPU on every GPU; only the side of the process
+boundary changes, and the UI process doesn't use libgbm on X11 at all. On
+Wayland GTK 3 shares EGL with WebKit and keeps the zero-copy `BufferEGLImage`
 path; nothing is set there. `WEBKIT_DISABLE_DMABUF_RENDERER=1` is not used
 instead: with it the web process aborts in `FrameRenderer::graphicsLayerFactory`
 on the first `document.startViewTransition()`.
+
+The SIGSEGV in `BufferGBM::didUpdateContents` seen on Mali / Panfrost (Fedora
+44, webkit2gtk4.1 2.54.0, XFCE and i3) was not WebKit's: every crash came while
+another thread was in `exit()`, after an exit handler registered after the
+host's exit guard had destroyed WebKit's GBM device (unloading libgbm's backend,
+which the next frame's `gbm_bo_map` called into). The host's `exit()` now parks
+the UI thread before any exit handler runs (`InstallUiExitGuard`). Shared memory
+stays on X11: it costs nothing there, and it keeps the UI process off libgbm
+should an exit ever get past the guard.
 
 ## Display: Wayland or X11 (Linux)
 
