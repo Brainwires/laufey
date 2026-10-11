@@ -1,0 +1,25 @@
+# Weekly RustSec advisory check of Cargo.lock (see SECURITY.md). Read-only: no
+# secrets, no write permissions; a failing run is the signal to triage.
+name: cargo audit
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit --file Cargo.lock
