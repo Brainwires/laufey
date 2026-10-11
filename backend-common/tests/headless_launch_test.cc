@@ -6,17 +6,22 @@
 // with the stand-in runtime (headless_runtime_lib.cc) for 0 ms and for 12 s,
 // longer than the bounded wait a windowed app's runtime gets once its loop
 // has ended; each must write its marker and the host must exit 0 after it,
-// not before.
+// not before. The host's stdout must carry only what the runtime wrote: it is
+// the worker's output, which its parent reads (a sidecar's protocol, a
+// forked worker's), and the host wrote "Runtime loaded successfully from:
+// ..." and "Runtime started" there on every launch.
 
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -44,22 +49,36 @@ std::string MakeTempDir() {
   return "";
 }
 
-void RemoveTempDir(const std::string& dir, const std::string& marker) {
+void RemoveTempDir(const std::string& dir, const std::string& marker,
+                   const std::string& out) {
   DeleteFileA(marker.c_str());
+  DeleteFileA(out.c_str());
   RemoveDirectoryA(dir.c_str());
 }
 
-// Starts the host with `env` set; its exit code, or -1 if it ran past
-// `limit` (then killed), -2 if it did not start.
-int RunToEnd(const char* const (&env)[3][2], std::chrono::milliseconds limit) {
+// Starts the host with `env` set and its stdout in the file `out`; its exit
+// code, or -1 if it ran past `limit` (then killed), -2 if it did not start.
+int RunToEnd(const char* const (&env)[3][2], const std::string& out,
+             std::chrono::milliseconds limit) {
+  SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
+  HANDLE out_handle =
+      CreateFileA(out.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (out_handle == INVALID_HANDLE_VALUE)
+    return -2;
   for (const auto& kv : env)
     SetEnvironmentVariableA(kv[0], kv[1]);
   std::string command = std::string("\"") + LAUFEY_HOST + "\" run probe.js";
   STARTUPINFOA si = {};
   si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  si.hStdOutput = out_handle;
+  si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
   PROCESS_INFORMATION pi = {};
   BOOL started = CreateProcessA(LAUFEY_HOST, &command[0], nullptr, nullptr,
-                                FALSE, 0, nullptr, nullptr, &si, &pi);
+                                TRUE, 0, nullptr, nullptr, &si, &pi);
+  CloseHandle(out_handle);
   for (const auto& kv : env)
     SetEnvironmentVariableA(kv[0], nullptr);
   if (!started) {
@@ -90,17 +109,25 @@ std::string MakeTempDir() {
   return dir ? dir : "";
 }
 
-void RemoveTempDir(const std::string& dir, const std::string& marker) {
+void RemoveTempDir(const std::string& dir, const std::string& marker,
+                   const std::string& out) {
   unlink(marker.c_str());
+  unlink(out.c_str());
   rmdir(dir.c_str());
 }
 
-// Starts the host with `env` set; its exit status, or -1 if it ran past
-// `limit` (then killed), -2 if it did not start, -3 if a signal ended it.
-int RunToEnd(const char* const (&env)[3][2], std::chrono::milliseconds limit) {
+// Starts the host with `env` set and its stdout in the file `out`; its exit
+// status, or -1 if it ran past `limit` (then killed), -2 if it did not start,
+// -3 if a signal ended it.
+int RunToEnd(const char* const (&env)[3][2], const std::string& out,
+             std::chrono::milliseconds limit) {
   auto start = std::chrono::steady_clock::now();
   pid_t pid = fork();
   if (pid == 0) {
+    int fd = open(out.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || dup2(fd, STDOUT_FILENO) < 0)
+      _exit(126);
+    close(fd);
     for (const auto& kv : env)
       setenv(kv[0], kv[1], 1);
     execl(LAUFEY_HOST, LAUFEY_HOST, "run", "probe.js",
@@ -130,22 +157,27 @@ bool RunHost(long runtime_ms) {
     return false;
   }
   std::string marker = dir + "/marker";
+  std::string out = dir + "/stdout";
   std::string ms = std::to_string(runtime_ms);
   const char* const env[3][2] = {
       {"LAUFEY_RUNTIME_PATH", LAUFEY_HEADLESS_RUNTIME},
       {"LAUFEY_TEST_HEADLESS_MARKER", marker.c_str()},
       {"LAUFEY_TEST_HEADLESS_MS", ms.c_str()},
   };
-  int code = RunToEnd(
-      env, std::chrono::milliseconds(runtime_ms) + std::chrono::seconds(30));
-  std::string text;
-  {
-    std::ifstream in(marker);
+  int code = RunToEnd(env, out,
+                      std::chrono::milliseconds(runtime_ms) +
+                          std::chrono::seconds(30));
+  auto read_file = [](const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
     std::stringstream read;
     read << in.rdbuf();
-    text = read.str();
-  }
-  RemoveTempDir(dir, marker);
+    return read.str();
+  };
+  std::string text = read_file(marker);
+  std::string stdout_text = read_file(out);
+  stdout_text.erase(std::remove(stdout_text.begin(), stdout_text.end(), '\r'),
+                    stdout_text.end());
+  RemoveTempDir(dir, marker, out);
   if (code == -1) {
     std::fprintf(stderr, "headless_launch_test: the host hung (%ld ms)\n",
                  runtime_ms);
@@ -163,6 +195,13 @@ bool RunHost(long runtime_ms) {
                  "headless_launch_test: the host exited before its %ld ms "
                  "runtime finished\n",
                  runtime_ms);
+    return false;
+  }
+  if (stdout_text != "worker stdout\n") {
+    std::fprintf(stderr,
+                 "headless_launch_test: the worker's stdout carried more than "
+                 "its runtime wrote (%ld ms): \"%s\"\n",
+                 runtime_ms, stdout_text.c_str());
     return false;
   }
   return true;
