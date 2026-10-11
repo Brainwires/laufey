@@ -3,7 +3,8 @@
 // A stand-in runtime library for headless_launch_test.cc: laufey_runtime_start
 // runs for LAUFEY_TEST_HEADLESS_MS milliseconds (a forked worker, the
 // updater's helper), then writes "done" to LAUFEY_TEST_HEADLESS_MARKER and
-// returns. It has no backend to call.
+// returns, having written "worker stdout" to its stdout (which a worker's
+// parent reads). It has no backend to call.
 
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
@@ -22,6 +23,8 @@ LAUFEY_TEST_EXPORT int laufey_runtime_init(const void* /*api*/) {
 }
 
 LAUFEY_TEST_EXPORT int laufey_runtime_start() {
+  std::fputs("worker stdout\n", stdout);
+  std::fflush(stdout);
   const char* ms = std::getenv("LAUFEY_TEST_HEADLESS_MS");
   std::this_thread::sleep_for(
       std::chrono::milliseconds(ms ? std::atol(ms) : 0));

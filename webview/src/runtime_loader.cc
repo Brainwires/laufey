@@ -1727,7 +1727,9 @@ bool RuntimeLoader::Load(const std::string& path) {
   }
 #endif
 
-  std::cout << "Runtime loaded successfully from: " << path << std::endl;
+  // stderr: stdout is the app's own (a headless worker's or a sidecar's
+  // output, which its parent reads).
+  std::cerr << "Runtime loaded successfully from: " << path << std::endl;
   return true;
 }
 
@@ -1750,7 +1752,7 @@ bool RuntimeLoader::Start() {
   running_ = true;
   runtime_thread_ = std::thread(&RuntimeLoader::RuntimeThread, this);
 
-  std::cout << "Runtime started" << std::endl;
+  std::cerr << "Runtime started" << std::endl;
   return true;
 }
 
