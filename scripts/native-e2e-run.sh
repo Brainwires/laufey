@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -20,6 +20,9 @@
 # page on another origin that must not reach loopback.
 # --bridge-origin runs only the API 44 bridge pin checks
 # (bridge_origin_checks.rs) under a launch file it writes next to the backend.
+# --navigation runs only the API 48 navigation guard checks
+# (navigation_checks.rs) against a loopback server, with the open-external
+# capture on so nothing reaches a real browser.
 # --lifetime runs only the app-lifetime checks (keep-alive with no window,
 # then quit() ending the event loop); they end the process, so they can't
 # share the main battery's run.
@@ -120,6 +123,9 @@ if [ "$mode" = "--lifetime" ]; then
 fi
 if [ "$mode" = "--bridge-origin" ]; then
   export LAUFEY_E2E_ONLY=bridge-origin
+fi
+if [ "$mode" = "--navigation" ]; then
+  export LAUFEY_E2E_ONLY=navigation
 fi
 if [ "$mode" = "--lna" ]; then
   export LAUFEY_E2E_ONLY=lna

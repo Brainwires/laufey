@@ -29,10 +29,13 @@
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
+#include "laufey_navigation_guard.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
+  if (laufey_common::ExternalOpenCapture::Instance().Capture(url))
+    return;
   std::wstring wurl = laufey_common::Utf8ToWide(url);
   if (wurl.empty())
     return;

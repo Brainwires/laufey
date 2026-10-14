@@ -15,6 +15,7 @@
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_navigation_guard.h"
 #include "laufey_json.h"
 #include "laufey_scheme_body_stream.h"
 #include "laufey_scheme_cancel.h"
@@ -722,13 +723,49 @@ static void DisableByteStreamFetchSource(WebKitSettings* settings) {
 // (and the web process has content to composite). The window_id is passed
 // directly as user_data because this signal is on the WebKitWebView, not the
 // toplevel registered with LaufeyIdForWidget.
-static void on_load_changed(WebKitWebView* /*webview*/,
-                            WebKitLoadEvent load_event, gpointer user_data) {
-  if (load_event != WEBKIT_LOAD_FINISHED) {
+// Hands `uri` to the OS browser (GIO), unless the open-external capture
+// test hook records it instead (laufey_navigation_guard.h). The caller has
+// already checked the URL (IsAllowedExternalLinkUrl). GTK thread.
+static void LaufeyLaunchInBrowser(const char* uri) {
+  if (!uri || laufey_common::ExternalOpenCapture::Instance().Capture(uri))
     return;
-  }
+  g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
+}
+
+// The navigation guard (API 48, laufey_navigation_guard.h). WebKitGTK's
+// navigation policy decision says nothing of the frame it targets, and
+// sub-frames are the page's CSP's business, so the guard watches the main
+// frame's own load events instead: the URI a load starts with, and each
+// redirect's. A refused one is stopped there, before anything commits (the
+// engine has already sent its request), and an http(s) destination opens in
+// the OS browser.
+static void GuardMainFrameLoad(WebKitWebView* webview, uint32_t wid) {
+  const char* uri = webkit_web_view_get_uri(webview);
+  if (!uri)
+    return;
+  laufey_common::NavigationDecision decision =
+      laufey_common::NavigationGuard::Instance().Decide(wid, uri);
+  if (decision == laufey_common::NavigationDecision::kAllow)
+    return;
+  std::string refused(uri);
+  laufey_common::LogGuardedNavigation(refused, decision);
+  webkit_web_view_stop_loading(webview);
+  if (decision == laufey_common::NavigationDecision::kOpenInBrowser)
+    LaufeyLaunchInBrowser(refused.c_str());
+}
+
+static void on_load_changed(WebKitWebView* webview, WebKitLoadEvent load_event,
+                            gpointer user_data) {
   uint32_t wid = static_cast<uint32_t>(GPOINTER_TO_UINT(user_data));
   if (wid == 0) {
+    return;
+  }
+  if (load_event == WEBKIT_LOAD_STARTED ||
+      load_event == WEBKIT_LOAD_REDIRECTED) {
+    GuardMainFrameLoad(webview, wid);
+    return;
+  }
+  if (load_event != WEBKIT_LOAD_FINISHED) {
     return;
   }
   RuntimeLoader::GetInstance()->DispatchPageLoadEvent(wid);
@@ -753,7 +790,7 @@ static WebKitWebView* on_create(WebKitWebView* /*webview*/,
   bool gesture = webkit_navigation_action_is_user_gesture(navigation_action);
   switch (DecideLaufeyPopup(uri, gesture)) {
     case LaufeyPopupDecision::kOpenInBrowser:
-      g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
+      LaufeyLaunchInBrowser(uri);
       break;
     case LaufeyPopupDecision::kBlockedNoGesture:
       std::cerr << "laufey: not opening " << uri
@@ -1574,9 +1611,7 @@ void WebKitGTKBackend::Navigate(uint32_t window_id, const std::string& url) {
 }
 
 void WebKitGTKBackend::OpenExternalURL(const std::string& url) {
-  gtk_invoke_sync([&] {
-    g_app_info_launch_default_for_uri(url.c_str(), nullptr, nullptr);
-  });
+  gtk_invoke_sync([&] { LaufeyLaunchInBrowser(url.c_str()); });
 }
 
 void WebKitGTKBackend::SetTitle(uint32_t window_id, const std::string& title) {

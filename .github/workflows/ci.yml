@@ -96,6 +96,16 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/bridge_origin_test"
           "$RUNNER_TEMP/bridge_origin_test"
+      # The navigation guard (API 48): what a window's top-level frame may
+      # load, and the open-external capture the e2e battery reads.
+      - name: backend-common navigation_guard_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/navigation_guard_test.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/navigation_guard_test"
+          "$RUNNER_TEMP/navigation_guard_test"
       # The host's command line: options stop at "--", a packaged app ignores
       # --runtime, a deep-link launch drops its command-line switches.
       - name: backend-common launch_args_test
@@ -583,6 +593,15 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --bridge-origin
+
+      # API 48: the navigation guard. A top-level navigation to another
+      # origin (script, redirect) never loads in the window and goes to the
+      # browser (captured); same-origin, sub-frames and allowed origins load.
+      - name: Navigation guard
+        if: matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --navigation
 
       # The CEF host makes no network request of its own: Chromium's net log
       # over a launch, the app page and 75 s of idle (past the component

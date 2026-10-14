@@ -21,8 +21,11 @@
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
+#include "laufey_navigation_guard.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
+  if (laufey_common::ExternalOpenCapture::Instance().Capture(url))
+    return;
   @autoreleasepool {
     NSURL* nsurl =
         [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];

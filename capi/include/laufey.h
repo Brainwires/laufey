@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 47
+#define LAUFEY_API_VERSION 48
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -2233,6 +2233,40 @@ struct laufey_backend_api {
                       uint32_t timeout_ms, char** reason);
   int (*secret_delete)(void* backend_data, const char* service,
                        const char* account, uint32_t timeout_ms, char** reason);
+
+  // --- Navigation guard (API >= 48) ----------------------------------------
+  //
+  // A window's top-level frame loads only the origin of the URL the
+  // embedder last navigated it to (`navigate`), the origins set here, and
+  // about:blank / about:srcdoc. Any other top-level navigation (a link,
+  // `location = ...`, a form, a server redirect, a meta refresh) is
+  // cancelled, and an http(s) destination opens in the OS browser through
+  // the checked open-external path (laufey_external_links.h). Sub-frames
+  // are not checked: what a page may frame is its Content Security
+  // Policy's. On every web-engine backend (CEF, WKWebView, WebView2,
+  // WebKitGTK); WebKitGTK reports no main-frame flag in its navigation
+  // policy, so it stops a refused main-frame load as it starts (and at each
+  // redirect), after the engine has sent the request and before anything
+  // commits. See docs/window-management.md, "External links and popups".
+  //
+  // `origins`: `count` exact origins ("scheme://host[:port]", a trailing
+  // "/" allowed) every window may load besides its own, replacing any set
+  // before; an entry that is not an origin is reported on stderr and
+  // skipped. Any thread. NULL on backends older than API version 48 and on
+  // backends without a web engine (Winit).
+  void (*set_allowed_navigation_origins)(void* backend_data,
+                                         const char* const* origins,
+                                         size_t count);
+
+  // Test hook (API >= 48): while `capture` is true, every URL the backend
+  // would hand to the OS browser (the navigation guard, a popup, the
+  // reserved __laufeyOpenExternal call) is recorded instead of opened.
+  // test_take_external_opens returns the recorded URLs as a JSON array of
+  // strings and clears them (freed with string_free). Turning capture off
+  // drops what was recorded. Any thread. NULL where
+  // set_allowed_navigation_origins is.
+  void (*test_capture_external_opens)(void* backend_data, bool capture);
+  char* (*test_take_external_opens)(void* backend_data);
 };
 
 #ifdef __cplusplus

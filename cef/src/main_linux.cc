@@ -24,6 +24,7 @@
 #include "laufey_cef_sandbox.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
+#include "laufey_navigation_guard.h"
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_platform_features.h"
@@ -35,6 +36,8 @@
 #include <gio/gio.h>
 
 void LaufeyOpenExternalURL(const std::string& url) {
+  if (laufey_common::ExternalOpenCapture::Instance().Capture(url))
+    return;
   g_app_info_launch_default_for_uri(url.c_str(), nullptr, nullptr);
 }
 

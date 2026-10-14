@@ -13,6 +13,7 @@
 #include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_navigation_guard.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
@@ -940,6 +941,19 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
   return store;
 }
 
+// Hands `url` to the OS browser (NSWorkspace), unless the open-external
+// capture test hook records it instead (laufey_navigation_guard.h). The
+// caller has already checked the URL (IsAllowedExternalLinkUrl).
+static void LaufeyOpenInBrowser(NSURL* url) {
+  if (!url)
+    return;
+  NSString* absolute = url.absoluteString;
+  if (absolute && laufey_common::ExternalOpenCapture::Instance().Capture(
+                      absolute.UTF8String))
+    return;
+  [[NSWorkspace sharedWorkspace] openURL:url];
+}
+
 @interface LaufeyUIDelegate : NSObject <WKUIDelegate>
 @end
 
@@ -970,7 +984,7 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
   NSString* absolute = url.absoluteString;
   if (absolute && DecideLaufeyPopup(absolute.UTF8String, true) ==
                       LaufeyPopupDecision::kOpenInBrowser) {
-    [[NSWorkspace sharedWorkspace] openURL:url];
+    LaufeyOpenInBrowser(url);
   }
   return nil;
 }
@@ -1116,6 +1130,37 @@ static WKWebsiteDataStore* LaufeyWebsiteDataStore() {
 @end
 
 @implementation LaufeyNavigationDelegate
+
+// The navigation guard (API 48, laufey_navigation_guard.h): a top-level
+// navigation to an origin the window may not load is cancelled, and an
+// http(s) destination opens in the OS browser. WebKit asks again for each
+// server redirect, so a redirect to another origin is refused too. A
+// navigation with no target frame is a new-window request, which the UI
+// delegate's createWebView hook handles; a sub-frame is the page's CSP's.
+- (void)webView:(WKWebView*)webView
+    decidePolicyForNavigationAction:(WKNavigationAction*)navigationAction
+                    decisionHandler:
+                        (void (^)(WKNavigationActionPolicy))decisionHandler {
+  WKFrameInfo* target = navigationAction.targetFrame;
+  NSURL* url = navigationAction.request.URL;
+  NSString* absolute = url.absoluteString;
+  if (!target || !target.isMainFrame || !absolute) {
+    decisionHandler(WKNavigationActionPolicyAllow);
+    return;
+  }
+  std::string urlString = absolute.UTF8String ? absolute.UTF8String : "";
+  laufey_common::NavigationDecision decision =
+      laufey_common::NavigationGuard::Instance().Decide(self.windowId,
+                                                        urlString);
+  if (decision == laufey_common::NavigationDecision::kAllow) {
+    decisionHandler(WKNavigationActionPolicyAllow);
+    return;
+  }
+  laufey_common::LogGuardedNavigation(urlString, decision);
+  decisionHandler(WKNavigationActionPolicyCancel);
+  if (decision == laufey_common::NavigationDecision::kOpenInBrowser)
+    LaufeyOpenInBrowser(url);
+}
 
 // Fired when a main-frame navigation finishes loading. Used to reveal a window
 // created with LAUFEY_WINDOW_FLAG_HIDDEN once it has real content to show.
@@ -1838,6 +1883,8 @@ void WKWebViewBackend::CloseWindow(uint32_t window_id) {
 }
 
 void WKWebViewBackend::OpenExternalURL(const std::string& url) {
+  if (laufey_common::ExternalOpenCapture::Instance().Capture(url))
+    return;
   std::string urlCopy = url;
   dispatch_async(dispatch_get_main_queue(), ^{
     @autoreleasepool {
