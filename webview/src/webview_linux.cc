@@ -734,25 +734,60 @@ static void LaufeyLaunchInBrowser(const char* uri) {
 
 // The navigation guard (API 48, laufey_navigation_guard.h). WebKitGTK's
 // navigation policy decision says nothing of the frame it targets, and
-// sub-frames are the page's CSP's business, so the guard watches the main
-// frame's own load events instead: the URI a load starts with, and each
-// redirect's. A refused one is stopped there, before anything commits (the
-// engine has already sent its request), and an http(s) destination opens in
-// the OS browser.
-static void GuardMainFrameLoad(WebKitWebView* webview, uint32_t wid) {
-  const char* uri = webkit_web_view_get_uri(webview);
+// sub-frames are the page's CSP's business, so the guard decides on the
+// main frame's response instead (webkit_response_policy_decision_is_main_
+// frame_main_resource, WebKitGTK 2.40): a refused one is ignored, so nothing
+// from it commits or runs (the engine has already sent its request), and an
+// http(s) destination opens in the OS browser. The response's URI is the
+// final one, after any redirect. Older WebKitGTK falls back to stopping the
+// main frame's load as it starts or redirects.
+static bool GuardRefuses(uint32_t wid, const char* uri) {
   if (!uri)
-    return;
+    return false;
   laufey_common::NavigationDecision decision =
       laufey_common::NavigationGuard::Instance().Decide(wid, uri);
   if (decision == laufey_common::NavigationDecision::kAllow)
-    return;
+    return false;
   std::string refused(uri);
   laufey_common::LogGuardedNavigation(refused, decision);
-  webkit_web_view_stop_loading(webview);
   if (decision == laufey_common::NavigationDecision::kOpenInBrowser)
     LaufeyLaunchInBrowser(refused.c_str());
+  return true;
 }
+
+static gboolean on_decide_policy(WebKitWebView* /*webview*/,
+                                 WebKitPolicyDecision* decision,
+                                 WebKitPolicyDecisionType type,
+                                 gpointer user_data) {
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+  if (type != WEBKIT_POLICY_DECISION_TYPE_RESPONSE)
+    return FALSE;
+  auto* response_decision = WEBKIT_RESPONSE_POLICY_DECISION(decision);
+  if (!webkit_response_policy_decision_is_main_frame_main_resource(
+          response_decision))
+    return FALSE;
+  uint32_t wid = static_cast<uint32_t>(GPOINTER_TO_UINT(user_data));
+  WebKitURIResponse* response =
+      webkit_response_policy_decision_get_response(response_decision);
+  const char* uri = response ? webkit_uri_response_get_uri(response) : nullptr;
+  if (wid == 0 || !GuardRefuses(wid, uri))
+    return FALSE;
+  webkit_policy_decision_ignore(decision);
+  return TRUE;
+#else
+  (void)decision;
+  (void)type;
+  (void)user_data;
+  return FALSE;
+#endif
+}
+
+#if !WEBKIT_CHECK_VERSION(2, 40, 0)
+static void GuardMainFrameLoad(WebKitWebView* webview, uint32_t wid) {
+  if (GuardRefuses(wid, webkit_web_view_get_uri(webview)))
+    webkit_web_view_stop_loading(webview);
+}
+#endif
 
 static void on_load_changed(WebKitWebView* webview, WebKitLoadEvent load_event,
                             gpointer user_data) {
@@ -760,11 +795,15 @@ static void on_load_changed(WebKitWebView* webview, WebKitLoadEvent load_event,
   if (wid == 0) {
     return;
   }
+#if !WEBKIT_CHECK_VERSION(2, 40, 0)
   if (load_event == WEBKIT_LOAD_STARTED ||
       load_event == WEBKIT_LOAD_REDIRECTED) {
     GuardMainFrameLoad(webview, wid);
     return;
   }
+#else
+  (void)webview;
+#endif
   if (load_event != WEBKIT_LOAD_FINISHED) {
     return;
   }
@@ -1500,6 +1539,8 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     g_signal_connect(webview, "load-changed", G_CALLBACK(on_load_changed),
                      GUINT_TO_POINTER(window_id));
     g_signal_connect(webview, "create", G_CALLBACK(on_create), nullptr);
+    g_signal_connect(webview, "decide-policy", G_CALLBACK(on_decide_policy),
+                     GUINT_TO_POINTER(window_id));
     g_signal_connect(webview, "drag-motion", G_CALLBACK(on_file_drag_motion),
                      GUINT_TO_POINTER(window_id));
     g_signal_connect(webview, "drag-data-received",

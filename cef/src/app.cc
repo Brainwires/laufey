@@ -298,10 +298,11 @@ void LaufeyHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 bool LaufeyHandler::OnBeforePopup(
     CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int popup_id,
     const CefString& target_url, const CefString& target_frame_name,
-    WindowOpenDisposition target_disposition, bool user_gesture,
-    const CefPopupFeatures& popupFeatures, CefWindowInfo& windowInfo,
-    CefRefPtr<CefClient>& client, CefBrowserSettings& settings,
-    CefRefPtr<CefDictionaryValue>& extra_info, bool* no_javascript_access) {
+    CefLifeSpanHandler::WindowOpenDisposition target_disposition,
+    bool user_gesture, const CefPopupFeatures& popupFeatures,
+    CefWindowInfo& windowInfo, CefRefPtr<CefClient>& client,
+    CefBrowserSettings& settings, CefRefPtr<CefDictionaryValue>& extra_info,
+    bool* no_javascript_access) {
   CEF_REQUIRE_UI_THREAD();
   // `target="_blank"` / `window.open()` aren't seen by the page's Navigation
   // API listener. Cancel the popup and route http(s) destinations to the OS
@@ -715,7 +716,16 @@ bool LaufeyHandler::OnProcessMessageReceived(
       if (callArgs && callArgs->GetSize() > 0 &&
           callArgs->GetType(0) == VTYPE_STRING) {
         std::string url = callArgs->GetString(0).ToString();
-        if (IsAllowedExternalLinkUrl(url)) {
+        // An origin the navigation guard lets this window load (one the
+        // embedder allows) stays in the window; anything else goes to the
+        // OS browser when the URL rule allows it.
+        uint32_t window_id =
+            RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
+        if (window_id != 0 &&
+            laufey_common::NavigationGuard::Instance().Decide(window_id, url) ==
+                laufey_common::NavigationDecision::kAllow) {
+          frame->LoadURL(url);
+        } else if (IsAllowedExternalLinkUrl(url)) {
           LaufeyOpenExternalURL(url);
         }
       }

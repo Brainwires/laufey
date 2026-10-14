@@ -441,16 +441,19 @@ browser; anything else (`file:`, `data:`, a custom scheme, `mailto:`) is
 dropped. Sub-frames are not checked: what a page may frame is its Content
 Security Policy's (`frame-src`).
 
-| Backend   | Where                                                        | Redirects                                  |
-| --------- | ------------------------------------------------------------ | ------------------------------------------ |
-| CEF       | `CefRequestHandler::OnBeforeBrowse` (main frame)             | asked again per redirect                   |
-| WKWebView | `decidePolicyForNavigationAction` (target frame is the main) | asked again per redirect                   |
-| WebView2  | `NavigationStarting` (main frame only)                       | raised again per redirect                  |
-| WebKitGTK | `load-changed` `STARTED` / `REDIRECTED` (main frame only)    | stopped at `REDIRECTED`, before any commit |
+| Backend   | Where                                                        | Redirects                           |
+| --------- | ------------------------------------------------------------ | ----------------------------------- |
+| CEF       | `CefRequestHandler::OnBeforeBrowse` (main frame)             | asked again per redirect            |
+| WKWebView | `decidePolicyForNavigationAction` (target frame is the main) | asked again per redirect            |
+| WebView2  | `NavigationStarting` (main frame only)                       | raised again per redirect           |
+| WebKitGTK | `decide-policy`, the main frame's main-resource response     | the final response, after redirects |
 
 WebKitGTK's navigation policy decision does not say which frame it targets, so
-that backend stops a refused main-frame load as it starts: the engine has
-already sent the request, but nothing from the response is committed or run.
+that backend refuses the main frame's response instead
+(`webkit_response_policy_decision_is_main_frame_main_resource`, WebKitGTK 2.40):
+the engine has already sent the request, but nothing from the response is
+committed or run. Before 2.40 it stops the main frame's load as it starts or
+redirects.
 
 A test can turn on `test_capture_external_opens`: every URL a backend would hand
 to the browser (the guard, a popup, the reserved call) is then recorded for

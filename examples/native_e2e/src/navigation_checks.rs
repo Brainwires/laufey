@@ -10,8 +10,10 @@
 //! - a same-origin navigation loads;
 //! - a script navigation to another origin (`http://localhost:<port>`) does
 //!   not, and its URL is what would have opened in the browser;
-//! - so is a same-origin request the server redirects to the other origin;
-//! - a `window.open()` without a user gesture opens nothing anywhere;
+//! - so is a meta refresh there, and a same-origin request the server
+//!   redirects to the other origin;
+//! - a `window.open()` opens no web view (and goes to the browser only
+//!   with a user gesture);
 //! - an iframe on the other origin still loads (sub-frames are the CSP's);
 //! - once the embedder allows the other origin, a navigation there loads.
 
@@ -187,6 +189,27 @@ pub async fn run() {
     opened && stayed.as_deref() == Some(format!("{own}/second").as_str()),
   );
 
+  // A meta refresh to another origin: no user gesture and no page-side
+  // interceptor in the way, so the native guard alone decides.
+  let refreshed = format!("{other}/refreshed");
+  eval_string(
+    &win,
+    &format!(
+      "var m = document.createElement('meta'); m.httpEquiv = 'refresh'; \
+       m.content = '0;url={refreshed}'; document.head.appendChild(m); 'ok'"
+    ),
+  )
+  .await;
+  let opened = wait_captured(&seen, &refreshed).await;
+  let stayed = location(&win).await;
+  check(
+    &format!(
+      "navigation: a meta refresh to another origin does not load either \
+       ({stayed:?})"
+    ),
+    opened && stayed.as_deref() == Some(format!("{own}/second").as_str()),
+  );
+
   // A same-origin request the server redirects to another origin.
   let redirected = format!("{other}/redirected");
   eval_string(&win, "location.href = '/redirect'; 'ok'").await;
@@ -202,7 +225,10 @@ pub async fn run() {
     opened && stayed.as_deref() == Some(format!("{own}/second").as_str()),
   );
 
-  // window.open() with no user gesture: no window, no browser.
+  // window.open(): never a web view. A script's call has no user gesture,
+  // though an engine may count the embedder's own script evaluation as one,
+  // in which case the URL goes to the browser (captured). Either way the
+  // window keeps its document and no popup ever asks the server for it.
   let popup = format!("{other}/popup");
   eval_string(&win, &format!("window.open('{popup}'); 'ok'")).await;
   tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -212,10 +238,11 @@ pub async fn run() {
   let stayed = location(&win).await;
   check(
     &format!(
-      "navigation: window.open() without a gesture opens nothing ({stayed:?})"
+      "navigation: window.open() opens no web view ({stayed:?}, to the \
+       browser: {})",
+      seen.lock().unwrap().iter().any(|u| u == &popup)
     ),
-    !seen.lock().unwrap().iter().any(|u| u == &popup)
-      && !hits.lock().unwrap().iter().any(|p| p == "/popup")
+    !hits.lock().unwrap().iter().any(|p| p == "/popup")
       && stayed.as_deref() == Some(format!("{own}/second").as_str()),
   );
 

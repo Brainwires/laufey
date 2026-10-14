@@ -2244,10 +2244,10 @@ struct laufey_backend_api {
   // the checked open-external path (laufey_external_links.h). Sub-frames
   // are not checked: what a page may frame is its Content Security
   // Policy's. On every web-engine backend (CEF, WKWebView, WebView2,
-  // WebKitGTK); WebKitGTK reports no main-frame flag in its navigation
-  // policy, so it stops a refused main-frame load as it starts (and at each
-  // redirect), after the engine has sent the request and before anything
-  // commits. See docs/window-management.md, "External links and popups".
+  // WebKitGTK); WebKitGTK reports no frame in its navigation policy, so it
+  // refuses the main frame's response instead: the engine has sent the
+  // request, and nothing from the response commits or runs. See
+  // docs/window-management.md, "External links and popups".
   //
   // `origins`: `count` exact origins ("scheme://host[:port]", a trailing
   // "/" allowed) every window may load besides its own, replacing any set

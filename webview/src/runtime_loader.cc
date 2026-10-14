@@ -1934,8 +1934,16 @@ void RuntimeLoader::PollPendingJsCalls() {
           url = list[0]->GetString();
         }
       }
-      if (IsAllowedExternalLinkUrl(url)) {
-        if (LaufeyBackend* backend = GetBackend()) {
+      // An origin the navigation guard lets this window load (one the
+      // embedder allows) stays in the window; anything else goes to the OS
+      // browser when the URL rule allows it.
+      laufey_common::NavigationDecision decision =
+          laufey_common::NavigationGuard::Instance().Decide(call.window_id,
+                                                            url);
+      if (LaufeyBackend* backend = GetBackend()) {
+        if (decision == laufey_common::NavigationDecision::kAllow) {
+          backend->Navigate(call.window_id, url);
+        } else if (IsAllowedExternalLinkUrl(url)) {
           backend->OpenExternalURL(url);
         }
       }
