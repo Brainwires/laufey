@@ -19,6 +19,7 @@
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_jsdialog_handler.h"
 #include "include/cef_permission_handler.h"
+#include "include/cef_request_handler.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 
@@ -235,7 +236,8 @@ class LaufeyHandler : public CefClient,
                       public CefJSDialogHandler,
                       public CefCommandHandler,
                       public CefContextMenuHandler,
-                      public CefPermissionHandler {
+                      public CefPermissionHandler,
+                      public CefRequestHandler {
  public:
   LaufeyHandler();
   ~LaufeyHandler() override;
@@ -266,6 +268,18 @@ class LaufeyHandler : public CefClient,
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
     return this;
   }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override {
+    return this;
+  }
+
+  // The navigation guard (API 48, laufey_navigation_guard.h): a main-frame
+  // navigation of a laufey window (and each of its server redirects) to an
+  // origin the window may not load is cancelled, and an http(s) destination
+  // opens in the OS browser. Sub-frames are left to the page's CSP; a
+  // browser that is no laufey window (DevTools) is not checked.
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request, bool user_gesture,
+                      bool is_redirect) override;
 
   // Local Network Access: the embedder's own origins (its declared custom
   // schemes and "app") may reach loopback / private addresses; everyone
@@ -308,15 +322,14 @@ class LaufeyHandler : public CefClient,
   // `target="_blank"` / `window.open()` requests aren't seen by the page's
   // Navigation API listener; cancel the popup and open http(s) destinations in
   // the OS browser instead.
-  bool OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
-                     int popup_id, const CefString& target_url,
-                     const CefString& target_frame_name,
-                     WindowOpenDisposition target_disposition,
-                     bool user_gesture, const CefPopupFeatures& popupFeatures,
-                     CefWindowInfo& windowInfo, CefRefPtr<CefClient>& client,
-                     CefBrowserSettings& settings,
-                     CefRefPtr<CefDictionaryValue>& extra_info,
-                     bool* no_javascript_access) override;
+  bool OnBeforePopup(
+      CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int popup_id,
+      const CefString& target_url, const CefString& target_frame_name,
+      CefLifeSpanHandler::WindowOpenDisposition target_disposition,
+      bool user_gesture, const CefPopupFeatures& popupFeatures,
+      CefWindowInfo& windowInfo, CefRefPtr<CefClient>& client,
+      CefBrowserSettings& settings, CefRefPtr<CefDictionaryValue>& extra_info,
+      bool* no_javascript_access) override;
   bool DoClose(CefRefPtr<CefBrowser> browser) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
 

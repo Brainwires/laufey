@@ -3,6 +3,7 @@
 #include "runtime_loader.h"
 
 #include "laufey_bridge_origin.h"
+#include "laufey_navigation_guard.h"
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
@@ -180,6 +181,10 @@ static void Backend_Navigate(void* data, uint32_t window_id, const char* url) {
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser && url) {
     std::string url_str(url);
+    // The window's top-level frame may load this URL's origin from now on
+    // (laufey_navigation_guard.h); recorded before the load starts, so
+    // OnBeforeBrowse lets it through.
+    laufey_common::NavigationGuard::Instance().SetWindowUrl(window_id, url_str);
     CefPostTask(TID_UI, base::BindOnce(
                             [](CefRefPtr<CefBrowser> b, std::string u) {
                               b->GetMainFrame()->LoadURL(u);
@@ -2263,6 +2268,7 @@ static uint32_t Backend_CreateWindowEx(void* data, uint32_t flags) {
 }
 
 static void Backend_CloseWindow(void* data, uint32_t window_id) {
+  laufey_common::NavigationGuard::Instance().ForgetWindow(window_id);
   auto* loader = RuntimeLoader::GetInstance();
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
@@ -3277,6 +3283,18 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.open_devtools = Backend_OpenDevTools;
   backend_api_.print_to_pdf = Backend_PrintToPdf;
   backend_api_.set_js_namespace = Backend_SetJsNamespace;
+  // The navigation guard (API 48): LaufeyHandler::OnBeforeBrowse checks
+  // every laufey window's main-frame navigations.
+  backend_api_.set_allowed_navigation_origins =
+      [](void*, const char* const* origins, size_t count) {
+        laufey_common::SetAllowedNavigationOriginsForAbi(origins, count);
+      };
+  backend_api_.test_capture_external_opens = [](void*, bool capture) {
+    laufey_common::TestCaptureExternalOpensForAbi(capture);
+  };
+  backend_api_.test_take_external_opens = [](void*) {
+    return laufey_common::TestTakeExternalOpensForAbi();
+  };
   backend_api_.show_dialog = Backend_ShowDialog;
   backend_api_.string_free = Backend_StringFree;
   backend_api_.read_clipboard_text = Backend_ReadClipboardText;

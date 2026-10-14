@@ -414,9 +414,50 @@ another origin and a request for a new window (`window.open()`,
   the macOS backend turns `javaScriptCanOpenWindowsAutomatically` off (macOS
   defaults it on) and WebKit's popup blocker drops a request without a gesture
   before it reaches the backend.
-- A same-window navigation to another origin is redirected only when it is
-  user-initiated (the Navigation API's `userInitiated`) or, on WKWebView, which
-  lacks that API, a trusted click on a link.
+- A same-window navigation to another origin never loads in the window (the
+  navigation guard, API 48, below). The page-side interceptor still hands a
+  user-initiated one (the Navigation API's `userInitiated`, or on WKWebView,
+  which lacks that API, a trusted click on a link) to the browser before the
+  engine starts it.
+
+### The navigation guard (API 48)
+
+A window's top-level frame loads only:
+
+- the origin of the URL the embedder last navigated it to (`navigate`), so the
+  app's own origin, whatever it is (a custom scheme, a loopback server, a dev
+  server); the embedder's own navigation is never refused;
+- the origins the embedder allows for every window with
+  `set_allowed_navigation_origins` (exact origins, `scheme://host[:port]`;
+  `laufey::set_allowed_navigation_origins` in Rust);
+- `about:blank` and `about:srcdoc`, and, in a window the embedder pointed at a
+  `file:` URL, other `file:` URLs.
+
+Any other top-level navigation (a link, `location = …`, a form, a server
+redirect, a meta refresh, a script on a timer) is cancelled and logged
+(`laufey: <url> is not the app's origin: opening it in the browser instead`). An
+`http(s)` destination that passes the URL rule above opens in the user's
+browser; anything else (`file:`, `data:`, a custom scheme, `mailto:`) is
+dropped. Sub-frames are not checked: what a page may frame is its Content
+Security Policy's (`frame-src`).
+
+| Backend   | Where                                                        | Redirects                           |
+| --------- | ------------------------------------------------------------ | ----------------------------------- |
+| CEF       | `CefRequestHandler::OnBeforeBrowse` (main frame)             | asked again per redirect            |
+| WKWebView | `decidePolicyForNavigationAction` (target frame is the main) | asked again per redirect            |
+| WebView2  | `NavigationStarting` (main frame only)                       | raised again per redirect           |
+| WebKitGTK | `decide-policy`, the main frame's main-resource response     | the final response, after redirects |
+
+WebKitGTK's navigation policy decision does not say which frame it targets, so
+that backend refuses the main frame's response instead
+(`webkit_response_policy_decision_is_main_frame_main_resource`, WebKitGTK 2.40):
+the engine has already sent the request, but nothing from the response is
+committed or run. Before 2.40 it stops the main frame's load as it starts or
+redirects.
+
+A test can turn on `test_capture_external_opens`: every URL a backend would hand
+to the browser (the guard, a popup, the reserved call) is then recorded for
+`test_take_external_opens` instead of opened.
 
 A script can also call the reserved `__laufeyOpenExternal(url)` method of the
 bridge namespace directly, without a gesture. The backend applies the URL rule

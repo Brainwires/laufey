@@ -36,6 +36,7 @@ mod io_checks;
 mod launch_checks;
 mod lna_checks;
 mod menu_notification_checks;
+mod navigation_checks;
 mod network_quiet_checks;
 mod os_view;
 mod platform_checks;
@@ -808,6 +809,11 @@ fn e2e_main() {
     // native-e2e-run.sh --bridge-origin writes the file.
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("bridge-origin") {
       bridge_origin_checks::run().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=navigation: the navigation guard (API 48).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("navigation") {
+      navigation_checks::run().await;
       finish();
     }
     // LAUFEY_E2E_ONLY=lifetime: keep-alive with no window, then quit()

@@ -270,6 +270,15 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_bridge_origin_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_bridge_origin_test COMMAND laufey_bridge_origin_test)
 
+  # The navigation guard (API 48): what a window's top-level frame may load,
+  # the allowed-origin entries and the open-external capture.
+  add_executable(laufey_navigation_guard_test tests/navigation_guard_test.cc)
+  target_link_libraries(laufey_navigation_guard_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_navigation_guard_test
+           COMMAND laufey_navigation_guard_test)
+
   # Writes (and removes) a laufey-launch.json next to the test binary.
   add_executable(laufey_launch_config_test tests/launch_config_test.cc)
   target_link_libraries(laufey_launch_config_test PRIVATE

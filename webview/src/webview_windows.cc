@@ -9,6 +9,7 @@
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_navigation_guard.h"
 #include "laufey_json.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
@@ -1401,6 +1402,37 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                     .Get(),
                 nullptr);
 
+            // The navigation guard (API 48, laufey_navigation_guard.h).
+            // NavigationStarting fires for the main frame only (sub-frames
+            // raise FrameNavigationStarting, left to the page's CSP), and
+            // again for each server redirect: a navigation to an origin the
+            // window may not load is cancelled before its request is sent,
+            // and an http(s) destination opens in the OS browser.
+            state->webview->add_NavigationStarting(
+                Callback<ICoreWebView2NavigationStartingEventHandler>(
+                    [this, wid](ICoreWebView2*,
+                                ICoreWebView2NavigationStartingEventArgs* args)
+                        -> HRESULT {
+                      LPWSTR uriRaw = nullptr;
+                      if (FAILED(args->get_Uri(&uriRaw)) || !uriRaw)
+                        return S_OK;
+                      std::string url = laufey_common::WideToUtf8(uriRaw);
+                      CoTaskMemFree(uriRaw);
+                      laufey_common::NavigationDecision decision =
+                          laufey_common::NavigationGuard::Instance().Decide(
+                              wid, url);
+                      if (decision == laufey_common::NavigationDecision::kAllow)
+                        return S_OK;
+                      laufey_common::LogGuardedNavigation(url, decision);
+                      args->put_Cancel(TRUE);
+                      if (decision ==
+                          laufey_common::NavigationDecision::kOpenInBrowser)
+                        OpenExternalURL(url);
+                      return S_OK;
+                    })
+                    .Get(),
+                nullptr);
+
             // In-process custom schemes: intercept requests for each
             // registered scheme and bridge them to the runtime's memory
             // transport (one handler; the runtime dispatches on the URL).
@@ -1594,6 +1626,8 @@ void WebView2Backend::Navigate(uint32_t window_id, const std::string& url) {
 }
 
 void WebView2Backend::OpenExternalURL(const std::string& url) {
+  if (laufey_common::ExternalOpenCapture::Instance().Capture(url))
+    return;
   std::wstring wurl = Utf8ToWide(url);
   ShellExecuteW(nullptr, L"open", wurl.c_str(), nullptr, nullptr,
                 SW_SHOWNORMAL);

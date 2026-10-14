@@ -4,6 +4,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
+#include "laufey_navigation_guard.h"
 #include "laufey_platform_features.h"
 #include "laufey_title_bar.h"
 #if defined(__linux__) || defined(__APPLE__)
@@ -120,6 +121,10 @@ static void Backend_Navigate(void* data, uint32_t window_id, const char* url) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   LaufeyBackend* backend = loader->GetBackend();
   if (backend && url) {
+    // The window's top-level frame may load this URL's origin from now on
+    // (laufey_navigation_guard.h); recorded before the load starts, so the
+    // load's own check passes.
+    laufey_common::NavigationGuard::Instance().SetWindowUrl(window_id, url);
     backend->Navigate(window_id, url);
   }
 }
@@ -597,6 +602,7 @@ static void Backend_CloseWindow(void* data, uint32_t window_id) {
   if (backend) {
     backend->CloseWindow(window_id);
   }
+  laufey_common::NavigationGuard::Instance().ForgetWindow(window_id);
 }
 
 static void Backend_SetCloseRequestedHandler(void* data,
@@ -1431,6 +1437,18 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_platform_features_changed_handler =
       Backend_SetPlatformFeaturesChangedHandler;
   backend_api_.exit_app = Backend_ExitApp;
+  // The navigation guard (API 48): every web-engine backend checks its
+  // windows' top-level navigations (laufey_navigation_guard.h).
+  backend_api_.set_allowed_navigation_origins =
+      [](void*, const char* const* origins, size_t count) {
+        laufey_common::SetAllowedNavigationOriginsForAbi(origins, count);
+      };
+  backend_api_.test_capture_external_opens = [](void*, bool capture) {
+    laufey_common::TestCaptureExternalOpensForAbi(capture);
+  };
+  backend_api_.test_take_external_opens = [](void*) {
+    return laufey_common::TestTakeExternalOpensForAbi();
+  };
   backend_api_.title_bar_preferences = Backend_TitleBarPreferences;
   backend_api_.set_title_bar_preferences_changed_handler =
       Backend_SetTitleBarPreferencesChangedHandler;
@@ -1916,8 +1934,16 @@ void RuntimeLoader::PollPendingJsCalls() {
           url = list[0]->GetString();
         }
       }
-      if (IsAllowedExternalLinkUrl(url)) {
-        if (LaufeyBackend* backend = GetBackend()) {
+      // An origin the navigation guard lets this window load (one the
+      // embedder allows) stays in the window; anything else goes to the OS
+      // browser when the URL rule allows it.
+      laufey_common::NavigationDecision decision =
+          laufey_common::NavigationGuard::Instance().Decide(call.window_id,
+                                                            url);
+      if (LaufeyBackend* backend = GetBackend()) {
+        if (decision == laufey_common::NavigationDecision::kAllow) {
+          backend->Navigate(call.window_id, url);
+        } else if (IsAllowedExternalLinkUrl(url)) {
           backend->OpenExternalURL(url);
         }
       }

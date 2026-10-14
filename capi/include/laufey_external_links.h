@@ -21,7 +21,10 @@
 
 // Reserved bridge method. The injected listener calls
 // `window[ns].__laufeyOpenExternal(url)`; each backend intercepts a call with
-// this path before it reaches the runtime and opens `url` in the OS browser.
+// this path before it reaches the runtime and opens `url` in the OS browser,
+// unless the navigation guard lets the calling window load it
+// (laufey_navigation_guard.h: an origin the embedder allows), in which case
+// the window navigates there itself.
 #define LAUFEY_OPEN_EXTERNAL_METHOD "__laufeyOpenExternal"
 
 // The native check on a URL the page asks to open. The reserved bridge
@@ -134,8 +137,10 @@ inline std::string BuildExternalLinkInterceptScript(const std::string& ns) {
       typeof window.navigation.addEventListener === 'function') {
     window.navigation.addEventListener('navigate', function(e) {
       try {
+        // A form submission is left to the native navigation guard, which
+        // keeps its method and body when the destination is allowed.
         if (!e.userInitiated || !e.cancelable || e.downloadRequest ||
-            e.hashChange || e.navigationType === 'reload' ||
+            e.hashChange || e.formData || e.navigationType === 'reload' ||
             e.navigationType === 'traverse') {
           return;
         }
