@@ -38,10 +38,17 @@ int WaitForProfileLevelDbLocks(const std::string& root_cache_dir,
                                int timeout_ms,
                                std::vector<std::string>* still_held);
 
-// Waits up to `timeout_ms` for this process's child processes (CEF's
-// helpers) to end; a zombie has ended. Returns the number still running. On
-// Linux only children with a --type= switch count, and not Chromium's
-// zygotes, which end only after the browser process does.
+// Whether a child process with this command line (arguments separated by
+// NULs, as /proc/<pid>/cmdline and KERN_PROCARGS2 give them, or by spaces,
+// as on Windows) is a CEF helper the host waits for after shutdown: it has a
+// --type= switch, and it is not a zygote or the crash handler, which end
+// only after the browser process does. The app's own child processes (a
+// sidecar, a Deno.Command) have no --type= and are not waited for.
+bool IsCefHelperToWaitFor(const std::string& command_line);
+
+// Waits up to `timeout_ms` for this process's CEF helpers
+// (IsCefHelperToWaitFor) to end; a zombie has ended. Returns the number
+// still running.
 int WaitForChildProcessesToExit(int timeout_ms);
 
 // Both steps with their log lines, for the hosts.

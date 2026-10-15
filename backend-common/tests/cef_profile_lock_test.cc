@@ -49,6 +49,18 @@ int main() {
   EXPECT(files[2] == "/p/CEF/Local Storage/leveldb/LOCK");
 #endif
   EXPECT(ProfileLevelDbLockFiles("").empty());
+
+  // Which children are helpers to wait for, by command line.
+  using std::string;
+  EXPECT(IsCefHelperToWaitFor(string("/app/x\0--type=utility\0", 22)));
+  EXPECT(IsCefHelperToWaitFor(
+      "\"C:\\App\\app.exe\" --type=renderer --lang=en-US"));
+  EXPECT(IsCefHelperToWaitFor("app --type=gpu-process"));
+  EXPECT(!IsCefHelperToWaitFor(string("/app/x\0--type=zygote\0", 21)));
+  EXPECT(!IsCefHelperToWaitFor("app.exe --type=crashpad-handler --db=x"));
+  EXPECT(!IsCefHelperToWaitFor("deno run sidecar.ts"));  // the app's own
+  EXPECT(!IsCefHelperToWaitFor("app.exe --flag --typex=renderer"));
+  EXPECT(!IsCefHelperToWaitFor(""));
   EXPECT(!LevelDbLockHeld("/nonexistent/laufey/LOCK"));
 
 #if !defined(_WIN32)
@@ -100,10 +112,9 @@ int main() {
   EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
   // Child processes: a running one is waited for; an ended one isn't.
-#if defined(__linux__)
-  // On Linux, a child is a helper by its --type= switch (sh's $1 here); a
-  // zygote, or a process of the app's own (no --type=), is not waited for:
-  // a zygote ends only after the browser process does.
+  // A child is a helper by its --type= switch (sh's $1 here); a zygote, or
+  // a process of the app's own (no --type=), is not waited for: a zygote
+  // ends only after the browser process does.
   auto spawn = [](const char* type_arg, const char* secs) {
     pid_t pid = fork();
     if (pid == 0) {
@@ -119,8 +130,8 @@ int main() {
     }
     return pid;
   };
-  pid_t zygote = spawn("--type=zygote", "3");
-  pid_t own = spawn(nullptr, "3");
+  pid_t zygote = spawn("--type=zygote", "30");
+  pid_t own = spawn(nullptr, "30");
   EXPECT(zygote > 0 && own > 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));  // exec'd
   EXPECT(WaitForChildProcessesToExit(0) == 0);
@@ -128,26 +139,15 @@ int main() {
   EXPECT(sleeper > 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));  // exec'd
   EXPECT(WaitForChildProcessesToExit(50) == 1);
-  auto t0 = std::chrono::steady_clock::now();
-  EXPECT(WaitForChildProcessesToExit(5000) == 0);  // a zombie has ended
-  // It ended when the helper did, not at the zygote's or the app's child's.
-  EXPECT(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));
+  EXPECT(WaitForChildProcessesToExit(20000) == 0);  // a zombie has ended
+  // It ended when the helper did, while the zygote and the app's own child
+  // still run.
+  EXPECT(kill(zygote, 0) == 0 && kill(own, 0) == 0);
   waitpid(sleeper, &status, 0);
   kill(zygote, SIGKILL);
   kill(own, SIGKILL);
   waitpid(zygote, &status, 0);
   waitpid(own, &status, 0);
-#else
-  pid_t sleeper = fork();
-  EXPECT(sleeper >= 0);
-  if (sleeper == 0) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    _exit(0);
-  }
-  EXPECT(WaitForChildProcessesToExit(50) == 1);
-  EXPECT(WaitForChildProcessesToExit(5000) == 0);  // a zombie has ended
-  waitpid(sleeper, &status, 0);
-#endif
 
   std::string cmd = "/bin/rm -rf '" + root + "'";
   (void)!std::system(cmd.c_str());

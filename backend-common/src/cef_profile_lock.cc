@@ -8,6 +8,7 @@
 #include <chrono>
 #include <iostream>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -29,6 +30,7 @@
 #if defined(__APPLE__)
 #include <libproc.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
 #endif
 
 #include "laufey_backend_common.h"
@@ -119,35 +121,103 @@ int WaitForProfileLevelDbLocks(const std::string& root_cache_dir,
                               .count());
 }
 
-namespace {
-
-#if !defined(_WIN32) && !defined(__APPLE__)
-// Whether a child with this /proc/<pid>/cmdline is a CEF helper the host
-// waits for: one with a --type= switch, except Chromium's zygotes, which end
-// only once the browser process has (they hold its IPC socket), so waiting
-// for them always ran into the timeout. The app's own child processes
-// (no --type=) are not the profile's.
-bool IsHelperToWaitFor(const std::string& cmdline) {
+bool IsCefHelperToWaitFor(const std::string& command_line) {
   bool helper = false;
-  size_t start = 0;
-  while (start < cmdline.size()) {
-    size_t end = cmdline.find('\0', start);
-    if (end == std::string::npos)
-      end = cmdline.size();
-    std::string arg = cmdline.substr(start, end - start);
-    if (arg.rfind("--type=", 0) == 0) {
-      if (arg == "--type=zygote")
-        return false;
-      helper = true;
-    }
-    start = end + 1;
+  size_t i = 0;
+  const size_t n = command_line.size();
+  auto separator = [](char c) {
+    return c == '\0' || c == ' ' || c == '\t' || c == '"';
+  };
+  while (i < n) {
+    while (i < n && separator(command_line[i]))
+      ++i;
+    size_t start = i;
+    while (i < n && !separator(command_line[i]))
+      ++i;
+    std::string arg = command_line.substr(start, i - start);
+    if (arg.rfind("--type=", 0) != 0)
+      continue;
+    std::string type = arg.substr(7);
+    // Chromium's zygotes (Linux) hold the browser's IPC socket and the
+    // crash handler watches it: both end only after the browser process.
+    if (type == "zygote" || type == "crashpad-handler")
+      return false;
+    helper = true;
   }
   return helper;
 }
+
+namespace {
+
+#if defined(_WIN32)
+// The command line of the process behind `process` (opened with
+// PROCESS_QUERY_LIMITED_INFORMATION), "" if it can't be read.
+std::string ProcessCommandLine(HANDLE process) {
+  using NtQueryInformationProcessFn =
+      LONG(WINAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  static const auto query = reinterpret_cast<NtQueryInformationProcessFn>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                     "NtQueryInformationProcess"));
+  if (!query)
+    return "";
+  struct CountedString {  // UNICODE_STRING
+    USHORT length;
+    USHORT maximum_length;
+    PWSTR buffer;
+  };
+  constexpr ULONG kProcessCommandLineInformation = 60;  // Windows 8.1+
+  ULONG size = 0;
+  query(process, kProcessCommandLineInformation, nullptr, 0, &size);
+  if (size < sizeof(CountedString) || size > (1u << 20))
+    return "";
+  std::vector<unsigned char> buf(size);
+  if (query(process, kProcessCommandLineInformation, buf.data(), size,
+            &size) < 0)
+    return "";
+  const auto* line = reinterpret_cast<const CountedString*>(buf.data());
+  if (!line->buffer)
+    return "";
+  return WideToUtf8(
+      std::wstring(line->buffer, line->length / sizeof(wchar_t)));
+}
+#elif defined(__APPLE__)
+// A process's arguments, NUL-separated (KERN_PROCARGS2), "" if they can't
+// be read.
+std::string ProcessCommandLine(pid_t pid) {
+  int argmax = 0;
+  size_t len = sizeof(argmax);
+  int argmax_mib[2] = {CTL_KERN, KERN_ARGMAX};
+  if (sysctl(argmax_mib, 2, &argmax, &len, nullptr, 0) != 0 || argmax <= 0)
+    return "";
+  std::vector<char> buf(static_cast<size_t>(argmax));
+  size_t size = buf.size();
+  int mib[3] = {CTL_KERN, KERN_PROCARGS2, pid};
+  if (sysctl(mib, 3, buf.data(), &size, nullptr, 0) != 0 ||
+      size < sizeof(int))
+    return "";
+  int argc = 0;
+  std::memcpy(&argc, buf.data(), sizeof(argc));
+  size_t i = sizeof(int);
+  while (i < size && buf[i] != '\0')  // the executable path
+    ++i;
+  while (i < size && buf[i] == '\0')  // its padding
+    ++i;
+  std::string out;
+  for (int a = 0; a < argc && i < size; ++a) {
+    size_t start = i;
+    while (i < size && buf[i] != '\0')
+      ++i;
+    out.append(buf.data() + start, i - start);
+    out.push_back('\0');
+    ++i;
+  }
+  return out;
+}
 #endif
 
-// This process's running (not zombie) children: on Linux only the CEF
-// helpers it waits for (IsHelperToWaitFor).
+// This process's running (not zombie) children that are CEF helpers it
+// waits for (IsCefHelperToWaitFor): not the app's own child processes, not
+// Chromium's zygotes or crash handler.
 int RunningChildren() {
 #if defined(_WIN32)
   DWORD self = GetCurrentProcessId();
@@ -160,9 +230,12 @@ int RunningChildren() {
   if (Process32FirstW(snap, &entry)) {
     do {
       if (entry.th32ParentProcessID == self && entry.th32ProcessID != self) {
-        HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, entry.th32ProcessID);
+        HANDLE p =
+            OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        FALSE, entry.th32ProcessID);
         if (p) {
-          if (WaitForSingleObject(p, 0) == WAIT_TIMEOUT)
+          if (WaitForSingleObject(p, 0) == WAIT_TIMEOUT &&
+              IsCefHelperToWaitFor(ProcessCommandLine(p)))
             ++n;
           CloseHandle(p);
         }
@@ -184,7 +257,8 @@ int RunningChildren() {
     struct proc_bsdshortinfo info;
     if (proc_pidinfo(pids[i], PROC_PIDT_SHORTBSDINFO, 0, &info,
                      sizeof(info)) == sizeof(info) &&
-        info.pbsi_status != SZOMB)
+        info.pbsi_status != SZOMB &&
+        IsCefHelperToWaitFor(ProcessCommandLine(pids[i])))
       ++n;
   }
   return n;
@@ -212,7 +286,7 @@ int RunningChildren() {
                            std::ios::binary);
     std::string cmdline((std::istreambuf_iterator<char>(cmd_file)),
                         std::istreambuf_iterator<char>());
-    if (IsHelperToWaitFor(cmdline))
+    if (IsCefHelperToWaitFor(cmdline))
       ++n;
   }
   closedir(proc);
