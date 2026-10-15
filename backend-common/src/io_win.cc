@@ -486,6 +486,17 @@ class WinFileDialog : public FileDialogPlatform {
     if (!name.empty() && !open)
       dialog_->SetFileName(Utf8ToWide(name).c_str());
 
+    // A cancel that arrived while the dialog was being set up (before
+    // dialog_ existed, or while a setup call above dispatched this thread's
+    // messages): never show it, settle it cancelled now.
+    if (cancel_requested_) {
+      shown_ = true;
+      FileDialogFinish(id_, LAUFEY_FILE_DIALOG_CANCELLED, {});
+      return true;
+    }
+    // Likewise an accept the test hook asked for before dialog_ existed.
+    if (accept_requested_)
+      ScheduleAccept(accept_path_, 0);
     HWND owner = parent_ && IsWindow(parent_) ? parent_ : nullptr;
     // Show runs the dialog's own modal loop on this thread; the I/O window's
     // messages (cancel, the test hook, their retry timers) are dispatched
@@ -527,7 +538,13 @@ class WinFileDialog : public FileDialogPlatform {
   }
 
   void Cancel() override {
-    if (!dialog_ || shown_)
+    if (shown_)
+      return;
+    // Remembered, never dropped: a cancel dispatched before Show() has
+    // created the COM dialog (a setup call can run this thread's messages)
+    // is applied by Show() itself, before the dialog is shown.
+    cancel_requested_ = true;
+    if (!dialog_)
       return;
     // Press the dialog's Cancel button, as a person would: Show() then
     // returns ERROR_CANCELLED through its own completion path.
@@ -548,8 +565,14 @@ class WinFileDialog : public FileDialogPlatform {
   }
 
   bool TestAccept(const std::string& path) override {
-    if (!dialog_ || shown_)
+    if (shown_)
       return false;
+    if (!dialog_) {
+      // Applied by Show() once the dialog is set up.
+      accept_requested_ = true;
+      accept_path_ = path;
+      return true;
+    }
     ScheduleAccept(path, 0);
     return true;
   }
@@ -656,6 +679,12 @@ class WinFileDialog : public FileDialogPlatform {
   FileDialogRequest req_;
   ComPtr<IFileDialog> dialog_;
   bool shown_ = false;  // Show() returned
+  // cancel_file_dialog reached this dialog (applied by Show() if it came
+  // before the dialog was shown).
+  bool cancel_requested_ = false;
+  // The test hook's accept, asked for before dialog_ existed.
+  bool accept_requested_ = false;
+  std::string accept_path_;
 };
 
 }  // namespace
