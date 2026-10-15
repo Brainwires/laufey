@@ -23,6 +23,7 @@
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 #include "laufey_cef_keychain.h"
+#include "laufey_cef_keychain_interpose.h"
 #include "laufey_cef_profile_lock.h"
 #include "laufey_navigation_guard.h"
 
@@ -452,6 +453,8 @@ int main(int argc, char* argv[]) {
         laufey_common::SetCefKeychainFallback(migration.error);
       } else {
         laufey_common::EnableSafeStorageRename(service, account);
+        LaufeySetSafeStorageRenamer(
+            &laufey_common::CopySafeStorageQueryRenamed);
         if (migration.created_item)
           std::cerr << "laufey: cookies are now encrypted with the keychain "
                        "item \""

@@ -11,9 +11,9 @@ run.
 CI has no Apple Developer identity, so `scripts/native-e2e-keychain.sh` stands
 in for a team-signed build with `LAUFEY_TEST_KEYCHAIN_APP_SCOPED=1`. Before a
 release that changes `laufey_cef_keychain.h`, `cef_keychain_mac.mm`,
-`keychain_interpose_mac.mm` or the CEF version, check the real signing path on a
-Mac with a Developer ID Application (or Apple Development) identity in its login
-keychain:
+`cef_keychain_interpose_mac.mm` or the CEF version, check the real signing path
+on a Mac with a Developer ID Application (or Apple Development) identity in its
+login keychain:
 
 1. Build the CEF backend and the native e2e runtime (`make cef`,
    `cargo build --release -p native_e2e_runtime`).
