@@ -167,7 +167,18 @@ else
   mac="$(printf 'laufey-notification-click/1\n%s' "$target" |
     openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$key_file")" |
     sed 's/.*= //')"
-  activate "$target&mac=$mac" || fail "ActivateAction on $app_id failed"
+  # The app ends itself (_exit) as soon as its response handler has the
+  # click, which can be before the host has sent ActivateAction's reply:
+  # D-Bus then answers NoReply ("disconnected ... without replying"). A
+  # shell ignores that reply, and whether the click arrived is what the
+  # result file below shows, so only another error fails here.
+  if ! err="$(activate "$target&mac=$mac" 2>&1)"; then
+    case "$err" in
+      *org.freedesktop.DBus.Error.NoReply*)
+        echo "note: the app exited before replying to ActivateAction" ;;
+      *) echo "$err" >&2; fail "ActivateAction on $app_id failed" ;;
+    esac
+  fi
   click_wait=30
 fi
 deadline=$((SECONDS + click_wait))
