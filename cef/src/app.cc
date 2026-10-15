@@ -718,15 +718,24 @@ bool LaufeyHandler::OnProcessMessageReceived(
         std::string url = callArgs->GetString(0).ToString();
         // An origin the navigation guard lets this window load (one the
         // embedder allows) stays in the window; anything else goes to the
-        // OS browser when the URL rule allows it.
+        // OS browser when the URL rule allows it, within the window's
+        // per-second budget.
         uint32_t window_id =
             RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
-        if (window_id != 0 &&
-            laufey_common::NavigationGuard::Instance().Decide(window_id, url) ==
-                laufey_common::NavigationDecision::kAllow) {
+        laufey_common::NavigationDecision decision =
+            window_id != 0
+                ? laufey_common::NavigationGuard::Instance().Decide(window_id,
+                                                                    url)
+                : (IsAllowedExternalLinkUrl(url)
+                       ? laufey_common::NavigationDecision::kOpenInBrowser
+                       : laufey_common::NavigationDecision::kBlock);
+        if (decision == laufey_common::NavigationDecision::kAllow) {
           frame->LoadURL(url);
-        } else if (IsAllowedExternalLinkUrl(url)) {
+        } else if (decision ==
+                   laufey_common::NavigationDecision::kOpenInBrowser) {
           LaufeyOpenExternalURL(url);
+        } else {
+          laufey_common::LogGuardedNavigation(url, decision);
         }
       }
       CefRefPtr<CefProcessMessage> reply =

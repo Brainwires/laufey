@@ -246,6 +246,33 @@ pub async fn run() {
       && stayed.as_deref() == Some(format!("{own}/second").as_str()),
   );
 
+  // A page navigating away in a loop: at most 3 a second reach the browser.
+  tokio::time::sleep(Duration::from_millis(1100)).await;
+  let _ = laufey::test_take_external_opens();
+  eval_string(
+    &win,
+    &format!(
+      "for (let i = 0; i < 12; i++) setTimeout(() => {{ \
+       location.href = '{other}/burst' + i; }}, i * 40); 'ok'"
+    ),
+  )
+  .await;
+  tokio::time::sleep(Duration::from_millis(1500)).await;
+  let burst = laufey::test_take_external_opens()
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|u| u.contains("/burst"))
+    .count();
+  let stayed = location(&win).await;
+  check(
+    &format!(
+      "navigation: a navigation loop reaches the browser at most 3 times a \
+       second ({burst} opened, {stayed:?})"
+    ),
+    (1..=4).contains(&burst)
+      && stayed.as_deref() == Some(format!("{own}/second").as_str()),
+  );
+
   // A sub-frame on another origin is the page's CSP's business.
   eval_string(
     &win,

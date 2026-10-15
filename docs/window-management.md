@@ -438,7 +438,9 @@ redirect, a meta refresh, a script on a timer) is cancelled and logged
 (`laufey: <url> is not the app's origin: opening it in the browser instead`). An
 `http(s)` destination that passes the URL rule above opens in the user's
 browser; anything else (`file:`, `data:`, a custom scheme, `mailto:`) is
-dropped. Sub-frames are not checked: what a page may frame is its Content
+dropped. A window hands at most 3 such navigations a second to the browser; the
+rest are cancelled and logged, so a page navigating away in a loop cannot flood
+the browser. Sub-frames are not checked: what a page may frame is its Content
 Security Policy's (`frame-src`).
 
 | Backend   | Where                                                        | Redirects                           |
