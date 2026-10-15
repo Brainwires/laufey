@@ -21,6 +21,7 @@
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
+#include "laufey_cef_profile_lock.h"
 #include "laufey_navigation_guard.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
@@ -403,9 +404,13 @@ int main(int argc, char* argv[]) {
     // runs the browser "incognito" and keeps localStorage/cookies in memory.
     // Without one, keep the throwaway per-process temp root.
     std::string cache_path = laufey_common::AppDataSubdir("CEF");
+    const bool persistent_profile = !cache_path.empty();
     if (!cache_path.empty()) {
       CefString(&settings.root_cache_path) = cache_path;
       CefString(&settings.cache_path) = cache_path;
+      // The previous launch's helpers must have let go of the profile's
+      // LevelDB databases (laufey_cef_profile_lock.h).
+      laufey_common::LaufeyWaitForProfileLocksBeforeInit(cache_path);
     } else {
       cache_path = std::string(NSTemporaryDirectory().UTF8String) +
                    "laufey_cef_" + std::to_string(getpid());
@@ -465,6 +470,10 @@ int main(int argc, char* argv[]) {
     RuntimeLoader::GetInstance()->Shutdown();
 
     CefShutdown();
+    // The helpers (the storage service committing localStorage) end before
+    // the process does, so a relaunch finds the profile free.
+    if (persistent_profile)
+      laufey_common::LaufeyWaitForHelpersAfterShutdown(cache_path);
   }
 
   // exit_app's code (API 46), else 0.
