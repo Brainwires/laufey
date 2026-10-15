@@ -978,7 +978,9 @@ async fn dialog_checks(w: &Window, caps: &laufey::WindowCapabilities) {
 /// being built, or long after its window is up. Each one settles cancelled
 /// exactly once (the outcome channel would report a second settle as a
 /// failure on the next dialog: the slot would be busy), and the slot is
-/// free right after. On Windows the dialog's window must also be gone.
+/// free right after. On Windows the dialog's window must also be gone. With
+/// LAUFEY_TEST_WIN_DIALOG_SETUP_PUMP_MS set (CI), the 0 ms abort reaches a
+/// Windows dialog before its COM object exists.
 async fn dialog_abort_stress(w: &Window, caps: &laufey::WindowCapabilities) {
   if !caps.file_dialogs() {
     na("file dialog abort stress (backend has no file dialogs)");
