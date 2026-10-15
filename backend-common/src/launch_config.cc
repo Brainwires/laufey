@@ -271,8 +271,7 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
         continue;
       if (!IsValidProxyMode(value.string)) {
         Warn(warnings, "\"proxy\" \"" + value.string +
-                           "\" is not \"system\", \"system-resolver\" or "
-                           "\"direct\"; ignoring it");
+                           "\" is not \"system\" or \"direct\"; ignoring it");
         continue;
       }
       config.has_proxy = true;
@@ -600,7 +599,7 @@ bool LaunchRequireSandbox() {
 }
 
 bool IsValidProxyMode(const std::string& mode) {
-  return mode == "system" || mode == "system-resolver" || mode == "direct";
+  return mode == "system" || mode == "direct";
 }
 
 std::string LaunchProxyModeFrom(const std::string& env_value, bool file_has,
@@ -611,7 +610,7 @@ std::string LaunchProxyModeFrom(const std::string& env_value, bool file_has,
       return env_value;
     if (warning)
       *warning = "LAUFEY_PROXY=" + env_value +
-                 " is not system, system-resolver or direct; ignoring it";
+                 " is not system or direct; ignoring it";
   }
   return file_has ? file_value : "system";
 }

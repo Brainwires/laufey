@@ -72,6 +72,10 @@ class LaufeySchemeHandler : public CefResourceHandler {
   bool failed_ = false;
   // Set on the IO thread once Open handed the exchange to the runtime.
   bool dispatched_ = false;
+  // LAUFEY_TIMING=1 (laufey_timing.h): what this request saw, under mutex_.
+  int timing_reads_ = 0;
+  int timing_writes_ = 0;
+  size_t timing_bytes_ = 0;
   // Reports the engine's cancel to the runtime (on_cancel) at most once and
   // never after FinishResponse.
   laufey_common::SchemeCancelGate cancel_gate_;

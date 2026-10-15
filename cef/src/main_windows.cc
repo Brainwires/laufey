@@ -24,6 +24,7 @@
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_cef_proxy.h"
+#include "laufey_timing.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
@@ -43,7 +44,14 @@
 // app's startup instead of holding the page's first loopback WebSocket.
 class ProxyWarmUpClient : public CefURLRequestClient {
  public:
-  void OnRequestComplete(CefRefPtr<CefURLRequest>) override {}
+  void OnRequestComplete(CefRefPtr<CefURLRequest> request) override {
+    if (laufey_common::TimingEnabled())
+      laufey_common::Timing(
+          "proxy warm-up complete status=" +
+          std::to_string(static_cast<int>(request->GetRequestStatus())) +
+          " error=" +
+          std::to_string(static_cast<int>(request->GetRequestError())));
+  }
   void OnUploadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {}
   void OnDownloadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {
   }
@@ -64,6 +72,43 @@ static void LaufeyWarmUpProxyResolution() {
   request->SetMethod("HEAD");
   request->SetFlags(UR_FLAG_DISABLE_CACHE);
   CefURLRequest::Create(request, new ProxyWarmUpClient(), nullptr);
+  laufey_common::Timing("proxy warm-up request created");
+}
+
+// LAUFEY_TIMING=1 (laufey_timing.h): a heartbeat on the browser's UI and IO
+// threads for the first 30 s, each 250 ms, logging every beat that ran more
+// than 150 ms late, so a stalled browser thread shows up with its length.
+static void LaufeyTimingHeartbeat(CefThreadId thread, const char* name,
+                                  std::chrono::steady_clock::time_point due,
+                                  int beat) {
+  auto now = std::chrono::steady_clock::now();
+  long long late =
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - due).count();
+  if (late > 150)
+    laufey_common::Timing(std::string("heartbeat ") + name + " late by " +
+                          std::to_string(late) + " ms (beat " +
+                          std::to_string(beat) + ")");
+  if (beat >= 120) {
+    laufey_common::Timing(std::string("heartbeat ") + name + " done");
+    return;
+  }
+  CefPostDelayedTask(
+      thread,
+      base::BindOnce(&LaufeyTimingHeartbeat, thread, name,
+                     now + std::chrono::milliseconds(250), beat + 1),
+      250);
+}
+
+static void LaufeyStartTimingHeartbeats() {
+  if (!laufey_common::TimingEnabled())
+    return;
+  auto due = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  CefPostDelayedTask(
+      TID_UI, base::BindOnce(&LaufeyTimingHeartbeat, TID_UI, "ui", due, 1),
+      250);
+  CefPostDelayedTask(
+      TID_IO, base::BindOnce(&LaufeyTimingHeartbeat, TID_IO, "io", due, 1),
+      250);
 }
 
 void LaufeyOpenExternalURL(const std::string& url) {
@@ -265,6 +310,8 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
 
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
+    laufey_common::Timing("OnContextInitialized");
+    LaufeyStartTimingHeartbeats();
 
     LaufeyWarmUpProxyResolution();
 
@@ -294,8 +341,12 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
       // Defer Start() to the next message loop iteration.
       // OnContextInitialized runs during CefInitialize(), before
       // CefRunMessageLoop() has started.
-      CefPostTask(TID_UI, base::BindOnce(
-                              []() { RuntimeLoader::GetInstance()->Start(); }));
+      laufey_common::Timing("runtime loaded");
+      CefPostTask(TID_UI, base::BindOnce([]() {
+                    laufey_common::Timing("runtime start");
+                    RuntimeLoader::GetInstance()->Start();
+                    laufey_common::Timing("runtime started");
+                  }));
     } else {
       // No runtime: create a default window for demo
       uint32_t laufey_id = RuntimeLoader::GetInstance()->AllocateWindowId();
@@ -380,6 +431,7 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
   if (exit_code >= 0) {
     return exit_code;
   }
+  laufey_common::Timing("browser process: CefExecuteProcess returned");
 
   // Single-instance mode (docs/deep-links.md): a second launch forwards its
   // command line (GetCommandLineW) to the running instance and exits here,
@@ -443,13 +495,16 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
     }
   }
 
+  laufey_common::Timing("CefInitialize");
   if (!CefInitialize(main_args, settings, app.get(), sandbox_info)) {
     LaufeyReportCefInitializeFailure(cache_path);
     return 1;
   }
+  laufey_common::Timing("CefInitialize returned");
   LaufeyInstallSecondInstanceHooks();
 
   CefRunMessageLoop();
+  laufey_common::Timing("CefRunMessageLoop returned");
 
   // The loop is over: UI tasks still queued are answered "not run" and an
   // auth session in progress ends cancelled, so a runtime thread waiting on

@@ -325,12 +325,14 @@ static void TestProxy() {
   size_t w = 0;
   LaunchConfig c = Parse("{}", &w);
   EXPECT(w == 0 && !c.has_proxy);
-  for (const char* mode : {"system", "system-resolver", "direct"}) {
+  for (const char* mode : {"system", "direct"}) {
     c = Parse(std::string("{\"proxy\": \"") + mode + "\"}", &w);
     EXPECT(w == 0 && c.has_proxy && c.proxy == mode);
   }
+  // "system-resolver" was a mode once; it is refused like any other value.
   const char* wrong[] = {"{\"proxy\": \"none\"}", "{\"proxy\": true}",
-                         "{\"proxy\": \"\"}"};
+                         "{\"proxy\": \"\"}",
+                         "{\"proxy\": \"system-resolver\"}"};
   for (const char* text : wrong) {
     c = Parse(text, &w);
     EXPECT(w == 1 && !c.has_proxy);
@@ -338,17 +340,18 @@ static void TestProxy() {
   std::string warning;
   EXPECT(LaunchProxyModeFrom("", false, "", &warning) == "system");
   EXPECT(LaunchProxyModeFrom("", true, "direct", &warning) == "direct");
-  EXPECT(LaunchProxyModeFrom("system-resolver", true, "direct", &warning) ==
-         "system-resolver");
+  EXPECT(LaunchProxyModeFrom("system", true, "direct", &warning) == "system");
   EXPECT(warning.empty());
+  EXPECT(LaunchProxyModeFrom("system-resolver", false, "", &warning) ==
+         "system");
+  EXPECT(warning.find("LAUFEY_PROXY") != std::string::npos);
+  warning.clear();
   EXPECT(LaunchProxyModeFrom("bogus", true, "direct", &warning) == "direct");
   EXPECT(warning.find("LAUFEY_PROXY") != std::string::npos);
 
   // The CEF switch per mode; a command line that chose wins.
   EXPECT(CefProxySwitchFor("system", false).empty());
   EXPECT(CefProxySwitchFor("direct", false) == "no-proxy-server");
-  EXPECT(CefProxySwitchFor("system-resolver", false) ==
-         "use-system-proxy-resolver");
   EXPECT(CefProxySwitchFor("direct", true).empty());
 }
 
