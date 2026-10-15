@@ -53,6 +53,7 @@ set(LAUFEY_COMMON_SRCS
   src/notifications.cc
   src/share.cc
   src/user_activity.cc
+  src/cef_profile_lock.cc
   src/notification_auth.cc
   src/auth_session.cc
   src/platform_features.cc
@@ -296,6 +297,14 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_user_activity_test tests/user_activity_test.cc)
   target_link_libraries(laufey_user_activity_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_user_activity_test COMMAND laufey_user_activity_test)
+
+  # CEF's profile LevelDB LOCK probe and the helper-process wait.
+  add_executable(laufey_cef_profile_lock_test tests/cef_profile_lock_test.cc)
+  target_link_libraries(laufey_cef_profile_lock_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_cef_profile_lock_test
+           COMMAND laufey_cef_profile_lock_test)
 
   # Writes (and removes) a laufey-launch.json next to the test binary.
   add_executable(laufey_launch_config_test tests/launch_config_test.cc)

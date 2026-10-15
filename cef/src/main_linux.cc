@@ -1072,6 +1072,11 @@ int main(int argc, char* argv[]) {
   // Where the profile records its password store (LaufeyApplyPasswordStore,
   // called from CefInitialize).
   g_root_cache_path = cache_path;
+  // A persistent profile's LevelDB databases must not be locked by the
+  // previous launch's helpers (laufey_cef_profile_lock.h).
+  const bool persistent_profile = settings.cache_path.length > 0;
+  if (persistent_profile)
+    laufey_common::LaufeyWaitForProfileLocksBeforeInit(cache_path);
 
   // No remote debugging while DevTools are off (API 40, inspectable).
   const char* port_env = laufey_common::LaunchInspectable()
@@ -1105,6 +1110,10 @@ int main(int argc, char* argv[]) {
   RuntimeLoader::GetInstance()->Shutdown();
 
   CefShutdown();
+  // The helpers (the storage service committing localStorage) end before
+  // the process does, so a relaunch finds the profile free.
+  if (persistent_profile)
+    laufey_common::LaufeyWaitForHelpersAfterShutdown(cache_path);
 
   // exit_app's code (API 46), else 0.
   return laufey_common::RequestedExitCode();

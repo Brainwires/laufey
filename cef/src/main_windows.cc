@@ -31,6 +31,7 @@
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
+#include "laufey_cef_profile_lock.h"
 #include "laufey_navigation_guard.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
@@ -412,9 +413,13 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
   // non-ASCII profile names. On failure leave the cache path unset (CEF then
   // runs with its in-memory default) rather than pointing it at garbage.
   std::string cache_path = laufey_common::AppDataSubdir("CEF");
+  const bool persistent_profile = !cache_path.empty();
   if (!cache_path.empty()) {
     CefString(&settings.root_cache_path) = cache_path;
     CefString(&settings.cache_path) = cache_path;
+    // The previous launch's helpers must have let go of the profile's
+    // LevelDB databases (laufey_cef_profile_lock.h).
+    laufey_common::LaufeyWaitForProfileLocksBeforeInit(cache_path);
   } else {
     wchar_t tempPath[MAX_PATH + 2];
     DWORD tempLen = GetTempPathW(MAX_PATH + 2, tempPath);
@@ -455,6 +460,10 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
   RuntimeLoader::GetInstance()->Shutdown();
 
   CefShutdown();
+  // The helpers (the storage service committing localStorage) end before
+  // the process does, so a relaunch finds the profile free.
+  if (persistent_profile)
+    laufey_common::LaufeyWaitForHelpersAfterShutdown(cache_path);
 
   // How a Windows app ends (docs/backends.md): CEF has shut down, so the
   // profile, cookies and web storage are on disk; end the process here with
