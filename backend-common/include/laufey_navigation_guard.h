@@ -29,10 +29,12 @@
 #ifndef LAUFEY_NAVIGATION_GUARD_H_
 #define LAUFEY_NAVIGATION_GUARD_H_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -53,6 +55,35 @@ enum class NavigationDecision {
   // Cancel it (a destination the OS browser is not handed: file:, a custom
   // scheme, data:, javascript:, …).
   kBlock,
+  // Cancel it without opening it: the window already handed more than
+  // kMaxExternalOpensPerSecond navigations to the browser in the last
+  // second (a page navigating away in a loop must not flood the browser).
+  kThrottled,
+};
+
+// How many refused navigations a window may hand to the OS browser per
+// second; the rest are cancelled and logged.
+inline constexpr size_t kMaxExternalOpensPerSecond = 3;
+
+// A sliding one-second window of the times a window's refused navigations
+// went to the browser. `TryTake` records `now` and returns true while fewer
+// than `limit` fall within the second before it.
+class ExternalOpenBudget {
+ public:
+  using Clock = std::chrono::steady_clock;
+
+  bool TryTake(Clock::time_point now,
+               size_t limit = kMaxExternalOpensPerSecond) {
+    while (!opens_.empty() && now - opens_.front() >= std::chrono::seconds(1))
+      opens_.pop_front();
+    if (opens_.size() >= limit)
+      return false;
+    opens_.push_back(now);
+    return true;
+  }
+
+ private:
+  std::deque<Clock::time_point> opens_;
 };
 
 namespace navigation_guard_internal {
@@ -160,6 +191,7 @@ class NavigationGuard {
   void ForgetWindow(uint32_t window_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     window_keys_.erase(window_id);
+    budgets_.erase(window_id);
   }
 
   // Replaces the origins every window may load (set_allowed_navigation_
@@ -181,11 +213,21 @@ class NavigationGuard {
     return allowed_.size();
   }
 
-  NavigationDecision Decide(uint32_t window_id, const std::string& url) {
+  // The decision for a top-level navigation of `window_id` to `url`. A
+  // refusal that would go to the browser counts against the window's
+  // per-second budget and is kThrottled once that is spent.
+  NavigationDecision Decide(
+      uint32_t window_id, const std::string& url,
+      ExternalOpenBudget::Clock::time_point now =
+          ExternalOpenBudget::Clock::now()) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = window_keys_.find(window_id);
-    return DecideTopLevelNavigation(
+    NavigationDecision decision = DecideTopLevelNavigation(
         it == window_keys_.end() ? std::string() : it->second, allowed_, url);
+    if (decision == NavigationDecision::kOpenInBrowser &&
+        !budgets_[window_id].TryTake(now))
+      return NavigationDecision::kThrottled;
+    return decision;
   }
 
  private:
@@ -193,6 +235,7 @@ class NavigationGuard {
   std::mutex mutex_;
   std::map<uint32_t, std::string> window_keys_;
   std::vector<std::string> allowed_;
+  std::map<uint32_t, ExternalOpenBudget> budgets_;
 };
 
 // The message a cancelled navigation is logged with.
@@ -205,6 +248,11 @@ inline void LogGuardedNavigation(const std::string& url,
   } else if (decision == NavigationDecision::kBlock) {
     std::cerr << "laufey: not loading " << url
               << " in the window: it is not the app's origin" << std::endl;
+  } else if (decision == NavigationDecision::kThrottled) {
+    std::cerr << "laufey: not opening " << url
+              << " in the browser: the window asked for more than "
+              << kMaxExternalOpensPerSecond << " in the last second"
+              << std::endl;
   }
 }
 

@@ -6,6 +6,7 @@
 
 #include "laufey_navigation_guard.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -162,6 +163,37 @@ int main() {
     EXPECT(guard.Decide(8, "app://localhost/") == kBlock);
     guard.ForgetWindow(7);
     EXPECT(guard.Decide(7, "https://docs.example.com/page") == kOpen);
+  }
+
+  // --- The per-window budget of browser opens --------------------------------
+  {
+    using Clock = ExternalOpenBudget::Clock;
+    const Clock::time_point t0 = Clock::now();
+    ExternalOpenBudget budget;
+    EXPECT(budget.TryTake(t0));
+    EXPECT(budget.TryTake(t0 + std::chrono::milliseconds(100)));
+    EXPECT(budget.TryTake(t0 + std::chrono::milliseconds(200)));
+    EXPECT(!budget.TryTake(t0 + std::chrono::milliseconds(300)));
+    EXPECT(!budget.TryTake(t0 + std::chrono::milliseconds(999)));
+    // A second after the first open, one slot is free again.
+    EXPECT(budget.TryTake(t0 + std::chrono::milliseconds(1000)));
+    EXPECT(!budget.TryTake(t0 + std::chrono::milliseconds(1050)));
+
+    NavigationGuard& guard = NavigationGuard::Instance();
+    guard.SetWindowUrl(42, "app://localhost/");
+    const std::string away = "https://away.example/";
+    for (size_t i = 0; i < kMaxExternalOpensPerSecond; ++i)
+      EXPECT(guard.Decide(42, away, t0) == kOpen);
+    EXPECT(guard.Decide(42, away, t0) == NavigationDecision::kThrottled);
+    // Other windows have budgets of their own.
+    guard.SetWindowUrl(43, "app://localhost/");
+    EXPECT(guard.Decide(43, away, t0) == kOpen);
+    // Navigations that stay in the window, or are dropped, cost nothing.
+    EXPECT(guard.Decide(42, "app://localhost/x", t0) == kAllow);
+    EXPECT(guard.Decide(42, "file:///x", t0) == kBlock);
+    EXPECT(guard.Decide(42, away, t0 + std::chrono::seconds(1)) == kOpen);
+    guard.ForgetWindow(42);
+    guard.ForgetWindow(43);
   }
 
   // --- The open-external capture --------------------------------------------
