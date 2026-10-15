@@ -25,6 +25,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <thread>
 #include <map>
 #include <memory>
@@ -420,6 +421,7 @@ class WinFileDialog : public FileDialogPlatform {
 
   bool Show() override {
     bool open = req_.kind == LAUFEY_FILE_DIALOG_OPEN;
+    TestPumpBeforeCreate();
     HRESULT hr =
         CoCreateInstance(open ? CLSID_FileOpenDialog : CLSID_FileSaveDialog,
                          nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog_));
@@ -568,6 +570,36 @@ class WinFileDialog : public FileDialogPlatform {
         DoAccept(path);
       ScheduleAccept(path, attempt + 1);
     });
+  }
+
+  // Test hook (LAUFEY_TEST_WIN_DIALOG_SETUP_PUMP_MS=<ms>): before creating
+  // the COM dialog, run this thread's messages for that long, as a setup
+  // call that pumps would, so a cancel posted right after the open is
+  // dispatched while dialog_ doesn't exist yet. Off (0) by default.
+  static void TestPumpBeforeCreate() {
+    static const DWORD ms = [] {
+      char buf[16] = {};
+      DWORD n = GetEnvironmentVariableA("LAUFEY_TEST_WIN_DIALOG_SETUP_PUMP_MS",
+                                        buf, sizeof(buf));
+      if (n == 0 || n >= sizeof(buf))
+        return DWORD{0};
+      return static_cast<DWORD>(strtoul(buf, nullptr, 10));
+    }();
+    if (ms == 0)
+      return;
+    ULONGLONG end = GetTickCount64() + ms;
+    for (;;) {
+      MSG msg;
+      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
+      ULONGLONG now = GetTickCount64();
+      if (now >= end)
+        return;
+      MsgWaitForMultipleObjects(0, nullptr, FALSE,
+                                static_cast<DWORD>(end - now), QS_ALLINPUT);
+    }
   }
 
   // The dialog's window, or null while Show() hasn't created it.
