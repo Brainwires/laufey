@@ -21,6 +21,7 @@
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
+#include "laufey_cef_profile_lock.h"
 #include "laufey_cef_sandbox.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
