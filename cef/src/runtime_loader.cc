@@ -3290,6 +3290,16 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_js_namespace = Backend_SetJsNamespace;
   // The navigation guard (API 48): LaufeyHandler::OnBeforeBrowse checks
   // every laufey window's main-frame navigations.
+  // Delivered notifications (API 49): backend-common's notification
+  // platform (the notification center / toast history).
+  backend_api_.list_delivered_notifications =
+      [](void*, laufey_notification_list_fn cb, void* user_data) {
+        laufey_common::ListDeliveredNotifications(cb, user_data);
+      };
+  backend_api_.remove_delivered_notifications =
+      [](void*, const char* const* tags, size_t count, bool all) {
+        laufey_common::RemoveDeliveredNotifications(tags, count, all);
+      };
   backend_api_.set_allowed_navigation_origins =
       [](void*, const char* const* origins, size_t count) {
         laufey_common::SetAllowedNavigationOriginsForAbi(origins, count);

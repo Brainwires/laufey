@@ -828,6 +828,37 @@ void ListScheduledNotifications(laufey_notification_list_fn callback,
       });
 }
 
+void ListDeliveredNotifications(laufey_notification_list_fn callback,
+                                void* user_data) {
+  if (!callback)
+    return;
+  NotificationPlatform* platform = Platform();
+  if (!platform) {
+    callback(user_data, "[]");
+    return;
+  }
+  platform->ListDelivered(
+      [callback, user_data](std::vector<ScheduledNotification> list) {
+        std::string json = BuildScheduledListJson(std::move(list));
+        callback(user_data, json.c_str());
+      });
+}
+
+void RemoveDeliveredNotifications(const char* const* tags, size_t count,
+                                  bool all) {
+  NotificationPlatform* platform = Platform();
+  if (!platform)
+    return;
+  std::vector<std::string> list;
+  for (size_t i = 0; !all && tags && i < count; ++i) {
+    if (tags[i] && *tags[i])
+      list.emplace_back(tags[i]);
+  }
+  if (!all && list.empty())
+    return;
+  platform->RemoveDelivered(list, all);
+}
+
 void CancelNotification(const char* tag_c) {
   if (!tag_c || !*tag_c)
     return;

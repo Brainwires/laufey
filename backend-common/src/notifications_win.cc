@@ -741,7 +741,8 @@ class WinNotificationPlatform : public NotificationPlatform {
                LAUFEY_NOTIFICATION_CAP_SCHEDULE_PERSISTS |
                LAUFEY_NOTIFICATION_CAP_ACTIONS |
                LAUFEY_NOTIFICATION_CAP_CLICKS |
-               LAUFEY_NOTIFICATION_CAP_COLD_START;
+               LAUFEY_NOTIFICATION_CAP_COLD_START |
+               LAUFEY_NOTIFICATION_CAP_DELIVERED;
     });
     return caps;
   }
@@ -761,6 +762,39 @@ class WinNotificationPlatform : public NotificationPlatform {
     std::vector<ScheduledNotification> list;
     ToastThread::Get().RunSync([&] { list = ListOnThread(); });
     done(std::move(list));
+  }
+
+  // The app's toasts in the Action Center (API 49): the toast history for
+  // its AppUserModelID. Windows keeps no delivery time ("at": 0).
+  void ListDelivered(
+      std::function<void(std::vector<ScheduledNotification>)> done) override {
+    std::vector<ScheduledNotification> list;
+    ToastThread::Get().RunSync([&] { list = ListDeliveredOnThread(); });
+    done(std::move(list));
+  }
+
+  void RemoveDelivered(const std::vector<std::string>& tags,
+                       bool all) override {
+    ToastThread::Get().RunSync([&] {
+      if (!Notifier() || !statics2_)
+        return;
+      ComPtr<winui::IToastNotificationHistory> hist;
+      if (FAILED(statics2_->get_History(&hist)) || !hist)
+        return;
+      HString aumid;
+      SetHString(&aumid, Aumid());
+      if (all) {
+        hist->ClearWithId(aumid.Get());
+        return;
+      }
+      HString group;
+      group.Set(kGroup);
+      for (const std::string& tag : tags) {
+        HString htag;
+        SetHString(&htag, WinTag(tag));
+        hist->RemoveGroupedTagWithId(htag.Get(), group.Get(), aumid.Get());
+      }
+    });
   }
 
   void QueryPermission(int /*kind*/, std::function<void(int)> done) override {
@@ -1025,6 +1059,35 @@ class WinNotificationPlatform : public NotificationPlatform {
       if (SUCCEEDED(s->get_DeliveryTime(&when)))
         n.at_ms = FromDateTime(when);
       list.push_back(std::move(n));
+    }
+    return list;
+  }
+
+  std::vector<ScheduledNotification> ListDeliveredOnThread() {
+    std::vector<ScheduledNotification> list;
+    if (!Notifier() || !statics2_)
+      return list;
+    ComPtr<winui::IToastNotificationHistory> hist;
+    if (FAILED(statics2_->get_History(&hist)) || !hist)
+      return list;
+    ComPtr<winui::IToastNotificationHistory2> hist2;
+    if (FAILED(hist.As(&hist2)) || !hist2)
+      return list;
+    HString aumid;
+    SetHString(&aumid, Aumid());
+    ComPtr<wf::Collections::IVectorView<winui::ToastNotification*>> toasts;
+    if (FAILED(hist2->GetHistoryWithId(aumid.Get(), &toasts)) || !toasts)
+      return list;
+    UINT32 count = 0;
+    toasts->get_Size(&count);
+    for (UINT32 i = 0; i < count; ++i) {
+      ComPtr<winui::IToastNotification> toast;
+      ComPtr<xml::IXmlDocument> doc;
+      if (FAILED(toasts->GetAt(i, &toast)) || FAILED(toast->get_Content(&doc)))
+        continue;
+      ScheduledNotification n;
+      if (ReadToastXml(doc.Get(), &n))
+        list.push_back(std::move(n));
     }
     return list;
   }

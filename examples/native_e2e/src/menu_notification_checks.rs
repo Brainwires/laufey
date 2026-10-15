@@ -1036,7 +1036,65 @@ async fn schedule_checks() {
     "a scheduled notification is delivered at its time",
     delivered,
   );
+  delivered_list_checks("e2e-soon").await;
   laufey::cancel_notification("e2e-soon");
+}
+
+async fn list_delivered() -> Vec<laufey::ScheduledNotification> {
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  laufey::list_delivered_notifications(move |list| {
+    let _ = tx.send(list);
+  });
+  rx.await.unwrap_or_default()
+}
+
+/// The notification center's delivered list (API 49): the notification
+/// `tag` just delivered is in it until removed by tag; removing all empties
+/// the app's list.
+async fn delivered_list_checks(tag: &str) {
+  if !laufey::notification_capabilities().delivered() {
+    let empty = list_delivered().await.is_empty();
+    check(
+      "no delivered list on this OS: list_delivered_notifications is empty",
+      empty,
+    );
+    return;
+  }
+  let mut listed = None;
+  for _ in 0..50 {
+    listed = list_delivered().await.into_iter().find(|n| n.tag == tag);
+    if listed.is_some() {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  check(
+    &format!("a delivered notification is in the delivered list ({listed:?})"),
+    listed.is_some(),
+  );
+  laufey::remove_delivered_notifications(Some(&[tag]));
+  let mut gone = false;
+  for _ in 0..50 {
+    if !list_delivered().await.iter().any(|n| n.tag == tag) {
+      gone = true;
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  check("remove_delivered_notifications(tags) removes it", gone);
+  laufey::remove_delivered_notifications(None);
+  let mut empty = false;
+  for _ in 0..50 {
+    if list_delivered().await.is_empty() {
+      empty = true;
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  check(
+    "remove_delivered_notifications(all) empties the list",
+    empty,
+  );
 }
 
 /// What Windows does for a click on a toast: CoCreateInstance on the app's

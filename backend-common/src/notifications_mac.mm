@@ -193,7 +193,8 @@ class MacNotificationPlatform : public NotificationPlatform {
     return LAUFEY_NOTIFICATION_CAP_SHOW | LAUFEY_NOTIFICATION_CAP_SCHEDULE |
            LAUFEY_NOTIFICATION_CAP_SCHEDULE_PERSISTS |
            LAUFEY_NOTIFICATION_CAP_ACTIONS | LAUFEY_NOTIFICATION_CAP_CLICKS |
-           LAUFEY_NOTIFICATION_CAP_COLD_START;
+           LAUFEY_NOTIFICATION_CAP_COLD_START |
+           LAUFEY_NOTIFICATION_CAP_DELIVERED;
   }
 
   bool Show(const NotificationOptions& opts) override {
@@ -301,6 +302,65 @@ class MacNotificationPlatform : public NotificationPlatform {
           (*heap)(std::move(list));
           delete heap;
         }];
+  }
+
+  // The notification center's delivered list (API 49): laufey's own
+  // notifications (those carrying its tag), with their delivery date.
+  void ListDelivered(
+      std::function<void(std::vector<ScheduledNotification>)> done) override {
+    if (!MacProcessIsBundled()) {
+      done({});
+      return;
+    }
+    auto* heap = new std::function<void(std::vector<ScheduledNotification>)>(
+        std::move(done));
+    [[UNUserNotificationCenter currentNotificationCenter]
+        getDeliveredNotificationsWithCompletionHandler:^(
+            NSArray<UNNotification*>* delivered) {
+          std::vector<ScheduledNotification> list;
+          for (UNNotification* note in delivered) {
+            UNNotificationRequest* r = note.request;
+            if (![r.content.userInfo[kTagKey] isKindOfClass:[NSString class]])
+              continue;  // not one of laufey's
+            ScheduledNotification n;
+            n.tag = TagOf(r);
+            n.title = StdStr(r.content.title);
+            n.body = StdStr(r.content.body);
+            n.has_data = DataOf(r, &n.data);
+            n.at_ms = note.date
+                          ? static_cast<int64_t>(
+                                [note.date timeIntervalSince1970] * 1000.0)
+                          : 0;
+            id acts = r.content.userInfo[kActionsKey];
+            if ([acts isKindOfClass:[NSArray class]]) {
+              for (id pair in (NSArray*)acts) {
+                if ([pair isKindOfClass:[NSArray class]] &&
+                    [(NSArray*)pair count] == 2)
+                  n.actions.push_back({StdStr(pair[0]), StdStr(pair[1])});
+              }
+            }
+            n.silent = r.content.sound == nil;
+            list.push_back(std::move(n));
+          }
+          (*heap)(std::move(list));
+          delete heap;
+        }];
+  }
+
+  void RemoveDelivered(const std::vector<std::string>& tags,
+                       bool all) override {
+    if (!MacProcessIsBundled())
+      return;
+    UNUserNotificationCenter* center =
+        [UNUserNotificationCenter currentNotificationCenter];
+    if (all) {
+      [center removeAllDeliveredNotifications];
+      return;
+    }
+    NSMutableArray<NSString*>* idents = [NSMutableArray array];
+    for (const std::string& tag : tags)
+      [idents addObject:NSStr(tag)];
+    [center removeDeliveredNotificationsWithIdentifiers:idents];
   }
 
   void QueryPermission(int /*kind*/, std::function<void(int)> done) override {

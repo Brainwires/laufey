@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 48
+#define LAUFEY_API_VERSION 49
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -380,6 +380,10 @@ typedef void (*laufey_menu_closed_fn)(void* user_data, uint32_t window_id);
              // response reaches set_notification_response_handler (Linux:
              // the portal transport plus the app's D-Bus service file;
              // docs/notifications.md)
+#define LAUFEY_NOTIFICATION_CAP_DELIVERED \
+  (1u << 6)  // list_delivered_notifications reads, and
+             // remove_delivered_notifications clears, the OS notification
+             // center's list (macOS, Windows; API >= 49)
 
 // Most responses held while no response handler is registered (a cold-start
 // click is the usual one); beyond that the oldest are dropped.
@@ -2267,6 +2271,26 @@ struct laufey_backend_api {
   // set_allowed_navigation_origins is.
   void (*test_capture_external_opens)(void* backend_data, bool capture);
   char* (*test_take_external_opens)(void* backend_data);
+
+  // --- Delivered notifications (API >= 49) ---------------------------------
+  //
+  // The app's notifications the OS notification center still shows (macOS
+  // UNUserNotificationCenter's delivered list, Windows' toast history), as
+  // list_scheduled_notifications' JSON ("at": when it was delivered, Unix ms,
+  // or 0 where the OS doesn't say), oldest first. `callback` fires EXACTLY
+  // ONCE, on a backend thread or synchronously. "[]" where the OS keeps no
+  // such list (Linux: LAUFEY_NOTIFICATION_CAP_DELIVERED unset). Any thread.
+  void (*list_delivered_notifications)(void* backend_data,
+                                       laufey_notification_list_fn callback,
+                                       void* user_data);
+
+  // Remove delivered notifications from the notification center: those with
+  // the `count` tags, or every one of the app's when `all` is true (then
+  // `tags` is ignored). Scheduled ones are left alone (cancel_notification
+  // removes both). Any thread; the OS may finish asynchronously.
+  void (*remove_delivered_notifications)(void* backend_data,
+                                         const char* const* tags, size_t count,
+                                         bool all);
 };
 
 #ifdef __cplusplus

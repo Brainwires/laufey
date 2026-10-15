@@ -304,3 +304,19 @@ shown event; it has no scheduling, responses or capabilities (API 41 entries are
 dispatch the OS response uses: the live callback when this process shows the
 notification, else the response handler (or its buffer). See
 [e2e-testing.md](e2e-testing.md).
+
+## Delivered notifications (API 49)
+
+`list_delivered_notifications` reads the app's notifications the OS notification
+center still shows, in the shape `list_scheduled_notifications` answers (`"at"`
+is when each was delivered, or 0 where the OS doesn't say), and
+`remove_delivered_notifications` removes them by tag, or all of the app's.
+Scheduled notifications are left alone (`cancel_notification` removes both).
+
+| OS      | Source                                                        | `"at"`        |
+| ------- | ------------------------------------------------------------- | ------------- |
+| macOS   | `UNUserNotificationCenter` `getDeliveredNotifications`        | delivery date |
+| Windows | the toast history for the app's AppUserModelID (`GetHistory`) | 0             |
+| Linux   | none: the notification server keeps no list for apps (`[]`)   |               |
+
+`LAUFEY_NOTIFICATION_CAP_DELIVERED` says whether the list is available.

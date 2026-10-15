@@ -5,6 +5,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
 #include "laufey_navigation_guard.h"
+#include "laufey_notifications.h"
 #include "laufey_platform_features.h"
 #include "laufey_title_bar.h"
 #if defined(__linux__) || defined(__APPLE__)
@@ -1439,6 +1440,16 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.exit_app = Backend_ExitApp;
   // The navigation guard (API 48): every web-engine backend checks its
   // windows' top-level navigations (laufey_navigation_guard.h).
+  // Delivered notifications (API 49): backend-common's notification
+  // platform (the notification center / toast history).
+  backend_api_.list_delivered_notifications =
+      [](void*, laufey_notification_list_fn cb, void* user_data) {
+        laufey_common::ListDeliveredNotifications(cb, user_data);
+      };
+  backend_api_.remove_delivered_notifications =
+      [](void*, const char* const* tags, size_t count, bool all) {
+        laufey_common::RemoveDeliveredNotifications(tags, count, all);
+      };
   backend_api_.set_allowed_navigation_origins =
       [](void*, const char* const* origins, size_t count) {
         laufey_common::SetAllowedNavigationOriginsForAbi(origins, count);

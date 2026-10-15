@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 48;
+pub const LAUFEY_API_VERSION: u32 = 49;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -918,6 +918,17 @@ pub struct LaufeyBackendApi {
     Option<unsafe extern "C" fn(*mut c_void, bool)>,
   pub test_take_external_opens:
     Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+  // --- Delivered notifications (API >= 49) ---
+  pub list_delivered_notifications: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+      *mut c_void,
+    ),
+  >,
+  pub remove_delivered_notifications: Option<
+    unsafe extern "C" fn(*mut c_void, *const *const c_char, usize, bool),
+  >,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1822,6 +1833,9 @@ pub fn create_api_base() -> LaufeyBackendApi {
     set_allowed_navigation_origins: None,
     test_capture_external_opens: None,
     test_take_external_opens: None,
+    // API 49: Winit shows no notifications of its own.
+    list_delivered_notifications: None,
+    remove_delivered_notifications: None,
   }
 }
 

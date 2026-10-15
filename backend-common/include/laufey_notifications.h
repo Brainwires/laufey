@@ -63,6 +63,15 @@ class NotificationPlatform {
   // The pending scheduled notifications this app made, any order.
   virtual void ListScheduled(
       std::function<void(std::vector<ScheduledNotification>)> done) = 0;
+  // The app's delivered notifications the OS still shows ("at": delivery
+  // time, 0 when unknown). The default: none (no such list on this OS).
+  virtual void ListDelivered(
+      std::function<void(std::vector<ScheduledNotification>)> done) {
+    done({});
+  }
+  // Remove delivered notifications with `tags`, or all the app's (`all`).
+  virtual void RemoveDelivered(const std::vector<std::string>& /*tags*/,
+                               bool /*all*/) {}
   // LAUFEY_PERMISSION_STATUS_* for LAUFEY_PERMISSION_NOTIFICATIONS(_
   // PROVISIONAL); `done` fires exactly once, on any thread.
   virtual void QueryPermission(int kind, std::function<void(int)> done) = 0;
@@ -101,6 +110,10 @@ void SetNotificationResponseHandler(laufey_notification_response_fn handler,
 void ListScheduledNotifications(laufey_notification_list_fn callback,
                                 void* user_data);
 void CancelNotification(const char* tag);
+void ListDeliveredNotifications(laufey_notification_list_fn callback,
+                                void* user_data);
+void RemoveDeliveredNotifications(const char* const* tags, size_t count,
+                                  bool all);
 bool TestNotificationRespond(const char* tag, const char* action_id);
 void QueryNotificationPermission(int kind, laufey_permission_callback_fn cb,
                                  void* user_data);
@@ -255,8 +268,7 @@ bool HasDBusActivationArg(const std::vector<std::string>& args);
 // (out->size() - 1 arguments) to everything after it: the web engine, GTK,
 // the single-instance forwarding. A runtime reads the process's own
 // arguments, so it leaves kDBusActivationArg out itself (laufey::args_os).
-bool CopyArgvWithoutDBusActivationArg(int argc,
-                                      char* const* argv,
+bool CopyArgvWithoutDBusActivationArg(int argc, char* const* argv,
                                       std::vector<char*>* out);
 
 // Whether `app_id` can be the app's D-Bus name and GApplication id: at most

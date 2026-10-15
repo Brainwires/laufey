@@ -29,6 +29,7 @@ pub const LAUFEY_NOTIFICATION_CAP_SCHEDULE_PERSISTS: u32 = 1 << 2;
 pub const LAUFEY_NOTIFICATION_CAP_ACTIONS: u32 = 1 << 3;
 pub const LAUFEY_NOTIFICATION_CAP_CLICKS: u32 = 1 << 4;
 pub const LAUFEY_NOTIFICATION_CAP_COLD_START: u32 = 1 << 5;
+pub const LAUFEY_NOTIFICATION_CAP_DELIVERED: u32 = 1 << 6;
 
 pub const LAUFEY_MAX_PENDING_NOTIFICATION_RESPONSES: usize = 16;
 pub const LAUFEY_NOTIFICATION_MAX_TAG_BYTES: usize = 256;
@@ -225,6 +226,11 @@ impl NotificationCapabilities {
   pub fn cold_start(&self) -> bool {
     self.bits & LAUFEY_NOTIFICATION_CAP_COLD_START != 0
   }
+  /// The OS notification center's delivered list can be read and cleared
+  /// (API 49: macOS and Windows).
+  pub fn delivered(&self) -> bool {
+    self.bits & LAUFEY_NOTIFICATION_CAP_DELIVERED != 0
+  }
 }
 
 /// The notification capabilities of this backend (on Linux, also whether a
@@ -357,6 +363,51 @@ where
       Box::into_raw(boxed) as *mut c_void,
     )
   };
+}
+
+/// The app's notifications the OS notification center still shows (API 49),
+/// oldest first; `at_ms` is when each was delivered, or 0 where the OS
+/// doesn't say. Empty where the OS keeps no such list (see
+/// [`NotificationCapabilities::delivered`]). `callback` runs exactly once.
+pub fn list_delivered_notifications<F>(callback: F)
+where
+  F: FnOnce(Vec<ScheduledNotification>) + Send + 'static,
+{
+  let api = api();
+  let Some(f) = api.list_delivered_notifications else {
+    callback(Vec::new());
+    return;
+  };
+  let boxed: Box<ListCallback> = Box::new(Box::new(callback));
+  unsafe {
+    f(
+      api.backend_data,
+      Some(notification_list_trampoline),
+      Box::into_raw(boxed) as *mut c_void,
+    )
+  };
+}
+
+/// Remove delivered notifications from the notification center (API 49):
+/// those with `tags`, or all the app's when `tags` is `None`. Scheduled ones
+/// are left alone.
+pub fn remove_delivered_notifications(tags: Option<&[&str]>) {
+  let api = api();
+  let Some(f) = api.remove_delivered_notifications else {
+    return;
+  };
+  match tags {
+    None => unsafe { f(api.backend_data, std::ptr::null(), 0, true) },
+    Some(tags) => {
+      let owned: Vec<CString> =
+        tags.iter().filter_map(|t| CString::new(*t).ok()).collect();
+      if owned.is_empty() {
+        return;
+      }
+      let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+      unsafe { f(api.backend_data, ptrs.as_ptr(), ptrs.len(), false) };
+    }
+  }
 }
 
 /// Cancel the scheduled notification `tag` and remove delivered ones with
