@@ -71,6 +71,13 @@ struct LaunchConfig {
   // content without the Chromium sandbox (laufey_cef_sandbox.h).
   bool has_require_sandbox = false;
   bool require_sandbox = false;
+  // "proxy" (CEF on Windows): how the window reaches the network. "system"
+  // (the default: the OS proxy configuration, Chromium's resolver),
+  // "system-resolver" (the OS configuration resolved by WinHTTP per request,
+  // --use-system-proxy-resolver), or "direct" (no proxy, --no-proxy-server).
+  // See LaunchProxyMode.
+  bool has_proxy = false;
+  std::string proxy;
   // "bridgeOrigins" (API 44): the documents the JS bridge serves, as kept
   // entries ("*", "<scheme>://*" or an origin); see laufey_bridge_origin.h.
   bool has_bridge_origins = false;
@@ -223,6 +230,19 @@ bool LaunchRequireSandboxFrom(const std::string& env_value, bool file_has,
 // else LAUFEY_REQUIRE_SANDBOX ("1"/"0", also "true"/"false") if set, else
 // off. An invalid or ignored environment value is reported on stderr.
 bool LaunchRequireSandbox();
+
+// Whether `mode` is a "proxy" value: "system", "system-resolver" or "direct".
+bool IsValidProxyMode(const std::string& mode);
+
+// Precedence step behind LaunchProxyMode, exposed for tests: `env_value` when
+// it is a valid mode, else the file's, else "system". An invalid environment
+// value is reported in `warning` and ignored.
+std::string LaunchProxyModeFrom(const std::string& env_value, bool file_has,
+                                const std::string& file_value,
+                                std::string* warning);
+
+// LAUFEY_PROXY, else the launch file's "proxy", else "system".
+std::string LaunchProxyMode();
 
 }  // namespace laufey_common
 
