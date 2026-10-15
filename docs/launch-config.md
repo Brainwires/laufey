@@ -47,7 +47,7 @@ stands in for one environment variable:
 | `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `inspectable`    | `LAUFEY_INSPECTABLE`     | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
 | `requireSandbox` | `LAUFEY_REQUIRE_SANDBOX` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
-| `proxy`          | `LAUFEY_PROXY`           | `"system"`, `"system-resolver"` or `"direct"`                     |
+| `proxy`          | `LAUFEY_PROXY`           | `"system"` or `"direct"`                                          |
 | `bridgeOrigins`  | none (file only)         | array of origins, `<scheme>://*` or `*` (see below)               |
 | `passkeyRpIds`   | none (file only)         | array of RP IDs: domain names, no scheme, port or path            |
 
@@ -78,11 +78,9 @@ what its variable does:
   network. Under the OS proxy configuration Chromium holds every request,
   loopback ones included, until its resolver has initialized, which with
   automatic detection (WPAD) or a PAC URL can take seconds; the host starts that
-  initialization as the browser context is created. `"system-resolver"` resolves
-  through WinHTTP per request (`--use-system-proxy-resolver`), with no
-  Chromium-side initialization; `"direct"` uses no proxy (`--no-proxy-server`).
-  A proxy switch on the command line wins. Other backends and platforms ignore
-  it.
+  initialization as the browser context is created. `"direct"` uses no proxy
+  (`--no-proxy-server`). A proxy switch on the command line wins. Other backends
+  and platforms ignore it.
 - `requireSandbox` (default `false`) set to `true` makes the Linux CEF host
   refuse to start (exit status 78, one line on stderr) where it would run web
   content without the Chromium sandbox: no user namespaces and no usable

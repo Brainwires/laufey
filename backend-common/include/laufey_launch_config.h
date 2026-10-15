@@ -72,9 +72,8 @@ struct LaunchConfig {
   bool has_require_sandbox = false;
   bool require_sandbox = false;
   // "proxy" (CEF on Windows): how the window reaches the network. "system"
-  // (the default: the OS proxy configuration, Chromium's resolver),
-  // "system-resolver" (the OS configuration resolved by WinHTTP per request,
-  // --use-system-proxy-resolver), or "direct" (no proxy, --no-proxy-server).
+  // (the default: the OS proxy configuration, Chromium's resolver) or
+  // "direct" (no proxy, --no-proxy-server).
   // See LaunchProxyMode.
   bool has_proxy = false;
   std::string proxy;
@@ -231,7 +230,7 @@ bool LaunchRequireSandboxFrom(const std::string& env_value, bool file_has,
 // off. An invalid or ignored environment value is reported on stderr.
 bool LaunchRequireSandbox();
 
-// Whether `mode` is a "proxy" value: "system", "system-resolver" or "direct".
+// Whether `mode` is a "proxy" value: "system" or "direct".
 bool IsValidProxyMode(const std::string& mode);
 
 // Precedence step behind LaunchProxyMode, exposed for tests: `env_value` when

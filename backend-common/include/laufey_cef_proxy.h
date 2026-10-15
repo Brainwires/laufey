@@ -10,9 +10,10 @@
 //   - every mode warms the resolver up as the browser context is created
 //     (CefWarmUpProxyResolution in main_windows.cc), so its initialization
 //     overlaps the app's startup instead of following the first request;
-//   - "system-resolver" resolves through WinHTTP per request
-//     (--use-system-proxy-resolver), with no Chromium-side initialization;
 //   - "direct" uses no proxy at all (--no-proxy-server).
+// (WinHTTP per-request resolution, --use-system-proxy-resolver, is not a
+// mode: under a slow PAC file the page's loopback WebSocket and fetches
+// timed out at 45 s, where "system" took 12 s and "direct" 14 ms.)
 // A proxy switch the app's own command line already carries wins.
 
 #ifndef LAUFEY_CEF_PROXY_H_
@@ -43,8 +44,6 @@ inline std::string CefProxySwitchFor(const std::string& mode,
     return "";
   if (mode == "direct")
     return "no-proxy-server";
-  if (mode == "system-resolver")
-    return "use-system-proxy-resolver";
   return "";
 }
 
