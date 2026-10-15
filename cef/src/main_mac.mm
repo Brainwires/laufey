@@ -21,6 +21,7 @@
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
+#include "laufey_cef_keychain.h"
 #include "laufey_navigation_guard.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
@@ -410,6 +411,32 @@ int main(int argc, char* argv[]) {
       cache_path = std::string(NSTemporaryDirectory().UTF8String) +
                    "laufey_cef_" + std::to_string(getpid());
       CefString(&settings.root_cache_path) = cache_path;
+    }
+
+    // A team-signed app's cookie key in a keychain item of its own
+    // (laufey_cef_keychain.h): migrate a profile written under the mock
+    // keychain once, then let the interposers rename Chromium's item. Any
+    // failure keeps the mock keychain for this launch.
+    if (laufey_common::ProcessCefKeychainMode() ==
+        laufey_common::CefKeychainMode::kAppScoped) {
+      std::string app_id = laufey_common::LaunchAppId();
+      std::string service = laufey_common::AppSafeStorageService(app_id);
+      std::string account = laufey_common::AppSafeStorageAccount(app_id);
+      laufey_common::CefKeychainMigration migration =
+          laufey_common::MigrateCefCookiesToAppKeychain(
+              settings.cache_path.length ? cache_path : std::string(), service,
+              account);
+      if (!migration.ok) {
+        laufey_common::SetCefKeychainFallback(migration.error);
+      } else {
+        laufey_common::EnableSafeStorageRename(service, account);
+        if (migration.created_item)
+          std::cerr << "laufey: cookies are now encrypted with the keychain "
+                       "item \""
+                    << service << "\" (" << migration.reencrypted
+                    << " moved from the mock keychain, " << migration.skipped
+                    << " left as they were)" << std::endl;
+      }
     }
 
     // No remote debugging while DevTools are off (API 40, inspectable).

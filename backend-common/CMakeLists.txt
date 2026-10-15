@@ -82,6 +82,7 @@ if(APPLE)
     src/auth_session_mac.mm
     src/title_bar_mac.mm
     src/secret_store_mac.mm
+    src/cef_keychain_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -169,6 +170,8 @@ elseif(APPLE)
     ${CARBON_FRAMEWORK}
     ${SERVICEMANAGEMENT_FRAMEWORK}
     ${SECURITY_FRAMEWORK}
+    # The CEF cookie key migration (cef_keychain_mac.mm): the system SQLite.
+    sqlite3
   )
   target_compile_options(laufey_backend_common PRIVATE
     $<$<COMPILE_LANGUAGE:OBJC,OBJCXX>:-fobjc-arc>
@@ -717,6 +720,25 @@ if(LAUFEY_BUILD_TESTS)
     add_test(NAME laufey_secret_store_mac_test
              COMMAND laufey_secret_store_mac_test)
     set_tests_properties(laufey_secret_store_mac_test PROPERTIES
+                         SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+    # A CEF app's Safe Storage item of its own (laufey_cef_keychain.h): who
+    # gets one, the rename of Chromium's item, OSCrypt's v10, and the one-time
+    # migration of a mock-keychain profile into the login keychain (another
+    # program is refused the item). Skipped (77) like the secure store test.
+    add_executable(laufey_cef_keychain_mac_test
+                   tests/cef_keychain_mac_test.mm)
+    target_link_libraries(laufey_cef_keychain_mac_test PRIVATE
+      laufey_backend_common sqlite3
+    )
+    target_compile_options(laufey_cef_keychain_mac_test PRIVATE -fobjc-arc)
+    target_compile_definitions(laufey_cef_keychain_mac_test PRIVATE
+      LAUFEY_SECRET_READER="$<TARGET_FILE:laufey_secret_store_mac_reader>")
+    add_dependencies(laufey_cef_keychain_mac_test
+                     laufey_secret_store_mac_reader)
+    add_test(NAME laufey_cef_keychain_mac_test
+             COMMAND laufey_cef_keychain_mac_test)
+    set_tests_properties(laufey_cef_keychain_mac_test PROPERTIES
                          SKIP_RETURN_CODE 77 TIMEOUT 120)
   endif()
 endif()

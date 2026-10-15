@@ -130,6 +130,10 @@ fi
 if [ "$mode" = "--lna" ]; then
   export LAUFEY_E2E_ONLY=lna
 fi
+# --keychain: one launch of scripts/native-e2e-keychain.sh (CEF on macOS).
+if [ "$mode" = "--keychain" ]; then
+  export LAUFEY_E2E_ONLY=keychain
+fi
 if [ "$mode" = "--window-api" ] || [ "$mode" = "--hidpi" ]; then
   export LAUFEY_E2E_ONLY=window-api
 fi

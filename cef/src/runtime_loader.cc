@@ -1952,11 +1952,16 @@ static char* Backend_ListShortcuts(void* /*data*/) {
 
 static char* Backend_PlatformFeatures(void* /*data*/) {
 #if defined(__APPLE__)
-  // macOS: the browser process runs with --use-mock-keychain (app.h), so
-  // OSCrypt's key is derived from Chromium's fixed mock password: the same
-  // on every install. Cookies on disk are obfuscated, not protected by the
-  // Keychain.
-  laufey_common::SetCookieEncryption("basic");
+  // macOS: a team-signed app keeps OSCrypt's key in a keychain item of its
+  // own ("os"); otherwise the browser process runs with --use-mock-keychain
+  // (app.h) and the key is derived from Chromium's fixed mock password, the
+  // same on every install: cookies on disk are obfuscated, not protected by
+  // the Keychain ("basic"). See laufey_cef_keychain.h.
+  laufey_common::SetCookieEncryption(
+      laufey_common::ProcessCefKeychainMode() ==
+              laufey_common::CefKeychainMode::kAppScoped
+          ? "os"
+          : "basic");
 #elif !defined(__linux__)
   // Windows (DPAPI): OSCrypt's key is the OS's.
   laufey_common::SetCookieEncryption("os");

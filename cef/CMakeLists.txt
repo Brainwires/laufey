@@ -85,6 +85,7 @@ if(OS_MAC)
 
   set(LAUFEY_SRCS_MAC
     src/drag_paths_mac.mm
+    src/keychain_interpose_mac.mm
     src/main_mac.mm
   )
 
