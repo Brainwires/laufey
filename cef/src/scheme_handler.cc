@@ -9,9 +9,18 @@
 #include "include/cef_request.h"
 #include "include/cef_response.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_timing.h"
 #include "runtime_loader.h"
 
 namespace {
+
+// LAUFEY_TIMING=1: one line about a request, by its URL.
+void SchemeTiming(const std::string& url, const std::string& what) {
+  laufey_common::Timing("scheme " + url + " " + what);
+}
+
+// Read/write lines per request beyond this are not logged (finish always is).
+constexpr int kTimingLinesPerRequest = 20;
 
 // Flatten a CEF header map into laufey's NUL-separated name\0value\0... wire
 // format (lowercasing names to match fetch/HTTP conventions).
@@ -110,6 +119,8 @@ bool LaufeySchemeHandler::Open(CefRefPtr<CefRequest> request,
   // FinishResponse(). Keeps the handler alive while the runtime streams.
   this->AddRef();
   dispatched_ = true;
+  if (laufey_common::TimingEnabled())
+    SchemeTiming(url_, "open " + method_);
   RuntimeLoader::GetInstance()->DispatchSchemeRequest(window_id_, this, method_,
                                                       url_, flat_headers);
   return true;
@@ -172,13 +183,21 @@ bool LaufeySchemeHandler::Read(void* data_out, int bytes_to_read,
               static_cast<uint8_t*>(data_out));
     response_body_.erase(response_body_.begin(), response_body_.begin() + n);
     bytes_read = static_cast<int>(n);
+    if (laufey_common::TimingEnabled() &&
+        ++timing_reads_ <= kTimingLinesPerRequest)
+      SchemeTiming(url_, "read " + std::to_string(n) + " bytes at once");
     return true;
   }
 
   if (finished_ || cancelled_) {
     bytes_read = 0;
+    if (laufey_common::TimingEnabled())
+      SchemeTiming(url_, "read: end of body");
     return false;  // EOF
   }
+  if (laufey_common::TimingEnabled() &&
+      ++timing_reads_ <= kTimingLinesPerRequest)
+    SchemeTiming(url_, "read parked (no data yet)");
 
   // No data yet: keep the output buffer + callback, fill them when
   // WriteResponse/FinishResponse arrives and resume via Continue(n).
@@ -251,6 +270,9 @@ void LaufeySchemeHandler::Begin(int status, const char* headers,
     to_continue = open_callback_;
     open_callback_ = nullptr;
   }
+  if (laufey_common::TimingEnabled())
+    SchemeTiming(url_, "begin " + std::to_string(status) +
+                           (to_continue ? "" : " (open not waiting)"));
   if (to_continue)
     to_continue->Continue();
 }
@@ -292,6 +314,14 @@ intptr_t LaufeySchemeHandler::WriteResponse(const uint8_t* buf, size_t len) {
       read_callback_ = nullptr;
       pending_data_ = nullptr;
     }
+    if (laufey_common::TimingEnabled()) {
+      timing_bytes_ += len;
+      if (++timing_writes_ <= kTimingLinesPerRequest)
+        SchemeTiming(
+            url_, "write #" + std::to_string(timing_writes_) + " " +
+                      std::to_string(len) + " bytes" +
+                      (to_continue ? ", resumes a parked read" : ", queued"));
+    }
   }
   if (to_continue)
     to_continue->Continue(to_report);
@@ -306,6 +336,11 @@ void LaufeySchemeHandler::FinishResponse() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     finished_ = true;
+    if (laufey_common::TimingEnabled())
+      SchemeTiming(url_, "finish after " + std::to_string(timing_writes_) +
+                             " writes, " + std::to_string(timing_bytes_) +
+                             " bytes" +
+                             (read_callback_ ? ", ends a parked read" : ""));
     to_continue = read_callback_;
     read_callback_ = nullptr;
     pending_data_ = nullptr;

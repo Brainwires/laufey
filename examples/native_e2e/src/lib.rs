@@ -350,7 +350,10 @@ async function waitForBinding(name) {{
 const r = {{ origin: location.origin, secure: !!window.isSecureContext,
              subtle: typeof (self.crypto && crypto.subtle), digestBytes: 0,
              storage: '', storagePrev: '', streamText: '', streamChunks: 0,
-             echoBody: '' }};
+             echoBody: '', t: {{ start: Date.now() }} }};
+// Wall-clock marks (ms since the epoch, as the host's LAUFEY_TIMING lines and
+// the net log): only the watchdog's report carries them.
+const mark = (k) => {{ r.t[k] = Date.now(); }};
 // Whatever happens, the runtime hears about it: an uncaught error is folded
 // into the report instead of leaving the test to time out silently.
 window.addEventListener('error', e => report('uncaught: ' + (e && e.message)));
@@ -379,13 +382,16 @@ async function report(problem) {{
     r.storage = localStorage.getItem('laufey_e2e') === v ? 'ok' : 'read back mismatch';
   }} catch (e) {{ r.storage = 'error: ' + (e && e.message); }}
   try {{
+    mark('streamFetch');
     const res = await fetch('/stream');
+    mark('streamHead');
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     for (;;) {{
       const {{ value, done }} = await reader.read();
-      if (done) break;
+      if (done) {{ mark('streamEnd'); break; }}
       r.streamChunks++;
+      mark('chunk' + r.streamChunks);
       r.streamText += dec.decode(value, {{ stream: true }});
     }}
     r.streamText += dec.decode();
@@ -393,8 +399,10 @@ async function report(problem) {{
   const echoUrl = {echo_url:?};
   if (echoUrl) {{
     try {{
+      mark('echoFetch');
       const res = await fetch(echoUrl, {{ mode: 'cors' }});
       r.echoBody = await res.text();
+      mark('echoDone');
     }} catch (e) {{ r.echoBody = 'error: ' + (e && e.message); }}
     // A WebSocket to the same loopback server (lna_checks.rs), reported
     // through schemeProbe("websocket", ...).

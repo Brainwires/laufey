@@ -160,6 +160,12 @@ fi
 if [ "$mode" = "--network-quiet" ]; then
   export LAUFEY_E2E_ONLY=network-quiet
 fi
+# The Windows CEF host's timing lines (laufey_timing.h: browser milestones,
+# a UI/IO-thread heartbeat, each custom-scheme request's reads and writes)
+# go to the log, for a page whose custom-scheme stream stalls on a runner.
+case "$backend:$(uname -s)" in
+  cef:MINGW* | cef:MSYS* | cef:CYGWIN*) export LAUFEY_TIMING=1 ;;
+esac
 occluder_pid=""
 if [ "$mode" = "--platform" ]; then
   export LAUFEY_E2E_ONLY=platform
