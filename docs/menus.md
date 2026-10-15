@@ -9,9 +9,11 @@ with that identifier.
 
 Regular items also support a few visual properties, mirroring Electron's
 `MenuItem`: `checked` (a checkmark, all platforms), `icon` (PNG-encoded image
-bytes, matching the tray and notification icon APIs), and `tooltip` (hover
-text). See [Per-platform support](#per-platform-support) for where each is
-drawn.
+bytes, matching the tray and notification icon APIs), `tooltip` (hover text) and
+`destructive` (API 49: an action that deletes or discards, drawn in red where
+`LAUFEY_MENU_CAP_DESTRUCTIVE` is set: macOS, WebKitGTK menus and CEF's Views
+menus; Win32 menus draw it as a normal item). See
+[Per-platform support](#per-platform-support) for where each is drawn.
 
 ```rust
 use laufey::MenuItem;

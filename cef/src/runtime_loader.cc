@@ -1508,6 +1508,8 @@ static uint32_t Backend_MenuCapabilities(void* /*data*/) {
                   LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED;
 #if defined(_WIN32)
   caps |= LAUFEY_MENU_CAP_ICONS;  // context menus (Win32)
+#else
+  caps |= LAUFEY_MENU_CAP_DESTRUCTIVE;  // Views menus (SetColor)
 #endif
   return caps;
 }
@@ -3268,7 +3270,8 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.menu_capabilities = [](void*) -> uint32_t {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
-           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS;
+           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
+           LAUFEY_MENU_CAP_DESTRUCTIVE;
   };
   backend_api_.test_trigger_menu_accelerator =
       [](void*, uint32_t window_id, const char* accelerator) -> bool {

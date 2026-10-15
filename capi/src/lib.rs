@@ -2380,6 +2380,10 @@ pub enum MenuItem {
     icon: Option<Vec<u8>>,
     /// Tooltip shown on hover. macOS only (matches Electron's `toolTip`).
     tooltip: Option<String>,
+    /// Drawn as a destructive action (red text) where the backend can
+    /// (`LAUFEY_MENU_CAP_DESTRUCTIVE`, API 49): macOS, Linux (GTK and CEF
+    /// Views menus); Win32 menus draw it as a normal item.
+    destructive: bool,
   },
   /// A submenu containing child items.
   Submenu { label: String, items: Vec<MenuItem> },
@@ -2400,6 +2404,7 @@ impl MenuItem {
         checked,
         icon,
         tooltip,
+        destructive,
       } => {
         let mut dict = HashMap::new();
         dict.insert("label".to_string(), Value::String(label.clone()));
@@ -2420,6 +2425,9 @@ impl MenuItem {
         }
         if let Some(tooltip) = tooltip {
           dict.insert("tooltip".to_string(), Value::String(tooltip.clone()));
+        }
+        if *destructive {
+          dict.insert("destructive".to_string(), Value::Bool(true));
         }
         Value::Dict(dict)
       }
@@ -4050,6 +4058,7 @@ mod tests {
       checked: false,
       icon: None,
       tooltip: None,
+      destructive: false,
     };
     let v = item.to_value();
     assert_eq!(
@@ -4072,6 +4081,7 @@ mod tests {
       checked: true,
       icon: Some(vec![0x89, b'P', b'N', b'G']),
       tooltip: Some("Open a file".into()),
+      destructive: false,
     };
     let v = item.to_value();
     assert_eq!(
@@ -4284,6 +4294,7 @@ mod tests {
           checked: false,
           icon: None,
           tooltip: None,
+          destructive: false,
         }],
       }],
     };

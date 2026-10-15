@@ -1565,6 +1565,7 @@ fn e2e_main() {
             checked: false,
             icon: None,
             tooltip: None,
+            destructive: false,
           },
           MenuItem::Separator,
           MenuItem::Role {
@@ -1695,6 +1696,7 @@ fn e2e_main() {
             checked: false,
             icon: None,
             tooltip: None,
+            destructive: false,
           },
           MenuItem::Role {
             role: "quit".into(),

@@ -142,6 +142,19 @@ void TestParseMenu() {
   EXPECT(CanonicalAccelerator(entries[0].accel) == "Super+O");
 
   EXPECT(ParseMenuTemplate(nullptr, &g_api, false).empty());
+
+  // "destructive" (API 49): only a JSON true.
+  root = g_api.value_list(nullptr);
+  laufey_value_t* del = Item("Delete", "delete", nullptr);
+  laufey_value_t* t = g_api.value_bool(nullptr, true);
+  g_api.value_dict_set(del, "destructive", t);
+  g_api.value_free(t);
+  Append(root, del);
+  Append(root, Item("Keep", "keep", nullptr));
+  entries = ParseMenuTemplate(root, &g_api, false);
+  g_api.value_free(root);
+  EXPECT(entries.size() == 2);
+  EXPECT(entries[0].destructive && !entries[1].destructive);
 }
 
 void TestKeyCodes() {

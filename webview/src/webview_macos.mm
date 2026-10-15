@@ -227,7 +227,8 @@ class WKWebViewBackend : public LaufeyBackend {
   uint32_t MenuCapabilities() override {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
-           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS;
+           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
+           LAUFEY_MENU_CAP_DESTRUCTIVE;
   }
   void ShowContextMenuEx(uint32_t window_id, int x, int y,
                          laufey_value_t* menu_template,

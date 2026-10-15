@@ -147,6 +147,12 @@ void Fill(CefRefPtr<CefMenuModel> model, const std::vector<MenuEntry>& entries,
           model->AddItem(id, e.label);
         }
         model->SetEnabled(id, e.enabled);
+        if (e.destructive) {
+          // "destructive" (API 49): red text, hovered or not.
+          const cef_color_t red = CefColorSetARGB(0xff, 0xe0, 0x1b, 0x24);
+          model->SetColor(id, CEF_MENU_COLOR_TEXT, red);
+          model->SetColor(id, CEF_MENU_COLOR_TEXT_HOVERED, red);
+        }
         if (e.has_accel && !(e.accel.mods & laufey_common::kModSuper)) {
           if (int key = KeyCodeFor(e.accel)) {
             model->SetAccelerator(

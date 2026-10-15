@@ -43,6 +43,9 @@ struct MenuEntry {
   Accelerator accel;
   bool enabled = true;
   bool checked = false;
+  // kItem: "destructive" (API 49): drawn as a destructive action where the
+  // platform can (LAUFEY_MENU_CAP_DESTRUCTIVE).
+  bool destructive = false;
   std::vector<uint8_t> icon_png;
   std::vector<MenuEntry> children;  // kSubmenu
 

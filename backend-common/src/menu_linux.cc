@@ -131,6 +131,22 @@ GtkWidget* NewItem(const MenuEntry& e) {
   return gtk_menu_item_new_with_label(e.label.c_str());
 }
 
+// "destructive" (API 49): the item's label in the theme's error red (GTK 3
+// has no destructive menu-item style; libadwaita's red is #e01b24).
+void ApplyDestructive(GtkWidget* item, const MenuEntry& e) {
+  if (!e.destructive)
+    return;
+  GtkWidget* child = gtk_bin_get_child(GTK_BIN(item));
+  if (!child || !GTK_IS_LABEL(child))
+    return;
+  gchar* escaped = g_markup_escape_text(e.label.c_str(), -1);
+  gchar* markup =
+      g_strdup_printf("<span foreground=\"#e01b24\">%s</span>", escaped);
+  gtk_label_set_markup(GTK_LABEL(child), markup);
+  g_free(markup);
+  g_free(escaped);
+}
+
 void ConnectClick(GtkWidget* item, laufey_menu_click_fn on_click,
                   void* on_click_data, uint32_t window_id,
                   const std::string& key, bool checked) {
@@ -195,6 +211,7 @@ GtkWidget* Build(const std::vector<MenuEntry>& entries, uint32_t window_id,
       }
       case MenuEntry::Kind::kItem: {
         GtkWidget* item = NewItem(e);
+        ApplyDestructive(item, e);
         const std::string& key = e.ClickKey();
         ConnectClick(item, on_click, on_click_data, window_id, key, e.checked);
         RegisterMenuClick(key, on_click, on_click_data, window_id);

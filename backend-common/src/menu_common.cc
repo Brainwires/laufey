@@ -113,6 +113,7 @@ void ParseList(laufey_value_t* list, const laufey_backend_api_t* api,
     e.tooltip = ReadString(api, item.get(), "tooltip");
     e.enabled = ReadBool(api, item.get(), "enabled", true);
     e.checked = ReadBool(api, item.get(), "checked", false);
+    e.destructive = ReadBool(api, item.get(), "destructive", false);
     e.accelerator_text = ReadString(api, item.get(), "accelerator");
     if (!e.accelerator_text.empty()) {
       std::string error;

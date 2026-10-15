@@ -22,6 +22,7 @@ pub const LAUFEY_MENU_CAP_CONTEXT_MENU: u32 = 1 << 2;
 pub const LAUFEY_MENU_CAP_CONTEXT_CLOSED: u32 = 1 << 3;
 pub const LAUFEY_MENU_CAP_ICONS: u32 = 1 << 4;
 pub const LAUFEY_MENU_CAP_TOOLTIPS: u32 = 1 << 5;
+pub const LAUFEY_MENU_CAP_DESTRUCTIVE: u32 = 1 << 6;
 
 pub const LAUFEY_NOTIFICATION_CAP_SHOW: u32 = 1 << 0;
 pub const LAUFEY_NOTIFICATION_CAP_SCHEDULE: u32 = 1 << 1;
@@ -69,6 +70,10 @@ impl MenuCapabilities {
   /// Item tooltips are shown.
   pub fn tooltips(&self) -> bool {
     self.bits & LAUFEY_MENU_CAP_TOOLTIPS != 0
+  }
+  /// An item's `destructive` is drawn as a destructive action (API 49).
+  pub fn destructive(&self) -> bool {
+    self.bits & LAUFEY_MENU_CAP_DESTRUCTIVE != 0
   }
 }
 

@@ -64,6 +64,17 @@ pub async fn run() {
     "[e2e] menu capabilities = {:#x}, notification capabilities = {:#x}",
     mcaps.bits, ncaps.bits
   );
+  // "destructive" (API 49): drawn wherever the menus aren't Win32's.
+  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  if backend == "webview" || backend == "cef" {
+    check(
+      &format!(
+        "menu capabilities: destructive items drawn: {} (Win32 menus can't)",
+        mcaps.destructive()
+      ),
+      mcaps.destructive() == !cfg!(windows),
+    );
+  }
   let w = Window::new(480, 360).title("native-e2e-menus");
   w.show();
   tokio::time::sleep(Duration::from_millis(800)).await;
@@ -188,6 +199,7 @@ async fn accelerator_checks(w: &Window, caps: &laufey::MenuCapabilities) {
             checked: false,
             icon: None,
             tooltip: Some("fires from the keyboard".into()),
+            destructive: false,
           },
           MenuItem::Item {
             label: "Disabled".into(),
@@ -197,6 +209,7 @@ async fn accelerator_checks(w: &Window, caps: &laufey::MenuCapabilities) {
             checked: false,
             icon: None,
             tooltip: None,
+            destructive: false,
           },
         ],
       }],
@@ -349,6 +362,7 @@ async fn context_menu_checks(w: &Window, caps: &laufey::MenuCapabilities) {
           checked: false,
           icon: Some(super::TINY_PNG.to_vec()),
           tooltip: Some("tooltip".into()),
+          destructive: false,
         },
         MenuItem::Separator,
         MenuItem::Item {
@@ -359,6 +373,17 @@ async fn context_menu_checks(w: &Window, caps: &laufey::MenuCapabilities) {
           checked: true,
           icon: None,
           tooltip: None,
+          destructive: false,
+        },
+        MenuItem::Item {
+          label: "Delete".into(),
+          id: Some("ctx-delete".into()),
+          accelerator: None,
+          enabled: true,
+          checked: false,
+          icon: Some(super::TINY_PNG.to_vec()),
+          tooltip: None,
+          destructive: true,
         },
       ],
       move |id| k.lock().unwrap().push(id.to_string()),
@@ -421,6 +446,7 @@ fn live_menu_items() -> Vec<MenuItem> {
       checked: false,
       icon: None,
       tooltip: None,
+      destructive: false,
     },
     MenuItem::Item {
       label: "Second".into(),
@@ -430,6 +456,7 @@ fn live_menu_items() -> Vec<MenuItem> {
       checked: false,
       icon: None,
       tooltip: None,
+      destructive: false,
     },
   ]
 }

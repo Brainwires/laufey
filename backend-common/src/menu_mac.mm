@@ -338,6 +338,18 @@ NSMenu* BuildNSMenuFromEntries(const std::vector<MenuEntry>& entries,
       [nsItem setState:NSControlStateValueOn];
     if (!e.tooltip.empty())
       [nsItem setToolTip:NSStr(e.tooltip)];
+    // "destructive" (API 49): AppKit has no destructive item style, so the
+    // title is drawn in the system red (what Finder's own "Delete" items
+    // look like in a contextual menu's emphasis).
+    if (e.destructive) {
+      NSDictionary* attrs = @{
+        NSForegroundColorAttributeName : [NSColor systemRedColor],
+        NSFontAttributeName : [NSFont menuFontOfSize:0],
+      };
+      [nsItem setAttributedTitle:[[NSAttributedString alloc]
+                                     initWithString:NSStr(e.label)
+                                         attributes:attrs]];
+    }
 
     // icon -> NSMenuItem.image, decoded from PNG bytes. Marked as a template
     // image so a monochrome (black + alpha) icon tints correctly: black in the

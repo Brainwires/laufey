@@ -351,6 +351,9 @@ typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
   (1u << 3)  // show_context_menu_ex reports the menu closing
 #define LAUFEY_MENU_CAP_ICONS (1u << 4)     // item "icon" is drawn
 #define LAUFEY_MENU_CAP_TOOLTIPS (1u << 5)  // item "tooltip" is shown
+#define LAUFEY_MENU_CAP_DESTRUCTIVE \
+  (1u << 6)  // item "destructive": true is drawn as a destructive action
+             // (red text; API >= 49)
 
 // Fired EXACTLY ONCE when a context menu shown with show_context_menu_ex
 // closes: after the item's laufey_menu_click_fn when one was chosen, or alone

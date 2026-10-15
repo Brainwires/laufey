@@ -77,6 +77,7 @@ fn hello_main() {
             checked: false,
             icon: None,
             tooltip: None,
+            destructive: false,
           },
           MenuItem::Separator,
           MenuItem::Item {
@@ -87,6 +88,7 @@ fn hello_main() {
             checked: false,
             icon: None,
             tooltip: None,
+            destructive: false,
           },
         ];
         laufey::set_dock_menu(&items, |id| {
@@ -216,6 +218,7 @@ fn hello_main() {
             checked: true,
             icon: None,
             tooltip: None,
+            destructive: false,
           },
           // icon (a template PNG that tints on selection) + tooltip.
           MenuItem::Item {
@@ -226,6 +229,7 @@ fn hello_main() {
             checked: false,
             icon: Some(include_bytes!("../icons/bell.png").to_vec()),
             tooltip: Some("Play a sound".into()),
+            destructive: false,
           },
         ],
       }],
