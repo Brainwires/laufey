@@ -176,6 +176,26 @@ elseif(APPLE)
   target_compile_options(laufey_backend_common PRIVATE
     $<$<COMPILE_LANGUAGE:OBJC,OBJCXX>:-fobjc-arc>
   )
+
+  # The CEF host's SecItem* interposers (laufey_cef_keychain_interpose.h): a
+  # dylib of their own, because dyld applies __interpose tuples only from a
+  # dylib loaded at launch, never from the main executable. The host links it
+  # and ships it next to its executable (@rpath = @executable_path).
+  add_library(laufey_keychain_interpose SHARED
+    src/cef_keychain_interpose_mac.mm
+  )
+  target_include_directories(laufey_keychain_interpose PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_link_libraries(laufey_keychain_interpose PRIVATE
+    ${SECURITY_FRAMEWORK}
+    ${FOUNDATION_FRAMEWORK}
+  )
+  target_compile_options(laufey_keychain_interpose PRIVATE -fobjc-arc)
+  set_target_properties(laufey_keychain_interpose PROPERTIES
+    INSTALL_NAME_DIR "@rpath"
+    BUILD_WITH_INSTALL_NAME_DIR TRUE
+  )
 elseif(UNIX)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LAUFEY_COMMON_GTK REQUIRED gtk+-3.0)
@@ -740,5 +760,29 @@ if(LAUFEY_BUILD_TESTS)
              COMMAND laufey_cef_keychain_mac_test)
     set_tests_properties(laufey_cef_keychain_mac_test PROPERTIES
                          SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+    # The interposers reach the SecItem* calls of an image dlopened after
+    # launch, as the CEF framework is: the test links the dylib (loaded at
+    # launch), dlopens a module that calls SecItemCopyMatching, and checks
+    # the renamer saw the query, and that its renamed copy is what ran. It
+    # looks up an item that doesn't exist, data-less: nothing is stored.
+    add_library(laufey_keychain_interpose_test_image MODULE
+                tests/cef_keychain_interpose_image_mac.cc)
+    target_link_libraries(laufey_keychain_interpose_test_image PRIVATE
+      ${SECURITY_FRAMEWORK} "-framework CoreFoundation")
+    add_executable(laufey_keychain_interpose_mac_test
+                   tests/cef_keychain_interpose_mac_test.mm)
+    target_link_libraries(laufey_keychain_interpose_mac_test PRIVATE
+      laufey_keychain_interpose "-framework Foundation" "-framework Security")
+    target_compile_options(laufey_keychain_interpose_mac_test PRIVATE
+                           -fobjc-arc)
+    target_compile_definitions(laufey_keychain_interpose_mac_test PRIVATE
+      LAUFEY_INTERPOSE_TEST_IMAGE="$<TARGET_FILE:laufey_keychain_interpose_test_image>")
+    set_target_properties(laufey_keychain_interpose_mac_test PROPERTIES
+      BUILD_RPATH "$<TARGET_FILE_DIR:laufey_keychain_interpose>")
+    add_dependencies(laufey_keychain_interpose_mac_test
+                     laufey_keychain_interpose_test_image)
+    add_test(NAME laufey_keychain_interpose_mac_test
+             COMMAND laufey_keychain_interpose_mac_test)
   endif()
 endif()

@@ -3,22 +3,33 @@
 // dyld interposing of the SecItem* calls the CEF framework makes, so a
 // team-signed app's OSCrypt password lives in an item of its own
 // ("<app id> Safe Storage") instead of Chromium's shared "Chromium Safe
-// Storage" (laufey_cef_keychain.h). The tuples live in the host executable,
-// which dyld loads at launch, and apply to every image bound after it, the
-// framework CEF loads included; the executable's own calls (the secure store,
-// the cookie migration) are never interposed. With renaming off (the mock
-// keychain) or any other item, the calls pass through unchanged.
+// Storage" (laufey_cef_keychain.h, laufey_cef_keychain_interpose.h).
+//
+// This file builds liblaufey_keychain_interpose.dylib, which the CEF host
+// links, so dyld loads it at launch. dyld honors __interpose tuples only in a
+// dylib, never in the main executable (the host's tuples were ignored there),
+// and a launch-time dylib's tuples apply to every other image, the CEF
+// framework the host dlopens later included. The calls made from this dylib
+// itself are never interposed, so the replacements below reach the real
+// functions. With no renamer set, or a query for any other item, the calls
+// pass through unchanged.
 
 #import <Security/Security.h>
 
-#include "laufey_cef_keychain.h"
+#include <atomic>
+
+#include "laufey_cef_keychain_interpose.h"
 
 namespace {
 
+std::atomic<LaufeySafeStorageRenamer> g_renamer{nullptr};
+
 // The renamed copy of `dict`, or nullptr to use `dict` as it is.
 CFDictionaryRef Renamed(CFDictionaryRef dict) {
-  return static_cast<CFDictionaryRef>(
-      laufey_common::CopySafeStorageQueryRenamed(dict));
+  LaufeySafeStorageRenamer renamer = g_renamer.load();
+  if (!renamer || !dict)
+    return nullptr;
+  return static_cast<CFDictionaryRef>(renamer(dict));
 }
 
 OSStatus LaufeySecItemCopyMatching(CFDictionaryRef query, CFTypeRef* result) {
@@ -73,3 +84,7 @@ __attribute__((used)) const Interpose kLaufeyKeychainInterposers[]
 };
 
 }  // namespace
+
+extern "C" void LaufeySetSafeStorageRenamer(LaufeySafeStorageRenamer renamer) {
+  g_renamer.store(renamer);
+}

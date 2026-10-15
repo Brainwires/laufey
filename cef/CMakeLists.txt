@@ -85,7 +85,6 @@ if(OS_MAC)
 
   set(LAUFEY_SRCS_MAC
     src/drag_paths_mac.mm
-    src/keychain_interpose_mac.mm
     src/main_mac.mm
   )
 
@@ -129,8 +128,24 @@ if(OS_MAC)
   endif()
   target_link_libraries(${CEF_TARGET} libcef_dll_wrapper ${CEF_STANDARD_LIBS}
     laufey_backend_common
+    laufey_keychain_interpose
     "-framework UserNotifications")
   target_include_directories(${CEF_TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${LAUFEY_INCLUDE_DIR}")
+  # The SecItem* interposers (laufey_cef_keychain_interpose.h) are a dylib:
+  # dyld ignores __interpose tuples in the main executable. It ships next to
+  # the executable, found through @rpath, and nothing else is on the rpath.
+  set_target_properties(${CEF_TARGET} PROPERTIES
+    INSTALL_RPATH "@executable_path"
+    BUILD_WITH_INSTALL_RPATH TRUE
+  )
+  add_custom_command(
+    TARGET ${CEF_TARGET}
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+            "$<TARGET_FILE:laufey_keychain_interpose>"
+            "${CEF_APP}/Contents/MacOS/"
+    VERBATIM
+  )
   set_target_properties(${CEF_TARGET} PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.deno.desktop"
