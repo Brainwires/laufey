@@ -217,6 +217,23 @@ int main() {
     EXPECT(!OsCryptDecryptV10(other_key, sealed, &opened) ||
            opened != Bytes("hello"));
     EXPECT(!OsCryptDecryptV10(mock, Bytes("v11xxxxxxxxxxxxxxxx"), &opened));
+    // A value sealed under another key is refused, not "opened" to garbage:
+    // CommonCrypto's own PKCS#7 removal accepts this one (its last byte
+    // decrypts to 0x08 under the mock key, the 7 before it don't).
+    EXPECT(!OsCryptDecryptV10(
+        mock, OsCryptEncryptV10(other_key, Bytes("not mine")), &opened));
+    // A damaged padding byte: in CBC, flipping the first block's last byte
+    // flips the second block's last plaintext byte, the 14 bytes of padding
+    // of an 18-byte value (0x0e -> 0x0f). And a body that isn't whole blocks.
+    std::vector<uint8_t> damaged =
+        OsCryptEncryptV10(mock, Bytes("0123456789abcdefXY"));
+    EXPECT(damaged.size() == 3 + 32);
+    EXPECT(OsCryptDecryptV10(mock, damaged, &opened));
+    damaged[3 + 15] ^= 0x01;
+    EXPECT(!OsCryptDecryptV10(mock, damaged, &opened));
+    std::vector<uint8_t> short_body = sealed;
+    short_body.pop_back();
+    EXPECT(!OsCryptDecryptV10(mock, short_body, &opened));
 
     // --- The migration, in the login keychain ------------------------------
     g_account = "dev.laufey.cef-keychain-test." + std::to_string(getpid());
@@ -236,7 +253,17 @@ int main() {
 
     CefKeychainMigration m =
         MigrateCefCookiesToAppKeychain(g_dir, g_service, g_account);
-    if (!m.ok && m.error.find("did not answer") != std::string::npos) {
+    // No usable keychain: the lookup got no answer, or storing the item was
+    // refused for want of one (no default or unlocked keychain, no UI to
+    // unlock it with, no entitlement).
+    const bool unusable =
+        !m.ok && (m.error.find("did not answer") != std::string::npos ||
+                  m.keychain_status == errSecInteractionNotAllowed ||
+                  m.keychain_status == errSecNoDefaultKeychain ||
+                  m.keychain_status == errSecNoSuchKeychain ||
+                  m.keychain_status == errSecNotAvailable ||
+                  m.keychain_status == errSecMissingEntitlement);
+    if (unusable) {
       std::printf("laufey_cef_keychain_mac_test: no usable keychain: %s\n",
                   m.error.c_str());
       const char* require = std::getenv("LAUFEY_SECRET_TEST_REQUIRE");
@@ -249,6 +276,9 @@ int main() {
     if (!m.ok)
       std::fprintf(stderr, "migration: %s\n", m.error.c_str());
     EXPECT(m.ok && m.created_item);
+    if (m.reencrypted != 1 || m.skipped != 1)
+      std::fprintf(stderr, "migration: %d re-encrypted, %d skipped\n",
+                   m.reencrypted, m.skipped);
     EXPECT(m.reencrypted == 1 && m.skipped == 1);
 
     // The item, read back by this program (its creator: no prompt).

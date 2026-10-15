@@ -106,7 +106,9 @@ const void* CopySafeStorageQueryRenamed(const void* dict);
 
 // OSCrypt's key for `password` (PBKDF2-HMAC-SHA1, "saltysalt", 1003
 // iterations, 16 bytes) and the "v10" AES-128-CBC encryption of a cookie
-// value, as Chromium does it (IV of 16 spaces, PKCS#7). Exposed for tests.
+// value, as Chromium does it (IV of 16 spaces, PKCS#7; decrypting checks
+// every padding byte, so a value sealed under another key is refused rather
+// than "opened" to garbage). Exposed for tests.
 std::vector<uint8_t> OsCryptKeyForPassword(const std::string& password);
 bool OsCryptDecryptV10(const std::vector<uint8_t>& key,
                        const std::vector<uint8_t>& encrypted,
@@ -121,6 +123,9 @@ struct CefKeychainMigration {
   int reencrypted = 0;
   int skipped = 0;
   std::string error;
+  // The keychain's OSStatus when a SecItem* call is what failed (0
+  // otherwise), so a caller can tell an unusable keychain from a bug.
+  int keychain_status = 0;
 };
 
 // Before CefInitialize, in the browser process of an app-scoped launch: if

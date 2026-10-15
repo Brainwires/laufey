@@ -147,14 +147,34 @@ bool Crypt(CCOperation op, const std::vector<uint8_t>& key, const uint8_t* in,
   static const uint8_t kIv[kCCBlockSizeAES128] = {
       ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
       ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+  // Decrypting, the padding is checked here, not by CommonCrypto: CCCrypt's
+  // PKCS#7 removal looks at the last byte only, so a cookie sealed under
+  // another key often "opens" with the mock key (a final byte of 0x01..0x10
+  // is likely) and the migration would re-encrypt garbage. Every padding
+  // byte must match, as in BoringSSL, which Chromium decrypts with.
+  const bool decrypt = op == kCCDecrypt;
+  if (decrypt && (in_len == 0 || in_len % kCCBlockSizeAES128 != 0))
+    return false;
   out->assign(in_len + kCCBlockSizeAES128, 0);
   size_t moved = 0;
-  CCCryptorStatus status =
-      CCCrypt(op, kCCAlgorithmAES128, kCCOptionPKCS7Padding, key.data(),
-              key.size(), kIv, in, in_len, out->data(), out->size(), &moved);
+  CCCryptorStatus status = CCCrypt(
+      op, kCCAlgorithmAES128, decrypt ? 0 : kCCOptionPKCS7Padding, key.data(),
+      key.size(), kIv, in, in_len, out->data(), out->size(), &moved);
   if (status != kCCSuccess)
     return false;
   out->resize(moved);
+  if (decrypt) {
+    if (moved == 0)
+      return false;
+    const uint8_t pad = out->back();
+    if (pad == 0 || pad > kCCBlockSizeAES128 || pad > moved)
+      return false;
+    for (size_t i = moved - pad; i < moved; ++i) {
+      if ((*out)[i] != pad)
+        return false;
+    }
+    out->resize(moved - pad);
+  }
   return true;
 }
 
@@ -296,6 +316,7 @@ CefKeychainMigration MigrateCefCookiesToAppKeychain(
     if (found != errSecItemNotFound) {
       out.error = "the keychain did not answer for \"" + service +
                   "\" (OSStatus " + std::to_string(found) + ")";
+      out.keychain_status = static_cast<int>(found);
       return out;
     }
     std::string password = RandomPassword();
@@ -361,6 +382,7 @@ CefKeychainMigration MigrateCefCookiesToAppKeychain(
     if (added != errSecSuccess) {
       out.error = "storing \"" + service + "\" failed (OSStatus " +
                   std::to_string(added) + ")";
+      out.keychain_status = static_cast<int>(added);
       rollback_all();
       return out;
     }
