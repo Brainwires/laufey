@@ -11,6 +11,7 @@
 // exercise the real lookup, and removes it again.
 
 #include "laufey_launch_config.h"
+#include "laufey_cef_proxy.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -320,6 +321,37 @@ static void TestInspectable() {
   EXPECT(LaunchInspectableFrom("", false, true, &warning));
 }
 
+static void TestProxy() {
+  size_t w = 0;
+  LaunchConfig c = Parse("{}", &w);
+  EXPECT(w == 0 && !c.has_proxy);
+  for (const char* mode : {"system", "system-resolver", "direct"}) {
+    c = Parse(std::string("{\"proxy\": \"") + mode + "\"}", &w);
+    EXPECT(w == 0 && c.has_proxy && c.proxy == mode);
+  }
+  const char* wrong[] = {"{\"proxy\": \"none\"}", "{\"proxy\": true}",
+                         "{\"proxy\": \"\"}"};
+  for (const char* text : wrong) {
+    c = Parse(text, &w);
+    EXPECT(w == 1 && !c.has_proxy);
+  }
+  std::string warning;
+  EXPECT(LaunchProxyModeFrom("", false, "", &warning) == "system");
+  EXPECT(LaunchProxyModeFrom("", true, "direct", &warning) == "direct");
+  EXPECT(LaunchProxyModeFrom("system-resolver", true, "direct", &warning) ==
+         "system-resolver");
+  EXPECT(warning.empty());
+  EXPECT(LaunchProxyModeFrom("bogus", true, "direct", &warning) == "direct");
+  EXPECT(warning.find("LAUFEY_PROXY") != std::string::npos);
+
+  // The CEF switch per mode; a command line that chose wins.
+  EXPECT(CefProxySwitchFor("system", false).empty());
+  EXPECT(CefProxySwitchFor("direct", false) == "no-proxy-server");
+  EXPECT(CefProxySwitchFor("system-resolver", false) ==
+         "use-system-proxy-resolver");
+  EXPECT(CefProxySwitchFor("direct", true).empty());
+}
+
 static void TestRequireSandbox() {
   size_t w = 0;
   LaunchConfig c = Parse("{}", &w);
@@ -597,6 +629,7 @@ int main() {
   TestSingleInstance();
   TestInspectable();
   TestRequireSandbox();
+  TestProxy();
   TestPasskeyRpIds();
   TestPaths();
   TestTrustedAppImage();

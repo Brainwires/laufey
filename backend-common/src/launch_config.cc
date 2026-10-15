@@ -264,6 +264,19 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
       }
       config.has_require_sandbox = true;
       config.require_sandbox = value.boolean;
+    } else if (key == "proxy") {
+      config.has_proxy = false;
+      config.proxy.clear();
+      if (!CheckString("proxy", value, warnings))
+        continue;
+      if (!IsValidProxyMode(value.string)) {
+        Warn(warnings, "\"proxy\" \"" + value.string +
+                           "\" is not \"system\", \"system-resolver\" or "
+                           "\"direct\"; ignoring it");
+        continue;
+      }
+      config.has_proxy = true;
+      config.proxy = value.string;
     } else if (key == "bridgeOrigins") {
       config.has_bridge_origins = false;
       config.bridge_origins.clear();
@@ -584,6 +597,33 @@ bool LaunchRequireSandbox() {
   if (!warning.empty())
     std::cerr << "laufey: " << warning << std::endl;
   return on;
+}
+
+bool IsValidProxyMode(const std::string& mode) {
+  return mode == "system" || mode == "system-resolver" || mode == "direct";
+}
+
+std::string LaunchProxyModeFrom(const std::string& env_value, bool file_has,
+                                const std::string& file_value,
+                                std::string* warning) {
+  if (!env_value.empty()) {
+    if (IsValidProxyMode(env_value))
+      return env_value;
+    if (warning)
+      *warning = "LAUFEY_PROXY=" + env_value +
+                 " is not system, system-resolver or direct; ignoring it";
+  }
+  return file_has ? file_value : "system";
+}
+
+std::string LaunchProxyMode() {
+  const LaunchConfig& file = ProcessLaunchConfig();
+  std::string warning;
+  std::string mode = LaunchProxyModeFrom(GetEnvUtf8("LAUFEY_PROXY"),
+                                         file.has_proxy, file.proxy, &warning);
+  if (!warning.empty())
+    std::cerr << "laufey: " << warning << std::endl;
+  return mode;
 }
 
 bool LaunchSingleInstance() {

@@ -14,6 +14,7 @@
 #include "include/cef_app.h"
 #include "include/cef_sandbox_win.h"
 #include "include/cef_task.h"
+#include "include/cef_urlrequest.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_closure_task.h"
@@ -22,6 +23,7 @@
 #include "app.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
+#include "laufey_cef_proxy.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
@@ -32,6 +34,36 @@
 #include "laufey_navigation_guard.h"
 #include "renderer_app.h"
 #include "runtime_loader.h"
+
+// Starts Chromium's proxy resolution as soon as the browser context exists
+// (laufey_cef_proxy.h): a request to a closed loopback port, whose answer
+// is ignored. Chromium initializes its resolver (WPAD, a PAC fetch) on the
+// first request that needs it; warming it up here overlaps that with the
+// app's startup instead of holding the page's first loopback WebSocket.
+class ProxyWarmUpClient : public CefURLRequestClient {
+ public:
+  void OnRequestComplete(CefRefPtr<CefURLRequest>) override {}
+  void OnUploadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {}
+  void OnDownloadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {
+  }
+  void OnDownloadData(CefRefPtr<CefURLRequest>, const void*, size_t) override {}
+  bool GetAuthCredentials(bool, const CefString&, int, const CefString&,
+                          const CefString&,
+                          CefRefPtr<CefAuthCallback>) override {
+    return false;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(ProxyWarmUpClient);
+};
+
+static void LaufeyWarmUpProxyResolution() {
+  CefRefPtr<CefRequest> request = CefRequest::Create();
+  request->SetURL("http://127.0.0.1:65535/");
+  request->SetMethod("HEAD");
+  request->SetFlags(UR_FLAG_DISABLE_CACHE);
+  CefURLRequest::Create(request, new ProxyWarmUpClient(), nullptr);
+}
 
 void LaufeyOpenExternalURL(const std::string& url) {
   if (laufey_common::ExternalOpenCapture::Instance().Capture(url))
@@ -218,11 +250,22 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
       // that still contact Google at startup (laufey_cef_network_quiet.h).
       LaufeyApplyNetworkQuietDefaults(command_line);
       LaufeyApplyInspectableToCommandLine(command_line);
+      // "proxy" (laufey_cef_proxy.h): a switch the command line already
+      // carries wins.
+      bool has_proxy_switch = false;
+      for (const std::string& name : laufey_common::CefProxySwitchNames())
+        has_proxy_switch = has_proxy_switch || command_line->HasSwitch(name);
+      std::string proxy_switch = laufey_common::CefProxySwitchFor(
+          laufey_common::LaunchProxyMode(), has_proxy_switch);
+      if (!proxy_switch.empty())
+        command_line->AppendSwitch(proxy_switch);
     }
   }
 
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
+
+    LaufeyWarmUpProxyResolution();
 
     // backend-common's I/O thread (file dialogs, drag-out, clipboard change
     // events; its own STA thread, see laufey_io.h).
