@@ -9,6 +9,7 @@
 #include <cstring>
 #include <unistd.h>
 
+#include "laufey_user_activity.h"
 #include "include/cef_application_mac.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
@@ -136,6 +137,22 @@ void LaufeyOpenExternalURL(const std::string& url) {
 // AppKit can't dispatch the event before the run loop starts. It can still
 // arrive before the runtime registers a handler, which is what the buffer in
 // FireOpenUrlMac covers.
+// Handoff and Spotlight (API 49): an activity of the app's the user
+// continues (laufey_user_activity.h); one that launched the app is held
+// until the runtime registers its handler.
+- (BOOL)application:(NSApplication*)application
+    willContinueUserActivityWithType:(NSString*)userActivityType {
+  return YES;
+}
+
+- (BOOL)application:(NSApplication*)application
+    continueUserActivity:(NSUserActivity*)userActivity
+      restorationHandler:
+          (void (^)(NSArray<id<NSUserActivityRestoring>>*))restorationHandler {
+  LaufeyContinueUserActivityMac(userActivity);
+  return YES;
+}
+
 - (void)application:(NSApplication*)application
            openURLs:(NSArray<NSURL*>*)urls {
   for (NSURL* url in urls) {

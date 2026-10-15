@@ -5,6 +5,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
 #include "laufey_navigation_guard.h"
+#include "laufey_user_activity.h"
 #include "laufey_notifications.h"
 #include "laufey_platform_features.h"
 #include "laufey_title_bar.h"
@@ -1459,6 +1460,14 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.exit_app = Backend_ExitApp;
   // The navigation guard (API 48): every web-engine backend checks its
   // windows' top-level navigations (laufey_navigation_guard.h).
+  // User activities: Handoff and Spotlight (API 49; macOS).
+  backend_api_.set_user_activity = [](void*, const char* json) -> bool {
+    return laufey_common::SetUserActivityForAbi(json);
+  };
+  backend_api_.set_user_activity_handler =
+      [](void*, laufey_user_activity_fn handler, void* user_data) {
+        laufey_common::SetUserActivityHandler(handler, user_data);
+      };
   // Delivered notifications (API 49): backend-common's notification
   // platform (the notification center / toast history).
   backend_api_.list_delivered_notifications =

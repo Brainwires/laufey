@@ -939,6 +939,16 @@ pub struct LaufeyBackendApi {
       *mut c_void,
     ),
   >,
+  // --- User activities (API >= 49) ---
+  pub set_user_activity:
+    Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> bool>,
+  pub set_user_activity_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+      *mut c_void,
+    ),
+  >,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1846,7 +1856,9 @@ pub fn create_api_base() -> LaufeyBackendApi {
     // API 49: Winit shows no notifications of its own.
     list_delivered_notifications: None,
     remove_delivered_notifications: None,
-    // API 49: no share sheet on Winit.
+    // API 49: no share sheet or user activities on Winit.
+    set_user_activity: None,
+    set_user_activity_handler: None,
     share: None,
   }
 }

@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use laufey::{ShareOutcome, ShareRequest, Window};
+use laufey::{ShareOutcome, ShareRequest, UserActivity, Window};
 
 use super::{check, na};
 
@@ -29,6 +29,7 @@ pub async fn run() {
     na("share (Winit has no share sheet)");
     return;
   }
+  user_activity_checks();
   let win = Window::new(320, 240).title("native-e2e-share");
   win.show();
   tokio::time::sleep(Duration::from_millis(500)).await;
@@ -70,4 +71,37 @@ pub async fn run() {
     );
   }
   let _ = &win;
+}
+
+/// User activities (API 49): set and cleared on macOS, refused elsewhere;
+/// an invalid activity is refused everywhere.
+fn user_activity_checks() {
+  let activity = UserActivity {
+    activity_type: "dev.laufey.e2e.view".into(),
+    title: "laufey e2e".into(),
+    url: Some("https://example.com/e2e".into()),
+    handoff: true,
+    searchable: false,
+    ..Default::default()
+  };
+  let set = laufey::set_user_activity(Some(&activity));
+  check(
+    &format!("user activity: set where there are activities (macOS) ({set})"),
+    set == cfg!(target_os = "macos"),
+  );
+  let invalid = UserActivity {
+    activity_type: "nodots".into(),
+    ..Default::default()
+  };
+  check(
+    "user activity: an activity type that isn't reverse-DNS is refused",
+    !laufey::set_user_activity(Some(&invalid)),
+  );
+  let cleared = laufey::set_user_activity(None);
+  check(
+    &format!("user activity: cleared on macOS ({cleared})"),
+    cleared == cfg!(target_os = "macos"),
+  );
+  let handler = laufey::on_user_activity(|_| {});
+  check("user activity: the continuation handler registers", handler);
 }

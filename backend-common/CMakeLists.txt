@@ -52,6 +52,7 @@ set(LAUFEY_COMMON_SRCS
   src/menu_common.cc
   src/notifications.cc
   src/share.cc
+  src/user_activity.cc
   src/notification_auth.cc
   src/auth_session.cc
   src/platform_features.cc
@@ -85,6 +86,7 @@ if(APPLE)
     src/secret_store_mac.mm
     src/cef_keychain_mac.mm
     src/share_mac.mm
+    src/user_activity_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -289,6 +291,11 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_share_test tests/share_test.cc)
   target_link_libraries(laufey_share_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_share_test COMMAND laufey_share_test)
+
+  # User activities (API 49): the activity, its JSON, the held dispatch.
+  add_executable(laufey_user_activity_test tests/user_activity_test.cc)
+  target_link_libraries(laufey_user_activity_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_user_activity_test COMMAND laufey_user_activity_test)
 
   # Writes (and removes) a laufey-launch.json next to the test binary.
   add_executable(laufey_launch_config_test tests/launch_config_test.cc)

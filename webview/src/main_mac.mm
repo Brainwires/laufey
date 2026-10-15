@@ -2,6 +2,7 @@
 
 #import <Cocoa/Cocoa.h>
 
+#include "laufey_user_activity.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_auth_session.h"
@@ -153,6 +154,22 @@ void EnsureEditMenu(NSMenu* menubar) {
 //
 // A launch URL lands before the runtime finished loading on its worker
 // thread, so FireOpenUrlMac buffers until a handler registers.
+// Handoff and Spotlight (API 49): an activity of the app's the user
+// continues (laufey_user_activity.h); one that launched the app is held
+// until the runtime registers its handler.
+- (BOOL)application:(NSApplication*)application
+    willContinueUserActivityWithType:(NSString*)userActivityType {
+  return YES;
+}
+
+- (BOOL)application:(NSApplication*)application
+    continueUserActivity:(NSUserActivity*)userActivity
+      restorationHandler:
+          (void (^)(NSArray<id<NSUserActivityRestoring>>*))restorationHandler {
+  LaufeyContinueUserActivityMac(userActivity);
+  return YES;
+}
+
 - (void)application:(NSApplication*)application
            openURLs:(NSArray<NSURL*>*)urls {
   for (NSURL* url in urls) {

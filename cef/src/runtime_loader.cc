@@ -4,6 +4,7 @@
 
 #include "laufey_bridge_origin.h"
 #include "laufey_navigation_guard.h"
+#include "laufey_user_activity.h"
 #include "laufey_share.h"
 #include "app.h"
 #include "custom_schemes.h"
@@ -3351,6 +3352,14 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_js_namespace = Backend_SetJsNamespace;
   // The navigation guard (API 48): LaufeyHandler::OnBeforeBrowse checks
   // every laufey window's main-frame navigations.
+  // User activities: Handoff and Spotlight (API 49; macOS).
+  backend_api_.set_user_activity = [](void*, const char* json) -> bool {
+    return laufey_common::SetUserActivityForAbi(json);
+  };
+  backend_api_.set_user_activity_handler =
+      [](void*, laufey_user_activity_fn handler, void* user_data) {
+        laufey_common::SetUserActivityHandler(handler, user_data);
+      };
   // Delivered notifications (API 49): backend-common's notification
   // platform (the notification center / toast history).
   backend_api_.list_delivered_notifications =

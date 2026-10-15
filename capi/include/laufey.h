@@ -372,6 +372,17 @@ typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
 typedef void (*laufey_share_fn)(void* user_data, int status,
                                 const char* detail);
 
+// --- User activities: Handoff and Spotlight (API >= 49) -----------------
+//
+// Fired when the user continues one of the app's activities (Handoff from
+// another device, a Spotlight result): `activity_json` (UTF-8, valid for the
+// call) is {"type", "title", "url" (or null), "userInfo": {string: string}}.
+// Activities continued before a handler was registered (the one that
+// launched the app) are held and delivered, in order, when one is. Fires on
+// the main thread (macOS).
+typedef void (*laufey_user_activity_fn)(void* user_data,
+                                        const char* activity_json);
+
 // Fired EXACTLY ONCE when a context menu shown with show_context_menu_ex
 // closes: after the item's laufey_menu_click_fn when one was chosen, or alone
 // when it was dismissed. Fires on the backend UI thread (or, for a request
@@ -2329,6 +2340,26 @@ struct laufey_backend_api {
   void (*share)(void* backend_data, uint32_t window_id,
                 const char* request_json, laufey_share_fn callback,
                 void* user_data);
+
+  // --- User activities: Handoff and Spotlight (API >= 49) ------------------
+  //
+  // Make `activity_json` the app's current NSUserActivity (macOS), or end
+  // the current one with NULL:
+  //   {"type": reverse-DNS string (required; listed in the bundle's
+  //    NSUserActivityTypes for continuation), "title": string,
+  //    "url": http(s) string (webpageURL: Handoff to a browser),
+  //    "userInfo": {string: string}, "keywords": [string],
+  //    "handoff": bool (default true), "searchable": bool (Spotlight,
+  //    default false)}
+  // Returns false for an invalid activity, and where there are none
+  // (Windows, Linux: NULL entries' answer too). Any thread.
+  bool (*set_user_activity)(void* backend_data, const char* activity_json);
+
+  // The handler for continued activities (see laufey_user_activity_fn);
+  // NULL clears it. Any thread.
+  void (*set_user_activity_handler)(void* backend_data,
+                                    laufey_user_activity_fn handler,
+                                    void* user_data);
 };
 
 #ifdef __cplusplus
