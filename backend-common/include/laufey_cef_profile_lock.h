@@ -39,7 +39,9 @@ int WaitForProfileLevelDbLocks(const std::string& root_cache_dir,
                                std::vector<std::string>* still_held);
 
 // Waits up to `timeout_ms` for this process's child processes (CEF's
-// helpers) to end; a zombie has ended. Returns the number still running.
+// helpers) to end; a zombie has ended. Returns the number still running. On
+// Linux only children with a --type= switch count, and not Chromium's
+// zygotes, which end only after the browser process does.
 int WaitForChildProcessesToExit(int timeout_ms);
 
 // Both steps with their log lines, for the hosts.

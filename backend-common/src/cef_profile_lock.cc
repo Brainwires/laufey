@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #endif
 
 #if defined(__APPLE__)
@@ -120,7 +121,33 @@ int WaitForProfileLevelDbLocks(const std::string& root_cache_dir,
 
 namespace {
 
-// This process's running (not zombie) children.
+#if !defined(_WIN32) && !defined(__APPLE__)
+// Whether a child with this /proc/<pid>/cmdline is a CEF helper the host
+// waits for: one with a --type= switch, except Chromium's zygotes, which end
+// only once the browser process has (they hold its IPC socket), so waiting
+// for them always ran into the timeout. The app's own child processes
+// (no --type=) are not the profile's.
+bool IsHelperToWaitFor(const std::string& cmdline) {
+  bool helper = false;
+  size_t start = 0;
+  while (start < cmdline.size()) {
+    size_t end = cmdline.find('\0', start);
+    if (end == std::string::npos)
+      end = cmdline.size();
+    std::string arg = cmdline.substr(start, end - start);
+    if (arg.rfind("--type=", 0) == 0) {
+      if (arg == "--type=zygote")
+        return false;
+      helper = true;
+    }
+    start = end + 1;
+  }
+  return helper;
+}
+#endif
+
+// This process's running (not zombie) children: on Linux only the CEF
+// helpers it waits for (IsHelperToWaitFor).
 int RunningChildren() {
 #if defined(_WIN32)
   DWORD self = GetCurrentProcessId();
@@ -179,7 +206,13 @@ int RunningChildren() {
       continue;
     char state = line[close_paren + 2];
     long ppid = std::strtol(line.c_str() + close_paren + 4, nullptr, 10);
-    if (ppid == self && state != 'Z' && state != 'X')
+    if (ppid != self || state == 'Z' || state == 'X')
+      continue;
+    std::ifstream cmd_file(std::string("/proc/") + e->d_name + "/cmdline",
+                           std::ios::binary);
+    std::string cmdline((std::istreambuf_iterator<char>(cmd_file)),
+                        std::istreambuf_iterator<char>());
+    if (IsHelperToWaitFor(cmdline))
       ++n;
   }
   closedir(proc);
