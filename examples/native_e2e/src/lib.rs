@@ -33,6 +33,7 @@ mod bridge_origin_checks;
 mod close_checks;
 mod file_chooser_checks;
 mod io_checks;
+mod keychain_checks;
 mod launch_checks;
 mod lna_checks;
 mod menu_notification_checks;
@@ -815,6 +816,17 @@ fn e2e_main() {
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("navigation") {
       navigation_checks::run().await;
       finish();
+    }
+    // LAUFEY_E2E_ONLY=keychain (CEF on macOS, scripts/native-e2e-keychain.sh):
+    // one launch of a profile kept across launches; quits through laufey so
+    // CEF writes its cookie store out.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("keychain") {
+      keychain_checks::run().await;
+      let failed = FAILED.load(Ordering::SeqCst);
+      eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
+      let _ = std::io::Write::flush(&mut std::io::stderr());
+      laufey::quit();
+      return;
     }
     // LAUFEY_E2E_ONLY=lifetime: keep-alive with no window, then quit()
     // (both end the process, so they can't share the main battery's run).

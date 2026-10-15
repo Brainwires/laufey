@@ -23,6 +23,10 @@
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 
+#if defined(__APPLE__)
+#include "laufey_cef_keychain.h"
+#endif
+
 extern std::string g_runtime_path;
 
 // Default CEF log severity for CefSettings.log_severity.
@@ -384,16 +388,22 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
   void OnBeforeCommandLineProcessing(
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
-    // macOS: Chromium's mock keychain. Without it OSCrypt keeps its key in
-    // the login Keychain item "Chromium Safe Storage", a name fixed at
-    // Chromium's build time (CEF has no setting for it) and shared by every
-    // unbranded Chromium and CEF app: the second such app is asked whether it
-    // may read another app's item, a denial deletes its cookies, and a
-    // profile written with the mock key loses its cookies at the switch
-    // (Chromium deletes what it can't decrypt). With it the key is the same
-    // on every install, so platform_features reports
-    // "cookieEncryption": "basic" (runtime_loader.cc), not "os".
+    // macOS: Chromium's mock keychain, unless this is a team-signed app with
+    // an app id (laufey_cef_keychain.h). Chromium's own item, "Chromium Safe
+    // Storage", has a name fixed at Chromium's build time and is shared by
+    // every unbranded Chromium and CEF app; a team-signed app gets an item of
+    // its own through the host's SecItem* interposers instead (renamed to
+    // "<app id> Safe Storage", its profile migrated before CefInitialize,
+    // main_mac.mm). Ad-hoc and unsigned builds, and a launch whose migration
+    // failed, keep the mock keychain: a constant key, so platform_features
+    // reports "cookieEncryption": "basic" there (runtime_loader.cc).
+#if defined(__APPLE__)
+    if (laufey_common::ProcessCefKeychainMode() ==
+        laufey_common::CefKeychainMode::kMock)
+      command_line->AppendSwitch("use-mock-keychain");
+#else
     command_line->AppendSwitch("use-mock-keychain");
+#endif
 
     // Silence Chromium's background networking. The GCM (Google Cloud
     // Messaging) client tries to register on startup and logs noisy
