@@ -164,6 +164,8 @@ class WKWebViewBackend : public LaufeyBackend {
   uint32_t PasskeyCapabilities() override {
     return laufey_common::PasskeyCapabilitiesMac();
   }
+  void Share(uint32_t window_id, const laufey_common::ShareRequest& request,
+             laufey_share_fn callback, void* user_data) override;
   void PasskeyRequest(uint32_t window_id, uint32_t kind,
                       const char* options_json,
                       laufey_passkey_result_fn callback,
@@ -2098,6 +2100,30 @@ void WKWebViewBackend::PrintToPdf(uint32_t window_id,
         callback(nullptr, 0, "print_to_pdf requires macOS 11 or newer",
                  callback_data);
       }
+    }
+  });
+}
+
+void WKWebViewBackend::Share(uint32_t window_id,
+                             const laufey_common::ShareRequest& request,
+                             laufey_share_fn callback, void* user_data) {
+  laufey_common::ShareRequest copy = request;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* win = nil;
+      if (window_id != 0) {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id))
+          win = state->window;
+        if (!win) {
+          laufey_common::ShareReport(
+              callback, user_data, LAUFEY_SHARE_FAILED,
+              "window " + std::to_string(window_id) + " not found");
+          return;
+        }
+      }
+      laufey_common::ShareShowMac((__bridge void*)win, copy, callback,
+                                  user_data);
     }
   });
 }

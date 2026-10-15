@@ -752,6 +752,25 @@ static uint32_t Backend_PasskeyCapabilities(void* data) {
   return 0;
 }
 
+static void Backend_Share(void* data, uint32_t window_id,
+                          const char* request_json, laufey_share_fn callback,
+                          void* user_data) {
+  laufey_common::ShareRequest request;
+  std::string error;
+  if (!laufey_common::ParseShareRequest(request_json ? request_json : "",
+                                        &request, &error)) {
+    laufey_common::ShareReport(callback, user_data, LAUFEY_SHARE_FAILED, error);
+    return;
+  }
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend()) {
+    backend->Share(window_id, request, callback, user_data);
+  } else {
+    laufey_common::ShareReport(callback, user_data, LAUFEY_SHARE_FAILED,
+                               "backend not initialized");
+  }
+}
+
 static void Backend_PasskeyRequest(void* data, uint32_t window_id,
                                    uint32_t kind, const char* options_json,
                                    laufey_passkey_result_fn callback,
@@ -1576,6 +1595,8 @@ void RuntimeLoader::InitializeBackendApi() {
   // ceremonies; Linux and iOS answer not_supported.
   backend_api_.passkey_capabilities = Backend_PasskeyCapabilities;
   backend_api_.passkey_request = Backend_PasskeyRequest;
+  // The share sheet (API 49).
+  backend_api_.share = Backend_Share;
 
   // Drag and drop, file dialogs and the rich clipboard (API >= 39): see
   // docs/drag-and-drop.md, docs/file-dialogs.md, docs/clipboard.md. The

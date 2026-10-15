@@ -228,6 +228,7 @@ fn vtable_layout_matches_the_header() {
     test_capture_external_opens,
     test_take_external_opens,
     list_delivered_notifications,
-    remove_delivered_notifications
+    remove_delivered_notifications,
+    share
   );
 }

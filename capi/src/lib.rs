@@ -54,6 +54,9 @@ pub use secret::*;
 mod navigation;
 pub use navigation::*;
 
+mod share;
+pub use share::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).

@@ -3,6 +3,7 @@
 #ifndef LAUFEY_RUNTIME_LOADER_H_
 #define LAUFEY_RUNTIME_LOADER_H_
 
+#include "laufey_share.h"
 #include <string>
 #include <chrono>
 #include <thread>
@@ -607,6 +608,14 @@ class LaufeyBackend {
   // of laufey_common::PasskeyReportNotSupported).
   virtual uint32_t PasskeyCapabilities() {
     return 0;
+  }
+  // The share sheet (API 49) over `window_id`, the request already parsed.
+  // The callback fires once. Default: none on this platform.
+  virtual void Share(uint32_t /*window_id*/,
+                     const laufey_common::ShareRequest& /*request*/,
+                     laufey_share_fn callback, void* user_data) {
+    laufey_common::ShareReport(callback, user_data, LAUFEY_SHARE_NOT_SUPPORTED,
+                               "no share sheet on this platform");
   }
   virtual void PasskeyRequest(uint32_t /*window_id*/, uint32_t /*kind*/,
                               const char* /*options_json*/,

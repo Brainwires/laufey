@@ -127,6 +127,9 @@ fi
 if [ "$mode" = "--navigation" ]; then
   export LAUFEY_E2E_ONLY=navigation
 fi
+if [ "$mode" = "--share" ]; then
+  export LAUFEY_E2E_ONLY=share
+fi
 if [ "$mode" = "--lna" ]; then
   export LAUFEY_E2E_ONLY=lna
 fi

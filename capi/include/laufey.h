@@ -355,6 +355,23 @@ typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
   (1u << 6)  // item "destructive": true is drawn as a destructive action
              // (red text; API >= 49)
 
+// --- The share sheet (API >= 49) -----------------------------------------
+//
+// Outcomes reported by share's callback.
+#define LAUFEY_SHARE_COMPLETED \
+  0  // a share target was chosen (`detail`: its
+     // name where the OS says)
+#define LAUFEY_SHARE_SHOWN \
+  1  // the share UI opened; this OS reports nothing more about it
+#define LAUFEY_SHARE_CANCELLED 2      // the user dismissed it
+#define LAUFEY_SHARE_NOT_SUPPORTED 3  // no share sheet here (Linux)
+#define LAUFEY_SHARE_FAILED 4         // a bad request, or the OS refused it
+
+// share's callback. `detail` (UTF-8, may be NULL) is the chosen target for
+// COMPLETED, else the reason; valid for the duration of the call.
+typedef void (*laufey_share_fn)(void* user_data, int status,
+                                const char* detail);
+
 // Fired EXACTLY ONCE when a context menu shown with show_context_menu_ex
 // closes: after the item's laufey_menu_click_fn when one was chosen, or alone
 // when it was dismissed. Fires on the backend UI thread (or, for a request
@@ -2294,6 +2311,24 @@ struct laufey_backend_api {
   void (*remove_delivered_notifications)(void* backend_data,
                                          const char* const* tags, size_t count,
                                          bool all);
+
+  // --- The share sheet (API >= 49) -----------------------------------------
+  //
+  // Show the OS share sheet over window `window_id` (0: the app's key /
+  // foreground window) for `request_json`:
+  //   {"title": string, "text": string, "url": string,
+  //    "files": [absolute paths], "x": number, "y": number}
+  // every key optional, at least one of text, url or files; "x"/"y" anchor
+  // the macOS picker at that point of the window (DIPs; default: its
+  // middle). macOS NSSharingServicePicker (COMPLETED with the service's
+  // name, or CANCELLED); Windows DataTransferManager for the window
+  // (COMPLETED / CANCELLED where Windows reports them, else SHOWN; files go
+  // as their paths in the text); Linux has none (NOT_SUPPORTED). `callback`
+  // fires EXACTLY ONCE, on the UI thread, or synchronously for a refusal.
+  // Any thread.
+  void (*share)(void* backend_data, uint32_t window_id,
+                const char* request_json, laufey_share_fn callback,
+                void* user_data);
 };
 
 #ifdef __cplusplus

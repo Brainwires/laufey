@@ -929,6 +929,16 @@ pub struct LaufeyBackendApi {
   pub remove_delivered_notifications: Option<
     unsafe extern "C" fn(*mut c_void, *const *const c_char, usize, bool),
   >,
+  // --- The share sheet (API >= 49) ---
+  pub share: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *const c_char,
+      Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+      *mut c_void,
+    ),
+  >,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1836,6 +1846,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     // API 49: Winit shows no notifications of its own.
     list_delivered_notifications: None,
     remove_delivered_notifications: None,
+    // API 49: no share sheet on Winit.
+    share: None,
   }
 }
 

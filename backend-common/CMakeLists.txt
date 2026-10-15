@@ -51,6 +51,7 @@ set(LAUFEY_COMMON_SRCS
   src/login_item.cc
   src/menu_common.cc
   src/notifications.cc
+  src/share.cc
   src/notification_auth.cc
   src/auth_session.cc
   src/platform_features.cc
@@ -83,6 +84,7 @@ if(APPLE)
     src/title_bar_mac.mm
     src/secret_store_mac.mm
     src/cef_keychain_mac.mm
+    src/share_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -111,6 +113,7 @@ elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
     src/strings_win.cc
     src/notifications_win.cc
+    src/share_win.cc
     src/dialog_win.cc
     src/clipboard_win.cc
     src/tray_win.cc
@@ -281,6 +284,11 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_navigation_guard_test
            COMMAND laufey_navigation_guard_test)
+
+  # The share sheet's request parsing (API 49; no OS).
+  add_executable(laufey_share_test tests/share_test.cc)
+  target_link_libraries(laufey_share_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_share_test COMMAND laufey_share_test)
 
   # Writes (and removes) a laufey-launch.json next to the test binary.
   add_executable(laufey_launch_config_test tests/launch_config_test.cc)

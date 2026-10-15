@@ -43,6 +43,7 @@ mod os_view;
 mod platform_checks;
 mod sandbox_checks;
 mod secret_checks;
+mod share_checks;
 mod stream_checks;
 mod system_checks;
 mod title_bar_checks;
@@ -810,6 +811,11 @@ fn e2e_main() {
     // native-e2e-run.sh --bridge-origin writes the file.
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("bridge-origin") {
       bridge_origin_checks::run().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=share: the share sheet's answers (API 49).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("share") {
+      share_checks::run().await;
       finish();
     }
     // LAUFEY_E2E_ONLY=navigation: the navigation guard (API 48).

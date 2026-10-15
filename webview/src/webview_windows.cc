@@ -432,6 +432,8 @@ class WebView2Backend : public LaufeyBackend {
   uint32_t PasskeyCapabilities() override {
     return laufey_common::PasskeyCapabilitiesWin();
   }
+  void Share(uint32_t window_id, const laufey_common::ShareRequest& request,
+             laufey_share_fn callback, void* user_data) override;
   void PasskeyRequest(uint32_t window_id, uint32_t kind,
                       const char* options_json,
                       laufey_passkey_result_fn callback,
@@ -2305,6 +2307,26 @@ bool WebView2Backend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
   if (height)
     *height = WinToDip((std::max)(0L, ph - frame.cy), scale);
   return true;
+}
+
+void WebView2Backend::Share(uint32_t window_id,
+                            const laufey_common::ShareRequest& request,
+                            laufey_share_fn callback, void* user_data) {
+  RunOnUiThread([this, window_id, request, callback, user_data] {
+    HWND hwnd = nullptr;
+    if (window_id != 0) {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        hwnd = state->hwnd;
+      if (!hwnd) {
+        laufey_common::ShareReport(
+            callback, user_data, LAUFEY_SHARE_FAILED,
+            "window " + std::to_string(window_id) + " not found");
+        return;
+      }
+    }
+    laufey_common::ShareShowWin(hwnd, request, callback, user_data);
+  });
 }
 
 void WebView2Backend::PasskeyRequest(uint32_t window_id, uint32_t kind,

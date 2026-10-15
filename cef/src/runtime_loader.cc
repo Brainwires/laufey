@@ -4,6 +4,7 @@
 
 #include "laufey_bridge_origin.h"
 #include "laufey_navigation_guard.h"
+#include "laufey_share.h"
 #include "app.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
@@ -903,6 +904,63 @@ static uint32_t Backend_PasskeyCapabilities(void* /*data*/) {
   return laufey_common::PasskeyCapabilitiesWin();
 #else
   return 0;
+#endif
+}
+
+// The share sheet (API 49): the request parsed here (a refusal answers
+// synchronously), shown on TID_UI over the window's native window.
+static void Backend_Share(void* data, uint32_t window_id,
+                          const char* request_json, laufey_share_fn callback,
+                          void* user_data) {
+  laufey_common::ShareRequest request;
+  std::string error;
+  if (!laufey_common::ParseShareRequest(request_json ? request_json : "",
+                                        &request, &error)) {
+    laufey_common::ShareReport(callback, user_data, LAUFEY_SHARE_FAILED, error);
+    return;
+  }
+#if defined(__APPLE__) || defined(_WIN32)
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  CefRefPtr<CefBrowser> browser =
+      window_id != 0 ? loader->GetBrowserForWindow(window_id) : nullptr;
+  if (window_id != 0 && !browser) {
+    laufey_common::ShareReport(
+        callback, user_data, LAUFEY_SHARE_FAILED,
+        "window " + std::to_string(window_id) + " not found");
+    return;
+  }
+  CefPostTask(
+      TID_UI,
+      base::BindOnce(
+          [](CefRefPtr<CefBrowser> b, laufey_common::ShareRequest r,
+             laufey_share_fn cb, void* ud) {
+            void* native = nullptr;
+            if (b) {
+              auto browser_view = CefBrowserView::GetForBrowser(b);
+              auto window = browser_view ? browser_view->GetWindow() : nullptr;
+              if (!window) {
+                laufey_common::ShareReport(cb, ud, LAUFEY_SHARE_FAILED,
+                                           "the window has no native handle");
+                return;
+              }
+#if defined(__APPLE__)
+              native = NSWindowForCefHandle(window->GetWindowHandle());
+#else
+              native = reinterpret_cast<void*>(window->GetWindowHandle());
+#endif
+            }
+#if defined(__APPLE__)
+            laufey_common::ShareShowMac(native, r, cb, ud);
+#else
+            laufey_common::ShareShowWin(native, r, cb, ud);
+#endif
+          },
+          browser, std::move(request), callback, user_data));
+#else
+  (void)data;
+  (void)window_id;
+  laufey_common::ShareReport(callback, user_data, LAUFEY_SHARE_NOT_SUPPORTED,
+                             "no share sheet on Linux");
 #endif
 }
 
@@ -3348,6 +3406,8 @@ void RuntimeLoader::InitializeBackendApi() {
   // Passkeys (API >= 37): see docs/passkeys.md.
   backend_api_.passkey_capabilities = Backend_PasskeyCapabilities;
   backend_api_.passkey_request = Backend_PasskeyRequest;
+  // The share sheet (API 49).
+  backend_api_.share = Backend_Share;
 
   // Drag and drop, file dialogs and the rich clipboard (API >= 39).
   backend_api_.set_file_drop_handler = Backend_SetFileDropHandler;
