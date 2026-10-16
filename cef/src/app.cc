@@ -31,6 +31,11 @@
 #ifdef __linux__
 #include <dirent.h>
 #include <gtk/gtk.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <fstream>
 
 #include "include/cef_request_context.h"
 #endif
@@ -918,16 +923,98 @@ void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line) {
 }
 
 #if defined(__linux__)
+namespace {
+
+std::vector<std::string> LaufeyListDir(const std::string& path) {
+  std::vector<std::string> names;
+  if (DIR* dir = opendir(path.c_str())) {
+    while (struct dirent* entry = readdir(dir))
+      names.push_back(entry->d_name);
+    closedir(dir);
+  }
+  return names;
+}
+
+// The directory holding the host executable (its real path).
+std::string LaufeyExecutableDir() {
+  char exe[4096];
+  ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+  if (len <= 0)
+    return std::string();
+  std::string path(exe, static_cast<size_t>(len));
+  size_t slash = path.rfind('/');
+  return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+// Copies `from` to `to` through a temporary name, so Chromium never sees a
+// partial dictionary under the final one.
+bool LaufeyCopyFile(const std::string& from, const std::string& to) {
+  const std::string tmp = to + ".laufey-tmp";
+  {
+    std::ifstream in(from, std::ios::binary);
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!in || !out)
+      return false;
+    out << in.rdbuf();
+    if (!out.good()) {
+      out.close();
+      unlink(tmp.c_str());
+      return false;
+    }
+  }
+  if (rename(tmp.c_str(), to.c_str()) != 0) {
+    unlink(tmp.c_str());
+    return false;
+  }
+  return true;
+}
+
+// The folders bundled Hunspell dictionaries are taken from, in order:
+// LAUFEY_SPELLCHECK_DICTIONARIES (a launcher's or developer's folder), then
+// "dictionaries" beside the host executable, where the runtime ships the
+// common languages and an app adds or replaces its own at packaging time.
+std::vector<std::string> LaufeyDictionarySources() {
+  std::vector<std::string> sources;
+  if (const char* env = std::getenv("LAUFEY_SPELLCHECK_DICTIONARIES")) {
+    if (*env)
+      sources.push_back(env);
+  }
+  const std::string exe_dir = LaufeyExecutableDir();
+  if (!exe_dir.empty())
+    sources.push_back(exe_dir + "/dictionaries");
+  return sources;
+}
+
+// Copies the dictionaries of `languages` that the profile lacks from the
+// bundled folders into <root_cache_path>/Dictionaries. Returns the
+// folder's names afterwards.
+std::vector<std::string> LaufeySeedSpellcheckDictionaries(
+    const std::string& root_cache_path,
+    const std::vector<std::string>& languages) {
+  const std::string target = root_cache_path + "/Dictionaries";
+  std::vector<std::string> files = LaufeyListDir(target);
+  for (const std::string& source : LaufeyDictionarySources()) {
+    const std::vector<std::string> seed = laufey_common::DictionariesToSeed(
+        languages, LaufeyListDir(source), files);
+    for (const std::string& name : seed) {
+      mkdir(target.c_str(), 0700);
+      if (LaufeyCopyFile(source + "/" + name, target + "/" + name)) {
+        files.push_back(name);
+      } else {
+        std::cerr << "laufey: could not copy the spellcheck dictionary "
+                  << source << "/" << name << " to " << target << std::endl;
+      }
+    }
+  }
+  return files;
+}
+
+}  // namespace
+
 void LaufeyKeepLocalSpellcheckDictionaries(const std::string& root_cache_path) {
   CefRefPtr<CefRequestContext> context = CefRequestContext::GetGlobalContext();
   if (!context || root_cache_path.empty())
     return;
-  std::vector<std::string> files;
-  if (DIR* dir = opendir((root_cache_path + "/Dictionaries").c_str())) {
-    while (struct dirent* entry = readdir(dir))
-      files.push_back(entry->d_name);
-    closedir(dir);
-  }
   std::vector<std::string> languages;
   CefRefPtr<CefValue> pref = context->GetPreference("spellcheck.dictionaries");
   if (pref && pref->GetType() == VTYPE_LIST) {
@@ -954,6 +1041,10 @@ void LaufeyKeepLocalSpellcheckDictionaries(const std::string& root_cache_path) {
                 << std::endl;
     }
   }
+  // The bundled dictionaries of the languages in use, copied into the
+  // profile so Chromium finds them where it looks (and never downloads).
+  const std::vector<std::string> files =
+      LaufeySeedSpellcheckDictionaries(root_cache_path, languages);
   const std::vector<std::string> kept =
       laufey_common::LocalHunspellDictionaries(languages, files);
   if (kept == listed)

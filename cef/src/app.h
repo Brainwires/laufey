@@ -195,9 +195,12 @@ void LaufeyStripDeepLinkSwitches(CefRefPtr<CefCommandLine> command_line);
 // (--component-updater). Browser process only.
 void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line);
 #if defined(__linux__)
-// Linux: keeps only the spellcheck languages whose Hunspell dictionary is
-// already in <root_cache_path>/Dictionaries, so Chromium never downloads
-// one from Google. Before the first browser; UI thread.
+// Linux: copies the Hunspell dictionaries of the profile's spellcheck
+// languages into <root_cache_path>/Dictionaries from the bundled folders
+// (LAUFEY_SPELLCHECK_DICTIONARIES, then "dictionaries" beside the host
+// executable), then keeps only the languages whose dictionary is there, so
+// Chromium never downloads one from Google. Before the first browser; UI
+// thread.
 void LaufeyKeepLocalSpellcheckDictionaries(const std::string& root_cache_path);
 #endif
 // Whether DevTools can be reached in this process: inspectable, or a

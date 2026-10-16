@@ -79,11 +79,41 @@ static void TestLocalHunspellDictionaries() {
   EXPECT(LocalHunspellDictionaries({""}, {"-1-0.bdic"}) == Names{});
 }
 
+static void TestDictionariesToSeed() {
+  const Names bundled = {"en-US-10-1.bdic", "de-DE-3-0.bdic", "fr-FR-3-0.bdic",
+                         "README_en_US.txt", "it-IT.bdic"};
+  // Only the languages in use, in the profile's order, and only the
+  // missing ones.
+  EXPECT((DictionariesToSeed({"de-DE", "en-US"}, bundled, {}) ==
+          Names{"de-DE-3-0.bdic", "en-US-10-1.bdic"}));
+  EXPECT((DictionariesToSeed({"de-DE", "en-US"}, bundled,
+                             {"EN-us-10-1.BDIC", "Custom Dictionary.txt"}) ==
+          Names{"de-DE-3-0.bdic"}));
+  // Nothing bundled for it, or not a versioned dictionary: not seeded.
+  EXPECT(DictionariesToSeed({"es-ES", "it-IT"}, bundled, {}) == Names{});
+  // A language is not served by a longer one's file.
+  EXPECT(DictionariesToSeed({"en"}, bundled, {}) == Names{});
+  // A language listed twice is seeded once.
+  EXPECT((DictionariesToSeed({"fr-FR", "fr-FR"}, bundled, {}) ==
+          Names{"fr-FR-3-0.bdic"}));
+  // The app's folder first, then the runtime's: the app's file wins.
+  const Names app = {"en-US-10-1.bdic"};
+  Names have = DictionariesToSeed({"en-US", "de-DE"}, app, {});
+  EXPECT((have == Names{"en-US-10-1.bdic"}));
+  EXPECT((DictionariesToSeed({"en-US", "de-DE"}, bundled, have) ==
+          Names{"de-DE-3-0.bdic"}));
+  // What gets seeded is then kept by LocalHunspellDictionaries.
+  EXPECT((LocalHunspellDictionaries(
+              {"de-DE"}, DictionariesToSeed({"de-DE"}, bundled, {})) ==
+          Names{"de-DE"}));
+}
+
 int main() {
   TestFeatureListNames();
   TestMerge();
   TestGaiaUrl();
   TestLocalHunspellDictionaries();
+  TestDictionariesToSeed();
   if (g_failures) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

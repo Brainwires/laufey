@@ -110,4 +110,26 @@ std::vector<std::string> LocalHunspellDictionaries(
   return kept;
 }
 
+std::vector<std::string> DictionariesToSeed(
+    const std::vector<std::string>& languages,
+    const std::vector<std::string>& source_files,
+    const std::vector<std::string>& existing_files) {
+  std::vector<std::string> have = existing_files;
+  std::vector<std::string> seed;
+  for (const std::string& language : languages) {
+    const std::string lang = Lower(language);
+    auto serves = [&](const std::string& file) {
+      return IsDictionaryFileFor(Lower(file), lang);
+    };
+    if (std::any_of(have.begin(), have.end(), serves))
+      continue;
+    auto it = std::find_if(source_files.begin(), source_files.end(), serves);
+    if (it == source_files.end())
+      continue;
+    seed.push_back(*it);
+    have.push_back(*it);
+  }
+  return seed;
+}
+
 }  // namespace laufey_common

@@ -74,6 +74,18 @@ std::vector<std::string> LocalHunspellDictionaries(
     const std::vector<std::string>& languages,
     const std::vector<std::string>& file_names);
 
+// The Hunspell files to copy into the profile's Dictionaries folder from a
+// folder of bundled ones (`source_files`, the names in that folder): for
+// each language in `languages` that no name in `existing_files` serves (the
+// test LocalHunspellDictionaries uses), the first source file that does.
+// Only the languages in use, so a profile holds just the dictionaries it
+// checks with. Call once per source folder, the app's own first, adding
+// what it returned to `existing_files` before the next.
+std::vector<std::string> DictionariesToSeed(
+    const std::vector<std::string>& languages,
+    const std::vector<std::string>& source_files,
+    const std::vector<std::string>& existing_files);
+
 }  // namespace laufey_common
 
 #endif  // LAUFEY_CEF_NETWORK_QUIET_H_
