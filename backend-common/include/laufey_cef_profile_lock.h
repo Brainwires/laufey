@@ -1,12 +1,14 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 //
 // CEF: a profile's LevelDB databases (localStorage, sessionStorage) are
-// locked by the storage service of the launch that has them open, through
-// the LOCK file in each database's directory (base::File::Lock: an
-// exclusive fcntl lock on POSIX, LockFileEx on Windows). A launch that finds
-// one still held (the previous launch's helper processes outliving its
-// browser process, a quick relaunch) runs that database in memory only, and
-// whatever the page stores is lost at exit. So:
+// locked by the launch that has them open, through the LOCK file in each
+// database's directory (base::File::Lock: an exclusive fcntl lock on POSIX,
+// LockFileEx on Windows). The lock is the storage service's; where Chromium
+// sandboxes that service (macOS) the browser process opens its files and
+// takes the lock for it, so the host itself holds it until it exits. A
+// launch that finds one still held (the previous launch's processes
+// outliving its browser process, a quick relaunch) runs that database in
+// memory only, and whatever the page stores is lost at exit. So:
 //
 //   - after CefShutdown the host waits (bounded) for its helper processes to
 //     end (WaitForChildProcessesToExit);
@@ -41,9 +43,10 @@ int WaitForProfileLevelDbLocks(const std::string& root_cache_dir,
 // Whether a child process with this command line (arguments separated by
 // NULs, as /proc/<pid>/cmdline and KERN_PROCARGS2 give them, or by spaces,
 // as on Windows) is a CEF helper the host waits for after shutdown: it has a
-// --type= switch, and it is not a zygote or the crash handler, which end
-// only after the browser process does. The app's own child processes (a
-// sidecar, a Deno.Command) have no --type= and are not waited for.
+// --type= switch, and it is not a zygote, the crash handler or macOS's
+// code-sign-clone-cleanup, which end only after the browser process does.
+// The app's own child processes (a sidecar, a Deno.Command) have no --type=
+// and are not waited for.
 bool IsCefHelperToWaitFor(const std::string& command_line);
 
 // Waits up to `timeout_ms` for this process's CEF helpers

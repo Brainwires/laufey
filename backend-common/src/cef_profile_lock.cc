@@ -140,7 +140,13 @@ bool IsCefHelperToWaitFor(const std::string& command_line) {
     std::string type = arg.substr(7);
     // Chromium's zygotes (Linux) hold the browser's IPC socket and the
     // crash handler watches it: both end only after the browser process.
-    if (type == "zygote" || type == "crashpad-handler")
+    // On macOS the browser starts code-sign-clone-cleanup during shutdown
+    // to delete its code-signing clone of the app bundle once the browser
+    // has exited: it polls getppid() until it is reparented, so waiting for
+    // it only ever ends at the deadline (chrome/browser/mac/
+    // code_sign_clone_manager.mm).
+    if (type == "zygote" || type == "crashpad-handler" ||
+        type == "code-sign-clone-cleanup")
       return false;
     helper = true;
   }

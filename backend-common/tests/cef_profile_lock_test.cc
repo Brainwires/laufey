@@ -58,6 +58,12 @@ int main() {
   EXPECT(IsCefHelperToWaitFor("app --type=gpu-process"));
   EXPECT(!IsCefHelperToWaitFor(string("/app/x\0--type=zygote\0", 21)));
   EXPECT(!IsCefHelperToWaitFor("app.exe --type=crashpad-handler --db=x"));
+  // macOS: started at shutdown, it waits for the browser process to exit.
+  static const char kCloneCleanup[] =
+      "/a/laufey Helper\0--type=code-sign-clone-cleanup\0"
+      "--unique-temp-dir-suffix=Ab3dE6\0";
+  EXPECT(!IsCefHelperToWaitFor(
+      string(kCloneCleanup, sizeof(kCloneCleanup) - 1)));
   EXPECT(!IsCefHelperToWaitFor("deno run sidecar.ts"));  // the app's own
   EXPECT(!IsCefHelperToWaitFor("app.exe --flag --typex=renderer"));
   EXPECT(!IsCefHelperToWaitFor(""));
@@ -114,7 +120,8 @@ int main() {
   // Child processes: a running one is waited for; an ended one isn't.
   // A child is a helper by its --type= switch (sh's $1 here); a zygote, or
   // a process of the app's own (no --type=), is not waited for: a zygote
-  // ends only after the browser process does.
+  // (and macOS's code-sign-clone-cleanup) ends only after the browser
+  // process does.
   auto spawn = [](const char* type_arg, const char* secs) {
     pid_t pid = fork();
     if (pid == 0) {
@@ -132,7 +139,9 @@ int main() {
   };
   pid_t zygote = spawn("--type=zygote", "30");
   pid_t own = spawn(nullptr, "30");
-  EXPECT(zygote > 0 && own > 0);
+  // macOS's code-sign-clone-cleanup polls for the browser's exit.
+  pid_t clone_cleanup = spawn("--type=code-sign-clone-cleanup", "30");
+  EXPECT(zygote > 0 && own > 0 && clone_cleanup > 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));  // exec'd
   EXPECT(WaitForChildProcessesToExit(0) == 0);
   pid_t sleeper = spawn("--type=utility", "0.4");
@@ -140,14 +149,17 @@ int main() {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));  // exec'd
   EXPECT(WaitForChildProcessesToExit(50) == 1);
   EXPECT(WaitForChildProcessesToExit(20000) == 0);  // a zombie has ended
-  // It ended when the helper did, while the zygote and the app's own child
-  // still run.
-  EXPECT(kill(zygote, 0) == 0 && kill(own, 0) == 0);
+  // It ended when the helper did, while the zygote, the clone cleanup and
+  // the app's own child still run.
+  EXPECT(kill(zygote, 0) == 0 && kill(own, 0) == 0 &&
+         kill(clone_cleanup, 0) == 0);
   waitpid(sleeper, &status, 0);
   kill(zygote, SIGKILL);
   kill(own, SIGKILL);
+  kill(clone_cleanup, SIGKILL);
   waitpid(zygote, &status, 0);
   waitpid(own, &status, 0);
+  waitpid(clone_cleanup, &status, 0);
 
   std::string cmd = "/bin/rm -rf '" + root + "'";
   (void)!std::system(cmd.c_str());
