@@ -72,8 +72,15 @@ the host does about each in the browser process (`cef/src/app.cc`,
   downloads each language's dictionary from Google the first time it is used, so
   at startup the host keeps only the languages whose dictionary is already in
   the profile's `Dictionaries` folder (`<data dir>/CEF/Dictionaries`, a file
-  such as `en-US-10-1.bdic`), and spelling is not checked otherwise. An app that
-  wants it ships the `.bdic` files and copies them there.
+  such as `en-US-10-1.bdic`), and spelling is not checked otherwise. Before
+  that, it copies the dictionaries of the languages in use into that folder
+  from the bundled ones: the folder named by `LAUFEY_SPELLCHECK_DICTIONARIES`
+  (for a launcher or a developer) first, then `dictionaries/` beside the host
+  executable, where a distribution ships the common languages and an app adds
+  or replaces its own `.bdic` files when it packages. Only missing dictionaries
+  are copied, and only for the languages in use. The files must carry the
+  version Chromium asks for (Chromium's `hunspell_dictionaries` at the commit
+  its DEPS pins).
 
 An app's own command line wins: a feature named in `--enable-features` is not
 disabled, a `--gaia-url` of its own is kept, and `--component-updater=...`
