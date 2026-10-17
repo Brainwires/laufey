@@ -1128,8 +1128,47 @@ static void LaufeyOpenInBrowser(NSURL* url) {
 
 @end
 
+// Downloads. WKWebView only writes a download when the navigation is turned
+// into one and the host picks a destination, so a page-triggered download (an
+// `<a download>` click, a `Content-Disposition: attachment` response, a blob
+// export) is inert without the delegate methods below. The save panel decides
+// where the bytes go; dismissing it cancels the download. A single instance
+// serves every download of its window (callbacks carry the WKDownload).
+API_AVAILABLE(macos(11.3))
+@interface LaufeyDownloadDelegate : NSObject <WKDownloadDelegate>
+@end
+
+@implementation LaufeyDownloadDelegate
+
+- (void)download:(WKDownload*)download
+    decideDestinationUsingResponse:(NSURLResponse*)response
+                 suggestedFilename:(NSString*)suggestedFilename
+                 completionHandler:
+                     (void (^)(NSURL* _Nullable))completionHandler {
+  NSSavePanel* panel = [NSSavePanel savePanel];
+  panel.nameFieldStringValue = suggestedFilename ?: @"download";
+
+  NSWindow* window = download.webView.window;
+  if (window) {
+    [panel beginSheetModalForWindow:window
+                  completionHandler:^(NSModalResponse response) {
+                    completionHandler(response == NSModalResponseOK ? panel.URL
+                                                                    : nil);
+                  }];
+  } else {
+    NSModalResponse response = [panel runModal];
+    completionHandler(response == NSModalResponseOK ? panel.URL : nil);
+  }
+}
+
+@end
+
 @interface LaufeyNavigationDelegate : NSObject <WKNavigationDelegate>
 @property(nonatomic, assign) uint32_t windowId;
+// LaufeyDownloadDelegate* (macOS 11.3+) — the weak WKDownload.delegate needs
+// an owner that outlives the download, and this delegate is retained by the
+// window's state.
+@property(nonatomic, strong) id downloadDelegate;
 @end
 
 @implementation LaufeyNavigationDelegate
@@ -1147,8 +1186,15 @@ static void LaufeyOpenInBrowser(NSURL* url) {
   WKFrameInfo* target = navigationAction.targetFrame;
   NSURL* url = navigationAction.request.URL;
   NSString* absolute = url.absoluteString;
+  // `shouldPerformDownload` is set for `<a download>` clicks: the navigation
+  // has to be turned into a download here or the engine drops it.
+  WKNavigationActionPolicy allow = WKNavigationActionPolicyAllow;
+  if (@available(macOS 11.3, *)) {
+    if (navigationAction.shouldPerformDownload)
+      allow = WKNavigationActionPolicyDownload;
+  }
   if (!target || !target.isMainFrame || !absolute) {
-    decisionHandler(WKNavigationActionPolicyAllow);
+    decisionHandler(allow);
     return;
   }
   std::string urlString = absolute.UTF8String ? absolute.UTF8String : "";
@@ -1156,7 +1202,7 @@ static void LaufeyOpenInBrowser(NSURL* url) {
       laufey_common::NavigationGuard::Instance().Decide(self.windowId,
                                                         urlString);
   if (decision == laufey_common::NavigationDecision::kAllow) {
-    decisionHandler(WKNavigationActionPolicyAllow);
+    decisionHandler(allow);
     return;
   }
   laufey_common::LogGuardedNavigation(urlString, decision);
@@ -1170,6 +1216,42 @@ static void LaufeyOpenInBrowser(NSURL* url) {
 - (void)webView:(WKWebView*)webView
     didFinishNavigation:(WKNavigation*)navigation {
   RuntimeLoader::GetInstance()->DispatchPageLoadEvent(self.windowId);
+}
+
+// Downloads are opt-in: the navigation has to be turned into one (see
+// decidePolicyForNavigationAction above, for `<a download>` clicks) or the
+// engine cancels it. A response whose type can't be displayed (an attachment)
+// is the other entry point. Everything else keeps the default allow path.
+- (void)webView:(WKWebView*)webView
+    decidePolicyForNavigationResponse:(WKNavigationResponse*)navigationResponse
+                      decisionHandler:(void (^)(WKNavigationResponsePolicy))
+                                          decisionHandler {
+  WKNavigationResponsePolicy policy = WKNavigationResponsePolicyAllow;
+  if (@available(macOS 11.3, *)) {
+    if (!navigationResponse.canShowMIMEType) {
+      policy = WKNavigationResponsePolicyDownload;
+    }
+  }
+  decisionHandler(policy);
+}
+
+- (void)adoptDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
+  if (!self.downloadDelegate) {
+    self.downloadDelegate = [[LaufeyDownloadDelegate alloc] init];
+  }
+  download.delegate = (id<WKDownloadDelegate>)self.downloadDelegate;
+}
+
+- (void)webView:(WKWebView*)webView
+     navigationAction:(WKNavigationAction*)navigationAction
+    didBecomeDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
+  [self adoptDownload:download];
+}
+
+- (void)webView:(WKWebView*)webView
+    navigationResponse:(WKNavigationResponse*)navigationResponse
+     didBecomeDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
+  [self adoptDownload:download];
 }
 
 @end

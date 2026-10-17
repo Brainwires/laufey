@@ -13,6 +13,7 @@
 - [Native dialogs](dialogs.md)
 - [File dialogs](file-dialogs.md)
 - [Drag and drop](drag-and-drop.md)
+- [Downloads](downloads.md)
 - [Input events](input-events.md)
 - [Window events](window-events.md)
 - [Window handles](window-handles.md)

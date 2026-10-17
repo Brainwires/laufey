@@ -137,7 +137,8 @@ group as:
   namespace / callbacks, page-load, custom scheme handlers, devtools.
 - **Native chrome**: application menu, context menu, tray (icon/tooltip/menu/
   click/double-click/dark-icon/bounds), dock/taskbar (badge/bounce/menu/
-  visibility/reopen), notifications, dialogs (alert/confirm/prompt/file).
+  visibility/reopen), notifications, dialogs (alert/confirm/prompt/file),
+  downloads (the save dialog).
 - **System integration**: clipboard read/write, permissions (query/request).
 
 ---
@@ -281,10 +282,11 @@ than OS-level input injection (flaky). Part of the Layer-0 hook (`§8`).
 
 ### F. Modal / outward-facing — _nightly_
 
-`show_dialog` (alert/confirm/prompt/file), `request_permission`,
-`open_devtools`, `bounce_dock`, external-browser open. Modal dialogs block the
-main thread (see the macOS modal trap in `§7.2`), so they need either a backend
-auto-answer stub or an external AX/UIA driver on a separate thread.
+`show_dialog` (alert/confirm/prompt/file), the download save dialog,
+`request_permission`, `open_devtools`, `bounce_dock`, external-browser open.
+Modal dialogs block the main thread (see the macOS modal trap in `§7.2`), so
+they need either a backend auto-answer stub or an external AX/UIA driver on a
+separate thread.
 
 ---
 
@@ -586,6 +588,7 @@ per-OS (`Linux/macOS/Windows`); WebView's web-layer cells differ by engine.
 | Menu accelerators / context-menu close | B (`§19`)   | ✅                          | ✅                      | N/A              | ✅ (`--menus-notifications`) |
 | Notification responses / scheduling    | A/B (`§19`) | ✅                          | ✅                      | N/A              | ✅ (`--menus-notifications`) |
 | Dialogs (alert/confirm/prompt/file)    | F           | ⚠️                          | ⚠️                      | ⚠️               | nightly                      |
+| Downloads (save dialog)                | F           | ⚠️                          | ⚠️                      | N/A              | nightly                      |
 
 Net: ~90% of the C ABI is a hosted-CI PR gate across all backends; only modal /
 outward-facing surfaces are nightly.
