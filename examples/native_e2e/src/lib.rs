@@ -31,6 +31,7 @@ mod auth_thread_checks;
 mod body_echo;
 mod bridge_origin_checks;
 mod close_checks;
+mod download_checks;
 mod file_chooser_checks;
 mod io_checks;
 mod keychain_checks;
@@ -829,6 +830,12 @@ fn e2e_main() {
     // LAUFEY_E2E_ONLY=navigation: the navigation guard (API 48).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("navigation") {
       navigation_checks::run().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=downloads: page-triggered downloads and their save
+    // dialog (docs/downloads.md).
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("downloads") {
+      download_checks::run().await;
       finish();
     }
     // LAUFEY_E2E_ONLY=keychain (CEF on macOS, scripts/native-e2e-keychain.sh):

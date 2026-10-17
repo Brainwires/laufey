@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -23,6 +23,10 @@
 # --navigation runs only the API 48 navigation guard checks
 # (navigation_checks.rs) against a loopback server, with the open-external
 # capture on so nothing reaches a real browser.
+# --downloads runs only the page-triggered download checks
+# (download_checks.rs) against a loopback server: the save dialog (the
+# backend's file dialog, answered by the test hook), a traversal filename,
+# cancel, a cross-origin iframe, a download loop and a large file.
 # --lifetime runs only the app-lifetime checks (keep-alive with no window,
 # then quit() ending the event loop); they end the process, so they can't
 # share the main battery's run.
@@ -127,6 +131,9 @@ fi
 if [ "$mode" = "--navigation" ]; then
   export LAUFEY_E2E_ONLY=navigation
 fi
+if [ "$mode" = "--downloads" ]; then
+  export LAUFEY_E2E_ONLY=downloads
+fi
 if [ "$mode" = "--share" ]; then
   export LAUFEY_E2E_ONLY=share
 fi
@@ -189,14 +196,14 @@ if [ "$mode" = "--platform" ]; then
     export XDG_DATA_DIRS="$secrets_dir:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
   fi
 fi
-# --io drives its dialogs through the test hook, which can accept only GTK's
-# chooser: under Xvfb (a private bus may activate xdg-desktop-portal) the
-# dialogs are GTK's. The portal's FileChooser has its own battery
+# --io (and --downloads) drive their dialogs through the test hook, which can
+# accept only GTK's chooser: under Xvfb (a private bus may activate
+# xdg-desktop-portal) the dialogs are GTK's. The portal's FileChooser has its own battery
 # (--file-chooser) and ctest (file_chooser_dbus_test). In a real session
 # (LAUFEY_E2E_HOST_SESSION=1) the session's own choice stands; there the
 # accept steps report N/A when the dialog is the portal's.
-if [ "$mode" = "--io" ] && [ "$(uname -s)" = "Linux" ] &&
-  [ -z "${LAUFEY_E2E_HOST_SESSION:-}" ]; then
+if { [ "$mode" = "--io" ] || [ "$mode" = "--downloads" ]; } &&
+  [ "$(uname -s)" = "Linux" ] && [ -z "${LAUFEY_E2E_HOST_SESSION:-}" ]; then
   export LAUFEY_FILE_CHOOSER="${LAUFEY_FILE_CHOOSER:-gtk}"
 fi
 if [ "$mode" = "--secret-store" ]; then
