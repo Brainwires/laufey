@@ -82,7 +82,7 @@ void AddRecord(std::vector<unsigned char>* log, size_t n, unsigned char fill) {
       left = 32768;
     }
     size_t avail = left - 7;
-    size_t frag = std::min(n - done, avail);
+    size_t frag = (std::min)(n - done, avail);
     bool end = done + frag == n;
     unsigned type = begin && end ? 1 : begin ? 2 : end ? 4 : 3;
     EmitPhysical(log, type, data.data() + done, frag);
