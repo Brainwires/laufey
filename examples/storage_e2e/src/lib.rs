@@ -14,6 +14,12 @@
 //!          `LAUFEY_E2E_STORAGE_EXPECT` (must equal) and/or
 //!          `LAUFEY_E2E_STORAGE_EXPECT_NOT` (must not equal).
 //!
+//! `LAUFEY_E2E_STORAGE_IDB=1` also stores the value in IndexedDB (database
+//! `laufey-e2e`, store `kv`, key `v`; the write waits for its transaction to
+//! complete) and reads it back from there, checked as localStorage is. The
+//! read prints `[e2e] read indexedDB=... dataLoss=...` (`dataLoss` is the
+//! `upgradeneeded` event's: `total` when Chromium deleted a corrupt database).
+//!
 //! `LAUFEY_E2E_STORAGE_HOLD_MS` keeps the launch alive that long before it
 //! quits (used to start a second instance against a running one).
 //!
@@ -244,6 +250,64 @@ const READ_JS: &str = r#"(() => {
 const READ_LS_JS: &str =
   r#"((localStorage.getItem("laufey-e2e-storage") || "") + "|")"#;
 
+/// Starts an IndexedDB request whose outcome lands in `window.__laufeyIdb`
+/// as `ok:<value>` or `error:<message>` (see `idb`). `body` runs with the
+/// open database `db` and must call `done(value)` or `fail(error)`.
+fn idb_script(body: &str) -> String {
+  format!(
+    r#"(() => {{
+  window.__laufeyIdb = "pending";
+  window.__laufeyIdbLoss = "none";
+  const done = (v) => {{ window.__laufeyIdb = "ok:" + (v ?? ""); }};
+  const fail = (e) => {{ window.__laufeyIdb = "error:" + e; }};
+  const r = indexedDB.open("laufey-e2e", 1);
+  r.onupgradeneeded = (e) => {{
+    window.__laufeyIdbLoss = e.dataLoss + ":" + (e.dataLossMessage || "");
+    r.result.createObjectStore("kv");
+  }};
+  r.onerror = () => fail(r.error);
+  r.onblocked = () => fail("blocked");
+  r.onsuccess = () => {{
+    const db = r.result;
+    try {{ {body} }} catch (e) {{ fail(e); }}
+  }};
+  return "started";
+}})()"#
+  )
+}
+
+/// Runs an `idb_script` and polls for its outcome: `Ok(value)` or
+/// `Err(why)`, and the open's `dataLoss`.
+async fn idb(win: &Window, body: &str) -> (Result<String, String>, String) {
+  let started = eval(win, &idb_script(body), SCRIPT_WAIT).await;
+  if started.ok().as_deref() != Some("started") {
+    return (Err("the script didn't start".into()), String::new());
+  }
+  let t = Instant::now();
+  while t.elapsed() < SCRIPT_WAIT {
+    let state = eval(
+      win,
+      "String(window.__laufeyIdb) + '|' + String(window.__laufeyIdbLoss)",
+      SCRIPT_WAIT,
+    )
+    .await
+    .ok()
+    .unwrap_or_default();
+    let (outcome, loss) = state.split_once('|').unwrap_or((&state, ""));
+    if let Some(v) = outcome.strip_prefix("ok:") {
+      return (Ok(v.to_string()), loss.to_string());
+    }
+    if let Some(e) = outcome.strip_prefix("error:") {
+      return (Err(e.to_string()), loss.to_string());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  (
+    Err(format!("no outcome within {SCRIPT_WAIT:?}")),
+    String::new(),
+  )
+}
+
 fn split(pair: &str) -> (String, String) {
   let mut it = pair.splitn(2, '|');
   let ls = it.next().unwrap_or("").to_string();
@@ -349,6 +413,7 @@ fn e2e_main() {
     }
     // Cookies are only used over loopback HTTP (see the module docs).
     let check_cookie = scheme.is_none();
+    let check_idb = env("LAUFEY_E2E_STORAGE_IDB").as_deref() == Some("1");
     let read_js = if check_cookie { READ_JS } else { READ_LS_JS };
 
     if ready {
@@ -380,6 +445,17 @@ fn e2e_main() {
           let (ls, cookie) = split(&got);
           eprintln!("[e2e] wrote localStorage={ls:?} cookie={cookie:?}");
           check("localStorage write reads back", !value.is_empty() && ls == value);
+          if check_idb {
+            let put = format!(
+              r#"const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put("{value}", "v");
+    tx.oncomplete = () => {{ db.close(); done("{value}"); }};
+    tx.onerror = tx.onabort = () => fail(tx.error);"#
+            );
+            let (result, loss) = idb(&win, &put).await;
+            eprintln!("[e2e] wrote indexedDB={result:?} dataLoss={loss}");
+            check("indexedDB write completes", result.is_ok());
+          }
           if check_cookie {
             check(
               "cookie write reads back",
@@ -403,8 +479,23 @@ fn e2e_main() {
           check("read storage", got.is_some());
           let (ls, cookie) = split(&got.unwrap_or_default());
           eprintln!("[e2e] read localStorage={ls:?} cookie={cookie:?}");
+          let idb_value = if check_idb {
+            let get = r#"const req = db.transaction("kv", "readonly")
+      .objectStore("kv").get("v");
+    req.onsuccess = () => { db.close(); done(req.result); };
+    req.onerror = () => fail(req.error);"#;
+            let (result, loss) = idb(&win, get).await;
+            eprintln!("[e2e] read indexedDB={result:?} dataLoss={loss}");
+            check("read indexedDB", result.is_ok());
+            Some(result.unwrap_or_default())
+          } else {
+            None
+          };
           if let Some(want) = env("LAUFEY_E2E_STORAGE_EXPECT") {
             check(&format!("localStorage is {want:?}"), ls == want);
+            if let Some(v) = &idb_value {
+              check(&format!("indexedDB is {want:?}"), *v == want);
+            }
             if check_cookie {
               check(&format!("cookie is {want:?}"), cookie == want);
             }

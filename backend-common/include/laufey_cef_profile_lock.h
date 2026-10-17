@@ -30,8 +30,11 @@
 // A write the kill cuts short leaves a torn record at the end of the
 // database's log. LevelDB reuses the log on the next open and appends after
 // it, and the open after that drops everything after the torn record in its
-// 32 KiB block: every later launch's writes, until the block fills. So
-// before CefInitialize the host cuts such an end (RepairProfileLevelDbLogs).
+// 32 KiB block: every later launch's writes, until the block fills. IndexedDB
+// (whose databases are LevelDB too, in the same service, reusing their logs
+// the same way) opens with paranoid checks, so there that open fails as
+// corrupt and Chromium deletes the origin's IndexedDB. So before
+// CefInitialize the host cuts such an end (RepairProfileLevelDbLogs).
 
 #ifndef LAUFEY_CEF_PROFILE_LOCK_H_
 #define LAUFEY_CEF_PROFILE_LOCK_H_
@@ -87,9 +90,17 @@ int64_t LevelDbLogKeepLength(const std::vector<unsigned char>& log);
 // when none, or on any error).
 int64_t RepairLevelDbLogTail(const std::string& log_file);
 
+// The profile's IndexedDB LevelDB databases under `root_cache_dir` (the
+// default profile at the root or in Default/) that exist, each a directory
+// with its own LOCK: IndexedDB/<origin>.indexeddb.leveldb for an origin's
+// default bucket, WebStorage/<bucket id>/IndexedDB/indexeddb.leveldb for the
+// others. Sorted.
+std::vector<std::string> ProfileIndexedDbDirs(
+    const std::string& root_cache_dir);
+
 // RepairLevelDbLogTail for every log (<number>.log) of the profile's
-// databases whose LOCK is free. Returns how many it cut, with a line on
-// stderr for each.
+// databases (ProfileLevelDbLockFiles' and ProfileIndexedDbDirs') whose LOCK
+// is free. Returns how many it cut, with a line on stderr for each.
 int RepairProfileLevelDbLogs(const std::string& root_cache_dir);
 
 // The --type= value of a child process's command line (separated as for

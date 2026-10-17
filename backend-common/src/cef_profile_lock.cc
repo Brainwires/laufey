@@ -5,8 +5,10 @@
 
 #include "laufey_cef_profile_lock.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -259,32 +261,87 @@ int64_t RepairLevelDbLogTailAt(const std::filesystem::path& path) {
 
 }  // namespace
 
-int RepairProfileLevelDbLogs(const std::string& root_cache_dir) {
-  int repaired = 0;
-  for (const std::string& lock : ProfileLevelDbLockFiles(root_cache_dir)) {
+std::vector<std::string> ProfileIndexedDbDirs(
+    const std::string& root_cache_dir) {
+  std::vector<std::string> out;
+  if (root_cache_dir.empty())
+    return out;
+  std::string root = root_cache_dir;
+  while (root.size() > 1 && (root.back() == '/' || root.back() == '\\'))
+    root.pop_back();
+  auto ends_with = [](const std::string& name, const char* suffix) {
+    const size_t n = std::strlen(suffix);
+    return name.size() > n && name.compare(name.size() - n, n, suffix) == 0;
+  };
+  for (const std::filesystem::path& profile :
+       {FsPath(root) / "Default", FsPath(root)}) {
     std::error_code ec;
-    std::filesystem::path dir = FsPath(lock).parent_path();
-    // Only a database no one has open (its LOCK free).
-    if (!std::filesystem::is_directory(dir, ec) || LevelDbLockHeld(lock))
-      continue;
-    for (std::filesystem::directory_iterator it(dir, ec), end;
+    // An origin's default bucket: IndexedDB/<origin>.indexeddb.leveldb.
+    for (std::filesystem::directory_iterator it(profile / "IndexedDB", ec),
+         end;
          !ec && it != end; it.increment(ec)) {
-      const std::filesystem::directory_entry& entry = *it;
-      const std::string name = Utf8Of(entry.path().filename());
-      if (name.size() < 5 || name.compare(name.size() - 4, 4, ".log") != 0 ||
-          name.find_first_not_of("0123456789") != name.size() - 4)
-        continue;
-      int64_t removed = RepairLevelDbLogTailAt(entry.path());
-      if (removed > 0) {
-        ++repaired;
-        std::cerr << "laufey: cut " << removed
-                  << " bytes of an interrupted write from the end of "
-                  << Utf8Of(entry.path())
-                  << " (what is written next would otherwise be lost)"
-                  << std::endl;
-      }
+      std::error_code dir_ec;
+      if (it->is_directory(dir_ec) &&
+          ends_with(Utf8Of(it->path().filename()), ".indexeddb.leveldb"))
+        out.push_back(Utf8Of(it->path()));
+    }
+    // Every other bucket: WebStorage/<bucket id>/IndexedDB/indexeddb.leveldb.
+    ec.clear();
+    for (std::filesystem::directory_iterator it(profile / "WebStorage", ec),
+         end;
+         !ec && it != end; it.increment(ec)) {
+      std::filesystem::path db = it->path() / "IndexedDB" / "indexeddb.leveldb";
+      std::error_code dir_ec;
+      if (std::filesystem::is_directory(db, dir_ec))
+        out.push_back(Utf8Of(db));
     }
   }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+namespace {
+
+// RepairLevelDbLogTail for every log (<number>.log) of the database in
+// `dir`, unless its LOCK is held. Returns how many it cut.
+int RepairLevelDbDir(const std::filesystem::path& dir) {
+  std::error_code ec;
+  // Only a database no one has open (its LOCK free).
+  if (!std::filesystem::is_directory(dir, ec) ||
+      LevelDbLockHeld(Utf8Of(dir / "LOCK")))
+    return 0;
+  int repaired = 0;
+  for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
+       it.increment(ec)) {
+    const std::filesystem::directory_entry& entry = *it;
+    const std::string name = Utf8Of(entry.path().filename());
+    if (name.size() < 5 || name.compare(name.size() - 4, 4, ".log") != 0 ||
+        name.find_first_not_of("0123456789") != name.size() - 4)
+      continue;
+    int64_t removed = RepairLevelDbLogTailAt(entry.path());
+    if (removed > 0) {
+      ++repaired;
+      std::cerr << "laufey: cut " << removed
+                << " bytes of an interrupted write from the end of "
+                << Utf8Of(entry.path())
+                << " (what is written next would otherwise be lost)"
+                << std::endl;
+    }
+  }
+  return repaired;
+}
+
+}  // namespace
+
+int RepairProfileLevelDbLogs(const std::string& root_cache_dir) {
+  int repaired = 0;
+  for (const std::string& lock : ProfileLevelDbLockFiles(root_cache_dir))
+    repaired += RepairLevelDbDir(FsPath(lock).parent_path());
+  // IndexedDB opens its databases with paranoid checks: there the record
+  // after a torn one fails the whole open as corrupt, and Chromium deletes
+  // the origin's IndexedDB to recover.
+  for (const std::string& dir : ProfileIndexedDbDirs(root_cache_dir))
+    repaired += RepairLevelDbDir(FsPath(dir));
   return repaired;
 }
 

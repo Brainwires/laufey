@@ -368,11 +368,18 @@ things keep what the page stored:
   raced the kill.
 - Before `CefInitialize` every CEF host cuts a write left half done at the end
   of the profile's LevelDB logs (once their `LOCK` files are free, and says so
-  on stderr). LevelDB reuses its log across launches and appends after a torn
-  record, and on the next open it drops everything after that record in its 32
-  KiB block: one write cut short by the kill cost every later launch's writes
-  until the block filled. On CI a quit's value was read back as the one from two
-  launches before, twice in a row.
+  on stderr): `localStorage`, `sessionStorage` and every IndexedDB database
+  (`IndexedDB/<origin>.indexeddb.leveldb`, and
+  `WebStorage/<bucket>/IndexedDB/indexeddb.leveldb` for the other buckets).
+  LevelDB reuses its log across launches and appends after a torn record. On the
+  next open `localStorage` drops everything after that record in its 32 KiB
+  block: one write cut short by the kill cost every later launch's writes until
+  the block filled. On CI a quit's value was read back as the one from two
+  launches before, twice in a row. IndexedDB opens its databases with LevelDB's
+  paranoid checks, so there the same open fails as corrupt and Chromium deletes
+  the origin's IndexedDB (the page's next `open` reports `dataLoss: "total"`,
+  "checksum mismatch"). Chromium 149 keeps IndexedDB in LevelDB; its SQLite
+  backend is off by default.
 
 The WebKit backends (WebKitGTK on Linux, WKWebView on macOS) also flush
 `localStorage` before the process ends. WebKit writes it from its network

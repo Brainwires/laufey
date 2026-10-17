@@ -195,44 +195,59 @@ for ((i = 1; i <= iterations; i++)); do
   done
 done
 
-# CEF: a write cut short at the end of the localStorage LevelDB log (the
-# storage service killed in the middle of a write) must not cost the writes
-# after it. LevelDB reuses the log and appends after the torn record, then
-# drops everything after it in that block on the next open; the host cuts
-# the torn end before CefInitialize (laufey_cef_profile_lock.h).
-if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
-  dir="$(data_dir torn)"
+# CEF: a write cut short at the end of a profile's LevelDB log (the storage
+# service killed in the middle of a write) must not cost the writes after it.
+# LevelDB reuses the log and appends after the torn record. On the next open
+# localStorage drops everything after it in that block, and IndexedDB, which
+# opens with paranoid checks, fails as corrupt and Chromium deletes the
+# origin's databases. The host cuts the torn end before CefInitialize
+# (laufey_cef_profile_lock.h).
+#
+# torn_step <name> <database dir glob for find -path> [VAR=value ...]: a
+# launch writes a value, the end of its database's newest log is torn, the
+# next launch must report cutting it and write another value, and the launch
+# after that must read that value back.
+torn_step() {
+  local name="$1" glob="$2"
+  shift 2
+  local dir first value ldb log
+  dir="$(data_dir "$name")"
   first="v$RANDOM$RANDOM"
   value="v$RANDOM${RANDOM}t"
-  launch torn-write-1 LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=write \
-    LAUFEY_E2E_STORAGE_VALUE="$first" LAUFEY_E2E_STORAGE_EXIT=quit
-  ldb="$(find "$scratch/data/torn" -type d -path '*Local Storage/leveldb' 2>/dev/null | head -1 || true)"
+  launch "$name-write-1" LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=write \
+    LAUFEY_E2E_STORAGE_VALUE="$first" LAUFEY_E2E_STORAGE_EXIT=quit "$@"
+  ldb="$(find "$scratch/data/$name" -type d -path "$glob" 2>/dev/null | head -1 || true)"
   log="$(ls "$ldb"/*.log 2>/dev/null | tail -1 || true)"
-  if [ "$rc" != 0 ] || [ -z "$log" ]; then
-    fail "torn log: the first write launch (exit $rc, log '${log}')"
-    sed 's/^/    | /' "$scratch/logs/torn-write-1.log" | tail -30
-  else
-    # A record header that promises 200 bytes, and 20 of them.
-    printf '\001\002\003\004\310\000\001' >>"$log"
-    head -c 20 /dev/zero >>"$log"
-    launch torn-write-2 LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=write \
-      LAUFEY_E2E_STORAGE_VALUE="$value" LAUFEY_E2E_STORAGE_EXIT=quit
-    if grep -Eq '^laufey: cut [0-9]+ bytes of an interrupted write' \
-      "$scratch/logs/torn-write-2.log"; then
-      pass "torn log: the host cut the torn end before the engine opened it"
-    else
-      fail "torn log: the host didn't report cutting the torn end"
-      sed 's/^/    | /' "$scratch/logs/torn-write-2.log" | tail -30
-    fi
-    launch torn-read LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=read \
-      LAUFEY_E2E_STORAGE_EXPECT="$value"
-    if grep -q '^\[e2e\] OVERALL PASS' "$scratch/logs/torn-read.log"; then
-      pass "torn log: the next launch read $value back"
-    else
-      fail "torn log: the next launch didn't read $value back"
-      sed 's/^/    | /' "$scratch/logs/torn-read.log" | tail -30
-    fi
+  if [ "$rc" != 0 ] || [ -z "$log" ] ||
+    ! grep -q '^\[e2e\] OVERALL PASS' "$scratch/logs/$name-write-1.log"; then
+    fail "$name: the first write launch (exit $rc, log '${log}')"
+    sed 's/^/    | /' "$scratch/logs/$name-write-1.log" | tail -30
+    return
   fi
+  # A record header that promises 200 bytes, and 20 of them.
+  printf '\001\002\003\004\310\000\001' >>"$log"
+  head -c 20 /dev/zero >>"$log"
+  launch "$name-write-2" LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=write \
+    LAUFEY_E2E_STORAGE_VALUE="$value" LAUFEY_E2E_STORAGE_EXIT=quit "$@"
+  if grep -Eq "^laufey: cut [0-9]+ bytes of an interrupted write from the end of .*${log##*/}" \
+    "$scratch/logs/$name-write-2.log"; then
+    pass "$name: the host cut the torn end before the engine opened it"
+  else
+    fail "$name: the host didn't report cutting the torn end of ${log##*/}"
+    sed 's/^/    | /' "$scratch/logs/$name-write-2.log" | tail -30
+  fi
+  launch "$name-read" LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=read \
+    LAUFEY_E2E_STORAGE_EXPECT="$value" "$@"
+  if grep -q '^\[e2e\] OVERALL PASS' "$scratch/logs/$name-read.log"; then
+    pass "$name: the next launch read $value back"
+  else
+    fail "$name: the next launch didn't read $value back"
+    sed 's/^/    | /' "$scratch/logs/$name-read.log" | tail -30
+  fi
+}
+if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
+  torn_step torn '*Local Storage/leveldb'
+  torn_step torn-idb '*IndexedDB/*.indexeddb.leveldb' LAUFEY_E2E_STORAGE_IDB=1
 fi
 
 for path in "${paths[@]}"; do
