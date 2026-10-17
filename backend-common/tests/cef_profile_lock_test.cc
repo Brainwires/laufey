@@ -6,11 +6,16 @@
 
 #include "laufey_cef_profile_lock.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -34,6 +39,63 @@
   } while (0)
 
 using namespace laufey_common;
+
+namespace {
+
+// A LevelDB log writer (leveldb/db/log_writer.cc), for the repair tests.
+uint32_t Crc32c(const unsigned char* p, size_t n) {
+  uint32_t crc = 0xFFFFFFFFu;
+  for (size_t i = 0; i < n; ++i) {
+    crc ^= p[i];
+    for (int k = 0; k < 8; ++k)
+      crc = (crc & 1) ? (crc >> 1) ^ 0x82F63B78u : crc >> 1;
+  }
+  return crc ^ 0xFFFFFFFFu;
+}
+
+void EmitPhysical(std::vector<unsigned char>* log, unsigned type,
+                  const unsigned char* p, size_t n) {
+  std::vector<unsigned char> body(1 + n);
+  body[0] = static_cast<unsigned char>(type);
+  std::memcpy(body.data() + 1, p, n);
+  uint32_t crc = Crc32c(body.data(), body.size());
+  crc = ((crc >> 15) | (crc << 17)) + 0xA282EAD8u;  // masked
+  unsigned char h[7] = {
+      static_cast<unsigned char>(crc), static_cast<unsigned char>(crc >> 8),
+      static_cast<unsigned char>(crc >> 16),
+      static_cast<unsigned char>(crc >> 24), static_cast<unsigned char>(n),
+      static_cast<unsigned char>(n >> 8), static_cast<unsigned char>(type)};
+  log->insert(log->end(), h, h + 7);
+  log->insert(log->end(), p, p + n);
+}
+
+// Appends one logical record of `n` bytes, fragmented across blocks.
+void AddRecord(std::vector<unsigned char>* log, size_t n, unsigned char fill) {
+  std::vector<unsigned char> data(n, fill);
+  size_t done = 0;
+  bool begin = true;
+  do {
+    size_t left = 32768 - log->size() % 32768;
+    if (left < 7) {
+      log->insert(log->end(), left, 0);  // the trailer
+      left = 32768;
+    }
+    size_t avail = left - 7;
+    size_t frag = std::min(n - done, avail);
+    bool end = done + frag == n;
+    unsigned type = begin && end ? 1 : begin ? 2 : end ? 4 : 3;
+    EmitPhysical(log, type, data.data() + done, frag);
+    done += frag;
+    begin = false;
+  } while (done < n);
+}
+
+std::vector<unsigned char> Cut(std::vector<unsigned char> log, size_t n) {
+  log.resize(n);
+  return log;
+}
+
+}  // namespace
 
 int main() {
 #if defined(_WIN32)
@@ -69,6 +131,64 @@ int main() {
   EXPECT(!IsCefHelperToWaitFor(""));
   EXPECT(!LevelDbLockHeld("/nonexistent/laufey/LOCK"));
 
+  // A child's CEF type, by its --type= switch.
+  EXPECT(CefHelperType(string("/a/x\0--type=renderer\0--lang=en\0", 31)) ==
+         "renderer");
+  EXPECT(CefHelperType("\"C:\\App\\app.exe\" --type=utility --x") ==
+         "utility");
+  EXPECT(CefHelperType("deno run sidecar.ts").empty());
+  EXPECT(CefHelperType("app --typex=renderer").empty());
+  EXPECT(CefHelperType("app --type=").empty());
+  EXPECT(CefHelperType("").empty());
+
+  // LevelDB log tails. Whole logs are kept as they are.
+  std::vector<unsigned char> log;
+  EXPECT(LevelDbLogKeepLength(log) == -1);
+  AddRecord(&log, 200, 'a');
+  AddRecord(&log, 30, 'b');
+  const size_t whole = log.size();
+  EXPECT(LevelDbLogKeepLength(log) == -1);
+  // A write cut short at the end (its payload, its header): cut to before it.
+  std::vector<unsigned char> torn = log;
+  AddRecord(&torn, 40, 'c');
+  EXPECT(LevelDbLogKeepLength(Cut(torn, whole + 7 + 25)) ==
+         static_cast<int64_t>(whole));
+  EXPECT(LevelDbLogKeepLength(Cut(torn, whole + 3)) ==
+         static_cast<int64_t>(whole));
+  // A later launch's write appended after the cut-short one (LevelDB reuses
+  // the log): it no longer checks, and LevelDB would drop it on the next
+  // open; cut to before the damage, after which an append reads again.
+  std::vector<unsigned char> poisoned = Cut(torn, whole + 7 + 25);
+  AddRecord(&poisoned, 50, 'd');
+  EXPECT(LevelDbLogKeepLength(poisoned) == static_cast<int64_t>(whole));
+  std::vector<unsigned char> healed = Cut(poisoned, whole);
+  AddRecord(&healed, 50, 'd');
+  EXPECT(LevelDbLogKeepLength(healed) == -1);
+  // A record fragmented over blocks, cut before its LAST: cut to its FIRST.
+  std::vector<unsigned char> big = log;
+  AddRecord(&big, 70000, 'e');
+  EXPECT(LevelDbLogKeepLength(big) == -1);
+  EXPECT(big.size() > 65536);
+  EXPECT(LevelDbLogKeepLength(Cut(big, 65536 + 100)) ==
+         static_cast<int64_t>(whole));
+  // Damage in an earlier block, whole records after it: left as it is.
+  std::vector<unsigned char> early = log;
+  early[10] ^= 0xFF;
+  AddRecord(&early, 40000, 'f');
+  AddRecord(&early, 10, 'g');
+  EXPECT(early.size() > 32768);
+  EXPECT(LevelDbLogKeepLength(early) == -1);
+  // ...and a torn end after it is still found.
+  const size_t early_whole = early.size();
+  std::vector<unsigned char> early_torn = early;
+  AddRecord(&early_torn, 40, 'h');
+  EXPECT(LevelDbLogKeepLength(Cut(early_torn, early_whole + 9)) ==
+         static_cast<int64_t>(early_whole));
+  // ...but in the last block, cut to it.
+  std::vector<unsigned char> late = log;
+  late[whole - 5] ^= 0xFF;  // in the second record's payload
+  EXPECT(LevelDbLogKeepLength(late) == static_cast<int64_t>(whole - 7 - 30));
+
 #if !defined(_WIN32)
   char tmpl[] = "/tmp/laufey-lock-test-XXXXXX";
   EXPECT(mkdtemp(tmpl) != nullptr);
@@ -82,6 +202,29 @@ int main() {
   EXPECT(fd >= 0);
   close(fd);
   EXPECT(!LevelDbLockHeld(lock));
+
+  // The profile's logs: a torn end is cut; a whole log, a log that is not
+  // the database's (no <number>.log name) and a missing file are left.
+  auto write_file = [](const std::string& path,
+                       const std::vector<unsigned char>& bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+  };
+  auto file_size = [](const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 ? static_cast<int64_t>(st.st_size)
+                                        : int64_t{-1};
+  };
+  const std::string db_log = dir + "/000003.log";
+  write_file(db_log, poisoned);
+  write_file(dir + "/LOG", poisoned);
+  EXPECT(RepairProfileLevelDbLogs(root) == 1);
+  EXPECT(file_size(db_log) == static_cast<int64_t>(whole));
+  EXPECT(file_size(dir + "/LOG") == static_cast<int64_t>(poisoned.size()));
+  EXPECT(RepairProfileLevelDbLogs(root) == 0);  // whole now
+  EXPECT(RepairLevelDbLogTail(dir + "/000099.log") == 0);  // missing
+  write_file(db_log, poisoned);  // torn again, for the held LOCK below
 
   // Another process holds it for about a second, as a previous launch's
   // storage service would.
@@ -105,6 +248,9 @@ int main() {
   char c;
   EXPECT(read(ready[0], &c, 1) == 1);
   EXPECT(LevelDbLockHeld(lock));
+  // A database someone has open is not touched.
+  EXPECT(RepairProfileLevelDbLogs(root) == 0);
+  EXPECT(file_size(db_log) == static_cast<int64_t>(poisoned.size()));
   // Too short a wait: still held.
   std::vector<std::string> held;
   WaitForProfileLevelDbLocks(root, 100, &held);
@@ -154,6 +300,29 @@ int main() {
   EXPECT(kill(zygote, 0) == 0 && kill(own, 0) == 0 &&
          kill(clone_cleanup, 0) == 0);
   waitpid(sleeper, &status, 0);
+
+  // The renderers a closed window leaves: the wait for one type pumps
+  // between checks and ends when they have, whatever else still runs (the
+  // zygote, the clone cleanup, the app's own child, a utility).
+  pid_t utility = spawn("--type=utility", "30");
+  pid_t renderer = spawn("--type=renderer", "0.4");
+  EXPECT(utility > 0 && renderer > 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));  // exec'd
+  int pumped = 0;
+  auto pump = [&pumped]() { ++pumped; };
+  EXPECT(WaitForCefHelpersOfType("renderer", 0, pump) == 1);
+  EXPECT(WaitForCefHelpersOfType("renderer", 20000, pump) == 0);
+  EXPECT(pumped > 0);
+  EXPECT(kill(utility, 0) == 0);
+  // None running: it returns at once, without pumping.
+  pumped = 0;
+  EXPECT(WaitForCefHelpersOfType("renderer", 20000, pump) == 0);
+  EXPECT(pumped == 0);
+  EXPECT(WaitForCefHelpersOfType("gpu-process", 0, nullptr) == 0);
+  waitpid(renderer, &status, 0);
+  kill(utility, SIGKILL);
+  waitpid(utility, &status, 0);
+
   kill(zygote, SIGKILL);
   kill(own, SIGKILL);
   kill(clone_cleanup, SIGKILL);

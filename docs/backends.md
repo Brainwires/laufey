@@ -73,14 +73,14 @@ the host does about each in the browser process (`cef/src/app.cc`,
   at startup the host keeps only the languages whose dictionary is already in
   the profile's `Dictionaries` folder (`<data dir>/CEF/Dictionaries`, a file
   such as `en-US-10-1.bdic`), and spelling is not checked otherwise. Before
-  that, it copies the dictionaries of the languages in use into that folder
-  from the bundled ones: the folder named by `LAUFEY_SPELLCHECK_DICTIONARIES`
-  (for a launcher or a developer) first, then `dictionaries/` beside the host
-  executable, where a distribution ships the common languages and an app adds
-  or replaces its own `.bdic` files when it packages. Only missing dictionaries
-  are copied, and only for the languages in use. The files must carry the
-  version Chromium asks for (Chromium's `hunspell_dictionaries` at the commit
-  its DEPS pins).
+  that, it copies the dictionaries of the languages in use into that folder from
+  the bundled ones: the folder named by `LAUFEY_SPELLCHECK_DICTIONARIES` (for a
+  launcher or a developer) first, then `dictionaries/` beside the host
+  executable, where a distribution ships the common languages and an app adds or
+  replaces its own `.bdic` files when it packages. Only missing dictionaries are
+  copied, and only for the languages in use. The files must carry the version
+  Chromium asks for (Chromium's `hunspell_dictionaries` at the commit its DEPS
+  pins).
 
 An app's own command line wins: a feature named in `--enable-features` is not
 disabled, a `--gaia-url` of its own is kept, and `--component-updater=...`
@@ -354,6 +354,25 @@ failed. Nothing an app relies on runs in that code: the profile is on disk after
 `CefShutdown`, and the host's stdout and stderr are flushed first.
 `scripts/exit-e2e-run.sh` checks each path (see
 [e2e-testing.md](e2e-testing.md)).
+
+CEF's `localStorage` lives in a LevelDB database that Chromium's storage service
+writes, and `CefShutdown` kills that service without waiting for a write in
+flight (Chromium waits only for the network service, which keeps cookies). Two
+things keep what the page stored:
+
+- On macOS the backend lets the closed windows' renderer processes end before
+  `CefShutdown` (at most 2 s, pumping CEF meanwhile). The storage service
+  commits a page's `localStorage` 5 s after a write, or at once when the page's
+  renderer goes; the stopped loop no longer runs the tasks that end the
+  renderers, so without the wait they ended inside `CefShutdown` and the commit
+  raced the kill.
+- Before `CefInitialize` every CEF host cuts a write left half done at the end
+  of the profile's LevelDB logs (once their `LOCK` files are free, and says so
+  on stderr). LevelDB reuses its log across launches and appends after a torn
+  record, and on the next open it drops everything after that record in its 32
+  KiB block: one write cut short by the kill cost every later launch's writes
+  until the block filled. On CI a quit's value was read back as the one from two
+  launches before, twice in a row.
 
 The WebKit backends (WebKitGTK on Linux, WKWebView on macOS) also flush
 `localStorage` before the process ends. WebKit writes it from its network

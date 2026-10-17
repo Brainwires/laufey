@@ -514,6 +514,18 @@ int main(int argc, char* argv[]) {
     // either is released before Shutdown waits for it.
     laufey_common::UiLoopEnded();
     LaufeyClearSecondInstanceHooks();
+
+    // The windows are closed, but their renderer processes are ended by
+    // tasks Chromium posts on the UI thread, which the stopped loop no longer
+    // runs. The storage service commits a page's localStorage when its
+    // renderer goes (until then the write waits on a commit timer of 5 s),
+    // and CefShutdown kills the storage service without waiting for a
+    // commit still in flight. So pump CEF until the renderers have ended
+    // (laufey_cef_profile_lock.h), while the runtime still answers.
+    if (persistent_profile)
+      laufey_common::LaufeyWaitForRenderersBeforeShutdown(
+          []() { CefDoMessageLoopWork(); });
+
     RuntimeLoader::GetInstance()->Shutdown();
 
     CefShutdown();

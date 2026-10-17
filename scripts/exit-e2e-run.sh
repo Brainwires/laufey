@@ -152,6 +152,12 @@ for ((i = 1; i <= iterations; i++)); do
       fail "$path #$i: the write launch (see below)"
       sed 's/^/    | /' "$wlog" | tail -40
     fi
+    # CEF on macOS: the closed window's renderer ended before CefShutdown,
+    # so the storage service committed what the page stored.
+    if grep -q 'renderer process(es) still running' "$wlog"; then
+      fail "$path #$i: the renderer outlived the loop (see below)"
+      grep 'renderer process(es) still running' "$wlog" | sed 's/^/    | /'
+    fi
     if [ "$rc" = 124 ]; then
       bump hangs "$path"
       hung=1
@@ -182,10 +188,52 @@ for ((i = 1; i <= iterations; i++)); do
       else
         fail "$path #$i: the next launch didn't read $value back"
         sed 's/^/    | /' "$rlog" | tail -30
+        echo "    the write launch:"
+        sed 's/^/    w| /' "$wlog" | tail -30
       fi
     fi
   done
 done
+
+# CEF: a write cut short at the end of the localStorage LevelDB log (the
+# storage service killed in the middle of a write) must not cost the writes
+# after it. LevelDB reuses the log and appends after the torn record, then
+# drops everything after it in that block on the next open; the host cuts
+# the torn end before CefInitialize (laufey_cef_profile_lock.h).
+if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
+  dir="$(data_dir torn)"
+  first="v$RANDOM$RANDOM"
+  value="v$RANDOM${RANDOM}t"
+  launch torn-write-1 LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=write \
+    LAUFEY_E2E_STORAGE_VALUE="$first" LAUFEY_E2E_STORAGE_EXIT=quit
+  ldb="$(find "$scratch/data/torn" -type d -path '*Local Storage/leveldb' 2>/dev/null | head -1 || true)"
+  log="$(ls "$ldb"/*.log 2>/dev/null | tail -1 || true)"
+  if [ "$rc" != 0 ] || [ -z "$log" ]; then
+    fail "torn log: the first write launch (exit $rc, log '${log}')"
+    sed 's/^/    | /' "$scratch/logs/torn-write-1.log" | tail -30
+  else
+    # A record header that promises 200 bytes, and 20 of them.
+    printf '\001\002\003\004\310\000\001' >>"$log"
+    head -c 20 /dev/zero >>"$log"
+    launch torn-write-2 LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=write \
+      LAUFEY_E2E_STORAGE_VALUE="$value" LAUFEY_E2E_STORAGE_EXIT=quit
+    if grep -Eq '^laufey: cut [0-9]+ bytes of an interrupted write' \
+      "$scratch/logs/torn-write-2.log"; then
+      pass "torn log: the host cut the torn end before the engine opened it"
+    else
+      fail "torn log: the host didn't report cutting the torn end"
+      sed 's/^/    | /' "$scratch/logs/torn-write-2.log" | tail -30
+    fi
+    launch torn-read LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=read \
+      LAUFEY_E2E_STORAGE_EXPECT="$value"
+    if grep -q '^\[e2e\] OVERALL PASS' "$scratch/logs/torn-read.log"; then
+      pass "torn log: the next launch read $value back"
+    else
+      fail "torn log: the next launch didn't read $value back"
+      sed 's/^/    | /' "$scratch/logs/torn-read.log" | tail -30
+    fi
+  fi
+fi
 
 for path in "${paths[@]}"; do
   echo "[exit-e2e] $path: $(count runs "$path") runs, $(count hangs "$path") hung," \
