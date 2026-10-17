@@ -14,13 +14,18 @@
 
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <mach/mach.h>
+#include <pthread.h>
+#include <pthread/qos.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 #include "laufey_cef_keychain_interpose.h"
 
@@ -34,6 +39,17 @@
   } while (0)
 
 namespace {
+
+// A thread's base scheduling priority (4 at background QoS).
+int BasePriority(mach_port_t thread) {
+  thread_extended_info_data_t info;
+  mach_msg_type_number_t count = THREAD_EXTENDED_INFO_COUNT;
+  if (thread_info(thread, THREAD_EXTENDED_INFO,
+                  reinterpret_cast<thread_info_t>(&info),
+                  &count) != KERN_SUCCESS)
+    return -1;
+  return info.pth_priority;
+}
 
 std::string g_service;
 std::atomic<int> g_seen{0};
@@ -90,9 +106,46 @@ int main() {
     EXPECT(lookup(g_service.c_str()) == plain);
     EXPECT(g_seen.load() == 2);
 
+    // The shutdown QoS interposer (LaufeyRaiseThreadsForShutdown). Before
+    // it, a thread of the image that asks for background QoS gets it.
+    using SetBackgroundQos = int (*)();
+    SetBackgroundQos set_background = reinterpret_cast<SetBackgroundQos>(
+        dlsym(image, "LaufeyInterposeTestSetBackgroundQos"));
+    EXPECT(set_background != nullptr);
+    dispatch_semaphore_t demoted = dispatch_semaphore_create(0);
+    dispatch_semaphore_t release = dispatch_semaphore_create(0);
+    std::atomic<mach_port_t> background_port{0};
+    std::atomic<int> background_qos{0};
+    std::thread background([&] {
+      EXPECT(set_background() == 0);
+      background_qos.store(qos_class_self());
+      background_port.store(pthread_mach_thread_np(pthread_self()));
+      dispatch_semaphore_signal(demoted);
+      dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER);
+    });
+    dispatch_semaphore_wait(demoted, DISPATCH_TIME_FOREVER);
+    EXPECT(background_qos.load() == QOS_CLASS_BACKGROUND);
+    const int before = BasePriority(background_port.load());
+    EXPECT(before > 0);
+    // It raises every thread already there, that one included (an
+    // override: its requested QoS is unchanged, its priority is not)...
+    EXPECT(LaufeyRaiseThreadsForShutdown() >= 2);
+    const int after = BasePriority(background_port.load());
+    EXPECT(after > before);
+    // ...and from now on a request for background QoS gets the default.
+    std::thread late([&] {
+      EXPECT(set_background() == 0);
+      EXPECT(qos_class_self() == QOS_CLASS_USER_INITIATED);
+    });
+    late.join();
+    dispatch_semaphore_signal(release);
+    background.join();
+
     dlclose(image);
-    std::printf("laufey_keychain_interpose_mac_test: ok (lookup status %d)\n",
-                plain);
+    std::printf(
+        "laufey_keychain_interpose_mac_test: ok (lookup status %d, background "
+        "thread priority %d -> %d)\n",
+        plain, before, after);
   }
   return 0;
 }

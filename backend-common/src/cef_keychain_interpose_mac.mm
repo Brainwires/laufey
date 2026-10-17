@@ -13,8 +13,17 @@
 // itself are never interposed, so the replacements below reach the real
 // functions. With no renamer set, or a query for any other item, the calls
 // pass through unchanged.
+//
+// The dylib also carries the host's shutdown QoS interposer
+// (LaufeyRaiseThreadsForShutdown): from the moment the host calls it, a
+// thread of the CEF framework that asks for QOS_CLASS_BACKGROUND gets
+// QOS_CLASS_USER_INITIATED, and every thread already in the process gets a
+// QoS override to it.
 
 #import <Security/Security.h>
+#include <mach/mach.h>
+#include <pthread.h>
+#include <pthread/qos.h>
 
 #include <atomic>
 
@@ -66,6 +75,20 @@ OSStatus LaufeySecItemDelete(CFDictionaryRef query) {
   return status;
 }
 
+std::atomic<bool> g_shutting_down{false};
+
+// Chromium's background thread type (QOS_CLASS_BACKGROUND,
+// base/threading/platform_thread_apple.mm) becomes its default type
+// (QOS_CLASS_USER_INITIATED) once the host has started shutting down: a
+// thread at background QoS gets no CPU at all while threads of a higher QoS
+// keep every core busy, and CefShutdown waits on such threads with no
+// timeout (laufey_cef_keychain_interpose.h).
+int LaufeyPthreadSetQosClassSelf(qos_class_t qos_class, int relative_priority) {
+  if (qos_class == QOS_CLASS_BACKGROUND && g_shutting_down.load())
+    qos_class = QOS_CLASS_USER_INITIATED;
+  return pthread_set_qos_class_self_np(qos_class, relative_priority);
+}
+
 struct Interpose {
   const void* replacement;
   const void* replacee;
@@ -81,10 +104,34 @@ __attribute__((used)) const Interpose kLaufeyKeychainInterposers[]
          reinterpret_cast<const void*>(&SecItemUpdate)},
         {reinterpret_cast<const void*>(&LaufeySecItemDelete),
          reinterpret_cast<const void*>(&SecItemDelete)},
+        {reinterpret_cast<const void*>(&LaufeyPthreadSetQosClassSelf),
+         reinterpret_cast<const void*>(&pthread_set_qos_class_self_np)},
 };
 
 }  // namespace
 
 extern "C" void LaufeySetSafeStorageRenamer(LaufeySafeStorageRenamer renamer) {
   g_renamer.store(renamer);
+}
+
+extern "C" int LaufeyRaiseThreadsForShutdown(void) {
+  g_shutting_down.store(true);
+  thread_act_array_t threads = nullptr;
+  mach_msg_type_number_t count = 0;
+  if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS)
+    return 0;
+  int raised = 0;
+  for (mach_msg_type_number_t i = 0; i < count; ++i) {
+    // An override only ever raises a thread's QoS, and lasts until the
+    // process ends. A thread too new to have a pthread yet asks for its QoS
+    // through the interposer above.
+    pthread_t thread = pthread_from_mach_thread_np(threads[i]);
+    if (thread && pthread_override_qos_class_start_np(
+                      thread, QOS_CLASS_USER_INITIATED, 0) != nullptr)
+      ++raised;
+    mach_port_deallocate(mach_task_self(), threads[i]);
+  }
+  vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads),
+                count * sizeof(thread_act_t));
+  return raised;
 }

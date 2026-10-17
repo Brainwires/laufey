@@ -515,6 +515,13 @@ int main(int argc, char* argv[]) {
     laufey_common::UiLoopEnded();
     LaufeyClearSecondInstanceHooks();
 
+    // CefShutdown waits, with no timeout, for thread-pool tasks that may sit
+    // on threads at background QoS, which get no CPU while the machine is
+    // busy at a higher QoS: under such a load the first quit hung in
+    // CefShutdown for good. From here on no thread of the process stays at
+    // background QoS (laufey_cef_keychain_interpose.h).
+    LaufeyRaiseThreadsForShutdown();
+
     // The windows are closed, but their renderer processes are ended by
     // tasks Chromium posts on the UI thread, which the stopped loop no longer
     // runs. The storage service commits a page's localStorage when its

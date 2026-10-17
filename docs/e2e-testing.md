@@ -727,12 +727,14 @@ checks that the next launch cuts it and that a value written after it is read
 back, and does the same with an IndexedDB database's log
 (`LAUFEY_E2E_STORAGE_IDB=1`: the value is also written to and read from
 IndexedDB; without the cut Chromium finds the database corrupt and deletes it).
-It stops at the first hang: on Windows such a process may not be killable and
-keeps its profile locked. `process-exit`, run only when named, ends with
-`std::process::exit` from the runtime's thread under a running engine (how a
-runtime ended before API 46) and reports whether the value survived. See
-[backends.md](backends.md#how-an-app-ends). The `native-e2e` CI job runs it
-after the storage step on every webview/cef leg.
+On CEF it ends with a quit while every core is kept busy (`nice -n 5 yes` on
+each), which must end within the limit and keep the value (on macOS such a quit
+used to stay in `CefShutdown`). It stops at the first hang: on Windows such a
+process may not be killable and keeps its profile locked. `process-exit`, run
+only when named, ends with `std::process::exit` from the runtime's thread under
+a running engine (how a runtime ended before API 46) and reports whether the
+value survived. See [backends.md](backends.md#how-an-app-ends). The `native-e2e`
+CI job runs it after the storage step on every webview/cef leg.
 
 ---
 

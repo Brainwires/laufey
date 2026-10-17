@@ -250,6 +250,44 @@ if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
   torn_step torn-idb '*IndexedDB/*.indexeddb.leveldb' LAUFEY_E2E_STORAGE_IDB=1
 fi
 
+# CEF: a quit with every core kept busy (as on a loaded CI runner) still ends
+# the process, and the next launch reads back what the page stored. On macOS
+# CefShutdown used to wait for good on thread-pool workers at background QoS,
+# which such a load starves (laufey_cef_keychain_interpose.h).
+if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
+  cpus="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+  burners=()
+  for ((c = 0; c < cpus; c++)); do
+    nice -n 5 yes >/dev/null &
+    burners+=($!)
+  done
+  dir="$(data_dir loaded)"
+  value="v$RANDOM${RANDOM}l"
+  launch loaded-write LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=write \
+    LAUFEY_E2E_STORAGE_VALUE="$value" LAUFEY_E2E_STORAGE_EXIT=quit
+  wsecs=$secs
+  kill "${burners[@]}" 2>/dev/null || true
+  wait "${burners[@]}" 2>/dev/null || true
+  if [ "$rc" = 124 ]; then
+    hung=1
+    fail "loaded quit: the process didn't end within ${timeout_s}s with $cpus cores busy"
+    sed 's/^/    | /' "$scratch/logs/loaded-write.log" | tail -30
+  elif [ "$rc" != 0 ] ||
+    ! grep -q '^\[e2e\] OVERALL PASS' "$scratch/logs/loaded-write.log"; then
+    fail "loaded quit: the write launch (exit $rc, ${wsecs}s)"
+    sed 's/^/    | /' "$scratch/logs/loaded-write.log" | tail -30
+  else
+    launch loaded-read LAUFEY_DATA_DIR="$dir" LAUFEY_E2E_STORAGE_MODE=read \
+      LAUFEY_E2E_STORAGE_EXPECT="$value"
+    if grep -q '^\[e2e\] OVERALL PASS' "$scratch/logs/loaded-read.log"; then
+      pass "loaded quit: ended in ${wsecs}s with $cpus cores busy; $value read back"
+    else
+      fail "loaded quit: the next launch didn't read $value back"
+      sed 's/^/    | /' "$scratch/logs/loaded-read.log" | tail -30
+    fi
+  fi
+fi
+
 for path in "${paths[@]}"; do
   echo "[exit-e2e] $path: $(count runs "$path") runs, $(count hangs "$path") hung," \
     "$(count bad_rc "$path") wrong exit codes, $(count lost "$path") lost the value"

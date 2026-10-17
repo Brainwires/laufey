@@ -384,6 +384,20 @@ things keep what the page stored:
   "checksum mismatch"). Chromium 149 keeps IndexedDB in LevelDB; its SQLite
   backend is off by default.
 
+On macOS `CefShutdown` could also never return when the machine was busy.
+Chromium runs its thread pool's best-effort workers at background QoS, and macOS
+gives a background thread no CPU at all while threads of a higher QoS keep every
+core busy. `CefShutdown` waits, with no timeout, for the pool's
+shutdown-blocking tasks (`TaskTracker::CompleteShutdown`); Chromium raises its
+workers' priority for shutdown, but each worker does that itself when it next
+runs, which a starved one never does. With every core of a CI runner kept busy,
+the first quit stayed there, two new workers stuck in the call that set their
+own background QoS. Before `CefShutdown` the macOS host now gives every thread
+of the process a QoS override to user-initiated and turns any later request for
+background QoS into user-initiated (the interposer dylib it already ships for
+the keychain; `laufey_cef_keychain_interpose.h`). The exit e2e ends with a quit
+while every core is busy.
+
 The WebKit backends (WebKitGTK on Linux, WKWebView on macOS) also flush
 `localStorage` before the process ends. WebKit writes it from its network
 process, in an SQLite transaction committed 500 ms after the first write
