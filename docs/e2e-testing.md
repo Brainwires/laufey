@@ -718,20 +718,21 @@ and a cookie and ends at once, with no pause for the engine, by one path —
 code 7, the runtime's thread then blocked for good, as `Deno.exit()` does). The
 driver asserts that the process ends within `LAUFEY_E2E_EXIT_TIMEOUT` seconds
 (60), with that path's exit code, and that the next launch of the same app reads
-the value back. On macOS CEF it also fails a launch whose closed window's
-renderer outlived the loop by 2 s (the host logs it; the storage service may
-then not have committed). On CEF it then tears the end of a profile's
-`localStorage` LevelDB log (a record header promising more than follows, as a
-write cut short by the storage service's kill leaves it) and checks that the
-next launch cuts it and that a value written after it is read back, and does the
-same with an IndexedDB database's log (`LAUFEY_E2E_STORAGE_IDB=1`: the value is
-also written to and read from IndexedDB; without the cut Chromium finds the
-database corrupt and deletes it). It stops at the first hang: on Windows such a
-process may not be killable and keeps its profile locked. `process-exit`, run
-only when named, ends with `std::process::exit` from the runtime's thread under
-a running engine (how a runtime ended before API 46) and reports whether the
-value survived. See [backends.md](backends.md#how-an-app-ends). The `native-e2e`
-CI job runs it after the storage step on every webview/cef leg.
+the value back. On macOS and Windows CEF it also fails a launch whose closed
+window's renderer outlived the loop by 2 s (the host logs it; the storage
+service may then not have committed). On CEF it then tears the end of a
+profile's `localStorage` LevelDB log (a record header promising more than
+follows, as a write cut short by the storage service's kill leaves it) and
+checks that the next launch cuts it and that a value written after it is read
+back, and does the same with an IndexedDB database's log
+(`LAUFEY_E2E_STORAGE_IDB=1`: the value is also written to and read from
+IndexedDB; without the cut Chromium finds the database corrupt and deletes it).
+It stops at the first hang: on Windows such a process may not be killable and
+keeps its profile locked. `process-exit`, run only when named, ends with
+`std::process::exit` from the runtime's thread under a running engine (how a
+runtime ended before API 46) and reports whether the value survived. See
+[backends.md](backends.md#how-an-app-ends). The `native-e2e` CI job runs it
+after the storage step on every webview/cef leg.
 
 ---
 

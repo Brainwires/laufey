@@ -152,8 +152,8 @@ for ((i = 1; i <= iterations; i++)); do
       fail "$path #$i: the write launch (see below)"
       sed 's/^/    | /' "$wlog" | tail -40
     fi
-    # CEF on macOS: the closed window's renderer ended before CefShutdown,
-    # so the storage service committed what the page stored.
+    # CEF on macOS and Windows: the closed window's renderer ended before
+    # CefShutdown, so the storage service committed what the page stored.
     if grep -q 'renderer process(es) still running' "$wlog"; then
       fail "$path #$i: the renderer outlived the loop (see below)"
       grep 'renderer process(es) still running' "$wlog" | sed 's/^/    | /'

@@ -24,8 +24,9 @@
 // waits only for the network service, which keeps cookies). The renderers
 // of the closed windows are ended by tasks on the UI thread, which a stopped
 // loop doesn't run, so CefShutdown ended them while the storage service was
-// being killed. So on macOS, before CefShutdown, the host pumps CEF until
-// they have ended (LaufeyWaitForRenderersBeforeShutdown).
+// being killed. So on macOS and Windows, before CefShutdown, the host pumps
+// CEF until they have ended (LaufeyWaitForRenderersBeforeShutdown). On Linux
+// they have already ended when CefRunMessageLoop returns (50 traced quits).
 //
 // A write the kill cuts short leaves a torn record at the end of the
 // database's log. LevelDB reuses the log on the next open and appends after

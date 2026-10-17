@@ -360,12 +360,15 @@ writes, and `CefShutdown` kills that service without waiting for a write in
 flight (Chromium waits only for the network service, which keeps cookies). Two
 things keep what the page stored:
 
-- On macOS the backend lets the closed windows' renderer processes end before
-  `CefShutdown` (at most 2 s, pumping CEF meanwhile). The storage service
-  commits a page's `localStorage` 5 s after a write, or at once when the page's
-  renderer goes; the stopped loop no longer runs the tasks that end the
+- On macOS and Windows the backend lets the closed windows' renderer processes
+  end before `CefShutdown` (at most 2 s, pumping CEF meanwhile). The storage
+  service commits a page's `localStorage` 5 s after a write, or at once when the
+  page's renderer goes; the stopped loop no longer runs the tasks that end the
   renderers, so without the wait they ended inside `CefShutdown` and the commit
-  raced the kill.
+  raced the kill (a renderer was still running when `CefShutdown` started in 27
+  of 50 traced quits on macOS, 9 of 20 on Windows). On Linux they have already
+  ended when `CefRunMessageLoop` returns (none in 50 traced quits, idle and with
+  the CPU busy).
 - Before `CefInitialize` every CEF host cuts a write left half done at the end
   of the profile's LevelDB logs (once their `LOCK` files are free, and says so
   on stderr): `localStorage`, `sessionStorage` and every IndexedDB database
