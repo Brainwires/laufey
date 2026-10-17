@@ -122,6 +122,16 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/navigation_guard_test"
           "$RUNNER_TEMP/navigation_guard_test"
+      # Page-triggered downloads: the file name the save dialog proposes, the
+      # origins a window may download from, the prompt budget.
+      - name: backend-common downloads_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/downloads_test.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/downloads_test"
+          "$RUNNER_TEMP/downloads_test"
       # The host's command line: options stop at "--", a packaged app ignores
       # --runtime, a deep-link launch drops its command-line switches.
       - name: backend-common launch_args_test

@@ -3,6 +3,7 @@
 #include "runtime_loader.h"
 
 #include "laufey_bridge_origin.h"
+#include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_user_activity.h"
 #include "laufey_share.h"
@@ -2335,6 +2336,7 @@ static uint32_t Backend_CreateWindowEx(void* data, uint32_t flags) {
 
 static void Backend_CloseWindow(void* data, uint32_t window_id) {
   laufey_common::NavigationGuard::Instance().ForgetWindow(window_id);
+  laufey_common::DownloadPolicy::Instance().ForgetWindow(window_id);
   auto* loader = RuntimeLoader::GetInstance();
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
@@ -2590,6 +2592,14 @@ static uint32_t Backend_ShowFileDialog(
   return laufey_common::ShowFileDialogLinux(nullptr, options, callback,
                                             user_data, portal_parent);
 #endif
+}
+
+uint32_t LaufeyShowFileDialog(uint32_t window_id,
+                              const laufey_file_dialog_options_t* options,
+                              laufey_file_dialog_result_fn callback,
+                              void* user_data) {
+  return Backend_ShowFileDialog(nullptr, window_id, options, callback,
+                                user_data);
 }
 
 static bool Backend_CancelFileDialog(void* /*data*/, uint32_t dialog_id) {

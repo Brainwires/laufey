@@ -9,6 +9,7 @@
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_json.h"
 #include "laufey_passkey.h"
@@ -25,7 +26,6 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
-#include <shobjidl.h>
 #include <wincodec.h>
 #include <wrl.h>
 
@@ -34,7 +34,6 @@
 #undef CreateWindow
 
 #pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "windowscodecs.lib")
 
 // WebView2 headers
@@ -312,51 +311,6 @@ void ClearWebView2EnvironmentOverrides() {
 }
 
 }  // namespace
-
-// ============================================================================
-// Downloads
-// ============================================================================
-
-// Show the OS save dialog seeded with `suggested_name` and return the chosen
-// path (empty when the user cancels). MUST run on the UI thread: it is called
-// from the WebView2 DownloadStarting callback, which is delivered there.
-static std::wstring ShowSaveDialog(HWND parent,
-                                   const std::wstring& suggested_name) {
-  ComPtr<IFileSaveDialog> dialog;
-  HRESULT hr =
-      CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
-                       __uuidof(IFileSaveDialog),
-                       reinterpret_cast<void**>(dialog.GetAddressOf()));
-  if (FAILED(hr) || !dialog) {
-    return std::wstring();
-  }
-
-  DWORD options = 0;
-  dialog->GetOptions(&options);
-  dialog->SetOptions(options | FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM |
-                     FOS_NOREADONLYRETURN);
-  if (!suggested_name.empty()) {
-    dialog->SetFileName(suggested_name.c_str());
-  }
-
-  // Cancel returns HRESULT_FROM_WIN32(ERROR_CANCELLED), so a failed Show is
-  // just a cancelled dialog here.
-  if (FAILED(dialog->Show(parent))) {
-    return std::wstring();
-  }
-
-  ComPtr<IShellItem> item;
-  if (FAILED(dialog->GetResult(&item)) || !item) {
-    return std::wstring();
-  }
-  PWSTR path = nullptr;
-  if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) {
-    return std::wstring();
-  }
-  std::wstring result(path);
-  CoTaskMemFree(path);
-  return result;
-}
 
 // ============================================================================
 // WebView2 Backend
@@ -728,6 +682,11 @@ class WebView2Backend : public LaufeyBackend {
   // controller callback never fires and the window stays blank. Runs `task`
   // inline when already on the UI thread.
   void RunOnUiThread(std::function<void()> task);
+
+  // A page-triggered download in `window_id` (DownloadStarting; UI thread).
+  // See laufey_downloads.h.
+  HRESULT OnDownloadStarting(uint32_t window_id,
+                             ICoreWebView2DownloadStartingEventArgs* args);
 
   // Like RunOnUiThread, but blocks until the task has run. For calls whose
   // arguments only outlive the call itself (e.g. a caller-owned
@@ -1621,43 +1580,56 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                     .Get(),
                 nullptr);
 
-            // Downloads: WebView2's default handling shows its in-app download
-            // UI; a desktop app is expected to ask for a location with the
-            // OS's own save dialog instead. DownloadStarting (ICoreWebView2_4)
-            // lets us suppress the default UI, seed the dialog with WebView2's
-            // suggested name and hand the chosen path back. Dismissing the
-            // dialog cancels the download. On older WebView2 runtimes the
-            // QueryInterface fails and the default handling stays.
+            // Downloads (docs/downloads.md, laufey_downloads.h): WebView2's
+            // default handling shows its in-app download UI; a desktop app
+            // asks with the OS's own save dialog instead. DownloadStarting
+            // (ICoreWebView2_4) suppresses the default UI; the download
+            // policy decides whether to ask at all (the app's origins only,
+            // a few prompts a window at a time); the backend's save dialog
+            // (one file dialog at a time, on laufey's I/O thread) decides
+            // where, the event held open by a deferral meanwhile. Dismissing
+            // the dialog cancels the download. On older WebView2 runtimes
+            // the QueryInterface fails and the default handling stays.
             ComPtr<ICoreWebView2_4> webview4;
             if (SUCCEEDED(state->webview.As(&webview4))) {
               webview4->add_DownloadStarting(
                   Callback<ICoreWebView2DownloadStartingEventHandler>(
-                      [hwnd](ICoreWebView2* sender,
-                             ICoreWebView2DownloadStartingEventArgs* args)
-                          -> HRESULT {
-                        // ResultFilePath is pre-populated with the suggested
-                        // file name in the default download folder.
-                        LPWSTR defaultPath = nullptr;
-                        args->get_ResultFilePath(&defaultPath);
-                        std::wstring suggested =
-                            defaultPath ? PathFindFileNameW(defaultPath)
-                                        : L"download";
-                        if (defaultPath) {
-                          CoTaskMemFree(defaultPath);
-                        }
-
-                        args->put_Handled(TRUE);
-                        std::wstring path = ShowSaveDialog(hwnd, suggested);
-                        if (path.empty()) {
-                          args->put_Cancel(TRUE);
-                        } else {
-                          args->put_ResultFilePath(path.c_str());
-                        }
-                        return S_OK;
-                      })
+                      [this, wid](ICoreWebView2* /*sender*/,
+                                  ICoreWebView2DownloadStartingEventArgs* args)
+                          -> HRESULT { return OnDownloadStarting(wid, args); })
                       .Get(),
                   nullptr);
             }
+            // Chromium's "download multiple files" permission (asked after a
+            // page's first download without a click) would show WebView2's
+            // own prompt. The download policy gates each download instead, so
+            // the app's origins get it and any other origin doesn't; every
+            // other permission keeps the default handling.
+            state->webview->add_PermissionRequested(
+                Callback<ICoreWebView2PermissionRequestedEventHandler>(
+                    [wid](ICoreWebView2* /*sender*/,
+                          ICoreWebView2PermissionRequestedEventArgs* args)
+                        -> HRESULT {
+                      COREWEBVIEW2_PERMISSION_KIND kind;
+                      if (FAILED(args->get_PermissionKind(&kind)) ||
+                          kind !=
+                              COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS)
+                        return S_OK;
+                      std::string url;
+                      LPWSTR uri = nullptr;
+                      if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+                        url = WideToUtf8(uri);
+                        CoTaskMemFree(uri);
+                      }
+                      bool ok = !url.empty() &&
+                                laufey_common::DownloadPolicy::Instance()
+                                    .OriginAllowed(wid, url, "");
+                      args->put_State(ok ? COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                                         : COREWEBVIEW2_PERMISSION_STATE_DENY);
+                      return S_OK;
+                    })
+                    .Get(),
+                nullptr);
 
             state->webview_ready = true;
 
@@ -2251,6 +2223,66 @@ void WebView2Backend::StartFileDrag(uint32_t window_id,
     req->icon_png.assign(icon_png, icon_png + icon_len);
   // RunDrag re-checks the HWND (IsWindow) on the UI thread.
   laufey_common::StartFileDragWin(hwnd, req);
+}
+
+HRESULT WebView2Backend::OnDownloadStarting(
+    uint32_t window_id, ICoreWebView2DownloadStartingEventArgs* args) {
+  // WebView2's own download UI never shows: this handler decides.
+  args->put_Handled(TRUE);
+
+  std::string url;
+  ComPtr<ICoreWebView2DownloadOperation> operation;
+  if (SUCCEEDED(args->get_DownloadOperation(&operation)) && operation) {
+    LPWSTR uri = nullptr;
+    if (SUCCEEDED(operation->get_Uri(&uri)) && uri) {
+      url = WideToUtf8(uri);
+      CoTaskMemFree(uri);
+    }
+  }
+  laufey_common::DownloadDecision decision =
+      url.empty() ? laufey_common::DownloadDecision::kForeignOrigin
+                  : laufey_common::DownloadPolicy::Instance().Decide(window_id,
+                                                                     url, "");
+  if (decision != laufey_common::DownloadDecision::kAsk) {
+    laufey_common::LogRefusedDownload(url, decision);
+    args->put_Cancel(TRUE);
+    return S_OK;
+  }
+
+  // ResultFilePath is pre-populated with the suggested file name in the
+  // default download folder; only the name is proposed.
+  std::string suggested;
+  LPWSTR default_path = nullptr;
+  if (SUCCEEDED(args->get_ResultFilePath(&default_path)) && default_path) {
+    suggested = WideToUtf8(PathFindFileNameW(default_path));
+    CoTaskMemFree(default_path);
+  }
+
+  ComPtr<ICoreWebView2Deferral> deferral;
+  if (FAILED(args->GetDeferral(&deferral)) || !deferral) {
+    args->put_Cancel(TRUE);
+    return S_OK;
+  }
+  ComPtr<ICoreWebView2DownloadStartingEventArgs> held(args);
+  laufey_common::AskDownloadDestination(
+      suggested,
+      [this, window_id](const laufey_file_dialog_options_t* options,
+                        laufey_file_dialog_result_fn callback,
+                        void* user_data) {
+        return ShowFileDialog(window_id, options, callback, user_data);
+      },
+      [this, held, deferral](std::string path) {
+        // The dialog answers on the I/O thread; WebView2's objects belong
+        // to the UI thread.
+        RunOnUiThread([held, deferral, path] {
+          if (path.empty())
+            held->put_Cancel(TRUE);
+          else
+            held->put_ResultFilePath(Utf8ToWide(path).c_str());
+          deferral->Complete();
+        });
+      });
+  return S_OK;
 }
 
 uint32_t WebView2Backend::ShowFileDialog(

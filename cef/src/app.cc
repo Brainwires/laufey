@@ -11,6 +11,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
 #include "laufey_external_links.h"
+#include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_passkey.h"
 #include "laufey_scheme_registry.h"
@@ -479,17 +480,93 @@ void LaufeyHandler::OnFileDropMessage(CefRefPtr<CefBrowser> browser,
   laufey_common::DispatchFileDrop(wid, phase, x, y, paths, paths.size());
 }
 
+// Downloads (docs/downloads.md, laufey_downloads.h). Without a download
+// handler CEF cancels page-triggered downloads outright (Alloy) or hands them
+// to Chrome's download UI; laufey asks with the backend's save dialog (one
+// file dialog at a time, test-driveable like the app's own) after the
+// download policy allows asking at all (the app's origins only, a few
+// prompts a window at a time). Never Continue() without a path: CEF then
+// saves into the Downloads folder unasked. A download that is not
+// continued is cancelled (its callback released, and Cancel() on its next
+// update).
+bool LaufeyHandler::CanDownload(CefRefPtr<CefBrowser> browser,
+                                const CefString& url,
+                                const CefString& /*request_method*/) {
+  CEF_REQUIRE_UI_THREAD();
+  uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
+  std::string u = url.ToString();
+  if (wid != 0 &&
+      laufey_common::DownloadPolicy::Instance().OriginAllowed(wid, u, ""))
+    return true;
+  laufey_common::LogRefusedDownload(
+      u, laufey_common::DownloadDecision::kForeignOrigin);
+  return false;
+}
+
 bool LaufeyHandler::OnBeforeDownload(
     CefRefPtr<CefBrowser> browser, CefRefPtr<CefDownloadItem> download_item,
     const CefString& suggested_name,
     CefRefPtr<CefBeforeDownloadCallback> callback) {
   CEF_REQUIRE_UI_THREAD();
-  // A webview has no download UI of its own; without a handler CEF cancels
-  // page-triggered downloads outright. Show CEF's native "Save As" dialog so
-  // the user picks the location, seeded with the server's suggested name;
-  // dismissing it cancels the download.
-  callback->Continue(suggested_name, /*show_dialog=*/true);
+  uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
+  uint32_t id = download_item->GetId();
+  std::string original = download_item->GetOriginalUrl().ToString();
+  std::string url = download_item->GetURL().ToString();
+  if (url.empty())
+    url = original;
+  laufey_common::DownloadPolicy& policy =
+      laufey_common::DownloadPolicy::Instance();
+  laufey_common::DownloadDecision decision =
+      laufey_common::DownloadDecision::kForeignOrigin;
+  if (wid == 0 || url.empty()) {
+    // Not a laufey window (DevTools): no downloads.
+  } else if (!original.empty() && !policy.OriginAllowed(wid, original, "")) {
+    url = original;
+  } else {
+    decision = policy.Decide(wid, url, "");
+  }
+  if (decision != laufey_common::DownloadDecision::kAsk) {
+    laufey_common::LogRefusedDownload(url, decision);
+    cancelled_downloads_.insert(id);
+    return true;
+  }
+
+  laufey_common::AskDownloadDestination(
+      suggested_name.ToString(),
+      [wid](const laufey_file_dialog_options_t* options,
+            laufey_file_dialog_result_fn result, void* user_data) {
+        return LaufeyShowFileDialog(wid, options, result, user_data);
+      },
+      [callback, id](std::string path) {
+        CefPostTask(TID_UI, base::BindOnce(
+                                [](CefRefPtr<CefBeforeDownloadCallback> cb,
+                                   uint32_t id, std::string path) {
+                                  if (path.empty()) {
+                                    LaufeyHandler::GetInstance()
+                                        ->cancelled_downloads_.insert(id);
+                                    return;
+                                  }
+                                  cb->Continue(path, /*show_dialog=*/false);
+                                },
+                                callback, id, std::move(path)));
+      });
   return true;
+}
+
+void LaufeyHandler::OnDownloadUpdated(
+    CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefDownloadItem> download_item,
+    CefRefPtr<CefDownloadItemCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  uint32_t id = download_item->GetId();
+  auto it = cancelled_downloads_.find(id);
+  if (it == cancelled_downloads_.end())
+    return;
+  if (download_item->IsCanceled() || download_item->IsComplete() ||
+      download_item->IsInterrupted()) {
+    cancelled_downloads_.erase(it);
+    return;
+  }
+  callback->Cancel();
 }
 
 void LaufeyHandler::OnDraggableRegionsChanged(
@@ -1090,9 +1167,24 @@ bool LaufeyDevToolsReachable() {
 }
 
 bool LaufeyHandler::OnShowPermissionPrompt(
-    CefRefPtr<CefBrowser> /*browser*/, uint64_t /*prompt_id*/,
+    CefRefPtr<CefBrowser> browser, uint64_t /*prompt_id*/,
     const CefString& requesting_origin, uint32_t requested_permissions,
     CefRefPtr<CefPermissionPromptCallback> callback) {
+  // Chromium's "download multiple files" prompt (its DownloadRequestLimiter,
+  // after a page's first download without a click). The CEF host has no
+  // prompt UI, so every later export would wait on it forever. laufey's own
+  // download policy gates each download instead (laufey_downloads.h: the
+  // app's origins, a few save dialogs a window, each one asked), so the app's
+  // origins are let through and any other origin is refused.
+  if (requested_permissions == CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS) {
+    uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
+    bool ok =
+        wid != 0 && laufey_common::DownloadPolicy::Instance().OriginAllowed(
+                        wid, requesting_origin.ToString(), "");
+    callback->Continue(ok ? CEF_PERMISSION_RESULT_ACCEPT
+                          : CEF_PERMISSION_RESULT_DENY);
+    return true;
+  }
   // Chromium's Local Network Access prompt (CEF 136 named it
   // LOCAL_NETWORK_ACCESS, CEF 145 split it into LOCAL_NETWORK and
   // LOOPBACK_NETWORK). The CEF host has no prompt UI, so an unanswered one

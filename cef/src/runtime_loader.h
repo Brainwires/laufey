@@ -555,6 +555,13 @@ class RuntimeLoader {
 // a --runtime flag or wrapper script.
 std::string LaufeyFindColocatedRuntime();
 
+// The backend's file dialog (show_file_dialog) for `window_id`: the save
+// dialog a page-triggered download asks with (laufey_downloads.h).
+uint32_t LaufeyShowFileDialog(uint32_t window_id,
+                              const laufey_file_dialog_options_t* options,
+                              laufey_file_dialog_result_fn callback,
+                              void* user_data);
+
 // Platform-specific native event monitor hooks.
 // Implemented in the platform-specific file (e.g. runtime_loader_mac.mm).
 void InstallNativeMouseMonitor();

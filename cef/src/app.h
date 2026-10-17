@@ -349,12 +349,18 @@ class LaufeyHandler : public CefClient,
                      const CefString& title) override;
 
   // Page-triggered downloads (`<a download>`, `Content-Disposition:
-  // attachment`, blob exports) show CEF's native "Save As" dialog, so the user
-  // picks the location; dismissing it cancels the download.
+  // attachment`, blob exports; laufey_downloads.h): only from the app's
+  // origins, saved where the user picks in the backend's save dialog;
+  // dismissing it cancels the download.
+  bool CanDownload(CefRefPtr<CefBrowser> browser, const CefString& url,
+                   const CefString& request_method) override;
   bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
                         CefRefPtr<CefDownloadItem> download_item,
                         const CefString& suggested_name,
                         CefRefPtr<CefBeforeDownloadCallback> callback) override;
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         CefRefPtr<CefDownloadItemCallback> callback) override;
 
   bool OnKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
                   CefEventHandle os_event) override;
@@ -388,6 +394,9 @@ class LaufeyHandler : public CefClient,
   // Browsers whose current drag the OS had no paths for: not asked again
   // (each lookup can block TID_UI, up to 1 s on X11) until the drag ends.
   std::set<int> file_drag_lookup_failed_;
+  // Downloads refused or dismissed but not yet seen cancelled (UI thread):
+  // OnDownloadUpdated cancels them (see OnBeforeDownload).
+  std::set<uint32_t> cancelled_downloads_;
   // Handles a "laufey_file_drop" message from the page observer.
   void OnFileDropMessage(CefRefPtr<CefBrowser> browser,
                          CefRefPtr<CefListValue> args);

@@ -213,6 +213,17 @@ class NavigationGuard {
     return allowed_.size();
   }
 
+  // The window's embedder-navigated key ("" when it was never navigated)
+  // and the allowed origins, as the guard decides with them (for the
+  // download policy, laufey_downloads.h).
+  void Snapshot(uint32_t window_id, std::string* window_key,
+                std::vector<std::string>* allowed) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = window_keys_.find(window_id);
+    *window_key = it == window_keys_.end() ? std::string() : it->second;
+    *allowed = allowed_;
+  }
+
   // The decision for a top-level navigation of `window_id` to `url`. A
   // refusal that would go to the browser counts against the window's
   // per-second budget and is kThrottled once that is spent.

@@ -15,6 +15,7 @@
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_json.h"
 #include "laufey_scheme_body_stream.h"
@@ -1281,55 +1282,100 @@ static gboolean on_window_delete_event(GtkWidget* widget, GdkEvent* event,
 // --- Downloads --------------------------------------------------------------
 // A webview has no download UI of its own: when a page triggers one (an
 // `<a download>` click, a `Content-Disposition: attachment` response, a blob
-// export) the host is responsible for deciding where the bytes go. Do what a
-// desktop app is expected to do and ask with the platform's save dialog; the
-// download is cancelled if the dialog is dismissed.
+// export) the host decides where the bytes go (docs/downloads.md). The
+// download policy decides whether to ask at all (laufey_downloads.h: the
+// app's origins only, a few prompts a window at a time); the backend's save
+// dialog (one file dialog at a time: the portal's, or GTK's) decides where;
+// dismissing it cancels the download.
 
-static void on_download_decide_destination(WebKitDownload* download,
-                                           const gchar* suggested_filename,
-                                           gpointer /*user_data*/) {
-  // Like the other GTK dialogs in this repo (ShowDialogLinux, the CEF JS
-  // dialogs), the chooser has no transient parent; gtk_dialog_run makes it
-  // modal regardless.
-  GtkWidget* chooser = gtk_file_chooser_dialog_new(
-      "Save File", nullptr, GTK_FILE_CHOOSER_ACTION_SAVE, "_Cancel",
-      GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, nullptr);
-  gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(chooser),
-                                                 TRUE);
-  if (suggested_filename && *suggested_filename) {
-    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser),
-                                      suggested_filename);
-  }
+static WebKitGTKBackend* g_gtk_backend_for_downloads = nullptr;
 
-  if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT) {
-    gchar* path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
-    if (path) {
-      webkit_download_set_destination(download, path);
-      // The chooser already confirmed an overwrite; WebKit refuses to replace
-      // an existing file unless told otherwise.
-      webkit_download_set_allow_overwrite(download, TRUE);
-      g_free(path);
-    } else {
-      webkit_download_cancel(download);
-    }
+// The download's URI before and after redirects (either may be null).
+static void DownloadUris(WebKitDownload* download, const char** original,
+                         const char** final_uri) {
+  WebKitURIRequest* request = webkit_download_get_request(download);
+  *original = request ? webkit_uri_request_get_uri(request) : nullptr;
+  WebKitURIResponse* response = webkit_download_get_response(download);
+  *final_uri = response ? webkit_uri_response_get_uri(response) : nullptr;
+  if (!*final_uri)
+    *final_uri = *original;
+}
+
+// decide-destination, handled asynchronously (WebKitGTK 2.40+: returning
+// TRUE without a destination holds the download until one is set or it is
+// cancelled).
+static gboolean on_download_decide_destination(WebKitDownload* download,
+                                               const gchar* suggested_filename,
+                                               gpointer /*user_data*/) {
+  WebKitWebView* view = webkit_download_get_web_view(download);
+  uint32_t wid = view ? LaufeyIdForWidget(GTK_WIDGET(view)) : 0;
+  const char* original = nullptr;
+  const char* final_uri = nullptr;
+  DownloadUris(download, &original, &final_uri);
+  laufey_common::DownloadPolicy& policy =
+      laufey_common::DownloadPolicy::Instance();
+  laufey_common::DownloadDecision decision =
+      laufey_common::DownloadDecision::kForeignOrigin;
+  std::string url = final_uri ? final_uri : "";
+  if (wid == 0 || !g_gtk_backend_for_downloads || !final_uri) {
+    // No laufey window (or nothing to check): refuse.
+  } else if (original && !policy.OriginAllowed(wid, original, "")) {
+    url = original;
   } else {
-    webkit_download_cancel(download);
+    decision = policy.Decide(wid, url, "");
   }
-  gtk_widget_destroy(chooser);
+  if (decision != laufey_common::DownloadDecision::kAsk) {
+    laufey_common::LogRefusedDownload(url, decision);
+    webkit_download_cancel(download);
+    return TRUE;
+  }
+
+#if !WEBKIT_CHECK_VERSION(2, 40, 0)
+  // An older WebKitGTK can't wait for the dialog's answer: refuse rather
+  // than save unasked.
+  std::cerr << "laufey: not downloading " << url
+            << ": needs WebKitGTK 2.40 or later to ask where" << std::endl;
+  webkit_download_cancel(download);
+  return TRUE;
+#endif
+
+  g_object_ref(download);
+  WebKitGTKBackend* backend = g_gtk_backend_for_downloads;
+  laufey_common::AskDownloadDestination(
+      suggested_filename ? suggested_filename : "",
+      [backend, wid](const laufey_file_dialog_options_t* options,
+                     laufey_file_dialog_result_fn callback, void* user_data) {
+        return backend->ShowFileDialog(wid, options, callback, user_data);
+      },
+      [download](std::string path) {
+        laufey_common::GtkRunAsync([download, path] {
+          if (path.empty()) {
+            webkit_download_cancel(download);
+          } else {
+            webkit_download_set_destination(download, path.c_str());
+            // The dialog asked before replacing a file; WebKit refuses to
+            // replace one unless told.
+            webkit_download_set_allow_overwrite(download, TRUE);
+          }
+          g_object_unref(download);
+        });
+      });
+  return TRUE;
 }
 
 static void on_download_started(WebKitWebContext* /*context*/,
                                 WebKitDownload* download,
                                 gpointer /*user_data*/) {
-  // The destination has to be set from this signal's paired
-  // `decide-destination` (which carries the server's suggested filename) or
-  // the download is cancelled.
+  // The destination is set from this download's `decide-destination`
+  // (which carries the suggested filename); without a handler WebKitGTK
+  // would save it into the Downloads folder unasked.
   g_signal_connect(download, "decide-destination",
                    G_CALLBACK(on_download_decide_destination), nullptr);
 }
 
 WebKitGTKBackend::WebKitGTKBackend() {
   g_gtk_backend = this;
+  g_gtk_backend_for_downloads = this;
 }
 
 WebKitGTKBackend::~WebKitGTKBackend() {

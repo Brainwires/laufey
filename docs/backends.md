@@ -325,6 +325,14 @@ dialogs, notifications, key mapping) in
 included as a CMake subdirectory by each backend. The winit backend shares its
 non-engine pieces through `backend-winit-common` instead.
 
+Page-triggered downloads are one of them (`laufey_downloads.h`, see
+[Downloads](downloads.md)): each engine's hook (`CefDownloadHandler`, WebView2's
+`DownloadStarting`, WebKitGTK's `decide-destination`, `WKDownloadDelegate`) asks
+the same download policy (the app's origins only, a few save dialogs per window)
+and the backend's own save dialog. Carried from upstream
+[#126](https://github.com/littledivy/laufey/pull/126) and hardened in this fork;
+no C ABI change.
+
 ## How an app ends
 
 The event loop ends when the last window closes (unless

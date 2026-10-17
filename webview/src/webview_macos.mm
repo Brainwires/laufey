@@ -13,6 +13,7 @@
 #include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
@@ -1128,43 +1129,129 @@ static void LaufeyOpenInBrowser(NSURL* url) {
 
 @end
 
-// Downloads. WKWebView only writes a download when the navigation is turned
-// into one and the host picks a destination, so a page-triggered download (an
-// `<a download>` click, a `Content-Disposition: attachment` response, a blob
-// export) is inert without the delegate methods below. The save panel decides
-// where the bytes go; dismissing it cancels the download. A single instance
-// serves every download of its window (callbacks carry the WKDownload).
+// Downloads (docs/downloads.md, laufey_downloads.h). WKWebView only writes a
+// download when the navigation is turned into one and the host picks a
+// destination, so a page-triggered download (an `<a download>` click, a
+// `Content-Disposition: attachment` response, a blob export) is inert without
+// the delegate methods below. The download policy decides whether to ask at
+// all (the app's origins only, the frame that started it included, a few
+// prompts a window at a time); the backend's save dialog (one file dialog at
+// a time) decides where the bytes go; dismissing it cancels the download. A
+// single instance serves every download of its window.
+static std::string LaufeySecurityOriginString(WKSecurityOrigin* origin) {
+  if (!origin || !origin.protocol)
+    return "";
+  std::string out = origin.protocol.UTF8String ?: "";
+  out += "://";
+  if (origin.host)
+    out += origin.host.UTF8String ?: "";
+  if (origin.port != 0)
+    out += ":" + std::to_string(static_cast<long>(origin.port));
+  return out;
+}
+
 API_AVAILABLE(macos(11.3))
 @interface LaufeyDownloadDelegate : NSObject <WKDownloadDelegate>
+@property(nonatomic, assign) WKWebViewBackend* backend;
+@property(nonatomic, assign) uint32_t windowId;
+// The origin of the frame each download started in (an `<a download>`
+// click's source frame), for macOS before 15.2 (no originatingFrame).
+@property(nonatomic, strong) NSMapTable<WKDownload*, NSString*>* initiators;
+- (void)noteDownload:(WKDownload*)download initiator:(NSString*)initiator;
 @end
 
 @implementation LaufeyDownloadDelegate
+
+- (void)noteDownload:(WKDownload*)download initiator:(NSString*)initiator {
+  if (!initiator)
+    return;
+  if (!self.initiators)
+    self.initiators = [NSMapTable weakToStrongObjectsMapTable];
+  [self.initiators setObject:initiator forKey:download];
+}
 
 - (void)download:(WKDownload*)download
     decideDestinationUsingResponse:(NSURLResponse*)response
                  suggestedFilename:(NSString*)suggestedFilename
                  completionHandler:
                      (void (^)(NSURL* _Nullable))completionHandler {
-  NSSavePanel* panel = [NSSavePanel savePanel];
-  panel.nameFieldStringValue = suggestedFilename ?: @"download";
-
-  NSWindow* window = download.webView.window;
-  if (window) {
-    [panel beginSheetModalForWindow:window
-                  completionHandler:^(NSModalResponse response) {
-                    completionHandler(response == NSModalResponseOK ? panel.URL
-                                                                    : nil);
-                  }];
-  } else {
-    NSModalResponse response = [panel runModal];
-    completionHandler(response == NSModalResponseOK ? panel.URL : nil);
+  // The frame that started it (nil for a main-frame navigation WebKit
+  // reports none for: its URL is the guard's already).
+  std::string initiator;
+#if defined(__MAC_15_2) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_15_2
+  // originatingFrame: the macOS 15.2 SDK and later.
+  if (@available(macOS 15.2, *)) {
+    if (download.originatingFrame)
+      initiator =
+          LaufeySecurityOriginString(download.originatingFrame.securityOrigin);
   }
+#endif
+  if (initiator.empty()) {
+    NSString* noted = [self.initiators objectForKey:download];
+    if (noted.UTF8String)
+      initiator = noted.UTF8String;
+  }
+  NSString* original = download.originalRequest.URL.absoluteString;
+  NSString* final_url = response.URL.absoluteString ?: original;
+  std::string url = final_url.UTF8String ?: "";
+  laufey_common::DownloadPolicy& policy =
+      laufey_common::DownloadPolicy::Instance();
+  laufey_common::DownloadDecision decision =
+      laufey_common::DownloadDecision::kForeignOrigin;
+  if (!self.backend || self.windowId == 0) {
+    // No window to ask over: refuse.
+  } else if (original && original.UTF8String &&
+             !policy.OriginAllowed(self.windowId, original.UTF8String,
+                                   initiator)) {
+    url = original.UTF8String;
+  } else {
+    decision = policy.Decide(self.windowId, url, initiator);
+  }
+  if (decision != laufey_common::DownloadDecision::kAsk) {
+    laufey_common::LogRefusedDownload(url, decision);
+    completionHandler(nil);
+    return;
+  }
+
+  void (^handler)(NSURL* _Nullable) = [completionHandler copy];
+  WKWebViewBackend* backend = self.backend;
+  uint32_t window_id = self.windowId;
+  laufey_common::AskDownloadDestination(
+      suggestedFilename.UTF8String ?: "",
+      [backend, window_id](const laufey_file_dialog_options_t* options,
+                           laufey_file_dialog_result_fn callback,
+                           void* user_data) {
+        return backend->ShowFileDialog(window_id, options, callback, user_data);
+      },
+      [handler](std::string path) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (path.empty()) {
+            handler(nil);
+            return;
+          }
+          NSString* chosen = [NSString stringWithUTF8String:path.c_str()];
+          if (!chosen) {
+            handler(nil);
+            return;
+          }
+          // WKDownload refuses a destination that exists. The save panel
+          // asked before replacing it, so a regular file there goes (never
+          // a directory or a link's target).
+          NSFileManager* fm = [NSFileManager defaultManager];
+          NSDictionary* attrs = [fm attributesOfItemAtPath:chosen error:nil];
+          if (attrs && [attrs[NSFileType] isEqualToString:NSFileTypeRegular]) {
+            [fm removeItemAtPath:chosen error:nil];
+          }
+          handler([NSURL fileURLWithPath:chosen]);
+        });
+      });
 }
 
 @end
 
 @interface LaufeyNavigationDelegate : NSObject <WKNavigationDelegate>
 @property(nonatomic, assign) uint32_t windowId;
+@property(nonatomic, assign) WKWebViewBackend* backend;
 // LaufeyDownloadDelegate* (macOS 11.3+) — the weak WKDownload.delegate needs
 // an owner that outlives the download, and this delegate is retained by the
 // window's state.
@@ -1235,23 +1322,34 @@ API_AVAILABLE(macos(11.3))
   decisionHandler(policy);
 }
 
-- (void)adoptDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
+- (void)adoptDownload:(WKDownload*)download
+            initiator:(WKFrameInfo*)frame API_AVAILABLE(macos(11.3)) {
   if (!self.downloadDelegate) {
-    self.downloadDelegate = [[LaufeyDownloadDelegate alloc] init];
+    LaufeyDownloadDelegate* delegate = [[LaufeyDownloadDelegate alloc] init];
+    delegate.backend = self.backend;
+    delegate.windowId = self.windowId;
+    self.downloadDelegate = delegate;
   }
-  download.delegate = (id<WKDownloadDelegate>)self.downloadDelegate;
+  LaufeyDownloadDelegate* delegate =
+      (LaufeyDownloadDelegate*)self.downloadDelegate;
+  if (frame) {
+    std::string origin = LaufeySecurityOriginString(frame.securityOrigin);
+    [delegate noteDownload:download
+                 initiator:[NSString stringWithUTF8String:origin.c_str()]];
+  }
+  download.delegate = delegate;
 }
 
 - (void)webView:(WKWebView*)webView
      navigationAction:(WKNavigationAction*)navigationAction
     didBecomeDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
-  [self adoptDownload:download];
+  [self adoptDownload:download initiator:navigationAction.sourceFrame];
 }
 
 - (void)webView:(WKWebView*)webView
     navigationResponse:(WKNavigationResponse*)navigationResponse
      didBecomeDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
-  [self adoptDownload:download];
+  [self adoptDownload:download initiator:nil];
 }
 
 @end
@@ -1822,6 +1920,7 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       LaufeyNavigationDelegate* navDelegate =
           [[LaufeyNavigationDelegate alloc] init];
       navDelegate.windowId = window_id;
+      navDelegate.backend = this;
       webview.navigationDelegate = navDelegate;
 
       if (transparent) {

@@ -588,7 +588,7 @@ per-OS (`Linux/macOS/Windows`); WebView's web-layer cells differ by engine.
 | Menu accelerators / context-menu close | B (`§19`)   | ✅                          | ✅                      | N/A              | ✅ (`--menus-notifications`) |
 | Notification responses / scheduling    | A/B (`§19`) | ✅                          | ✅                      | N/A              | ✅ (`--menus-notifications`) |
 | Dialogs (alert/confirm/prompt/file)    | F           | ⚠️                          | ⚠️                      | ⚠️               | nightly                      |
-| Downloads (save dialog)                | F           | ⚠️                          | ⚠️                      | N/A              | nightly                      |
+| Downloads (save dialog)                | C + F       | ✅                          | ✅                      | N/A              | ✅ (`--downloads`)           |
 
 Net: ~90% of the C ABI is a hosted-CI PR gate across all backends; only modal /
 outward-facing surfaces are nightly.

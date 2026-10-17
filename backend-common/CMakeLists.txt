@@ -308,6 +308,12 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_navigation_guard_test
            COMMAND laufey_navigation_guard_test)
 
+  # Page-triggered downloads: the proposed file name, the origins and prompt
+  # budget, the save-dialog request.
+  add_executable(laufey_downloads_test tests/downloads_test.cc)
+  target_link_libraries(laufey_downloads_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_downloads_test COMMAND laufey_downloads_test)
+
   # The share sheet's request parsing (API 49; no OS).
   add_executable(laufey_share_test tests/share_test.cc)
   target_link_libraries(laufey_share_test PRIVATE laufey_backend_common)

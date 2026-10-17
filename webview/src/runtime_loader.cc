@@ -4,6 +4,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
+#include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_user_activity.h"
 #include "laufey_notifications.h"
@@ -605,6 +606,7 @@ static void Backend_CloseWindow(void* data, uint32_t window_id) {
     backend->CloseWindow(window_id);
   }
   laufey_common::NavigationGuard::Instance().ForgetWindow(window_id);
+  laufey_common::DownloadPolicy::Instance().ForgetWindow(window_id);
 }
 
 static void Backend_SetCloseRequestedHandler(void* data,
