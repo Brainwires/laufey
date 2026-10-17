@@ -54,6 +54,22 @@ jobs:
       - name: deno lint
         run: deno lint
 
+  # RustSec advisories against Cargo.lock on every CI run (the weekly
+  # cargo_audit.yml on main only sees main's lockfile). Fails on any
+  # vulnerability; unmaintained/unsound/yanked warnings are printed only.
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.1
+      - name: cargo audit
+        run: cargo audit --file Cargo.lock
+
   test:
     name: cargo test (capi)
     runs-on: ubuntu-latest
