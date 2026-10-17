@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, denext/integration]
+    branches: [main, denext/integration, development-denext]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, development-denext]
   # Nightly, so flakes and runner-image drift show up between merges.
   schedule:
     - cron: "17 6 * * *"
