@@ -20,6 +20,17 @@ const std::vector<std::string>& CefQuietDisabledFeatures() {
   return features;
 }
 
+const std::vector<std::string>& CefOwnDisabledFeatures() {
+  // CEF 7827 chrome_main_delegate_cef.cc:358-374 (laufey_cef_network_quiet.h).
+  static const std::vector<std::string> features = {
+      "GlicActorUi",
+      "AutofillActorMode",
+      "LensOverlay",
+      "KillOnInvalidNavigationHeaders",
+  };
+  return features;
+}
+
 std::vector<std::string> FeatureListNames(const std::string& value) {
   std::vector<std::string> names;
   size_t start = 0;
@@ -51,12 +62,15 @@ std::string MergeQuietDisabledFeatures(const std::string& disable,
     return std::find(list.begin(), list.end(), name) != list.end();
   };
   std::string merged = disable;
-  for (const std::string& feature : CefQuietDisabledFeatures()) {
-    if (contains(disabled, feature) || contains(enabled, feature))
-      continue;
-    if (!merged.empty() && merged.back() != ',')
-      merged += ',';
-    merged += feature;
+  for (const std::vector<std::string>* list :
+       {&CefQuietDisabledFeatures(), &CefOwnDisabledFeatures()}) {
+    for (const std::string& feature : *list) {
+      if (contains(disabled, feature) || contains(enabled, feature))
+        continue;
+      if (!merged.empty() && merged.back() != ',')
+        merged += ',';
+      merged += feature;
+    }
   }
   return merged;
 }

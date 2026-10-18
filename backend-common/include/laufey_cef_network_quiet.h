@@ -44,6 +44,22 @@ namespace laufey_common {
 // appends them to --disable-features.
 const std::vector<std::string>& CefQuietDisabledFeatures();
 
+// The Chromium features CEF 149 itself adds to --disable-features before the
+// host's command line hook runs (CEF branch 7827,
+// libcef/common/chrome/chrome_main_delegate_cef.cc,
+// ChromeMainDelegateCef::BasicStartupComplete, lines 356-374): GlicActorUi,
+// AutofillActorMode and LensOverlay crash Chrome's browser initialization
+// under CEF, KillOnInvalidNavigationHeaders breaks CefFrame::LoadRequest with
+// custom headers. A deep-link launch whose command line carries
+// --disable-features drops that switch, CEF's entries included
+// (LaufeyStripDeepLinkSwitches), and the browser then crashes at startup in
+// tabs::TabInterface::GetFromContents, so MergeQuietDisabledFeatures adds
+// them back. Not mirrored: EnableHangWatcher (CEF disables it only with
+// multi_threaded_message_loop, which laufey doesn't use) and Windows'
+// TcpSocketIoCompletionPortWin (off by default in Chromium 149, so CEF adds
+// nothing). Re-check the list at every CEF update.
+const std::vector<std::string>& CefOwnDisabledFeatures();
+
 // The feature names in a --enable-features / --disable-features value: each
 // comma-separated entry without a leading "*" and without a "<Trial" or
 // ":param/value" suffix. Empty entries are skipped.
@@ -51,7 +67,8 @@ std::vector<std::string> FeatureListNames(const std::string& value);
 
 // The --disable-features value with the quiet defaults added: `disable` (the
 // value already on the command line, possibly empty) followed by each
-// default that is neither already in it nor named in `enable`. A feature
+// default (CefQuietDisabledFeatures, then CefOwnDisabledFeatures) that is
+// neither already in it nor named in `enable`. A feature
 // the app's own command line enables stays enabled. Returns `disable`
 // unchanged when there is nothing to add.
 std::string MergeQuietDisabledFeatures(const std::string& disable,

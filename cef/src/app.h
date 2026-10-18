@@ -193,7 +193,9 @@ void LaufeyStripDeepLinkSwitches(CefRefPtr<CefCommandLine> command_line);
 // (except one the command line's --enable-features names), unless the
 // command line sets one, a --gaia-url Chromium refuses to connect to, and
 // --disable-component-update unless it configures the component updater
-// (--component-updater). Browser process only.
+// (--component-updater). It also re-adds CEF's own default disabled
+// features (CefOwnDisabledFeatures), which a deep-link launch's strip drops
+// with the command line's --disable-features. Browser process only.
 void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line);
 #if defined(__linux__)
 // Linux: copies the Hunspell dictionaries of the profile's spellcheck

@@ -6,7 +6,9 @@
 
 #include "laufey_cef_network_quiet.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -24,8 +26,11 @@ static int g_failures = 0;
 
 using Names = std::vector<std::string>;
 
-static const char kAll[] =
+static const char kQuiet[] =
     "NetworkTimeServiceQuerying,AimEnabled,PreconnectToSearch";
+static const char kOwn[] =
+    "GlicActorUi,AutofillActorMode,LensOverlay,KillOnInvalidNavigationHeaders";
+static const std::string kAll = std::string(kQuiet) + "," + kOwn;
 
 static void TestFeatureListNames() {
   EXPECT(FeatureListNames("") == Names{});
@@ -40,22 +45,55 @@ static void TestMerge() {
   // Nothing on the command line: every default, in order.
   EXPECT(MergeQuietDisabledFeatures("", "") == kAll);
   EXPECT(CefQuietDisabledFeatures().size() == 3);
+  EXPECT(CefOwnDisabledFeatures().size() == 4);
   // The app's own disabled features come first and are kept as written.
-  EXPECT(MergeQuietDisabledFeatures("Foo<Trial", "") ==
-         std::string("Foo<Trial,") + kAll);
-  EXPECT(MergeQuietDisabledFeatures("Foo,", "") == std::string("Foo,") + kAll);
+  EXPECT(MergeQuietDisabledFeatures("Foo<Trial", "") == "Foo<Trial," + kAll);
+  EXPECT(MergeQuietDisabledFeatures("Foo,", "") == "Foo," + kAll);
   // A default already disabled is not repeated.
   EXPECT(MergeQuietDisabledFeatures("AimEnabled", "") ==
-         "AimEnabled,NetworkTimeServiceQuerying,PreconnectToSearch");
+         std::string("AimEnabled,NetworkTimeServiceQuerying,"
+                     "PreconnectToSearch,") +
+             kOwn);
   EXPECT(MergeQuietDisabledFeatures(kAll, "") == kAll);
+  EXPECT(MergeQuietDisabledFeatures(kOwn, "") ==
+         std::string(kOwn) + "," + kQuiet);
   // An app that enables one of them keeps it: the explicit choice wins.
   EXPECT(MergeQuietDisabledFeatures("", "PreconnectToSearch") ==
-         "NetworkTimeServiceQuerying,AimEnabled");
+         std::string("NetworkTimeServiceQuerying,AimEnabled,") + kOwn);
   EXPECT(MergeQuietDisabledFeatures("", "OverlayScrollbar,*AimEnabled<T") ==
-         "NetworkTimeServiceQuerying,PreconnectToSearch");
-  EXPECT(MergeQuietDisabledFeatures(
-             "X", "NetworkTimeServiceQuerying,AimEnabled,PreconnectToSearch") ==
-         "X");
+         std::string("NetworkTimeServiceQuerying,PreconnectToSearch,") + kOwn);
+  EXPECT(MergeQuietDisabledFeatures("X", kAll) == "X");
+}
+
+// CEF's own default --disable-features entries (features that crash Chrome's
+// browser initialization or break CEF APIs), spelled out here rather than
+// read from CefOwnDisabledFeatures() so a list that loses one fails too.
+static const char* const kCefOwn[] = {"GlicActorUi", "AutofillActorMode",
+                                      "LensOverlay",
+                                      "KillOnInvalidNavigationHeaders"};
+
+static void TestDeepLinkKeepsCefDefaults() {
+  // A deep-link launch whose command line carries --disable-features (a
+  // relaunch copies Chromium's processed switches next to the link) drops
+  // the switch (LaufeyStripDeepLinkSwitches), and with it the entries CEF
+  // had merged into it before the command line hook. The hook's merge must
+  // put CEF's back, or Chrome crashes at startup
+  // (tabs::TabInterface::GetFromContents).
+  const std::string after_strip = MergeQuietDisabledFeatures("", "");
+  const Names names = FeatureListNames(after_strip);
+  for (const char* feature : kCefOwn) {
+    if (std::find(names.begin(), names.end(), feature) == names.end()) {
+      std::fprintf(stderr, "FAIL: %s missing after a deep-link strip (%s)\n",
+                   feature, after_strip.c_str());
+      ++g_failures;
+    }
+  }
+  EXPECT(CefOwnDisabledFeatures() ==
+         Names(std::begin(kCefOwn), std::end(kCefOwn)));
+  // Nothing is lost when the switch survives either (an ordinary launch:
+  // CEF's entries are already there and are not repeated).
+  EXPECT(FeatureListNames(MergeQuietDisabledFeatures(kOwn, "")).size() ==
+         4 + CefQuietDisabledFeatures().size());
 }
 
 static void TestGaiaUrl() {
@@ -111,6 +149,7 @@ static void TestDictionariesToSeed() {
 int main() {
   TestFeatureListNames();
   TestMerge();
+  TestDeepLinkKeepsCefDefaults();
   TestGaiaUrl();
   TestLocalHunspellDictionaries();
   TestDictionariesToSeed();
