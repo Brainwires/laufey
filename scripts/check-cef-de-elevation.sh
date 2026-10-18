@@ -44,7 +44,7 @@ check-cef-de-elevation: $file pins $version (Chromium $major).
   line hook, so --do-not-de-elevate (CefWindowsBrowserSwitches) no longer
   keeps an elevated Windows app elevated. Move the switch ahead of CEF's
   command line parsing first; see docs/backends.md ("The Chromium sandbox",
-  apps started elevated) and denext's plans/cef-uac-elevated.md.
+  apps started elevated).
 MSG
     status=1
   else
