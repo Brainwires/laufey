@@ -129,6 +129,23 @@ static void TestDeepLinkStrip() {
   EXPECT(!Contains(strip, "remote-debugging-port"));
 }
 
+static void TestCefWindowsBrowserSwitches() {
+  // The browser process never relaunches itself de-elevated.
+  EXPECT(Contains(CefWindowsBrowserSwitches(), "do-not-de-elevate"));
+  // Switch names, as CefCommandLine takes them: no leading dashes, no value.
+  for (const std::string& name : CefWindowsBrowserSwitches()) {
+    EXPECT(!name.empty() && name[0] != '-');
+    EXPECT(name.find('=') == std::string::npos);
+  }
+  // A deep-link launch drops the one its command line carries (Chromium's
+  // own relaunch puts it there, next to the link), which is why the host
+  // appends them after the strip rather than relying on the command line.
+  EXPECT(Contains(
+      DeepLinkSwitchesToStrip(
+          {"--lang=en-US", "--do-not-de-elevate", "--", "acme://x"}, {}),
+      "do-not-de-elevate"));
+}
+
 // A fake filesystem for ChooseRuntimePath: the paths in `files` exist.
 static std::function<bool(const std::string&)> Files(Args files) {
   return [files](const std::string& path) { return Contains(files, path); };
@@ -272,6 +289,7 @@ int main() {
   TestUrlArguments();
   TestSwitchNames();
   TestDeepLinkStrip();
+  TestCefWindowsBrowserSwitches();
   TestChooseRuntimePath();
   TestMissingPackagedRuntime();
   TestWebView2EnvironmentOverrides();

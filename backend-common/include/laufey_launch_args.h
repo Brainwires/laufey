@@ -69,6 +69,32 @@ std::vector<std::string> DeepLinkSwitchesToStrip(
     const std::vector<std::string>& args,
     const std::vector<std::string>& allowed);
 
+// The Chromium switches the Windows CEF host always puts on its browser
+// process's command line. Its command line hook (OnBeforeCommandLineProcessing)
+// appends each one the command line lacks, after it dropped a deep-link
+// launch's switches (DeepLinkSwitchesToStrip), so a link can't take them away
+// and a launch that already carries one keeps it.
+//
+//  * "do-not-de-elevate" (Chromium's kDoNotDeElevateOnLaunch). A Chrome
+//    browser process that starts elevated (the full token of an administrator
+//    with UAC on: "Run as administrator", an elevated shell, a task with the
+//    highest privileges) relaunches itself through the desktop shell's token
+//    and ends at once (ChromeBrowserMainPartsWin::MaybeAutoDeElevate, feature
+//    AutoDeElevate, on by default). For a laufey app that relaunch is a
+//    different process with the shell's default environment, Chromium's own
+//    switches in its argv and nobody waiting for it: the launch the user
+//    started exits 1 (CefInitialize fails with the de-elevation result) at
+//    once, the variables its launcher set are gone, and a deep link's
+//    relaunch drops CEF's own --disable-features defaults with every other
+//    switch (DeepLinkSwitchesToStrip) and crashes in Chrome's tab code. With
+//    the switch the app runs at the level it was started at, as every other
+//    backend's does (the executable's manifest asks for asInvoker).
+//    Chromium reads it in PreEarlyInitialization, after the hook. A Chromium
+//    that checks earlier (in ChromeMainDelegate::BasicStartupComplete, which
+//    CEF calls before the hook; main@{#1700144}) needs it before CEF parses
+//    the command line instead: see docs/backends.md.
+const std::vector<std::string>& CefWindowsBrowserSwitches();
+
 // Whether the running executable is a packaged app: its launch file
 // (laufey-launch.json) exists, or `has_colocated_runtime` (the backend found
 // a runtime library next to the executable).

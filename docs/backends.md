@@ -228,6 +228,22 @@ session; a deep-link launch drops that switch with every other Chromium switch
   (`WinMain`, `no_sandbox = true`); it loads `<executable name>.runtime.dll`
   too.
 
+  An app started elevated (an administrator's full token with UAC on: "Run as
+  administrator", an elevated shell, a scheduled task with the highest
+  privileges) stays elevated, as on every other backend: the browser process's
+  command line always carries `--do-not-de-elevate` (`CefWindowsBrowserSwitches`
+  in `laufey_launch_args.h`), appended after a deep-link launch's switches are
+  dropped. Without it Chromium relaunches an elevated browser process through
+  the desktop shell's token and ends the elevated one (feature `AutoDeElevate`),
+  so the launch exited 1 at once, its relaunch had the shell's default
+  environment instead of the launcher's, and a deep link given on the command
+  line never reached the app. A machine with UAC off (a GitHub runner) never
+  takes that path. Chromium 149 checks the switch in `PreEarlyInitialization`,
+  after the host's command line hook; a later Chromium checks it in
+  `ChromeMainDelegate::BasicStartupComplete`, which CEF runs before the hook, so
+  a CEF update past that change has to put the switch on the command line before
+  CEF parses it.
+
 The native e2e battery checks the result from outside the backend
 (`examples/native_e2e/src/sandbox_checks.rs`,
 `scripts/native-e2e-run.sh

@@ -291,6 +291,14 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     // propagates it to subprocesses.
     if (process_type.empty()) {
       LaufeyStripDeepLinkSwitches(command_line);
+      // After the strip, so a deep-link launch keeps them too: the app stays
+      // at the integrity level it was started at (no de-elevating relaunch;
+      // laufey_launch_args.h).
+      for (const std::string& name :
+           laufey_common::CefWindowsBrowserSwitches()) {
+        if (!command_line->HasSwitch(name))
+          command_line->AppendSwitch(name);
+      }
       command_line->AppendSwitch("disable-background-networking");
       // What --disable-background-networking leaves: the Chrome services
       // that still contact Google at startup (laufey_cef_network_quiet.h).

@@ -179,6 +179,11 @@ std::vector<std::string> DeepLinkSwitchesToStrip(
   return strip;
 }
 
+const std::vector<std::string>& CefWindowsBrowserSwitches() {
+  static const std::vector<std::string> switches = {"do-not-de-elevate"};
+  return switches;
+}
+
 bool IsPackagedLaunch(bool has_colocated_runtime) {
   if (has_colocated_runtime)
     return true;
