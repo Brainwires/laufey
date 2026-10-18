@@ -92,7 +92,7 @@ inline size_t Utf8SequenceLength(const std::string& s, size_t i) {
       (cp >= 0xD800 && cp <= 0xDFFF))
     return 0;
   // Unicode's bidirectional overrides and isolates (U+202A..U+202E,
-  // U+2066..U+2069) make a name read as another ("evil‮txt.exe").
+  // U+2066..U+2069) make a name read as another ("evil\u202Etxt.exe").
   if ((cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069))
     return 0;
   return n;
