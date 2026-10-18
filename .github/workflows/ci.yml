@@ -1,5 +1,13 @@
 name: CI
 
+# Scope (GitHub caps this account at 20 concurrent jobs, 5 of them macOS): the
+# full matrix (macOS arm64 + x64, Windows x64 + arm64, Linux x64 + arm64) runs
+# on a push to development-denext, on a `v*` tag (the release needs every job)
+# and on a dispatch (input `full`, default true). Every other push and pull
+# request runs Linux x64 only: lint, cargo audit, the capi tests, tsan, the
+# Linux clipboard / sandbox / e2e jobs and the ubuntu-22.04 legs of the
+# matrices. For a full run on another branch:
+#   gh workflow run ci.yml --ref <branch> -f full=true
 on:
   push:
     branches: [main, denext/integration, development-denext]
@@ -7,6 +15,18 @@ on:
   pull_request:
     branches: [main, development-denext]
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run the full matrix (macOS, Windows, Linux arm64); false runs Linux x64 only
+        type: boolean
+        default: true
+
+# A newer push to the same branch or pull request supersedes its run. Never
+# cancelled: a tag's run (it publishes the release), a run on `main`, and a
+# dispatch (the event is part of the group, so a push never cancels it).
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' }}
 
 # Read-only by default; a job that needs more (the release) asks for it.
 permissions:
@@ -231,7 +251,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-latest]
+        # Linux x64 only unless the run is full (see the top of the file).
+        os: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '["ubuntu-22.04","macos-14","windows-latest"]' || '["ubuntu-22.04"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -373,15 +394,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
-          # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
-          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
-          - { target: x86_64-apple-darwin, os: macos-15-intel }
-          - { target: aarch64-apple-darwin, os: macos-14 }
+        # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
+        # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
+        # Linux x64 only unless the run is full (see the top of the file).
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-14"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -451,20 +467,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-14, backend: winit }
-          - { os: macos-14, backend: webview }
-          - { os: macos-14, backend: cef }
-          - { os: windows-latest, backend: winit }
-          - { os: windows-latest, backend: webview }
-          - { os: windows-latest, backend: cef }
-          - { os: ubuntu-22.04, backend: cef }
-          # The Layer-0 battery is excluded on webview/linux (see above); the
-          # storage e2e and the request-body round trip run there.
-          - { os: ubuntu-22.04, backend: webview, layer0_excluded: true }
-          # arm64: WebView2 on Windows on Arm, CEF on Linux arm64.
-          - { os: windows-11-arm, backend: webview }
-          - { os: ubuntu-22.04-arm, backend: cef }
+        # macOS and Windows: winit, webview and cef. Linux x64: cef, and
+        # webview with the Layer-0 battery excluded (see above; the storage e2e
+        # and the request-body round trip run there). arm64: WebView2 on
+        # Windows on Arm, CEF on Linux arm64.
+        # Linux x64 only unless the run is full (see the top of the file).
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"os":"macos-14","backend":"winit"},{"os":"macos-14","backend":"webview"},{"os":"macos-14","backend":"cef"},{"os":"windows-latest","backend":"winit"},{"os":"windows-latest","backend":"webview"},{"os":"windows-latest","backend":"cef"},{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true},{"os":"windows-11-arm","backend":"webview"},{"os":"ubuntu-22.04-arm","backend":"cef"}]' || '[{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -976,15 +984,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
-          # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
-          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
-          - { target: x86_64-apple-darwin, os: macos-15-intel }
-          - { target: aarch64-apple-darwin, os: macos-14 }
+        # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
+        # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
+        # Linux x64 only unless the run is full (see the top of the file).
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-14"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1221,17 +1224,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
-          # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-          - { target: x86_64-apple-darwin, os: macos-15-intel }
-          - { target: aarch64-apple-darwin, os: macos-14 }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
-          # aarch64-pc-windows-msvc (windows-11-arm) is intentionally omitted:
-          # CEF-on-Windows-ARM64 needs the windowsarm64 dist + arch-matched MSVC
-          # setup and is tracked as a separate follow-up (issue #42).
+        # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
+        # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
+        # aarch64-pc-windows-msvc (windows-11-arm) is intentionally omitted:
+        # CEF-on-Windows-ARM64 needs the windowsarm64 dist + arch-matched MSVC
+        # setup and is tracked as a separate follow-up (issue #42).
+        # Linux x64 only unless the run is full (see the top of the file).
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-14"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

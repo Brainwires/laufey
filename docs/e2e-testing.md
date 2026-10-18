@@ -597,9 +597,16 @@ outward-facing surfaces are nightly.
 
 ## 10. CI architecture
 
-`.github/workflows/ci.yml` runs on every pull request to `main`, every push to
-`main`, `denext/integration` or a `v*` tag, nightly (so flakes and runner-image
-drift show up between merges) and on demand:
+`.github/workflows/ci.yml` runs on every pull request to `main` or
+`development-denext`, every push to `main`, `denext/integration`,
+`development-denext` or a `v*` tag, and on demand. The full matrix below runs on
+a push to `development-denext`, on a `v*` tag and on a dispatch (input `full`,
+default true); every other push and pull request runs the Linux x64 jobs and
+legs only, which keeps the account's concurrency cap (20 jobs, 5 macOS) free.
+For a full run on another branch, dispatch it with `-f full=true`
+(`gh workflow run ci.yml --ref <branch> -f full=true`). A newer push cancels the
+previous run on its ref; tag, `main` and dispatched runs are never cancelled.
+There is no scheduled run.
 
 - **`lint`** — `cargo fmt --check`, `cargo clippy --workspace -D warnings`,
   `clang-format` 22.1.5 over `capi`, `cef/src` and `webview/src`,
@@ -631,9 +638,9 @@ drift show up between merges) and on demand:
   the tag against the `laufey` crate version, publishes the crate and creates
   the GitHub release with the build artifacts and `SHA256SUMS`.
 
-The nightly run is the same workflow, not a wider one: what the hosted runners
-cannot drive (modal dialogs, outward-facing notification UI, the macOS / Windows
-Layer-1 observers of `§7.2`–`§7.3`) is not covered in CI.
+What the hosted runners cannot drive (modal dialogs, outward-facing notification
+UI, the macOS / Windows Layer-1 observers of `§7.2`–`§7.3`) is not covered in
+CI.
 
 When a run goes wrong in CI it leaves evidence: `native-e2e-run.sh` streams the
 backend's output (so a hang shows how far the battery got) and prints its exit
@@ -652,8 +659,7 @@ backend-launch matrix above, the Linux Layer-1 D-Bus observer
 (`native_e2e_driver`, run by `--layer1`), and CEF / WebView build jobs. Not
 landed: the macOS self-Accessibility and Windows UI Automation observers
 (`§7.2`, `§7.3`) — macOS and Windows chrome is checked in-process only — and a
-job for dialogs and other modal / outward-facing surfaces (the nightly run
-repeats the PR checks).
+job for dialogs and other modal / outward-facing surfaces.
 
 ---
 

@@ -21,7 +21,8 @@ on:
 permissions:
   contents: read
 
-# Never run two publishes for the same tag concurrently.
+# Never run two publishes for the same tag concurrently, and never cancel one
+# in progress.
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
