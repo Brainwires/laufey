@@ -6,9 +6,6 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main, development-denext]
-  # Nightly, so flakes and runner-image drift show up between merges.
-  schedule:
-    - cron: "17 6 * * *"
   workflow_dispatch:
 
 # Read-only by default; a job that needs more (the release) asks for it.
