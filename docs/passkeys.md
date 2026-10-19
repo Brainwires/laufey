@@ -4,8 +4,8 @@ A page served from a custom scheme (`app://`, `myapp://`) or a loopback origin
 can't use the browser engine's WebAuthn for a relying party on the web: the RP
 ID (`example.com`) has to match the page's origin. laufey runs the ceremony
 through the OS platform authenticator instead — Touch ID / iCloud Keychain on
-macOS, Windows Hello on Windows, and roaming security keys on both — for the
-app's own trusted code to call.
+macOS, Windows Hello on Windows, and roaming security keys on both and on Linux
+(through libwebauthn) — for the app's own trusted code to call.
 
 ```rust
 let caps = laufey::passkey_capabilities();
@@ -147,13 +147,13 @@ An authentication's `response` holds `clientDataJSON`, `authenticatorData`,
 { "ok": false, "error": { "code": "cancelled", "message": "…" } }
 ```
 
-| `code`          | Meaning                                                         |
-| --------------- | --------------------------------------------------------------- |
-| `cancelled`     | The user dismissed the OS UI, or the anchor window closed.      |
-| `invalid_rp`    | The RP ID is malformed, not in `passkeyRpIds`, or OS-refused.   |
-| `not_supported` | No platform API (Linux, Winit, macOS < 12, Windows < 1903).     |
-| `timeout`       | The options' `timeout` passed.                                  |
-| `unknown`       | Anything else: invalid options, busy, an OS error (its message) |
+| `code`          | Meaning                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------- |
+| `cancelled`     | The user dismissed the OS UI, or the anchor window closed.                                  |
+| `invalid_rp`    | The RP ID is malformed, not in `passkeyRpIds`, or OS-refused.                               |
+| `not_supported` | No platform API (Winit, macOS < 12, Windows < 1903, Linux without `liblaufey_webauthn.so`). |
+| `timeout`       | The options' `timeout` passed.                                                              |
+| `unknown`       | Anything else: invalid options, busy, an OS error (its message)                             |
 
 ### Threading and lifetime
 
@@ -271,12 +271,87 @@ the DOMException name `WebAuthNGetErrorName` gives the HRESULT:
 `unknown` with the system message. A bad RP ID is caught by the parser before
 the OS sees it.
 
-## Linux and Winit
+## Linux
 
-Linux has no platform authenticator API: WebKitGTK and CEF report no
-capabilities and answer every request `not_supported` (use the page's own
-WebAuthn where the origin allows it). The Winit backend leaves both pointers
-`NULL`.
+Linux has no platform authenticator API, so there laufey runs the roaming half:
+**security keys over USB** (FIDO2 / CTAP2, and U2F keys), through
+[libwebauthn](https://github.com/linux-credentials/libwebauthn), on the CEF and
+WebKitGTK backends. `passkey_capabilities` reports
+`LAUFEY_PASSKEY_SECURITY_KEYS` (never `PLATFORM_AUTHENTICATOR`), with or without
+a key plugged in.
+
+**The library.** libwebauthn lives in `liblaufey_webauthn.so` (`webauthn-linux/`
+in this repository, Rust), a shared library of its own that the backend
+`dlopen()`s from **its own directory** (the directory of the host executable,
+`/proc/self/exe`) the first time passkeys are asked about. No environment
+variable names another file. `make webview` / `make cef` build it and copy it
+beside the host when the libudev and libdbus-1 development files are there
+(`libudev-dev libdbus-1-dev` on Debian / Ubuntu, `systemd-devel dbus-devel` on
+Fedora); without them the build says so and skips it. A backend without the
+library, or whose library can't list HID devices, reports no capabilities and
+answers `not_supported` with the reason, which `platform_features` also gives
+(`passkeys`, `passkeysReason`). At run time the library needs `libudev.so.1` and
+`libdbus-1.so.3`, present on every desktop. The backends link none of it (no
+Tokio, D-Bus or udev in the host process until a passkey is used), and
+libwebauthn (LGPL-2.1-or-later) stays a separately replaceable library: an app
+that ships `liblaufey_webauthn.so` ships LGPL code, as a library the user can
+rebuild from `webauthn-linux/` and replace.
+
+**Access to the key.** Keys are read through `/dev/hidraw*`. systemd's udev
+rules give the logged-in user access to FIDO devices (the `uaccess` tag, from
+systemd 244's FIDO detection); on a system without them, add a udev rule for the
+key or the request finds no key.
+
+**The ceremony.** The backend parses and pins the options as everywhere
+([Options](#options)), then hands the library a canonical options document built
+from the parsed values (never the caller's text) with the RP ID and the timeout.
+The library's own thread waits for a key (several plugged in: each blinks and
+the first one touched is used), runs MakeCredential or GetAssertion (with
+libwebauthn's preflight of the exclude / allow list), and asks for the PIN when
+the key needs it. **libwebauthn builds `clientDataJSON`** from the origin
+`https://<rpId>`, in WebAuthn's member order, byte for byte what laufey builds
+on Windows. The registration's `authenticatorAttachment` is `"cross-platform"`
+and its `transports` what the key reports (`"usb"`). With several discoverable
+credentials for the RP on one key, the first the key returns is used (there is
+no account picker yet).
+
+**The UI** is laufey's own, in GTK, on the GTK thread: while the key is wanted a
+dialog says "Insert your security key", "Touch the security key you want to use"
+or "Touch your security key" (with the RP ID) and has a Cancel button
+(`cancelled`); when the key needs its PIN a dialog asks for it (a masked entry;
+after a wrong PIN it says so, and with three attempts left or fewer it says how
+many). The PIN goes to the key through CTAP's PIN protocol and is not kept: the
+entry is cleared. On WebKitGTK the dialogs are transient for the request's
+window; on CEF they have no parent (Chromium's window is not a GTK one). A PIN
+is never set from here: a key with no PIN that must verify the user answers
+`not_supported`.
+
+**Refused up front**: a registration whose `authenticatorAttachment` is
+`"platform"` (`not_supported`: there is no platform authenticator, and a
+security key is not what the RP asked for; `@clerk/electron-passkeys` asks for
+one, so its registrations are refused on Linux), and an authentication whose
+every allowed credential names transports none of which is `"usb"` (a passkey on
+a phone or in a platform authenticator can't be reached).
+
+The timeout is the options' `timeout`, 60 s when none is given. laufey's own
+timer ends the request (`timeout`) and cancels the library's operation (the key
+gets `CTAPHID_CANCEL`); the library runs to the timeout plus 5 s as a backstop.
+Closing the request's window cancels it (`cancelled`).
+
+Errors: the user cancelling (the dialog, the PIN entry, or on the key) and a key
+that holds no credential for the site → `cancelled`; a key not touched in time →
+`timeout`; a key without a PIN where user verification is required, an algorithm
+or option the key doesn't support → `not_supported`; a credential the exclude
+list names already on the key, a wrong PIN, a blocked PIN, a full key and
+everything else → `unknown` with a message that names no value.
+
+caBLE / hybrid (a phone over Bluetooth and a tunnel server, which libwebauthn
+supports) and NFC are not offered: they need a QR code and Bluetooth (or a
+reader) and are a later step.
+
+## Winit
+
+The Winit backend leaves both pointers `NULL`.
 
 ## Security notes
 
@@ -302,12 +377,29 @@ parser against byte-for-byte output of `@clerk/electron`'s serializers,
 base64url / UTF-8 / RP ID rules, the `passkeyRpIds` pin, the envelopes, and the
 ceremony lifecycle (one at a time, exactly-once delivery, timeout, abort, window
 close, concurrent requests). `passkey_mac_test.mm` covers the macOS error
-mapping. The native e2e battery checks the capabilities per OS, that Linux
-answers `not_supported`, and that macOS / Windows refuse malformed options and
-answer a real OS request exactly once.
+mapping. On Linux, `webauthn-linux`'s own tests (`cargo test`) run whole
+ceremonies through its C ABI against a virtual CTAP2.1 security key behind
+libwebauthn's virtual HID device (`src/virtual_key.rs`: ES256 credentials,
+resident keys, the exclude and allow lists, PIN protocol 1, refusals on the
+key): registration then authentication with the signature checked against the
+attested key, a discoverable credential, a wrong PIN then the right one, a
+cancelled PIN entry, no key plugged in (cancel, timeout, plugged in later), and
+options libwebauthn refuses. `passkey_linux_test.cc` (ctest
+`laufey_passkey_linux_test`) checks the canonical options documents, the
+envelopes and the missing library, and, given the library built with its
+`virt-test` feature (`LAUFEY_TEST_WEBAUTHN_LIBRARY`), whole ceremonies through
+`PasskeyBegin` / `PasskeyStartLinux` with the UI hooked: the PIN, the window
+closing while a key is awaited, the timeout, and the requests refused up front.
+The native e2e battery checks the capabilities per OS (Linux: security keys
+only, required where CI built the library), that macOS / Windows / Linux refuse
+malformed options, and that a real request is answered exactly once (on Linux,
+the "insert your security key" dialog until laufey's timeout).
 
 A real ceremony needs a person at the machine (and on macOS a signed, associated
 build): run one against a test RP from a build of the app with the entitlement,
 register a passkey with Touch ID / Windows Hello, sign in with it, cancel the
 sheet (→ `cancelled`), let it time out (→ `timeout`), and close the window while
-it is up (→ `cancelled`).
+it is up (→ `cancelled`). On Linux the same with a real USB security key (no
+virtual key exercises the HID transport itself, a key's own PIN rules or several
+keys plugged in at once): register, sign in with and without a PIN, enter a
+wrong PIN, cancel the dialog, and pull the key mid-request.

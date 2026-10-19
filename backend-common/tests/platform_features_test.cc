@@ -542,7 +542,8 @@ int main() {
          "\"notificationServerCapabilities\":null,\"badge\":null,"
          "\"badgeReason\":null,\"fileChooser\":null,"
          "\"fileChooserReason\":null,\"windowBlur\":null,"
-         "\"windowBlurReason\":null}");
+         "\"windowBlurReason\":null,\"passkeys\":null,"
+         "\"passkeysReason\":null}");
   // The file chooser (L2): the portal's, or GTK's with the reason.
   {
     PlatformFeatures c = f;
@@ -559,12 +560,26 @@ int main() {
     b.window_blur_reason = "ignored when there is one";
     EXPECT(Contains(PlatformFeaturesToJson(b),
                     "\"windowBlur\":\"kwin-wayland\","
-                    "\"windowBlurReason\":null}"));
+                    "\"windowBlurReason\":null,"));
     b.window_blur.clear();
     b.window_blur_reason = "the compositor offers no org_kde_kwin_blur_manager";
     EXPECT(Contains(PlatformFeaturesToJson(b),
                     "\"windowBlur\":null,\"windowBlurReason\":"
-                    "\"the compositor offers no org_kde_kwin_blur_manager\"}"));
+                    "\"the compositor offers no org_kde_kwin_blur_manager\","));
+  }
+  // Passkeys: security keys, or why not (the reason only without).
+  {
+    PlatformFeatures p = f;
+    p.passkeys = "security-keys";
+    p.passkeys_reason = "ignored when they work";
+    EXPECT(Contains(PlatformFeaturesToJson(p),
+                    "\"passkeys\":\"security-keys\","
+                    "\"passkeysReason\":null}"));
+    p.passkeys.clear();
+    p.passkeys_reason = "liblaufey_webauthn.so is not installed";
+    EXPECT(Contains(PlatformFeaturesToJson(p),
+                    "\"passkeys\":null,\"passkeysReason\":"
+                    "\"liblaufey_webauthn.so is not installed\"}"));
   }
   // The notification platform's facts and the badge (L1).
   {

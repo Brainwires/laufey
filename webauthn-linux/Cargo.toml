@@ -1,0 +1,69 @@
+# Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
+#
+# Linux security-key passkeys for the CEF and WebView backends, over
+# libwebauthn (https://github.com/linux-credentials/libwebauthn). Built as a
+# shared library of its own, liblaufey_webauthn.so, which a backend dlopen()s
+# from its own directory when a passkey is first asked for: the backends link
+# none of it (no tokio, D-Bus or udev in the host), and libwebauthn
+# (LGPL-2.1-or-later) stays a separately replaceable library. See
+# docs/passkeys.md.
+#
+# Its own workspace and lock file: the root workspace (the capi crate and the
+# examples) never builds it.
+
+[package]
+name = "laufey-webauthn"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "laufey's Linux security-key passkeys over libwebauthn (dlopen()ed by the backends)"
+
+[workspace]
+
+[lib]
+name = "laufey_webauthn"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# A virtual CTAP2 authenticator (src/virtual_key.rs) and the C entry point
+# that switches ceremonies to it, for the backends' own tests. Never in a
+# shipped build.
+virt-test = [
+  "libwebauthn/virt",
+  "dep:p256",
+  "dep:ciborium",
+  "dep:aes",
+  "dep:cbc",
+  "dep:hmac",
+  "dep:rand",
+]
+
+# Small: it ships beside every Linux backend. Panics unwind (a ceremony's
+# panic becomes an `unknown` result on its own thread).
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libwebauthn = "=0.10.0"
+tokio = { version = "1.45", features = ["rt", "time", "sync", "macros"] }
+serde_json = "1"
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"], optional = true }
+ciborium = { version = "0.2", optional = true }
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
+hmac = { version = "0.12", optional = true }
+rand = { version = "0.8", optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libwebauthn = { version = "=0.10.0", features = ["virt"] }
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+ciborium = "0.2"
+aes = "0.8"
+cbc = "0.1"
+hmac = "0.12"
+rand = "0.8"

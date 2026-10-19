@@ -213,6 +213,9 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
     laufey_common::AuthSessionWindowClosing(nswindow);
 #elif defined(_WIN32)
     laufey_common::PasskeyWindowClosing(reinterpret_cast<void*>(handle));
+#else
+    laufey_common::PasskeyWindowClosing(
+        reinterpret_cast<const void*>(static_cast<uintptr_t>(handle)));
 #endif
 #ifdef __APPLE__
     laufey_common::MacUnwatchWindowState(NSWindowForCefHandle(handle));

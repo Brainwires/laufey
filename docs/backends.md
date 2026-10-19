@@ -360,7 +360,12 @@ the compositor offers (`org_kde_kwin_blur_manager` on Wayland,
 `_KDE_NET_WM_BLUR_BEHIND_REGION` in `_NET_SUPPORTED` on X11), never by the
 desktop's name; `platformFeatures().windowBlur` reports it
 ([window management](window-management.md#backdrops-mica-acrylic-vibrancy-blur-api--38)).
-WebKitGTK and Winit choose through GTK and winit, which connect the same way.
+Passkeys on Linux are security keys over USB through libwebauthn, in
+`liblaufey_webauthn.so` beside the host (built by `make webview` / `make cef`
+when libudev and libdbus-1 development files are there;
+[Passkeys](passkeys.md#linux)); `platformFeatures().passkeys` says whether they
+work here, and why not. WebKitGTK and Winit choose through GTK and winit, which
+connect the same way.
 
 ## Winit
 

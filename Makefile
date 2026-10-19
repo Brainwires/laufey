@@ -76,7 +76,7 @@ BUILD_DIR := $(CURDIR)/build
 
 .PHONY: all clean check-deps help
 .PHONY: runtimes hello-runtime ddcore-runtime
-.PHONY: winit webview cef
+.PHONY: winit webview cef webauthn-linux
 .PHONY: cef-deps
 .PHONY: fmt fmt-check lint
 .PHONY: native-e2e native-e2e-run
@@ -119,10 +119,32 @@ native-e2e-run: native-e2e winit ## Run the e2e battery under the winit backend
 winit: check-deps ## Build the winit backend
 	cd winit && cargo build --release
 
-webview: check-deps ## Build the webview backend
+# Linux: liblaufey_webauthn.so (passkeys with security keys, through
+# libwebauthn; webauthn-linux/), copied beside each backend's host, which
+# dlopen()s it from there. It needs the libudev and libdbus-1 development
+# files; without them it is skipped with a warning, and the backend reports
+# no passkey capability (docs/passkeys.md).
+WEBAUTHN_LIB := webauthn-linux/target/release/liblaufey_webauthn.so
+
+webauthn-linux: ## Build liblaufey_webauthn.so (Linux; skipped without libudev / libdbus-1)
+ifeq ($(HOST_OS),linux)
+	@if pkg-config --exists libudev dbus-1; then \
+		cargo build --release --locked --manifest-path webauthn-linux/Cargo.toml; \
+	else \
+		echo "warning: libudev / libdbus-1 development files missing: liblaufey_webauthn.so not built (no passkeys on Linux)" >&2; \
+	fi
+endif
+
+# $(call install_webauthn,<dir>): the library beside a host, when built.
+define install_webauthn
+$(if $(filter linux,$(HOST_OS)),@if [ -f $(WEBAUTHN_LIB) ]; then cp $(WEBAUTHN_LIB) $(1)/; fi)
+endef
+
+webview: check-deps webauthn-linux ## Build the webview backend
 	cmake -G Ninja -B webview/build -S webview -DCMAKE_BUILD_TYPE=Release \
 		$(if $(WEBVIEW2_ROOT),-DWEBVIEW2_ROOT=$(WEBVIEW2_ROOT))
 	ninja -C webview/build
+	$(call install_webauthn,webview/build)
 
 $(CEF_TARBALL):
 	@echo "Downloading CEF $(CEF_VERSION) for $(CEF_ARCH)..."
@@ -160,12 +182,13 @@ $(CEF_ROOT)/libcef_dll_wrapper/libcef_dll_wrapper$(LIB_EXT): $(CEF_SRC)/CMakeLis
 
 cef-deps: $(CEF_ROOT)/libcef_dll_wrapper/libcef_dll_wrapper$(LIB_EXT) ## Download and build CEF dependencies
 
-cef: check-deps cef-deps ## Build the CEF backend
+cef: check-deps cef-deps webauthn-linux ## Build the CEF backend
 	cmake -G Ninja -B cef/build -S cef \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCEF_ROOT=$(CEF_ROOT) \
 		-DPROJECT_ARCH=$(PROJ_ARCH)
 	ninja -C cef/build
+	$(call install_webauthn,cef/build/Release)
 
 CPP_SOURCES := $(shell find capi cef/src webview/src -name '*.cc' -o -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.mm' 2>/dev/null)
 
@@ -189,7 +212,7 @@ lint: ## Run all linters
 
 clean: ## Remove all build artifacts
 	cargo clean
-	rm -rf webview/build cef/build
+	rm -rf webview/build cef/build webauthn-linux/target
 
 clean-cef-vendor: ## Remove downloaded CEF files
 	rm -rf vendor/cef

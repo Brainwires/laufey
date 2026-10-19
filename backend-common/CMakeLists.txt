@@ -110,6 +110,7 @@ elseif(UNIX)
     src/cookie_db_linux.cc
     src/title_bar_linux.cc
     src/window_blur_linux.cc
+    src/passkey_linux.cc
     src/secret_store_linux.cc
     src/termination_signals_linux.cc
   )
@@ -380,6 +381,18 @@ if(LAUFEY_BUILD_TESTS)
     Threads::Threads
   )
   add_test(NAME laufey_passkey_test COMMAND laufey_passkey_test)
+
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Linux security keys (passkey_linux.cc): the pure parts here; whole
+    # ceremonies against liblaufey_webauthn.so's virtual key when
+    # LAUFEY_TEST_WEBAUTHN_LIBRARY names one built with `virt-test`.
+    add_executable(laufey_passkey_linux_test tests/passkey_linux_test.cc)
+    target_link_libraries(laufey_passkey_linux_test PRIVATE
+      laufey_backend_common
+      Threads::Threads
+    )
+    add_test(NAME laufey_passkey_linux_test COMMAND laufey_passkey_linux_test)
+  endif()
 
   # The rendezvous behind the synchronous UI-thread calls (laufey_sync_call.h)
   # under load; the `tsan` CI job also runs it under ThreadSanitizer.

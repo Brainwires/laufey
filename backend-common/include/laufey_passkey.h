@@ -15,8 +15,9 @@
 // This file holds everything that is not an OS call: the strict options
 // parser, base64url, the envelope / clientDataJSON writers, the app-wide
 // "one ceremony at a time" slot and the exactly-once completion. The OS
-// halves are PasskeyStartMac (passkey_mac.mm) and PasskeyStartWin
-// (passkey_win.cc); Linux has no platform API and reports not_supported.
+// halves are PasskeyStartMac (passkey_mac.mm), PasskeyStartWin
+// (passkey_win.cc) and PasskeyStartLinux (passkey_linux.cc: security keys
+// through libwebauthn; Linux has no platform authenticator API).
 //
 // Nothing here logs: challenges, user handles and credentials never reach
 // stderr, and error messages name fields, never their values.
@@ -326,6 +327,50 @@ void PasskeyStartMac(std::shared_ptr<PasskeyCeremony> ceremony,
 // is the error's localizedDescription. Exposed for tests.
 PasskeyError MapAuthorizationErrorMac(NSError* error);
 #endif
+#endif
+
+#ifdef __linux__
+// Linux: security keys (USB / HID) through libwebauthn, in
+// liblaufey_webauthn.so beside the backend (passkey_linux.cc,
+// webauthn-linux/). LAUFEY_PASSKEY_SECURITY_KEYS when the library loads and
+// can list HID devices (with or without a key plugged in), else 0 with why
+// in `reason`. Any thread.
+uint32_t PasskeyCapabilitiesLinux(std::string* reason = nullptr);
+// Runs the ceremony in the library (its own thread); the user is asked to
+// insert / touch the key and for its PIN in GTK dialogs, transient for
+// `gtk_window` (a GtkWindow*, or null: CEF). `window_key` (may be null) is
+// what the backend passes to PasskeyWindowClosing for the anchor window.
+// Any thread. Always ends with ceremony->Finish.
+void PasskeyStartLinux(std::shared_ptr<PasskeyCeremony> ceremony,
+                       void* gtk_window, const void* window_key);
+
+// The pieces, exposed for tests: the canonical options documents the
+// library gets (WebAuthn JSON, built from the parsed options; `timeout_ms`
+// the ceremony's), whether an allow list can be met by a USB key (an entry
+// without transports, or one naming "usb"), and the envelope for the
+// library's result document.
+std::string PasskeyLinuxCreationJson(const PasskeyCreationOptions& options,
+                                     uint32_t timeout_ms);
+std::string PasskeyLinuxRequestJson(const PasskeyRequestOptions& options,
+                                    uint32_t timeout_ms);
+bool PasskeyLinuxReachable(const std::vector<PasskeyCredentialDescriptor>& list,
+                           std::string* why);
+std::string PasskeyLinuxEnvelope(bool create, const std::string& result_json);
+
+// Tests: the UI requests answered by the test instead of GTK dialogs
+// (`pin`'s reply must be called once; null cancels), and the library loaded
+// from `path` instead of the backend's directory.
+struct PasskeyLinuxUi {
+  std::function<void(uint32_t status)> status;
+  std::function<void(int32_t attempts_left,
+                     std::function<void(const char* pin)> reply)>
+      pin;
+  std::function<void()> closed;
+};
+void SetPasskeyLinuxUiForTesting(const PasskeyLinuxUi* ui);
+void SetPasskeyLinuxLibraryForTesting(const std::string& path);
+// The loaded library's dlopen() handle (null when it isn't loaded).
+void* PasskeyLinuxLibraryHandleForTesting();
 #endif
 
 #ifdef _WIN32

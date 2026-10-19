@@ -23,6 +23,7 @@
 #include "laufey_scheme_cancel.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_ui_tasks.h"
+#include "laufey_passkey.h"
 #include "init_script.h"
 #include <webkit2/webkit2.h>
 #include <JavaScriptCore/JavaScript.h>
@@ -1006,6 +1007,14 @@ class WebKitGTKBackend : public LaufeyBackend {
   // GTK has no API for them (see docs/window-management.md), so those keep
   // the base class's "false". The only backdrop is the compositor's blur.
   uint32_t WindowCapabilities() override;
+  // Passkeys: security keys through libwebauthn (passkey_linux.cc).
+  uint32_t PasskeyCapabilities() override {
+    return laufey_common::PasskeyCapabilitiesLinux();
+  }
+  void PasskeyRequest(uint32_t window_id, uint32_t kind,
+                      const char* options_json,
+                      laufey_passkey_result_fn callback,
+                      void* user_data) override;
   // KWin's blur (LAUFEY_BACKDROP_BLUR, and ACRYLIC as the same blur) where
   // the compositor offers it; see laufey_window_blur.h.
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
@@ -1256,6 +1265,8 @@ static void on_script_message(WebKitUserContentManager* manager,
 // destroys. A window the user closed still has its id: its state goes here,
 // or every later call naming it would reach the destroyed widgets.
 static void on_window_destroy(GtkWidget* widget, gpointer user_data) {
+  // A passkey request anchored to this window ends with it (`cancelled`).
+  laufey_common::PasskeyWindowClosing(widget);
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid > 0) {
     // Lock order windows_mutex_ -> g_widget_mutex: the two are taken one
@@ -2123,6 +2134,47 @@ uint32_t WebKitGTKBackend::WindowCapabilities() {
     caps |=
         LAUFEY_WINDOW_CAP_BACKDROP_BLUR | LAUFEY_WINDOW_CAP_BACKDROP_ACRYLIC;
   return caps;
+}
+
+void WebKitGTKBackend::PasskeyRequest(uint32_t window_id, uint32_t kind,
+                                      const char* options_json,
+                                      laufey_passkey_result_fn callback,
+                                      void* user_data) {
+  // Any thread. Refusals (no library, invalid options, busy) answer here,
+  // synchronously; a started ceremony resolves its window on the GTK thread
+  // and then runs on the library's own thread (PasskeyStartLinux).
+  if (!callback)
+    return;
+  if (laufey_common::PasskeyCapabilitiesLinux() == 0) {
+    laufey_common::PasskeyReportNotSupported(callback, user_data);
+    return;
+  }
+  std::shared_ptr<laufey_common::PasskeyCeremony> ceremony =
+      laufey_common::PasskeyBegin(kind, options_json, callback, user_data);
+  if (!ceremony)
+    return;
+  gtk_invoke_sync([&] {
+    GtkWidget* window = nullptr;
+    if (window_id != 0) {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    } else {
+      // The focused window, else the first one.
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      for (auto& [id, state] : windows_) {
+        if (!window || gtk_window_is_active(GTK_WINDOW(state.window)))
+          window = state.window;
+      }
+    }
+    if (window_id != 0 && !window) {
+      ceremony->Finish(laufey_common::PasskeyErrorEnvelope(
+          laufey_common::kPasskeyUnknown,
+          "window " + std::to_string(window_id) + " not found"));
+      return;
+    }
+    laufey_common::PasskeyStartLinux(ceremony, window, window);
+  });
 }
 
 bool WebKitGTKBackend::SetWindowBackdrop(uint32_t window_id, int backdrop,

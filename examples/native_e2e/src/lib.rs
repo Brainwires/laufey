@@ -810,7 +810,8 @@ fn e2e_main() {
       let body_win = body_round_trip(&body_received).await;
       let stream_win = stream_checks::run(&stream_state).await;
       let _ = &stream_win;
-      // Passkeys answer without the engine (not_supported on Linux), so they
+      // Passkeys answer without the engine (Linux: security keys through
+      // liblaufey_webauthn.so, else not_supported), so they
       // ride along where the full battery can't run.
       passkey_checks(body_win.as_ref().map(|w| w.id()).unwrap_or(0)).await;
       let _ = &body_win;
@@ -3095,8 +3096,9 @@ async fn passkey_answer(
 /// docs/passkeys.md), so this covers what answers without one: the
 /// capabilities per OS, the parser's refusals, an unknown window, one ceremony
 /// at a time, and a real OS round trip — on macOS an unsigned host is refused
-/// by the OS at once (`invalid_rp`); on Windows the request shows the system
-/// dialog and laufey's own timeout ends it (`timeout`;
+/// by the OS at once (`invalid_rp`); on Windows (and Linux, with
+/// liblaufey_webauthn.so) the request shows the system (laufey's) dialog and
+/// laufey's own timeout ends it (`timeout`;
 /// LAUFEY_E2E_PASSKEY_EXPECT overrides the expected code for a machine where
 /// the dialog ends differently). Exactly-once delivery is covered by
 /// backend-common's passkey_test (the Rust future can't observe a second
@@ -3110,7 +3112,20 @@ async fn passkey_checks(window_id: u32) {
   );
   let supported = caps.platform_authenticator || caps.security_keys;
 
-  if backend == "winit" || cfg!(target_os = "linux") {
+  // Linux: security keys through liblaufey_webauthn.so beside the backend
+  // (no platform authenticator). LAUFEY_E2E_EXPECT_PASSKEYS=1 (CI, which
+  // builds the library) requires it; without it the backend answers
+  // not_supported like one without any passkey API.
+  let linux_keys = cfg!(target_os = "linux") && backend != "winit";
+  if linux_keys
+    && std::env::var("LAUFEY_E2E_EXPECT_PASSKEYS").as_deref() == Ok("1")
+  {
+    check(
+      "passkey capabilities: security keys (liblaufey_webauthn.so)",
+      caps.security_keys && !caps.platform_authenticator,
+    );
+  }
+  if backend == "winit" || (cfg!(target_os = "linux") && !caps.security_keys) {
     check("passkey capabilities: none here", !supported);
     let env = passkey_answer(
       "passkey get",
@@ -3130,6 +3145,11 @@ async fn passkey_checks(window_id: u32) {
     check(
       "passkey capabilities: platform + security keys (macOS 12+)",
       caps.platform_authenticator && caps.security_keys,
+    );
+  } else if cfg!(target_os = "linux") {
+    check(
+      "passkey capabilities: security keys only (Linux)",
+      caps.security_keys && !caps.platform_authenticator,
     );
   } else if !caps.security_keys {
     // Windows without webauthn.dll (an old build / Server SKU).
@@ -3220,6 +3240,8 @@ async fn passkey_checks(window_id: u32) {
     // CEF and WebView2 runs of the integration branch, 2026-10-01/02);
     // `cancelled` would mean the OS gave up first, `not_supported` that
     // webauthn.dll is missing (handled above), and `unknown` a failure.
+    // Linux the same: the "insert your security key" dialog waits for a key
+    // nobody plugs in, and laufey's timer ends it.
     _ => vec!["timeout".into()],
   };
   check(

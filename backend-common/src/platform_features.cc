@@ -456,6 +456,9 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   out += ",\"windowBlurReason\":" + StringOrNull(f.window_blur.empty()
                                                      ? f.window_blur_reason
                                                      : std::string());
+  out += ",\"passkeys\":" + StringOrNull(f.passkeys);
+  out += ",\"passkeysReason\":" +
+         StringOrNull(f.passkeys.empty() ? f.passkeys_reason : std::string());
   out += "}";
   return out;
 }

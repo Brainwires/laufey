@@ -897,7 +897,8 @@ static void Backend_SetSecondInstanceHandler(void* /*data*/,
 // --- Passkeys (API >= 37) ---
 //
 // macOS and Windows run real ceremonies (backend-common passkey_mac.mm /
-// passkey_win.cc); Linux has no platform API and answers not_supported.
+// passkey_win.cc); Linux has no platform API, and runs security keys
+// through libwebauthn (passkey_linux.cc).
 
 static uint32_t Backend_PasskeyCapabilities(void* /*data*/) {
 #if defined(__APPLE__)
@@ -905,7 +906,7 @@ static uint32_t Backend_PasskeyCapabilities(void* /*data*/) {
 #elif defined(_WIN32)
   return laufey_common::PasskeyCapabilitiesWin();
 #else
-  return 0;
+  return laufey_common::PasskeyCapabilitiesLinux();
 #endif
 }
 
@@ -1024,10 +1025,39 @@ static void Backend_PasskeyRequest(void* data, uint32_t window_id,
                   },
                   browser, ceremony));
 #else
-  (void)data;
-  (void)window_id;
-  (void)kind;
-  (void)options_json;
+  // Linux: the window resolved on TID_UI; the GTK dialogs have no GTK
+  // parent (Chromium's window isn't one), and the window's handle is the
+  // key PasskeyWindowClosing cancels by.
+  std::shared_ptr<laufey_common::PasskeyCeremony> ceremony =
+      laufey_common::PasskeyBegin(kind, options_json, callback, user_data);
+  if (!ceremony)
+    return;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  CefRefPtr<CefBrowser> browser =
+      window_id != 0 ? loader->GetBrowserForWindow(window_id) : nullptr;
+  if (window_id != 0 && !browser) {
+    ceremony->Finish(laufey_common::PasskeyErrorEnvelope(
+        laufey_common::kPasskeyUnknown,
+        "window " + std::to_string(window_id) + " not found"));
+    return;
+  }
+  CefPostTask(TID_UI,
+              base::BindOnce(
+                  [](CefRefPtr<CefBrowser> b,
+                     std::shared_ptr<laufey_common::PasskeyCeremony> c) {
+                    const void* key = nullptr;
+                    if (b) {
+                      auto browser_view = CefBrowserView::GetForBrowser(b);
+                      auto window =
+                          browser_view ? browser_view->GetWindow() : nullptr;
+                      if (window) {
+                        key = reinterpret_cast<const void*>(
+                            static_cast<uintptr_t>(window->GetWindowHandle()));
+                      }
+                    }
+                    laufey_common::PasskeyStartLinux(c, nullptr, key);
+                  },
+                  browser, ceremony));
 #endif
 }
 

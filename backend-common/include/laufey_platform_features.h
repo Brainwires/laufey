@@ -181,6 +181,12 @@ struct PlatformFeatures {
   // this backend can use it is window_capabilities' BACKDROP_BLUR.
   std::string window_blur;
   std::string window_blur_reason;
+  // Linux: passkeys with security keys (passkey_linux.cc): "security-keys"
+  // when liblaufey_webauthn.so is beside the backend and can list HID
+  // devices (with or without a key plugged in), or empty with why not.
+  // passkey_capabilities says the same as flags.
+  std::string passkeys;
+  std::string passkeys_reason;
 };
 
 // --- The probe

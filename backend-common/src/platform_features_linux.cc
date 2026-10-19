@@ -52,6 +52,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_notifications.h"
+#include "laufey_passkey.h"
 #include "laufey_platform_features.h"
 #include "laufey_window_blur.h"
 
@@ -717,6 +718,9 @@ PlatformFeatures ProbePlatformFeatures() {
   f.tray_library = AppIndicatorLibraryAvailableLinux();
   // KWin's blur, on a connection of its own (the effect can be toggled).
   f.window_blur = ProbeWindowBlur(&f.window_blur_reason);
+  // Security keys through liblaufey_webauthn.so (loaded once; HID listed).
+  f.passkeys =
+      PasskeyCapabilitiesLinux(&f.passkeys_reason) != 0 ? "security-keys" : "";
   return f;
 }
 
