@@ -82,6 +82,8 @@ constexpr int kMaxConnects = 2;
 
 std::atomic<bool> g_forced{false};
 std::atomic<int> g_transfers{0};
+std::atomic<int> g_save_requests{0};
+std::atomic<int> g_saves_confirmed{0};
 std::atomic<bool> g_watching{false};
 std::atomic<int64_t> g_backoff_ms{
     std::chrono::duration_cast<std::chrono::milliseconds>(kReconnectBackoff)
@@ -404,6 +406,9 @@ class Bridge {
     incr_ = Atom("INCR");
     time_prop_ = Atom("LAUFEY_CLIPBOARD_TIME");
     convert_time_prop_ = Atom("LAUFEY_CLIPBOARD_CONVERT_TIME");
+    clipboard_manager_ = Atom("CLIPBOARD_MANAGER");
+    save_targets_ = Atom("SAVE_TARGETS");
+    save_prop_ = Atom("LAUFEY_CLIPBOARD_SAVE");
     if (clipboard_ == XCB_NONE || targets_ == XCB_NONE || incr_ == XCB_NONE ||
         time_prop_ == XCB_NONE || convert_time_prop_ == XCB_NONE) {
       Teardown();
@@ -789,8 +794,14 @@ class Bridge {
   }
 
   void OnSelectionNotify(const xcb_selection_notify_event_t* e) {
-    if (e->requestor != window_ || conversions_.empty() ||
-        !conversions_.front().converting || conversions_.front().incr)
+    if (e->requestor == window_ && e->selection == clipboard_manager_ &&
+        clipboard_manager_ != XCB_NONE) {
+      OnSaveNotify(e);
+      return;
+    }
+    if (e->requestor != window_ || e->selection != clipboard_ ||
+        conversions_.empty() || !conversions_.front().converting ||
+        conversions_.front().incr)
       return;
     Conversion& c = conversions_.front();
     // A late answer to an earlier conversion: another target, another
@@ -905,6 +916,48 @@ class Bridge {
       owned_time_ = time;
     }
     FinishOwn(ok);
+    if (ok)
+      RequestSave(time);
+  }
+
+  // Asks the clipboard manager, if one runs (it owns CLIPBOARD_MANAGER), to
+  // save what we now own (freedesktop's clipboard manager protocol, as GTK's
+  // gtk_clipboard_store): the property lists the targets to save, and the
+  // manager converts each from us (served like any requestor), then answers
+  // with a SelectionNotify (OnSaveNotify). Nothing waits for it.
+  void RequestSave(xcb_timestamp_t time) {
+    if (clipboard_manager_ == XCB_NONE || save_targets_ == XCB_NONE ||
+        save_prop_ == XCB_NONE || !owned_)
+      return;
+    auto* reply = static_cast<xcb_get_selection_owner_reply_t*>(
+        WaitReply(xcb_get_selection_owner(conn_, clipboard_manager_).sequence));
+    bool manager = reply && reply->owner != XCB_NONE;
+    free(reply);
+    if (!manager)
+      return;
+    std::vector<xcb_atom_t> list;
+    for (const auto& [mime, data] : *owned_) {
+      xcb_atom_t a = Atom(mime);
+      if (a != XCB_NONE)
+        list.push_back(a);
+    }
+    xcb_change_property(conn_, XCB_PROP_MODE_REPLACE, window_, save_prop_,
+                        XCB_ATOM_ATOM, 32, static_cast<uint32_t>(list.size()),
+                        list.data());
+    xcb_convert_selection(conn_, window_, clipboard_manager_, save_targets_,
+                          save_prop_, time);
+    xcb_flush(conn_);
+    g_save_requests++;
+  }
+
+  // The manager's answer: saved (a property) or refused (none).
+  void OnSaveNotify(const xcb_selection_notify_event_t* e) {
+    if (e->target != save_targets_)
+      return;
+    if (e->property != XCB_NONE)
+      g_saves_confirmed++;
+    xcb_delete_property(conn_, window_, save_prop_);
+    xcb_flush(conn_);
   }
 
   void FinishOwn(bool ok) {
@@ -1108,7 +1161,8 @@ class Bridge {
   xcb_window_t window_ = XCB_NONE;
   xcb_atom_t clipboard_ = XCB_NONE, targets_ = XCB_NONE, timestamp_ = XCB_NONE,
              multiple_ = XCB_NONE, incr_ = XCB_NONE, time_prop_ = XCB_NONE,
-             convert_time_prop_ = XCB_NONE;
+             convert_time_prop_ = XCB_NONE, clipboard_manager_ = XCB_NONE,
+             save_targets_ = XCB_NONE, save_prop_ = XCB_NONE;
   // The last conversion's server timestamp (CurrentTime before the first).
   xcb_timestamp_t convert_time_ = XCB_CURRENT_TIME;
   // The conversions' properties.
@@ -1139,16 +1193,9 @@ class Bridge {
 bool Enabled() {
   if (g_forced.load())
     return true;
-  static const bool enabled = [] {
-    const char* forced = getenv("LAUFEY_CLIPBOARD");
-    if (forced && strcmp(forced, "gtk") == 0)
-      return false;
-    // A Wayland display that is there (not XDG_SESSION_TYPE, nor a stale
-    // $WAYLAND_DISPLAY) with Xwayland's $DISPLAY beside it.
-    const char* x11 = getenv("DISPLAY");
-    return DisplayBackend() == "wayland" && x11 && *x11 &&
-           data_control::CompositorIsMutter();
-  }();
+  static const bool enabled = UseX11Bridge(
+      DisplayBackend(), getenv("DISPLAY"), getenv("LAUFEY_CLIPBOARD"),
+      [] { return data_control::CompositorIsMutter(); });
   return enabled;
 }
 
@@ -1160,6 +1207,20 @@ Bridge* Usable() {
 }
 
 }  // namespace
+
+bool UseX11Bridge(const std::string& display_backend, const char* display,
+                  const char* laufey_clipboard,
+                  const std::function<bool()>& compositor_is_mutter) {
+  if (laufey_clipboard && strcmp(laufey_clipboard, "gtk") == 0)
+    return false;
+  if (!display || !*display)
+    return false;
+  // An X11 session: the display that is there is X11 (not XDG_SESSION_TYPE).
+  if (display_backend == "x11")
+    return true;
+  // A Wayland display that is there, mutter's, with Xwayland's $DISPLAY.
+  return display_backend == "wayland" && compositor_is_mutter();
+}
 
 bool Available() {
   return Usable() != nullptr;
@@ -1199,6 +1260,14 @@ void SetReconnectBackoffForTesting(int ms) {
 
 int ActiveTransfers() {
   return g_transfers.load();
+}
+
+int SaveRequestsForTesting() {
+  return g_save_requests.load();
+}
+
+int SavesConfirmedForTesting() {
+  return g_saves_confirmed.load();
 }
 
 }  // namespace x11_clipboard

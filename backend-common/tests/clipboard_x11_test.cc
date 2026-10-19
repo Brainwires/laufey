@@ -1,13 +1,18 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 //
-// The X11 CLIPBOARD client laufey uses on mutter (clipboard_x11_linux.h),
-// against a private Xvfb, with a second X client in the test (a "peer" on
-// a connection of its own) on the other end of every transfer:
+// The X11 CLIPBOARD client laufey uses in X11 sessions and on mutter
+// (clipboard_x11_linux.h), against a private Xvfb, with a second X client in
+// the test (a "peer" on a connection of its own) on the other end of every
+// transfer:
+//   - which sessions use it (X11; mutter's Wayland; not LAUFEY_CLIPBOARD=gtk);
 //   - we own: the peer reads TARGETS, TIMESTAMP, UTF8_STRING, STRING (offered
 //     only when the text is Latin-1, and then as Latin-1), and a PNG larger
-//     than a chunk through INCR; we read our own PNG back the same way;
+//     than a chunk through INCR; we read our own PNG back the same way; a
+//     multi-megabyte PNG both ways; a clipboard manager (CLIPBOARD_MANAGER's
+//     owner) is asked to save what we own (SAVE_TARGETS) and takes it;
 //   - the peer owns: we read its UTF-8 text, Latin-1 STRING, an HTML larger
-//     than a chunk through INCR, and the formats; change events (XFixes);
+//     than a chunk through INCR, a multi-megabyte PNG, and the formats;
+//     change events (XFixes);
 //   - hostile peers: an owner that never answers (the read gives up after
 //     its timeout), an owner that stalls mid-INCR (the read gives up after
 //     a step's timeout), an INCR announced over max_bytes (refused at once),
@@ -101,13 +106,13 @@ std::string Take(char* s) {
 }
 
 // A noise image: its PNG is far larger than a 64 KiB chunk.
-std::string NoisePng() {
-  GdkPixbuf* pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 300, 300);
+std::string NoisePng(int side = 300) {
+  GdkPixbuf* pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, side, side);
   guchar* px = gdk_pixbuf_get_pixels(pixbuf);
   int stride = gdk_pixbuf_get_rowstride(pixbuf);
   uint32_t x = 2463534242u;
-  for (int y = 0; y < 300; y++) {
-    for (int i = 0; i < 300 * 3; i++) {
+  for (int y = 0; y < side; y++) {
+    for (int i = 0; i < side * 3; i++) {
       x ^= x << 13;
       x ^= x >> 17;
       x ^= x << 5;
@@ -292,6 +297,46 @@ class Peer {
       free(ev);
     }
     return incr;
+  }
+
+  // Becomes the clipboard manager (owns CLIPBOARD_MANAGER, as xfce4-clipman
+  // or gsd-clipboard do).
+  void OwnManager() {
+    xcb_set_selection_owner(conn_, window_, Atom("CLIPBOARD_MANAGER"),
+                            XCB_CURRENT_TIME);
+    xcb_flush(conn_);
+  }
+
+  // As the manager: waits for a SAVE_TARGETS request, reads the targets it
+  // lists, converts CLIPBOARD to `target` from the owner (what a manager
+  // keeps), and answers "saved". False when no request came.
+  bool ServeSave(const std::string& target, std::vector<std::string>* listed,
+                 std::string* saved) {
+    xcb_atom_t manager = Atom("CLIPBOARD_MANAGER");
+    xcb_atom_t save = Atom("SAVE_TARGETS");
+    xcb_generic_event_t* ev = Wait([&](xcb_generic_event_t* e) {
+      auto* r = reinterpret_cast<xcb_selection_request_event_t*>(e);
+      return (e->response_type & 0x7f) == XCB_SELECTION_REQUEST &&
+             r->selection == manager && r->target == save;
+    });
+    if (!ev)
+      return false;
+    auto req = *reinterpret_cast<xcb_selection_request_event_t*>(ev);
+    free(ev);
+    xcb_get_property_reply_t* r = xcb_get_property_reply(
+        conn_,
+        xcb_get_property(conn_, 0, req.requestor, req.property, XCB_ATOM_ATOM,
+                         0, 1024),
+        nullptr);
+    EXPECT(r);
+    auto* atoms = static_cast<xcb_atom_t*>(xcb_get_property_value(r));
+    for (int i = 0; i < xcb_get_property_value_length(r) / 4; i++)
+      listed->push_back(Name(atoms[i]));
+    free(r);
+    std::string type;
+    bool ok = Fetch(target, saved, &type);
+    Notify(req, ok ? req.property : XCB_NONE);
+    return ok;
   }
 
   // Kills the client that created `window` (XKillClient).
@@ -631,6 +676,33 @@ int main() {
     std::printf("laufey_clipboard_x11_test: Xvfb missing, skipped\n");
     return 77;
   }
+  // Which sessions use the X11 bridge (pure): X11 sessions, and mutter's
+  // Wayland with Xwayland's $DISPLAY; never with LAUFEY_CLIPBOARD=gtk or
+  // without a $DISPLAY; mutter is asked about only on Wayland.
+  {
+    int asked = 0;
+    auto mutter = [&] {
+      asked++;
+      return true;
+    };
+    auto other = [&] {
+      asked++;
+      return false;
+    };
+    EXPECT(x11_clipboard::UseX11Bridge("x11", ":0", nullptr, other));
+    EXPECT(asked == 0);
+    EXPECT(x11_clipboard::UseX11Bridge("x11", ":0", "", other));
+    EXPECT(!x11_clipboard::UseX11Bridge("x11", ":0", "gtk", mutter));
+    EXPECT(!x11_clipboard::UseX11Bridge("x11", nullptr, nullptr, mutter));
+    EXPECT(!x11_clipboard::UseX11Bridge("x11", "", nullptr, mutter));
+    EXPECT(asked == 0);
+    EXPECT(x11_clipboard::UseX11Bridge("wayland", ":1", nullptr, mutter));
+    EXPECT(!x11_clipboard::UseX11Bridge("wayland", ":1", nullptr, other));
+    EXPECT(asked == 2);
+    EXPECT(!x11_clipboard::UseX11Bridge("wayland", nullptr, nullptr, mutter));
+    EXPECT(!x11_clipboard::UseX11Bridge("", ":0", nullptr, mutter));
+  }
+
   // No data-control: the X11 client is the clipboard.
   unsetenv("WAYLAND_DISPLAY");
   x11_clipboard::EnableForTesting();
@@ -690,6 +762,55 @@ int main() {
   free(got);
   EXPECT(Take(ClipboardReadFormatsLinux()) == "image/png");
 
+  // A clipboard manager runs: once we own the selection it is asked to
+  // save it (SAVE_TARGETS, listing our targets), converts what it keeps from
+  // us, and says so. Without one, nothing is asked.
+  {
+    Peer manager;
+    manager.OwnManager();
+    int requests = x11_clipboard::SaveRequestsForTesting();
+    int confirmed = x11_clipboard::SavesConfirmedForTesting();
+    ClipboardWriteTextLinux("kept after exit");
+    std::vector<std::string> listed;
+    std::string saved;
+    EXPECT(manager.ServeSave("UTF8_STRING", &listed, &saved));
+    EXPECT(Has(listed, "UTF8_STRING") && Has(listed, "STRING"));
+    EXPECT(saved == "kept after exit");
+    EXPECT(WaitFor([&] {
+      return x11_clipboard::SavesConfirmedForTesting() == confirmed + 1;
+    }));
+    EXPECT(x11_clipboard::SaveRequestsForTesting() == requests + 1);
+  }
+  {
+    int requests = x11_clipboard::SaveRequestsForTesting();
+    ClipboardWriteTextLinux("no manager");
+    EXPECT(peer.Fetch("UTF8_STRING", &data, &type) && data == "no manager");
+    EXPECT(x11_clipboard::SaveRequestsForTesting() == requests);
+  }
+
+  // A large image (megabytes, as a screenshot): INCR in many chunks, to the
+  // peer and back to ourselves.
+  {
+    std::string big = NoisePng(1100);
+    EXPECT(big.size() > 3 * 1024 * 1024);
+    start = Clock::now();
+    EXPECT(ClipboardWriteImageLinux(
+        reinterpret_cast<const uint8_t*>(big.data()), big.size()));
+    bool big_incr = false;
+    EXPECT(peer.Fetch("image/png", &data, &type, &big_incr));
+    EXPECT(big_incr && data == big);
+    size_t big_len = 0;
+    uint8_t* big_got = ClipboardReadImageLinux(&big_len);
+    EXPECT(big_got && big_len == big.size() &&
+           memcmp(big_got, big.data(), big_len) == 0);
+    free(big_got);
+    std::printf("large image (%zu bytes): out and back in %.2f s\n", big.size(),
+                SecondsSince(start));
+    // The small PNG again, for what follows.
+    EXPECT(ClipboardWriteImageLinux(
+        reinterpret_cast<const uint8_t*>(png.data()), png.size()));
+  }
+
   // Over max_bytes: not delivered.
   {
     bool found = true;
@@ -739,6 +860,23 @@ int main() {
     got = ClipboardReadImageLinux(&len);
     EXPECT(got && len == png.size() && memcmp(got, png.data(), len) == 0);
     free(got);
+    owner.Stop();
+  }
+  // Another app copies a large image: we read it through INCR.
+  {
+    std::string big = NoisePng(1100);
+    Peer owner;
+    owner.Own({{"image/png", big}}, false);
+    EXPECT(WaitFor(
+        [] { return Take(ClipboardReadFormatsLinux()) == "image/png"; }));
+    start = Clock::now();
+    size_t big_len = 0;
+    uint8_t* big_got = ClipboardReadImageLinux(&big_len);
+    EXPECT(big_got && big_len == big.size() &&
+           memcmp(big_got, big.data(), big_len) == 0);
+    free(big_got);
+    std::printf("large image from another app (%zu bytes) in %.2f s\n",
+                big.size(), SecondsSince(start));
     owner.Stop();
   }
   {

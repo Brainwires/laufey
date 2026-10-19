@@ -350,12 +350,15 @@ names a socket that exists (absolute, else under `$XDG_RUNTIME_DIR`) or
 explicit `--ozone-platform=` (an app's own `--ozone-platform` or
 `--ozone-platform-hint` wins; with no display at all,
 `--ozone-platform-hint=auto`). The clipboard and global shortcut backends,
-window placement and `platformFeatures().sessionType` follow the same choice.
-KWin's blur behind translucent windows (`set_window_backdrop` with `BLUR`,
-WebKitGTK) is found the same way, by what the compositor offers
-(`org_kde_kwin_blur_manager` on Wayland, `_KDE_NET_WM_BLUR_BEHIND_REGION` in
-`_NET_SUPPORTED` on X11), never by the desktop's name;
-`platformFeatures().windowBlur` reports it
+window placement and `platformFeatures().sessionType` follow the same choice: on
+X11 the clipboard is laufey's own XCB client of the `CLIPBOARD` selection (text,
+HTML and PNG, `INCR` for large data, the clipboard manager asked to keep it;
+[Clipboard](clipboard.md)), on Wayland ext-data-control or, on mutter,
+Xwayland's selection. KWin's blur behind translucent windows
+(`set_window_backdrop` with `BLUR`, WebKitGTK) is found the same way, by what
+the compositor offers (`org_kde_kwin_blur_manager` on Wayland,
+`_KDE_NET_WM_BLUR_BEHIND_REGION` in `_NET_SUPPORTED` on X11), never by the
+desktop's name; `platformFeatures().windowBlur` reports it
 ([window management](window-management.md#backdrops-mica-acrylic-vibrancy-blur-api--38)).
 WebKitGTK and Winit choose through GTK and winit, which connect the same way.
 

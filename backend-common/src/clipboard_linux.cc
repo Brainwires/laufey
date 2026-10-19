@@ -169,11 +169,12 @@ void OnOwnerChange(GtkClipboard*, GdkEvent*, gpointer) {
   FireClipboardChange();
 }
 
-// --- The clipboard without focus (Wayland) ---------------------------------
+// --- The clipboard without focus ---------------------------------------------
 //
-// ext-data-control where the compositor offers it, else (mutter) the X11
-// CLIPBOARD of Xwayland. Each answers false when it isn't in use here, and
-// the caller then uses GTK's clipboard.
+// Wayland: ext-data-control where the compositor offers it, else (mutter)
+// the X11 CLIPBOARD of Xwayland. X11 sessions: the X server's CLIPBOARD over
+// laufey's own XCB connection, off the UI thread. Each answers false when it
+// isn't in use here, and the caller then uses GTK's clipboard.
 //
 // Privacy: these paths read the clipboard whatever has focus, so an app in
 // the background reads it while the session is unlocked (as on macOS and
