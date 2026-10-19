@@ -541,7 +541,8 @@ int main() {
          "\"notificationScheduleReason\":null,"
          "\"notificationServerCapabilities\":null,\"badge\":null,"
          "\"badgeReason\":null,\"fileChooser\":null,"
-         "\"fileChooserReason\":null}");
+         "\"fileChooserReason\":null,\"windowBlur\":null,"
+         "\"windowBlurReason\":null}");
   // The file chooser (L2): the portal's, or GTK's with the reason.
   {
     PlatformFeatures c = f;
@@ -549,7 +550,21 @@ int main() {
     c.file_chooser_reason = "xdg-desktop-portal offers no FileChooser here";
     EXPECT(Contains(PlatformFeaturesToJson(c),
                     "\"fileChooser\":\"gtk\",\"fileChooserReason\":"
-                    "\"xdg-desktop-portal offers no FileChooser here\"}"));
+                    "\"xdg-desktop-portal offers no FileChooser here\","));
+  }
+  // KWin's blur: the compositor's, or why not (the reason only without).
+  {
+    PlatformFeatures b = f;
+    b.window_blur = "kwin-wayland";
+    b.window_blur_reason = "ignored when there is one";
+    EXPECT(Contains(PlatformFeaturesToJson(b),
+                    "\"windowBlur\":\"kwin-wayland\","
+                    "\"windowBlurReason\":null}"));
+    b.window_blur.clear();
+    b.window_blur_reason = "the compositor offers no org_kde_kwin_blur_manager";
+    EXPECT(Contains(PlatformFeaturesToJson(b),
+                    "\"windowBlur\":null,\"windowBlurReason\":"
+                    "\"the compositor offers no org_kde_kwin_blur_manager\"}"));
   }
   // The notification platform's facts and the badge (L1).
   {

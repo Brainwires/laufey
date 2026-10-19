@@ -174,6 +174,13 @@ struct PlatformFeatures {
   // and why (laufey_cef_sandbox.h). Empty elsewhere.
   std::string sandbox;
   std::string sandbox_reason;
+  // Linux: whether the compositor blurs behind translucent windows
+  // (laufey_window_blur.h): "kwin-wayland" (org_kde_kwin_blur_manager),
+  // "kwin-x11" (_KDE_NET_WM_BLUR_BEHIND_REGION in _NET_SUPPORTED), or empty
+  // with why not. Probed on every call (the effect can be toggled). Whether
+  // this backend can use it is window_capabilities' BACKDROP_BLUR.
+  std::string window_blur;
+  std::string window_blur_reason;
 };
 
 // --- The probe

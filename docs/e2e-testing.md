@@ -810,8 +810,13 @@ one that doesn't must refuse (setters return `false`).
   manager) the check is N/A, never a pass, and it still fails if a wrong state
   is reported.
 - **Title bar / backdrops**: each setter succeeds exactly when the capability is
-  reported; a hidden title bar puts the content origin at the frame origin and
-  the default one moves it back.
+  reported (KWin's blur on X11 may refuse the test's opaque window although the
+  session offers it); a hidden title bar puts the content origin at the frame
+  origin and the default one moves it back. On Linux, Acrylic is reported
+  exactly with the blur; `LAUFEY_E2E_EXPECT_BLUR=1` (under KWin with its Blur
+  effect, e.g. a nested `kwin_wayland`) or `=0` pins the capability.
+  `backend-common/tests/window_blur_test.cc` covers the protocol and the
+  property against a compositor of its own and an Xvfb standing in for KWin.
 - **A window the user closes** (`close_checks.rs`): a second window is closed
   through the window system, not `close_window` — Alt+F4 through the window
   manager on X11 (N/A without one), `WM_CLOSE` posted to it on Windows,

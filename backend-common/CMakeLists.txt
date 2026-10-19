@@ -109,6 +109,7 @@ elseif(UNIX)
     src/platform_features_linux.cc
     src/cookie_db_linux.cc
     src/title_bar_linux.cc
+    src/window_blur_linux.cc
     src/secret_store_linux.cc
     src/termination_signals_linux.cc
   )
@@ -717,6 +718,23 @@ if(LAUFEY_BUILD_TESTS)
              COMMAND laufey_clipboard_x11_test)
     set_tests_properties(laufey_clipboard_x11_test PROPERTIES
                          SKIP_RETURN_CODE 77)
+
+    # KWin's blur (laufey_window_blur.h) against a compositor of the test's
+    # own (libwayland-server) and a private Xvfb standing in for KWin.
+    pkg_check_modules(LAUFEY_TEST_WAYLAND_SERVER wayland-server)
+    if(LAUFEY_TEST_WAYLAND_SERVER_FOUND)
+      add_executable(laufey_window_blur_test tests/window_blur_test.cc)
+      target_include_directories(laufey_window_blur_test PRIVATE
+        ${LAUFEY_TEST_WAYLAND_SERVER_INCLUDE_DIRS})
+      target_link_libraries(laufey_window_blur_test PRIVATE
+        laufey_backend_common
+        ${LAUFEY_TEST_WAYLAND_SERVER_LIBRARIES}
+        Threads::Threads
+      )
+      add_test(NAME laufey_window_blur_test COMMAND laufey_window_blur_test)
+      set_tests_properties(laufey_window_blur_test PROPERTIES
+                           SKIP_RETURN_CODE 77)
+    endif()
   endif()
 
   if(WIN32)

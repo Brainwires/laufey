@@ -2677,6 +2677,23 @@ async fn window_api_checks() {
   }
 
   // -- backdrops ----------------------------------------------------------------
+  // KWin's blur (Linux, WebView): LAUFEY_E2E_EXPECT_BLUR=1 runs under KWin
+  // with its Blur effect (a nested or headless kwin_wayland), =0 under any
+  // other compositor; unset, the capability is only checked against what
+  // set_backdrop does. On X11 an opaque window (no RGBA visual: this one)
+  // may refuse a blur the session offers.
+  let x11_session = cfg!(target_os = "linux")
+    && laufey::platform_features()
+      .is_some_and(|f| f.contains("\"sessionType\":\"x11\""));
+  match std::env::var("LAUFEY_E2E_EXPECT_BLUR").as_deref() {
+    Ok("1") => check("blur reported (KWin with the Blur effect)", caps.blur()),
+    Ok("0") => check("no blur reported (no KWin blur)", !caps.blur()),
+    _ => {}
+  }
+  check(
+    "acrylic is reported with the KWin blur (Linux)",
+    !cfg!(target_os = "linux") || caps.blur() == caps.acrylic(),
+  );
   for (name, backdrop, cap) in [
     ("mica", laufey::Backdrop::Mica, caps.mica()),
     ("acrylic", laufey::Backdrop::Acrylic, caps.acrylic()),
@@ -2686,13 +2703,14 @@ async fn window_api_checks() {
       laufey::Backdrop::Vibrancy(laufey::VibrancyMaterial::Sidebar),
       caps.vibrancy(),
     ),
+    ("blur", laufey::Backdrop::Blur, caps.blur()),
   ] {
     let applied = w.set_backdrop(backdrop);
     check(
       &format!(
         "set_backdrop({name}) succeeds exactly when reported (got {applied})"
       ),
-      applied == cap,
+      applied == cap || (cap && !applied && x11_session),
     );
     if applied {
       check(

@@ -278,13 +278,14 @@ unified toolbar). The traffic-light position is kept across resizes, fullscreen
 and title changes. Both work on WKWebView and on CEF's NSWindow; the other
 platforms have no title bar API of this kind and return `false`.
 
-## Backdrops: Mica, Acrylic, vibrancy (API ≥ 38)
+## Backdrops: Mica, Acrylic, vibrancy, blur (API ≥ 38)
 
 ```rust
 use laufey::{Backdrop, VibrancyMaterial};
 
 win.set_backdrop(Backdrop::Mica);                                 // Windows 11
 win.set_backdrop(Backdrop::Vibrancy(VibrancyMaterial::Sidebar));  // macOS
+win.set_backdrop(Backdrop::Blur);                                 // KDE Plasma
 win.set_backdrop(Backdrop::None);
 ```
 
@@ -301,7 +302,27 @@ background transparent while one is set.
 - **CEF, every OS**: not supported — the CEF browser view paints an opaque
   background in windowed mode (the same reason `WindowOptions::transparent` is
   ignored there), so nothing could show through.
-- **WebKitGTK / Winit**: no backdrop API.
+- **WebKitGTK on KDE Plasma**: KWin's blur behind the window
+  (`LAUFEY_BACKDROP_BLUR`; `ACRYLIC` is accepted as the same blur, so an app
+  that asks for Acrylic gets the nearest thing). On Wayland through KDE's
+  `org_kde_kwin_blur_manager` protocol (the whole surface, applied with the
+  window's next frame and again whenever it is mapped, since GTK replaces a
+  Wayland window's surface when it hides it); on X11 through the
+  `_KDE_NET_WM_BLUR_BEHIND_REGION` property (an empty list, the whole window).
+  Found by feature probing, never by the desktop's name: KWin offers the global,
+  or lists the atom in the root window's `_NET_SUPPORTED`, only while its Blur
+  desktop effect is loaded (which needs OpenGL compositing), so another
+  compositor (mutter, wlroots, any X11 window manager) or KWin with the effect
+  off reports no blur, and the capability is read again on each call. While a
+  blur is set the window paints no background of its own and the web view's
+  background is clear; `None` restores both (a window created `TRANSPARENT`
+  stays transparent). On X11 the window needs an RGBA visual, chosen before it
+  is realized, so only a window created with `WindowOptions::transparent` can
+  show it there; any other refuses (`false`) although the session offers it. The
+  window manager's own decorations are not blurred, and on Wayland a
+  client-side-decorated window's shadow margin is blurred with the rest of the
+  surface.
+- **WebKitGTK elsewhere / Winit**: no backdrop API.
 
 `set_backdrop` returns `false` and changes nothing when the backend / OS can't
 show that backdrop.
@@ -321,11 +342,15 @@ build), so an app can surface "unsupported" instead of pretending:
 | traffic-light position    | ✓         | ✓         | –              | –           | –         | –               | –                      |
 | Mica / Acrylic / tabbed   | –         | –         | ✓ (Windows 11) | –           | –         | –               | –                      |
 | vibrancy                  | ✓         | –         | –              | –           | –         | –               | –                      |
+| blur (KWin)               | –         | –         | –              | –           | ✓ (KWin)  | –               | –                      |
 | normal bounds             | ✓         | ✓         | ✓              | ✓           | ✓         | ✓               | ✓                      |
 | keep-alive with no window | ✓         | ✓         | ✓              | ✓           | ✓         | ✓               | ✓                      |
 | set position              | ✓         | ✓         | ✓              | ✓           | X11 only  | X11 only        | not on Wayland         |
 
 "(WM)": applied by the window manager; nothing changes under a bare X server.
+"(KWin)": while KWin's Blur effect is on, on Wayland or X11 (with Acrylic
+reported too, as the same blur); `platformFeatures().windowBlur` says whether
+the session's compositor offers it at all.
 
 **Units.** Sizes, constraints, positions and screen rectangles are in DIP
 (density-independent pixels: points on macOS, CSS pixels at zoom 1) on every

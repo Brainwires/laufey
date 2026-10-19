@@ -14,6 +14,7 @@
 //!   LAUFEY_E2E_EXPECT_PORTALS=Notification,Settings,...  (each present)
 //!   LAUFEY_E2E_EXPECT_NOTIFICATION_SERVER=1|0  a server owns
 //!                                         org.freedesktop.Notifications
+//!   LAUFEY_E2E_EXPECT_WINDOW_BLUR=kwin-wayland|kwin-x11|none  KWin's blur
 //!
 //! An unset expectation is not checked.
 
@@ -68,6 +69,29 @@ pub(crate) async fn run() {
       running == (want == "1")
         && (running || has("\"notificationReason\":\"no ")),
     );
+  }
+  // KWin's blur: a compositor fact on Linux (a reason when there is none),
+  // null elsewhere.
+  if cfg!(target_os = "linux") {
+    check(
+      "windowBlur is KWin's, or null with a reason",
+      has("\"windowBlur\":\"kwin-wayland\",\"windowBlurReason\":null")
+        || has("\"windowBlur\":\"kwin-x11\",\"windowBlurReason\":null")
+        || (has("\"windowBlur\":null") && !has("\"windowBlurReason\":null")),
+    );
+  } else {
+    check(
+      "windowBlur is null off Linux",
+      has("\"windowBlur\":null,\"windowBlurReason\":null"),
+    );
+  }
+  if let Some(want) = expect("LAUFEY_E2E_EXPECT_WINDOW_BLUR") {
+    let got = if want == "none" {
+      has("\"windowBlur\":null")
+    } else {
+      has(&format!("\"windowBlur\":\"{want}\""))
+    };
+    check(&format!("windowBlur is {want}"), got);
   }
   if let Some(want) = expect("LAUFEY_E2E_EXPECT_PORTALS") {
     for iface in want.split(',').filter(|s| !s.is_empty()) {

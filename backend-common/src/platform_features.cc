@@ -452,6 +452,10 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   out += ",\"badgeReason\":" + StringOrNull(f.badge_reason);
   out += ",\"fileChooser\":" + StringOrNull(f.file_chooser);
   out += ",\"fileChooserReason\":" + StringOrNull(f.file_chooser_reason);
+  out += ",\"windowBlur\":" + StringOrNull(f.window_blur);
+  out += ",\"windowBlurReason\":" + StringOrNull(f.window_blur.empty()
+                                                     ? f.window_blur_reason
+                                                     : std::string());
   out += "}";
   return out;
 }

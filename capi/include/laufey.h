@@ -109,6 +109,9 @@ extern "C" {
 //   MICA_ALT   Windows 11 tabbed Mica (DWMSBT_TABBEDWINDOW).
 //   VIBRANCY   macOS NSVisualEffectView behind the web view, with the
 //              `material` argument (LAUFEY_VIBRANCY_*).
+//   BLUR       the compositor blurs what is behind the window (KDE Plasma:
+//              KWin's blur, on Wayland and X11; the WebView backend only).
+//              On KDE Plasma ACRYLIC is the same blur.
 // A backdrop only shows where the page leaves its background transparent:
 // the backend makes the web view's own background transparent while one is
 // set and restores it for NONE.
@@ -117,6 +120,7 @@ extern "C" {
 #define LAUFEY_BACKDROP_ACRYLIC 2
 #define LAUFEY_BACKDROP_MICA_ALT 3
 #define LAUFEY_BACKDROP_VIBRANCY 4
+#define LAUFEY_BACKDROP_BLUR 5
 
 // macOS vibrancy materials (the NSVisualEffectMaterial values, so they pass
 // through unchanged).
@@ -168,6 +172,10 @@ extern "C" {
   (1u << 19)  // one open dialog may pick files and directories (macOS)
 #define LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL \
   (1u << 20)  // a dialog with a window_id is modal to it (a sheet on macOS)
+// LAUFEY_BACKDROP_BLUR: the compositor blurs behind the window (KWin's blur
+// on Linux, probed when asked; ACRYLIC is then reported too, as the same
+// blur).
+#define LAUFEY_WINDOW_CAP_BACKDROP_BLUR (1u << 21)
 
 // --- Drag and drop (API >= 39) ----------------------------------------------
 //

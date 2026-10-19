@@ -378,11 +378,19 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug -DLAUFEY_BUILD_TESTS=ON
           ninja -C build-clipboard laufey_clipboard_wayland_test \
             laufey_clipboard_x11_test laufey_exit_guard_test \
-            laufey_shortcuts_portal_test
+            laufey_shortcuts_portal_test laufey_window_blur_test
       - name: clipboard_wayland_test (headless sway)
         run: scripts/headless-sway.sh build-clipboard/laufey_clipboard_wayland_test
       - name: clipboard_x11_test (Xvfb)
         run: build-clipboard/laufey_clipboard_x11_test
+      # KWin's blur (laufey_window_blur.h): KDE's blur protocol against a
+      # compositor of the test's own, and the X11 property against an Xvfb
+      # standing in for KWin. Both parts must run (no skip).
+      - name: window_blur_test (own compositor + Xvfb)
+        run: |
+          build-clipboard/laufey_window_blur_test | tee "$RUNNER_TEMP/blur.log"
+          grep -q "wayland part passed" "$RUNNER_TEMP/blur.log"
+          grep -q "x11 part passed" "$RUNNER_TEMP/blur.log"
       - name: exit_guard_test
         run: build-clipboard/laufey_exit_guard_test
       - name: shortcuts_portal_test

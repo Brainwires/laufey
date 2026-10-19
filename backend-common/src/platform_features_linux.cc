@@ -53,6 +53,7 @@
 #include "laufey_io.h"
 #include "laufey_notifications.h"
 #include "laufey_platform_features.h"
+#include "laufey_window_blur.h"
 
 namespace laufey_common {
 
@@ -714,6 +715,8 @@ PlatformFeatures ProbePlatformFeatures() {
       LauncherEntryAvailable(&f.badge_reason) ? "launcher-entry" : "title";
   f.tray_xembed = XEmbedTrayPresent(f.session_type);
   f.tray_library = AppIndicatorLibraryAvailableLinux();
+  // KWin's blur, on a connection of its own (the effect can be toggled).
+  f.window_blur = ProbeWindowBlur(&f.window_blur_reason);
   return f;
 }
 

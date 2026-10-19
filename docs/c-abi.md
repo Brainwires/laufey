@@ -101,10 +101,12 @@ The pointers group into:
   `set_display_changed_handler`, `window_capabilities` (what this backend / OS
   can do), `set_window_titlebar_style` / `set_window_traffic_light_position`
   (macOS), `set_window_backdrop` (Mica / Acrylic on Windows 11, vibrancy on
-  macOS), `get_window_normal_bounds`, `set_quit_on_last_window_closed`, the
-  `quit` contract (ends the loop like the last window closing) and, from API 46,
-  `exit_app` (`quit` with the process's exit code, without waiting for the
-  calling thread; see [backends.md](backends.md#how-an-app-ends)). See
+  macOS, KWin's blur on KDE Plasma: `LAUFEY_BACKDROP_BLUR` /
+  `LAUFEY_WINDOW_CAP_BACKDROP_BLUR`), `get_window_normal_bounds`,
+  `set_quit_on_last_window_closed`, the `quit` contract (ends the loop like the
+  last window closing) and, from API 46, `exit_app` (`quit` with the process's
+  exit code, without waiting for the calling thread; see
+  [backends.md](backends.md#how-an-app-ends)). See
   [window-management.md](window-management.md). API 39 adds the
   `LAUFEY_WINDOW_CAP_FILE_*` bits for drag and drop and file dialogs.
 - **Drag and drop** (API ≥ 39) — `set_file_drop_handler` (files dragged over and

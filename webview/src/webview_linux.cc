@@ -6,6 +6,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_window.h"
+#include "laufey_window_blur.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
 #include "laufey_platform_features.h"
@@ -25,6 +26,14 @@
 #include "init_script.h"
 #include <webkit2/webkit2.h>
 #include <JavaScriptCore/JavaScript.h>
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/gdkwayland.h>
+#endif
+#ifdef GDK_WINDOWING_X11
+// Not gdk/gdkx.h: it pulls in Xlib, whose `Bool` macro breaks
+// laufey::Value::Bool.
+extern "C" unsigned long gdk_x11_window_get_xid(GdkWindow* window);
+#endif
 
 #include <errno.h>
 #include <sys/random.h>
@@ -993,10 +1002,14 @@ class WebKitGTKBackend : public LaufeyBackend {
   bool IsDevToolsOpen(uint32_t window_id) override;
   bool IsDevToolsEnabled(uint32_t window_id) override;
 
-  // Window state, constraints and screens (API >= 38). No title bar styles
-  // or backdrops: GTK has no API for either (see
-  // docs/window-management.md), so those keep the base class's "false".
+  // Window state, constraints and screens (API >= 38). No title bar styles:
+  // GTK has no API for them (see docs/window-management.md), so those keep
+  // the base class's "false". The only backdrop is the compositor's blur.
   uint32_t WindowCapabilities() override;
+  // KWin's blur (LAUFEY_BACKDROP_BLUR, and ACRYLIC as the same blur) where
+  // the compositor offers it; see laufey_window_blur.h.
+  bool SetWindowBackdrop(uint32_t window_id, int backdrop,
+                         int material) override;
   void SetWindowState(uint32_t window_id, int action) override;
   uint32_t GetWindowState(uint32_t window_id) override;
   void SetWindowStateHandler(laufey_window_state_fn handler,
@@ -1543,6 +1556,100 @@ static void init_dark_theme_sync() {
       G_DBUS_SIGNAL_FLAGS_NONE, on_portal_setting_changed, nullptr, nullptr);
 }
 
+// --- Backdrop: KWin's blur (laufey_window_blur.h) ---
+//
+// The blur shows only through what the window leaves transparent: while it
+// is on, the window paints no background of its own (app-paintable) and the
+// web view's background is clear, so the page's own transparent regions show
+// the blurred desktop. On X11 that needs the window's RGBA visual, chosen
+// before it is realized: only a window created with
+// LAUFEY_WINDOW_FLAG_TRANSPARENT can show it there. GTK thread throughout.
+
+static const char kTransparentKey[] = "laufey-transparent";
+static const char kBlurWantedKey[] = "laufey-blur";
+static const char kBlurProxyKey[] = "laufey-blur-proxy";
+
+static bool LaufeyIsX11Display(GdkDisplay* display) {
+  return display &&
+         g_strcmp0(G_OBJECT_TYPE_NAME(display), "GdkX11Display") == 0;
+}
+
+// Whether the compositor of `display` blurs behind windows now.
+static bool LaufeyBlurAvailable(GdkDisplay* display) {
+#ifdef GDK_WINDOWING_WAYLAND
+  if (display && GDK_IS_WAYLAND_DISPLAY(display))
+    return laufey_common::KwinBlurWaylandAvailable(
+        gdk_wayland_display_get_wl_display(display));
+#endif
+#ifdef GDK_WINDOWING_X11
+  if (display && LaufeyIsX11Display(display))
+    return laufey_common::KwinBlurX11Available();
+#endif
+  (void)display;
+  return false;
+}
+
+// Asks the compositor to blur behind `window` (on) or to stop. A window
+// that has no surface yet (unrealized, or unmapped on Wayland) counts as
+// done: "map" applies the blur it wants.
+static bool LaufeyApplyBlur(GtkWidget* window, bool on) {
+  GdkWindow* gw = gtk_widget_get_window(window);
+  if (!gw)
+    return true;
+  GdkDisplay* display = gdk_window_get_display(gw);
+#ifdef GDK_WINDOWING_WAYLAND
+  if (GDK_IS_WAYLAND_DISPLAY(display)) {
+    auto* proxy = static_cast<wl_proxy*>(
+        g_object_get_data(G_OBJECT(window), kBlurProxyKey));
+    wl_surface* surface = gdk_wayland_window_get_wl_surface(gw);
+    bool ok = true;
+    if (surface) {
+      ok = laufey_common::KwinBlurWaylandSet(
+          gdk_wayland_display_get_wl_display(display), surface, &proxy, on);
+    } else {
+      laufey_common::KwinBlurWaylandForget(&proxy);
+    }
+    g_object_set_data(G_OBJECT(window), kBlurProxyKey, proxy);
+    return ok;
+  }
+#endif
+#ifdef GDK_WINDOWING_X11
+  if (LaufeyIsX11Display(display)) {
+    return laufey_common::KwinBlurX11Set(
+        static_cast<uint32_t>(gdk_x11_window_get_xid(gw)), on);
+  }
+#endif
+  (void)display;
+  return !on;
+}
+
+static void on_window_map_blur(GtkWidget* window, gpointer) {
+  if (!g_object_get_data(G_OBJECT(window), kBlurWantedKey))
+    return;
+  LaufeyApplyBlur(window, true);
+  // The blur applies with the surface's next commit.
+  gtk_widget_queue_draw(window);
+}
+
+static void on_window_unmap_blur(GtkWidget* window, gpointer) {
+  auto* proxy = static_cast<wl_proxy*>(
+      g_object_get_data(G_OBJECT(window), kBlurProxyKey));
+  if (!proxy)
+    return;
+  laufey_common::KwinBlurWaylandForget(&proxy);
+  g_object_set_data(G_OBJECT(window), kBlurProxyKey, nullptr);
+}
+
+// The window paints its own background again (unless it was created
+// transparent), and so does the web view.
+static void LaufeyRestoreOpaque(GtkWidget* window, WebKitWebView* webview) {
+  if (g_object_get_data(G_OBJECT(window), kTransparentKey))
+    return;
+  gtk_widget_set_app_paintable(window, FALSE);
+  GdkRGBA white = {1.0, 1.0, 1.0, 1.0};
+  webkit_web_view_set_background_color(webview, &white);
+}
+
 void WebKitGTKBackend::CreateWindow(uint32_t window_id, int width, int height) {
   CreateWindowEx(window_id, width, height, 0);
 }
@@ -1567,7 +1674,14 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
         gtk_widget_set_visual(window, rgba);
       }
       gtk_widget_set_app_paintable(window, TRUE);
+      g_object_set_data(G_OBJECT(window), kTransparentKey, GINT_TO_POINTER(1));
     }
+    // A blur set while the window is unmapped is applied when it maps; GTK
+    // destroys a Wayland window's surface (and its blur) when it unmaps.
+    g_signal_connect_after(window, "map", G_CALLBACK(on_window_map_blur),
+                           nullptr);
+    g_signal_connect(window, "unmap", G_CALLBACK(on_window_unmap_blur),
+                     nullptr);
     if (flags & LAUFEY_WINDOW_FLAG_NO_ACTIVATE) {
       // Treat as a utility/panel window: out of taskbar & pager, and don't
       // grab focus when shown (the GTK equivalent of a non-activating panel).
@@ -2001,7 +2115,65 @@ uint32_t WebKitGTKBackend::WindowCapabilities() {
           LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
           LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOGS |
           LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+  // KWin's blur, probed now (the Blur effect can be turned on and off).
+  bool blur = false;
+  gtk_invoke_sync(
+      [&] { blur = LaufeyBlurAvailable(gdk_display_get_default()); });
+  if (blur)
+    caps |=
+        LAUFEY_WINDOW_CAP_BACKDROP_BLUR | LAUFEY_WINDOW_CAP_BACKDROP_ACRYLIC;
   return caps;
+}
+
+bool WebKitGTKBackend::SetWindowBackdrop(uint32_t window_id, int backdrop,
+                                         int /*material*/) {
+  bool result = false;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state)
+      return;
+    GtkWidget* window = state->window;
+    bool wanted =
+        g_object_get_data(G_OBJECT(window), kBlurWantedKey) != nullptr;
+    if (backdrop == LAUFEY_BACKDROP_NONE) {
+      if (wanted) {
+        g_object_set_data(G_OBJECT(window), kBlurWantedKey, nullptr);
+        LaufeyApplyBlur(window, false);
+        LaufeyRestoreOpaque(window, state->webview);
+        gtk_widget_queue_resize(window);
+        gtk_widget_queue_draw(window);
+      }
+      result = true;
+      return;
+    }
+    if (backdrop != LAUFEY_BACKDROP_BLUR && backdrop != LAUFEY_BACKDROP_ACRYLIC)
+      return;
+    GdkDisplay* display = gtk_widget_get_display(window);
+    if (!LaufeyBlurAvailable(display))
+      return;
+#ifdef GDK_WINDOWING_X11
+    // X11 blends a window's alpha only with an RGBA visual.
+    if (LaufeyIsX11Display(display) &&
+        gtk_widget_get_visual(window) !=
+            gdk_screen_get_rgba_visual(gtk_widget_get_screen(window)))
+      return;
+#endif
+    gtk_widget_set_app_paintable(window, TRUE);
+    GdkRGBA clear = {0.0, 0.0, 0.0, 0.0};
+    webkit_web_view_set_background_color(state->webview, &clear);
+    if (!LaufeyApplyBlur(window, true)) {
+      LaufeyRestoreOpaque(window, state->webview);
+      return;
+    }
+    g_object_set_data(G_OBJECT(window), kBlurWantedKey, GINT_TO_POINTER(1));
+    // The opaque region follows app-paintable on the next allocation; the
+    // blur applies with the surface's next commit.
+    gtk_widget_queue_resize(window);
+    gtk_widget_queue_draw(window);
+    result = true;
+  });
+  return result;
 }
 
 void WebKitGTKBackend::StartFileDrag(uint32_t window_id,

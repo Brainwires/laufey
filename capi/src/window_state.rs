@@ -31,6 +31,7 @@ pub const LAUFEY_BACKDROP_MICA: c_int = 1;
 pub const LAUFEY_BACKDROP_ACRYLIC: c_int = 2;
 pub const LAUFEY_BACKDROP_MICA_ALT: c_int = 3;
 pub const LAUFEY_BACKDROP_VIBRANCY: c_int = 4;
+pub const LAUFEY_BACKDROP_BLUR: c_int = 5;
 
 pub const LAUFEY_WINDOW_CAP_STATE: u32 = 1 << 0;
 pub const LAUFEY_WINDOW_CAP_STATE_EVENTS: u32 = 1 << 1;
@@ -54,6 +55,7 @@ pub const LAUFEY_WINDOW_CAP_FILE_DRAG_OUT: u32 = 1 << 17;
 pub const LAUFEY_WINDOW_CAP_FILE_DIALOGS: u32 = 1 << 18;
 pub const LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES: u32 = 1 << 19;
 pub const LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL: u32 = 1 << 20;
+pub const LAUFEY_WINDOW_CAP_BACKDROP_BLUR: u32 = 1 << 21;
 
 // --- Types ---
 
@@ -210,6 +212,9 @@ pub enum Backdrop {
   MicaAlt,
   /// macOS NSVisualEffectView.
   Vibrancy(VibrancyMaterial),
+  /// The compositor's blur behind the window (KDE Plasma's KWin, on Wayland
+  /// and X11; the WebView backend).
+  Blur,
 }
 
 impl Backdrop {
@@ -220,6 +225,7 @@ impl Backdrop {
       Backdrop::Acrylic => (LAUFEY_BACKDROP_ACRYLIC, 0),
       Backdrop::MicaAlt => (LAUFEY_BACKDROP_MICA_ALT, 0),
       Backdrop::Vibrancy(m) => (LAUFEY_BACKDROP_VIBRANCY, m as c_int),
+      Backdrop::Blur => (LAUFEY_BACKDROP_BLUR, 0),
     }
   }
 }
@@ -269,6 +275,10 @@ impl WindowCapabilities {
   }
   pub fn vibrancy(&self) -> bool {
     self.has(LAUFEY_WINDOW_CAP_VIBRANCY)
+  }
+  /// [`Backdrop::Blur`] works (KWin's blur on Linux).
+  pub fn blur(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_BACKDROP_BLUR)
   }
   pub fn normal_bounds(&self) -> bool {
     self.has(LAUFEY_WINDOW_CAP_NORMAL_BOUNDS)
@@ -687,6 +697,14 @@ mod tests {
       VibrancyMaterial::UnderPageBackground as c_int,
       ffi::LAUFEY_VIBRANCY_UNDER_PAGE_BACKGROUND as c_int
     );
+    assert_eq!(
+      Backdrop::Blur.raw(),
+      (ffi::LAUFEY_BACKDROP_BLUR as c_int, 0)
+    );
+    assert_eq!(
+      LAUFEY_WINDOW_CAP_BACKDROP_BLUR,
+      ffi::LAUFEY_WINDOW_CAP_BACKDROP_BLUR
+    );
     assert_eq!(TitlebarStyle::HiddenInset.raw(), 2);
     assert_eq!(
       LAUFEY_WINDOW_CAP_SET_POSITION,
@@ -710,6 +728,7 @@ mod tests {
     let caps = window_capabilities_with(&fake);
     assert!(caps.state() && caps.vibrancy());
     assert!(!caps.mica() && !caps.screens() && !caps.keep_alive());
+    assert!(!caps.blur());
   }
 
   static SCREEN_COUNT: std::sync::atomic::AtomicUsize =
