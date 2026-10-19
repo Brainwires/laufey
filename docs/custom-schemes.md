@@ -140,6 +140,28 @@ is not declared, so it is denied. LNA is never switched off for the process (no
 The WebView backends have no such checks: WKWebView, WebView2 and WebKitGTK let
 a page reach loopback servers already.
 
+## A document's body waits for its commit (CEF)
+
+On CEF the body of a frame's document served over a custom scheme (an HTML,
+XHTML, SVG or XML response with a 2xx status) reaches the renderer only once the
+browser process has taken in the document's commit (CEF's `OnLoadStart` for that
+frame and URL), at most 1 s after its head. The head goes at once, so the
+navigation commits as before; what waits is the page's first script.
+
+Without it a page that touches `localStorage` as it loads could be left without
+storage. The renderer opens a page's `localStorage` over a process-wide
+interface that isn't ordered with the frame's commit, and the browser checks the
+request against the frame's storage key, which the frame takes from the new
+document only when the browser handles the commit. A custom-scheme response
+arrives quickly enough that the page's script can run first: Chromium then drops
+the request without a word (`DOMStorageContextWrapper::IsRequestValid`), the
+page reads an empty `localStorage`, and nothing it stores reaches the disk. On
+macOS arm64 CI an app that stored at startup and quit at once lost about one
+launch in 40 this way (the next launch read the value from two launches before);
+with the hold, none (`scripts/storage-stress-e2e-run.sh`,
+`laufey_cef_commit_gate.h`). A page over loopback HTTP is not held: its response
+comes later, and none of 500 such launches lost anything.
+
 ## Streaming responses
 
 A response reaches the page as the handler writes it, and a response may never

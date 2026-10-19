@@ -6,8 +6,12 @@
 #include <cstring>
 #include <iostream>
 
+#include "include/base/cef_callback.h"
 #include "include/cef_request.h"
 #include "include/cef_response.h"
+#include "include/cef_task.h"
+#include "include/wrapper/cef_closure_task.h"
+#include "laufey_cef_commit_gate.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_timing.h"
 #include "runtime_loader.h"
@@ -151,6 +155,25 @@ void LaufeySchemeHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
     if (!charset.empty()) {
       response->SetCharset(charset);
     }
+    // A frame's document: its body waits until the browser has taken in
+    // the commit, so no script of it opens localStorage before the frame
+    // has the document's storage key (laufey_cef_commit_gate.h).
+    if (browser_id_ != 0 && gate_id_ == 0 &&
+        laufey_common::DocumentBodyNeedsCommitGate(frame_document_, status_,
+                                                   mime_type)) {
+      gate_closed_ = true;
+      CefRefPtr<LaufeySchemeHandler> self(this);
+      gate_id_ = laufey_common::CommitGates().Add(
+          browser_id_, main_frame_, url_, [self] { self->OpenGate(); });
+      CefPostDelayedTask(
+          TID_IO,
+          base::BindOnce(
+              [](uint64_t id) { laufey_common::CommitGates().ReleaseOne(id); },
+              gate_id_),
+          laufey_common::kCommitGateMaxWaitMs);
+      if (laufey_common::TimingEnabled())
+        SchemeTiming(url_, "body held for the commit");
+    }
   }
 
   // Streaming: length unknown until FinishResponse.
@@ -174,6 +197,15 @@ bool LaufeySchemeHandler::Read(void* data_out, int bytes_to_read,
   if (failed_) {
     bytes_read = kNetErrFailed;
     return false;
+  }
+
+  // Held for the document's commit: park until OpenGate.
+  if (gate_closed_ && !cancelled_) {
+    pending_data_ = data_out;
+    pending_cap_ = bytes_to_read;
+    read_callback_ = callback;
+    bytes_read = 0;
+    return true;
   }
 
   if (!response_body_.empty()) {
@@ -208,15 +240,52 @@ bool LaufeySchemeHandler::Read(void* data_out, int bytes_to_read,
   return true;
 }
 
-void LaufeySchemeHandler::Cancel() {
+void LaufeySchemeHandler::OpenGate() {
   CefRefPtr<CefResourceReadCallback> to_continue;
+  int to_report = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    cancelled_ = true;
+    if (!gate_closed_)
+      return;
+    gate_closed_ = false;
+    if (laufey_common::TimingEnabled())
+      SchemeTiming(url_, "body released");
+    if (!read_callback_ || !pending_data_)
+      return;  // the next Read takes the body
+    if (failed_) {
+      to_report = kNetErrFailed;
+    } else if (!response_body_.empty()) {
+      size_t n =
+          std::min(static_cast<size_t>(pending_cap_), response_body_.size());
+      std::copy(response_body_.begin(), response_body_.begin() + n,
+                static_cast<uint8_t*>(pending_data_));
+      response_body_.erase(response_body_.begin(), response_body_.begin() + n);
+      to_report = static_cast<int>(n);
+    } else if (!finished_ && !cancelled_) {
+      return;  // stays parked: WriteResponse fills it
+    }
     to_continue = read_callback_;
     read_callback_ = nullptr;
     pending_data_ = nullptr;
   }
+  to_continue->Continue(to_report);
+}
+
+void LaufeySchemeHandler::Cancel() {
+  CefRefPtr<CefResourceReadCallback> to_continue;
+  uint64_t gate_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cancelled_ = true;
+    gate_closed_ = false;
+    gate_id = gate_id_;
+    to_continue = read_callback_;
+    read_callback_ = nullptr;
+    pending_data_ = nullptr;
+  }
+  // The held body isn't waited for any more.
+  if (gate_id)
+    laufey_common::CommitGates().Forget(gate_id);
   // Wake any parked read so it reports EOF.
   if (to_continue)
     to_continue->Continue(0);
@@ -298,8 +367,10 @@ intptr_t LaufeySchemeHandler::WriteResponse(const uint8_t* buf, size_t len) {
       to_report = kNetErrFailed;
     } else {
       response_body_.insert(response_body_.end(), buf, buf + len);
-      // Satisfy a parked Read by copying into its output buffer.
-      if (read_callback_ && pending_data_ && !response_body_.empty()) {
+      // Satisfy a parked Read by copying into its output buffer (not one
+      // held for the commit: OpenGate does that).
+      if (read_callback_ && pending_data_ && !response_body_.empty() &&
+          !gate_closed_) {
         size_t n =
             std::min(static_cast<size_t>(pending_cap_), response_body_.size());
         std::copy(response_body_.begin(), response_body_.begin() + n,
@@ -341,9 +412,12 @@ void LaufeySchemeHandler::FinishResponse() {
                              " writes, " + std::to_string(timing_bytes_) +
                              " bytes" +
                              (read_callback_ ? ", ends a parked read" : ""));
-    to_continue = read_callback_;
-    read_callback_ = nullptr;
-    pending_data_ = nullptr;
+    // A read held for the commit stays parked: OpenGate ends it.
+    if (!gate_closed_) {
+      to_continue = read_callback_;
+      read_callback_ = nullptr;
+      pending_data_ = nullptr;
+    }
     // Finished without a head: Open is still waiting for Begin, which never
     // comes, so the request would hang. There is no response: fail it.
     if (!began_) {
@@ -365,5 +439,10 @@ CefRefPtr<CefResourceHandler> LaufeySchemeHandlerFactory::Create(
     const CefString& scheme_name, CefRefPtr<CefRequest> request) {
   uint32_t window_id =
       RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
-  return new LaufeySchemeHandler(window_id);
+  const cef_resource_type_t type = request->GetResourceType();
+  const bool main_frame = type == RT_MAIN_FRAME;
+  const bool frame_document = browser && (main_frame || type == RT_SUB_FRAME);
+  return new LaufeySchemeHandler(window_id,
+                                 browser ? browser->GetIdentifier() : 0,
+                                 frame_document, main_frame);
 }

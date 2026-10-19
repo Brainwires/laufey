@@ -326,6 +326,14 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_user_activity_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_user_activity_test COMMAND laufey_user_activity_test)
 
+  # CEF: a custom-scheme document's body held for its commit.
+  add_executable(laufey_cef_commit_gate_test tests/cef_commit_gate_test.cc)
+  target_link_libraries(laufey_cef_commit_gate_test PRIVATE
+    laufey_backend_common
+    Threads::Threads
+  )
+  add_test(NAME laufey_cef_commit_gate_test COMMAND laufey_cef_commit_gate_test)
+
   # CEF's profile LevelDB LOCK probe and the helper-process wait.
   add_executable(laufey_cef_profile_lock_test tests/cef_profile_lock_test.cc)
   target_link_libraries(laufey_cef_profile_lock_test PRIVATE

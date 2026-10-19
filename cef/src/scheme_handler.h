@@ -32,7 +32,15 @@
 // CEF's callbacks are resumed via Continue() (safe from any thread).
 class LaufeySchemeHandler : public CefResourceHandler {
  public:
-  explicit LaufeySchemeHandler(uint32_t window_id) : window_id_(window_id) {}
+  // `browser_id` is the CEF browser the request belongs to (0: none), and
+  // `frame_document` whether it loads a frame's document (`main_frame`: the
+  // main frame's), whose body waits for the commit (laufey_cef_commit_gate.h).
+  LaufeySchemeHandler(uint32_t window_id, int browser_id, bool frame_document,
+                      bool main_frame)
+      : window_id_(window_id),
+        browser_id_(browser_id),
+        frame_document_(frame_document),
+        main_frame_(main_frame) {}
 
   // CefResourceHandler:
   bool Open(CefRefPtr<CefRequest> request, bool& handle_request,
@@ -51,8 +59,15 @@ class LaufeySchemeHandler : public CefResourceHandler {
   intptr_t WriteResponse(const uint8_t* buf, size_t len);
   void FinishResponse();
 
+  // The document's commit was taken in (or the gate's deadline passed): the
+  // body may go to the renderer. Any thread.
+  void OpenGate();
+
  private:
   uint32_t window_id_;
+  const int browser_id_;
+  const bool frame_document_;
+  const bool main_frame_;
 
   // Request state (immutable after Open).
   std::string method_;
@@ -72,6 +87,10 @@ class LaufeySchemeHandler : public CefResourceHandler {
   bool failed_ = false;
   // Set on the IO thread once Open handed the exchange to the runtime.
   bool dispatched_ = false;
+  // The body is held for the document's commit (laufey_cef_commit_gate.h):
+  // a Read parks until OpenGate. `gate_id_` is its DocumentCommitGates entry.
+  bool gate_closed_ = false;
+  uint64_t gate_id_ = 0;
   // LAUFEY_TIMING=1 (laufey_timing.h): what this request saw, under mutex_.
   int timing_reads_ = 0;
   int timing_writes_ = 0;

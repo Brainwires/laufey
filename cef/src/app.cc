@@ -5,6 +5,8 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_bridge_origin.h"
+#include "laufey_cef_commit_gate.h"
+#include "laufey_timing.h"
 #include "laufey_cef_network_quiet.h"
 #include "laufey_io.h"
 #include "laufey_launch_args.h"
@@ -367,7 +369,21 @@ bool LaufeyHandler::DoClose(CefRefPtr<CefBrowser> browser) {
   return false;
 }
 
+void LaufeyHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                TransitionType transition_type) {
+  const std::string url = frame->GetURL().ToString();
+  int released = laufey_common::CommitGates().Committed(
+      browser->GetIdentifier(), frame->IsMain(), url);
+  if (laufey_common::TimingEnabled())
+    laufey_common::Timing(std::string("load start ") +
+                          (frame->IsMain() ? "main " : "sub ") + url + " (" +
+                          std::to_string(released) + " held bodies released)");
+}
+
 void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
+  // A body still held for a commit that won't come.
+  laufey_common::CommitGates().ReleaseBrowser(browser->GetIdentifier());
   CEF_REQUIRE_UI_THREAD();
   file_drag_paths_.erase(browser->GetIdentifier());
   file_drag_lookup_failed_.erase(browser->GetIdentifier());

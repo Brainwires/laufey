@@ -248,6 +248,7 @@ class LaufeyHandler : public CefClient,
                       public CefCommandHandler,
                       public CefContextMenuHandler,
                       public CefPermissionHandler,
+                      public CefLoadHandler,
                       public CefRequestHandler {
  public:
   LaufeyHandler();
@@ -285,6 +286,15 @@ class LaufeyHandler : public CefClient,
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override {
     return this;
   }
+  CefRefPtr<CefLoadHandler> GetLoadHandler() override {
+    return this;
+  }
+
+  // A frame's document committed (CEF calls this from DidFinishNavigation,
+  // once the browser has taken in the commit): its body, held by the custom
+  // scheme handler, may go to the renderer (laufey_cef_commit_gate.h).
+  void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                   TransitionType transition_type) override;
 
   // The navigation guard (API 48, laufey_navigation_guard.h): a main-frame
   // navigation of a laufey window (and each of its server redirects) to an

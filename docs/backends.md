@@ -457,6 +457,14 @@ things keep what the page stored:
   "checksum mismatch"). Chromium 150 keeps IndexedDB in LevelDB; its SQLite
   backend is off by default.
 
+A launch could also lose what its page stored with nothing wrong at the end: on
+CEF a page served over a custom scheme that touched `localStorage` as it loaded
+could run before the browser had taken in its commit, and Chromium then left it
+without storage for that document (it read nothing, and nothing it stored was
+written). The custom scheme handler holds such a document's body until the
+commit is in; see
+[custom-schemes.md](custom-schemes.md#a-documents-body-waits-for-its-commit-cef).
+
 On macOS `CefShutdown` could also never return when the machine was busy.
 Chromium runs its thread pool's best-effort workers at background QoS, and macOS
 gives a background thread no CPU at all while threads of a higher QoS keep every
