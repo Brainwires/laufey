@@ -20,6 +20,13 @@
 //! read prints `[e2e] read indexedDB=... dataLoss=...` (`dataLoss` is the
 //! `upgradeneeded` event's: `total` when Chromium deleted a corrupt database).
 //!
+//! `LAUFEY_E2E_STORAGE_PREV` makes the launch a step of a chain (with
+//! `LAUFEY_E2E_STORAGE_VALUE`; `scripts/storage-stress-e2e-run.sh`): the
+//! page's own script reads localStorage and stores the new value as it loads,
+//! as an app's page does at startup, and reports both reads to the runtime,
+//! which checks the first against the value (`-`: nothing stored), what the
+//! launch before it stored, and then ends at once (`LAUFEY_E2E_STORAGE_EXIT`).
+//!
 //! `LAUFEY_E2E_STORAGE_HOLD_MS` keeps the launch alive that long before it
 //! quits (used to start a second instance against a running one).
 //!
@@ -89,6 +96,67 @@ fn env(name: &str) -> Option<String> {
   std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+/// Where `/chain?prev=...&back=...` from the page is delivered.
+static CHAIN: std::sync::OnceLock<std::sync::mpsc::Sender<String>> =
+  std::sync::OnceLock::new();
+
+/// Delivers a `/chain` request's query to CHAIN; false for any other path.
+fn chain_request(path: &str) -> bool {
+  let Some(query) = path.strip_prefix("/chain?") else {
+    return false;
+  };
+  if let Some(tx) = CHAIN.get() {
+    let _ = tx.send(query.to_string());
+  }
+  true
+}
+
+/// A query parameter, percent-decoded (the page encodes with
+/// encodeURIComponent).
+fn query_param(query: &str, name: &str) -> String {
+  let raw = query
+    .split('&')
+    .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+    .unwrap_or("");
+  let bytes = raw.as_bytes();
+  let mut out = Vec::new();
+  let mut i = 0;
+  while i < bytes.len() {
+    if bytes[i] == b'%' && i + 2 < bytes.len() {
+      if let Ok(b) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+        out.push(b);
+        i += 3;
+        continue;
+      }
+    }
+    out.push(bytes[i]);
+    i += 1;
+  }
+  String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The page. In a chain step (`LAUFEY_E2E_STORAGE_PREV`) its own script
+/// reads localStorage and stores the new value as it loads, as an app's page
+/// does at startup (a launch's first storage access, which opens the
+/// database), and reports both reads with a request to `/chain` (CHAIN).
+fn page_body() -> String {
+  let mut body =
+    String::from("<!doctype html><title>storage-e2e</title><p>storage-e2e</p>");
+  if env("LAUFEY_E2E_STORAGE_PREV").is_some() {
+    let value = env("LAUFEY_E2E_STORAGE_VALUE").unwrap_or_default();
+    body.push_str(&format!(
+      r#"<script>try {{
+  window.__laufeyPrev = String(localStorage.getItem("{KEY}"));
+  localStorage.setItem("{KEY}", {value:?});
+  window.__laufeyBack = localStorage.getItem("{KEY}");
+}} catch (e) {{ window.__laufeyPrev = "error: " + e; }}
+fetch("/chain?prev=" + encodeURIComponent(window.__laufeyPrev) +
+  "&back=" + encodeURIComponent(window.__laufeyBack));</script>"#
+    ));
+  }
+  body
+}
+
 /// Serves the same tiny page for every request on 127.0.0.1:`port`.
 ///
 /// Each connection gets its own thread. A persistent profile remembers this
@@ -126,7 +194,16 @@ fn answer(mut stream: TcpStream) {
   if req.is_empty() {
     return;
   }
-  let body = "<!doctype html><title>storage-e2e</title><p>storage-e2e</p>";
+  let line = String::from_utf8_lossy(&req);
+  let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+  if chain_request(&path) {
+    let _ = write!(
+      stream,
+      "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+    );
+    return;
+  }
+  let body = page_body();
   let _ = write!(
     stream,
     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
@@ -138,7 +215,18 @@ fn answer(mut stream: TcpStream) {
 
 /// Serves the page for every request on the custom scheme.
 fn serve_scheme(req: SchemeRequest) {
-  let body = "<!doctype html><title>storage-e2e</title><p>storage-e2e</p>";
+  let path = req
+    .url
+    .splitn(4, '/')
+    .nth(3)
+    .map(|p| format!("/{p}"))
+    .unwrap_or_default();
+  if chain_request(&path) {
+    req.exchange.begin(204, &[]);
+    req.exchange.finish();
+    return;
+  }
+  let body = page_body();
   let headers = vec![
     (
       "content-type".to_string(),
@@ -333,6 +421,13 @@ fn e2e_main() {
       env("LAUFEY_DATA_DIR")
     );
 
+    // A chain step: the page reports what it read to /chain (page_body).
+    let chain = env("LAUFEY_E2E_STORAGE_PREV").map(|prev| {
+      let (tx, rx) = std::sync::mpsc::channel();
+      let _ = CHAIN.set(tx);
+      (prev, rx)
+    });
+
     let (origin, served) = match &scheme {
       Some(name) => {
         // Registered before the first window, as the scheme contract requires.
@@ -349,6 +444,38 @@ fn e2e_main() {
     let win = Window::new(480, 320)
       .title("storage-e2e")
       .load(&format!("{origin}/"));
+
+    if let Some((prev, rx)) = chain {
+      // As an app that stores at startup and quits at once: no pause.
+      let t = Instant::now();
+      let report = tokio::task::spawn_blocking(move || rx.recv_timeout(PAGE_WAIT))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+      check("the page reported its reads", report.is_some());
+      if let Some(query) = report {
+        let read = query_param(&query, "prev");
+        let back = query_param(&query, "back");
+        let want = if prev == "-" { "null".to_string() } else { prev };
+        // One write: the host's own stderr lines (LAUFEY_TIMING) can't
+        // land inside it, and the driver parses it.
+        let _ = std::io::stderr().write_all(
+          format!(
+            "[e2e] previous localStorage={read:?} want={want:?} back={back:?} ({} ms)\n",
+            t.elapsed().as_millis()
+          )
+          .as_bytes(),
+        );
+        check(&format!("localStorage before the write is {want:?}"), read == want);
+        let value = env("LAUFEY_E2E_STORAGE_VALUE").unwrap_or_default();
+        check("localStorage write reads back", !value.is_empty() && back == value);
+      }
+      let failed = FAILED.load(Ordering::SeqCst);
+      eprintln!("[e2e] OVERALL {}", if failed { "FAIL" } else { "PASS" });
+      let _ = std::io::stderr().flush();
+      end(&win, &exit_mode).await;
+      return;
+    }
 
     // Wait until the page's own origin answers (not about:blank or an error
     // page). Polled rather than via on_page_load, which CEF doesn't fire. A

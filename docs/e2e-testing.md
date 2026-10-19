@@ -745,6 +745,21 @@ a running engine (how a runtime ended before API 46) and reports whether the
 value survived. See [backends.md](backends.md#how-an-app-ends). The `native-e2e`
 CI job runs it after the storage step on every webview/cef leg.
 
+Many quick relaunches of one app have a driver too,
+`scripts/storage-stress-e2e-run.sh <webview|cef> [launches]`
+(`LAUFEY_E2E_STORAGE_PREV`): a chain of launches of one `LAUFEY_DATA_DIR`, each
+of whose page reads `localStorage` and stores a fresh value as it loads (as an
+app's page does at startup) and reports both reads to the runtime, which then
+quits at once. Every launch must read the value the launch before it stored, and
+read back its own. `LAUFEY_E2E_STRESS_SCHEME=<name>` serves the page over that
+custom scheme instead of loopback HTTP. On a failure it prints the launch's log
+and, on CEF, the `localStorage` database's LevelDB info logs from before and
+after the launch. CI runs 200 launches over a custom scheme on CEF: in
+`native-e2e` on macOS arm64 and Linux x64 and arm64, and in `build-cef` on macOS
+x64. On macOS arm64 it lost about one launch in 40 before the custom scheme
+handler held a document's body for its commit
+([custom-schemes.md](custom-schemes.md#a-documents-body-waits-for-its-commit-cef)).
+
 ---
 
 ## 15. Single instance and opened files (`single_instance_e2e`)

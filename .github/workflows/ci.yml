@@ -975,6 +975,21 @@ jobs:
         shell: bash
         run: scripts/exit-e2e-run.sh ${{ matrix.backend }} 3
 
+      # localStorage over 200 quick relaunches of one app, its page served
+      # over a custom scheme: each launch's page reads the previous launch's
+      # value and stores its own as it loads, and the launch quits at once.
+      # CEF on macOS arm64 used to lose about one launch in 40: a page that
+      # touched localStorage before the browser had taken in its commit was
+      # left without storage (laufey_cef_commit_gate.h). macOS x64 runs it in
+      # build-cef.
+      - name: Storage — localStorage over quick relaunches (stress)
+        if: matrix.backend == 'cef' && runner.os != 'Windows'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          LAUFEY_E2E_STRESS_SCHEME: lsstress
+        run: scripts/storage-stress-e2e-run.sh cef 200
+
       # Single-instance lock + argument forwarding (second_instance), the
       # arguments a runtime sees at a cold start, and on macOS files opened
       # through LaunchServices (open_url). See docs/deep-links.md. Winit has
@@ -1341,6 +1356,20 @@ jobs:
           key: cef-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('Makefile') }}
 
       - run: make cef
+
+      # The localStorage stress of native-e2e on macOS x64, which has no
+      # native-e2e leg (see "Storage — localStorage over quick relaunches").
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        if: matrix.target == 'x86_64-apple-darwin'
+      - name: Storage — localStorage over quick relaunches (stress)
+        if: matrix.target == 'x86_64-apple-darwin'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          LAUFEY_E2E_STRESS_SCHEME: lsstress
+        run: |
+          cargo build --release -p storage_e2e_runtime
+          scripts/storage-stress-e2e-run.sh cef 200
 
       # The host runs a headless launch (`run <script>`: a forked worker, the
       # full-app updater's helper) to its end, past the bounded wait a
