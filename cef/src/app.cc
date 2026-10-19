@@ -1187,9 +1187,17 @@ bool LaufeyHandler::OnShowPermissionPrompt(
   }
   // Chromium's Local Network Access prompt (CEF 136 named it
   // LOCAL_NETWORK_ACCESS, CEF 145 split it into LOCAL_NETWORK and
-  // LOOPBACK_NETWORK). The CEF host has no prompt UI, so an unanswered one
-  // holds the page's request forever.
-  constexpr uint32_t kLocalNetwork = CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS |
+  // LOOPBACK_NETWORK, CEF 150 renamed the old bit
+  // LOCAL_NETWORK_ACCESS_DEPRECATED). The CEF host has no prompt UI, so an
+  // unanswered one holds the page's request forever.
+#if CEF_API_ADDED(15000)
+  constexpr uint32_t kLocalNetworkAccessBit =
+      CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS_DEPRECATED;
+#else
+  constexpr uint32_t kLocalNetworkAccessBit =
+      CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS;
+#endif
+  constexpr uint32_t kLocalNetwork = kLocalNetworkAccessBit |
                                      CEF_PERMISSION_TYPE_LOCAL_NETWORK |
                                      CEF_PERMISSION_TYPE_LOOPBACK_NETWORK;
   switch (laufey_common::DecideLocalNetworkPrompt(

@@ -9,7 +9,7 @@ features that a given engine can't express on a given OS (see
 
 | Backend                                                           | Engine        | Process model | Bundled | JS bridge |
 | ----------------------------------------------------------------- | ------------- | ------------- | ------- | --------- |
-| [CEF](https://github.com/littledivy/laufey/tree/main/cef)         | Chromium 144  | multi-process | yes     | yes       |
+| [CEF](https://github.com/littledivy/laufey/tree/main/cef)         | Chromium 150  | multi-process | yes     | yes       |
 | [WebView](https://github.com/littledivy/laufey/tree/main/webview) | system native | single        | no      | yes       |
 | [Winit](https://github.com/littledivy/laufey/tree/main/winit)     | none          | single        | n/a     | no        |
 
@@ -19,11 +19,12 @@ There is also an **iOS** backend (UIKit + WKWebView, statically linked) — see
 
 ## CEF
 
-Embeds Chromium 144 through the Chromium Embedded Framework and runs Chromium's
-real multi-process architecture — a browser process plus renderer, GPU, and
-utility subprocesses, with the same rendering and DevTools you get in Chrome.
-The engine is bundled into the app, so binaries are large but rendering is
-identical everywhere and independent of the host OS.
+Embeds Chromium 150 (CEF 150.0.21, Chromium 150.0.7871.255) through the Chromium
+Embedded Framework and runs Chromium's real multi-process architecture — a
+browser process plus renderer, GPU, and utility subprocesses, with the same
+rendering and DevTools you get in Chrome. The engine is bundled into the app, so
+binaries are large but rendering is identical everywhere and independent of the
+host OS.
 
 Sources live in [`cef/`](https://github.com/littledivy/laufey/tree/main/cef);
 shared native features come from `backend-common`. On Windows the backend links
@@ -160,9 +161,9 @@ session; a deep-link launch drops that switch with every other Chromium switch
   process's seccomp sandbox is Chromium's own decision: Chromium skips it when
   the GL driver started threads before the sandbox, as Mesa's llvmpipe (software
   GL, e.g. under Xvfb) does.
-- **Windows.** CEF 149's Windows sandbox comes with the bootstrap model
-  (`USE_SANDBOX=ON`, CEF's default, defines `CEF_USE_BOOTSTRAP`): the sandbox
-  information is created by the distribution's `bootstrap.exe`
+- **Windows.** CEF's Windows sandbox (149 and later) comes with the bootstrap
+  model (`USE_SANDBOX=ON`, CEF's default, defines `CEF_USE_BOOTSTRAP`): the
+  sandbox information is created by the distribution's `bootstrap.exe`
   (`cef_sandbox_info_create` is linked into it, not into `libcef.dll`), so the
   bootstrap is the app's executable and laufey's CEF host is a DLL it loads. The
   build ships the two side by side in `cef/build/Release`:
@@ -238,11 +239,11 @@ session; a deep-link launch drops that switch with every other Chromium switch
   so the launch exited 1 at once, its relaunch had the shell's default
   environment instead of the launcher's, and a deep link given on the command
   line never reached the app. A machine with UAC off (a GitHub runner) never
-  takes that path. Chromium 149 checks the switch in `PreEarlyInitialization`,
-  after the host's command line hook; a later Chromium checks it in
-  `ChromeMainDelegate::BasicStartupComplete`, which CEF runs before the hook, so
-  a CEF update past that change has to put the switch on the command line before
-  CEF parses it.
+  takes that path. Chromium 149 and 150 check the switch in
+  `PreEarlyInitialization`, after the host's command line hook; a later Chromium
+  checks it in `ChromeMainDelegate::BasicStartupComplete`, which CEF runs before
+  the hook, so a CEF update past that change has to put the switch on the
+  command line before CEF parses it.
 
 The native e2e battery checks the result from outside the backend
 (`examples/native_e2e/src/sandbox_checks.rs`,
@@ -257,6 +258,40 @@ opposite, for a Linux run without a usable sandbox or a Windows build with
 `-DUSE_SANDBOX=OFF`. On Linux `LAUFEY_E2E_EXPECT_SANDBOX_MODE` names the layer
 (`namespace`: the renderer has a user namespace of its own; `setuid`: it
 doesn't), checked against the host's `laufey: sandbox:` line too.
+
+### Updating CEF (fork note)
+
+The CEF version is pinned twice, in the `Makefile` (`CEF_FULL_VERSION`, with a
+SHA-256 for each platform's minimal distribution, checked after the download)
+and in `cef/flake.nix` (the macOS hashes). This fork moved from CEF 149.0.5
+(Chromium 149.0.7827.197) to CEF 150.0.21 (Chromium 150.0.7871.255, CEF branch
+7871, API version 15000), the newest CEF 150 build published for all six
+platforms; upstream tracks the same major in
+[littledivy/laufey#83](https://github.com/littledivy/laufey/pull/83) (150.0.14).
+What CEF 150 changed for the host: `CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS` is
+now `CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS_DEPRECATED` (same bit, still
+answered by the Local Network Access prompt handler in `cef/src/app.cc`), and
+`CefTextfield`'s removed methods, which laufey never used. CEF's own default
+`--disable-features` list, the features the network-quiet defaults turn off, the
+Hunspell dictionaries' commit and the place Chromium checks
+`--do-not-de-elevate` (`PreEarlyInitialization`) are all unchanged from 149.
+
+At every CEF update:
+
+1. Pick a version published for every platform in the
+   [CEF builds index](https://cef-builds.spotifycdn.com/index.html) and update
+   both pins and every hash.
+2. Re-sync `CefOwnDisabledFeatures()` (`laufey_cef_network_quiet.h`) with
+   `ChromeMainDelegateCef::BasicStartupComplete` in CEF's
+   `libcef/common/chrome/chrome_main_delegate_cef.cc` at the pinned commit (only
+   features enabled by default there are added), and check that the
+   network-quiet features still exist and are still on by default; the
+   `--network-quiet` e2e leg fails on any new host in the net log.
+3. Check where Chromium reads `--do-not-de-elevate` (see the elevated-launch
+   paragraph above); `scripts/check-cef-de-elevation.sh` fails from Chromium 156
+   on.
+4. Run the full CI matrix (`ci.yml` with `full=true`), native e2e on every OS
+   included.
 
 ## WebView
 
@@ -405,7 +440,7 @@ things keep what the page stored:
   launches before, twice in a row. IndexedDB opens its databases with LevelDB's
   paranoid checks, so there the same open fails as corrupt and Chromium deletes
   the origin's IndexedDB (the page's next `open` reports `dataLoss: "total"`,
-  "checksum mismatch"). Chromium 149 keeps IndexedDB in LevelDB; its SQLite
+  "checksum mismatch"). Chromium 150 keeps IndexedDB in LevelDB; its SQLite
   backend is off by default.
 
 On macOS `CefShutdown` could also never return when the machine was busy.

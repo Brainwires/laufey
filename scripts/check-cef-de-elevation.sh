@@ -5,8 +5,9 @@
 #
 # The Windows CEF host keeps an elevated app elevated by appending
 # --do-not-de-elevate in its command line hook (CefWindowsBrowserSwitches in
-# backend-common/include/laufey_launch_args.h). Chromium 149 reads the switch
-# in ChromeBrowserMainPartsWin::PreEarlyInitialization, after that hook.
+# backend-common/include/laufey_launch_args.h). Chromium 149 and 150 read the
+# switch in ChromeBrowserMainPartsWin::PreEarlyInitialization, after that hook
+# (checked at 150.0.7871.255).
 # Chromium main@{#1700144} (c4486a503a, "Move Windows auto-de-elevation check
 # earlier in startup", first in Chromium 156) reads it in
 # ChromeMainDelegate::BasicStartupComplete, which CEF runs BEFORE the hook, so

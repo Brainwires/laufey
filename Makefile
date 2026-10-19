@@ -47,10 +47,19 @@ else
   LIB_EXT := .a
 endif
 
-CEF_VERSION := 149.0.5
-CEF_FULL_VERSION := 149.0.5+g6770623+chromium-149.0.7827.197
+CEF_VERSION := 150.0.21
+CEF_FULL_VERSION := 150.0.21+ga61e9a5+chromium-150.0.7871.255
 CEF_URL_VERSION := $(subst +,%2B,$(CEF_FULL_VERSION))
 CEF_DOWNLOAD_URL := https://cef-builds.spotifycdn.com/cef_binary_$(CEF_URL_VERSION)_$(CEF_ARCH)_minimal.tar.bz2
+# SHA-256 of each platform's minimal distribution (cef/flake.nix pins the macOS
+# ones too). Update them with CEF_FULL_VERSION.
+CEF_SHA256_macosarm64 := c76962f68931a3a43bb0f98ec89bc50ee8861984cc33d1d1e16087ea6b2d44a5
+CEF_SHA256_macosx64 := 91fd8e5fcacbc3270074d46e273a154e8aeb9d84e7a0a99e4a0c7f6374a8d457
+CEF_SHA256_linuxarm64 := f6283c4c4bb59ebc0aeb55863e82e41dd0dd55a88bb4815d545b4982a1cf19fc
+CEF_SHA256_linux64 := 3151a428c8f614ead64d764b7a11c6f2597606ff11742559ce1d51a1ff53b12d
+CEF_SHA256_windowsarm64 := 5466f8216bead8a0dd4cdba3e879d55ea4ec35195f97b97eb395cf8616a80755
+CEF_SHA256_windows64 := 2614d58de921f025b76f8c2970482cc4356278321a3712f579154738f9c06f51
+CEF_SHA256 := $(CEF_SHA256_$(CEF_ARCH))
 CEF_DIR := $(CURDIR)/vendor/cef/$(CEF_FULL_VERSION)/$(CEF_ARCH)
 CEF_TARBALL := $(CEF_DIR)/cef-minimal.tar.bz2
 CEF_SRC := $(CEF_DIR)/src
@@ -118,7 +127,13 @@ webview: check-deps ## Build the webview backend
 $(CEF_TARBALL):
 	@echo "Downloading CEF $(CEF_VERSION) for $(CEF_ARCH)..."
 	@mkdir -p $(CEF_DIR)
-	curl -L -o $(CEF_TARBALL) "$(CEF_DOWNLOAD_URL)"
+	curl -fL -o $(CEF_TARBALL).part "$(CEF_DOWNLOAD_URL)"
+	@actual=$$( (command -v sha256sum >/dev/null && sha256sum $(CEF_TARBALL).part || shasum -a 256 $(CEF_TARBALL).part) | cut -d' ' -f1); \
+	if [ "$$actual" != "$(CEF_SHA256)" ]; then \
+		echo "CEF $(CEF_ARCH): SHA-256 $$actual, expected $(CEF_SHA256)" >&2; \
+		rm -f $(CEF_TARBALL).part; exit 1; \
+	fi
+	mv $(CEF_TARBALL).part $(CEF_TARBALL)
 
 $(CEF_SRC)/CMakeLists.txt: $(CEF_TARBALL)
 	@echo "Extracting CEF..."
