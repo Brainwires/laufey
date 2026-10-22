@@ -108,10 +108,15 @@ path, which replaces it only when the whole `2xx` response has arrived. So:
   (serve the file from a GET)"), since saving it would send the form again.
   Serve the file from a `GET`, for example by redirecting the form to it. CEF
   saves a `POST` attachment through Chromium's own path;
-- an `<a download="name">` link's own name isn't seen here: the dialog proposes
-  the response's `Content-Disposition` name, else the URL's last path segment.
+- on WKWebView, WebKitGTK and CEF an `<a download="name">` link's own name isn't
+  seen: the dialog proposes the response's `Content-Disposition` name, else the
+  URL's last path segment.
 
-WebView2 saves such downloads through its own download path.
+WebView2 saves such attachments through its own download path, but a download
+link to the app's scheme never starts there either (Chromium's link download
+can't reach the scheme). laufey's page script sees the link first, through the
+Navigation API (a navigation with a `downloadRequest`), cancels it and hands the
+URL to the same save, proposing the link's `download` name.
 
 ## Per-engine notes
 

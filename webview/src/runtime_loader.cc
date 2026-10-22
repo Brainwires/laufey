@@ -5,6 +5,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_external_links.h"
 #include "laufey_downloads.h"
+#include "scheme_download.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_user_activity.h"
 #include "laufey_notifications.h"
@@ -1993,6 +1994,37 @@ void RuntimeLoader::PollPendingJsCalls() {
         } else {
           laufey_common::LogGuardedNavigation(url, decision);
         }
+      }
+      RespondToCall(call.call_id, laufey::Value::Null(), nullptr);
+      continue;
+    }
+
+    // Reserved bridge call from WebView2's download-link script
+    // (scheme_download.h): save the app-scheme URL through the scheme
+    // handler, after the download policy (the calling document's origin is
+    // the initiator) and the save dialog.
+    if (call.method_path == LAUFEY_SCHEME_DOWNLOAD_METHOD) {
+      std::string url;
+      std::string name;
+      if (call.args && call.args->IsList()) {
+        const laufey::ValueList& list = call.args->GetList();
+        if (!list.empty() && list[0] && list[0]->IsString())
+          url = list[0]->GetString();
+        if (list.size() > 1 && list[1] && list[1]->IsString())
+          name = list[1]->GetString();
+      }
+      LaufeyBackend* backend = GetBackend();
+      if (backend && laufey_common::IsAppSchemeUrl(url)) {
+        uint32_t wid = call.window_id;
+        laufey_webview::StartSchemeDownload(
+            wid, url, call.origin, "GET", "",
+            laufey_common::SchemeDownloadName(url, "", name),
+            [backend, wid](const laufey_file_dialog_options_t* options,
+                           laufey_file_dialog_result_fn callback,
+                           void* user_data) {
+              return backend->ShowFileDialog(wid, options, callback, user_data);
+            },
+            [](std::function<void()> fn) { fn(); });
       }
       RespondToCall(call.call_id, laufey::Value::Null(), nullptr);
       continue;

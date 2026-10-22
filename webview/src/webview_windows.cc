@@ -10,6 +10,7 @@
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_downloads.h"
+#include "scheme_download.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_json.h"
 #include "laufey_passkey.h"
@@ -1306,6 +1307,15 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             std::wstring wInitScript(initScript.begin(), initScript.end());
             state->webview->AddScriptToExecuteOnDocumentCreated(
                 wInitScript.c_str(), nullptr);
+
+            // A download link to the app's own scheme (scheme_download.h):
+            // WebView2's own download of it never starts.
+            std::string linkScript =
+                laufey_webview::BuildSchemeDownloadLinkScript(
+                    RuntimeLoader::GetInstance()->GetJsNamespace());
+            std::wstring wLinkScript(linkScript.begin(), linkScript.end());
+            state->webview->AddScriptToExecuteOnDocumentCreated(
+                wLinkScript.c_str(), nullptr);
 
             // The file-drop observer (API 39): reports file drags over the
             // page to the host, the drop with its File objects, whose native

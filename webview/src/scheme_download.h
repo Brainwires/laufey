@@ -50,6 +50,48 @@ class SchemeDownloadExchange : public SchemeExchangeBase {
   laufey_common::SchemeDownloadSink sink_;
 };
 
+// Reserved bridge method: `window[ns].__laufeyDownload(url, name)` saves `url`
+// (on the app's scheme, the calling document's origin) as StartSchemeDownload
+// does, proposing `name`. RuntimeLoader handles it before the runtime sees
+// it; the download policy and the dialog decide as for any download.
+#define LAUFEY_SCHEME_DOWNLOAD_METHOD "__laufeyDownload"
+
+// WebView2: a page's `<a download>` link to the app's own scheme never starts
+// (Chromium fetches a download link with a URL loader of its own, which has
+// no way to reach the scheme). The Navigation API reports the link first, as
+// a cancelable navigation with a `downloadRequest` (the link's `download`
+// name): this script cancels it and hands the URL to
+// LAUFEY_SCHEME_DOWNLOAD_METHOD instead. Only a same-origin link on a scheme
+// the engine doesn't load itself; everything else keeps the engine's path.
+inline std::string BuildSchemeDownloadLinkScript(const std::string& ns) {
+  return R"JS(
+(function() {
+  var ns = ")JS" +
+         ns +
+         R"JS(";
+  var engineSchemes = ['http:', 'https:', 'blob:', 'data:', 'file:',
+                       'about:', 'javascript:'];
+  if (!window.navigation ||
+      typeof window.navigation.addEventListener !== 'function') return;
+  window.navigation.addEventListener('navigate', function(e) {
+    try {
+      if (typeof e.downloadRequest !== 'string' || !e.cancelable) return;
+      var dest = new URL(e.destination.url);
+      if (engineSchemes.indexOf(dest.protocol) !== -1) return;
+      if (dest.origin !== location.origin) return;
+      var bridge = window[ns];
+      if (!bridge) return;
+      e.preventDefault();
+      bridge.)JS" LAUFEY_SCHEME_DOWNLOAD_METHOD
+         R"JS((dest.href, e.downloadRequest);
+    } catch (err) {
+      // Never let this break in-page navigation.
+    }
+  });
+})();
+)JS";
+}
+
 // Runs `fn` on the engine's UI thread.
 using UiPost = std::function<void(std::function<void()>)>;
 
