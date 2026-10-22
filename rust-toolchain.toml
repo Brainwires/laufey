@@ -1,0 +1,6 @@
+# The Rust toolchain laufey is built, linted and tested with. CI installs this
+# exact version (dtolnay/rust-toolchain `toolchain:` inputs); bump both together.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

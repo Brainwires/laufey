@@ -4,7 +4,7 @@ A `Makefile` drives the build. `make help` lists every target.
 
 ## Prerequisites
 
-- Rust (stable)
+- Rust 1.99.1 (pinned in `rust-toolchain.toml`; rustup installs it on first use)
 - `cmake` and `ninja`
 - macOS: `brew install llvm` (for `libclang`)
 - Linux: GTK + X dev packages
