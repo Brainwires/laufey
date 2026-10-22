@@ -680,6 +680,58 @@ class SchemeDownloadSink {
   bool began_ = false;
 };
 
+// The name to propose for a download of `url` whose response said
+// `disposition` ("" when unknown), else `engine_suggestion`, else the URL's
+// last path segment.
+inline std::string SchemeDownloadName(const std::string& url,
+                                      const std::string& disposition,
+                                      const std::string& engine_suggestion) {
+  std::string name = DispositionFileName(disposition);
+  if (name.empty())
+    name = engine_suggestion;
+  if (name.empty())
+    name = UrlFileName(url);
+  return name;
+}
+
+// Saves `url` (on the app's scheme) for window `window_id`: when `method` is
+// repeatable (the save is a second request) and the download policy allows
+// it (`initiator`: the origin of the frame that started it, "" when the
+// engine doesn't say), asks with `show` (seeded with `suggested`, else the
+// URL's name) and calls `fetch` with the chosen path, on whichever thread
+// the dialog answered on. `fetch` asks the app's scheme handler for the URL
+// with a GET and writes the response through a SchemeDownloadSink. A refusal
+// is logged; a dismissed dialog fetches nothing. Returns whether it asked.
+inline bool StartSchemeDownload(uint32_t window_id, const std::string& url,
+                                const std::string& initiator,
+                                const std::string& method,
+                                const std::string& suggested,
+                                const DownloadDialogShow& show,
+                                std::function<void(std::string)> fetch) {
+  if (!IsRepeatableDownloadMethod(method)) {
+    std::string shown = url.size() > 200 ? url.substr(0, 200) + "..." : url;
+    std::cerr << "laufey: not downloading " << shown << ": a " << method
+              << " response from the app's scheme can't be saved (serve the "
+                 "file from a GET)"
+              << std::endl;
+    return false;
+  }
+  DownloadDecision decision =
+      window_id == 0
+          ? DownloadDecision::kForeignOrigin
+          : DownloadPolicy::Instance().Decide(window_id, url, initiator);
+  if (decision != DownloadDecision::kAsk) {
+    LogRefusedDownload(url, decision);
+    return false;
+  }
+  AskDownloadDestination(suggested.empty() ? UrlFileName(url) : suggested, show,
+                         [fetch](std::string path) {
+                           if (!path.empty())
+                             fetch(std::move(path));
+                         });
+  return true;
+}
+
 }  // namespace laufey_common
 
 #endif  // LAUFEY_DOWNLOADS_H_

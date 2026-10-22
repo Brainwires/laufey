@@ -12,6 +12,7 @@
 #include "include/cef_task.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "laufey_cef_commit_gate.h"
+#include "laufey_downloads.h"
 #include "laufey_scheme_registry.h"
 #include "laufey_timing.h"
 #include "runtime_loader.h"
@@ -86,6 +87,9 @@ bool LaufeySchemeHandler::Open(CefRefPtr<CefRequest> request,
   CefRequest::HeaderMap header_map;
   request->GetHeaderMap(header_map);
   std::string flat_headers = FlattenHeaders(header_map);
+  // For a download of this URL (LaufeyHandler::CanDownload).
+  laufey_common::SchemeResponseNotes::Instance().NoteRequest(url_, method_,
+                                                             flat_headers);
 
   // Buffer the request body up front. CEF makes the full POST data available
   // here, so the runtime's ReadRequestBody pulls become non-blocking copies.
@@ -125,8 +129,9 @@ bool LaufeySchemeHandler::Open(CefRefPtr<CefRequest> request,
   dispatched_ = true;
   if (laufey_common::TimingEnabled())
     SchemeTiming(url_, "open " + method_);
-  RuntimeLoader::GetInstance()->DispatchSchemeRequest(window_id_, this, method_,
-                                                      url_, flat_headers);
+  RuntimeLoader::GetInstance()->DispatchSchemeRequest(
+      window_id_, static_cast<LaufeySchemeExchange*>(this), method_, url_,
+      flat_headers);
   return true;
 }
 
@@ -292,8 +297,10 @@ void LaufeySchemeHandler::Cancel() {
   // Tell the runtime (on_cancel), unless it already finished the exchange.
   // Cancel runs on the IO thread Open ran on, so `dispatched_` is settled.
   if (dispatched_) {
-    cancel_gate_.Cancel(
-        [this] { RuntimeLoader::GetInstance()->DispatchSchemeCancel(this); });
+    cancel_gate_.Cancel([this] {
+      RuntimeLoader::GetInstance()->DispatchSchemeCancel(
+          static_cast<LaufeySchemeExchange*>(this));
+    });
   }
 }
 
@@ -338,6 +345,8 @@ void LaufeySchemeHandler::Begin(int status, const char* headers,
     began_ = true;
     to_continue = open_callback_;
     open_callback_ = nullptr;
+    laufey_common::SchemeResponseNotes::Instance().NoteResponse(
+        url_, response_headers_);
   }
   if (laufey_common::TimingEnabled())
     SchemeTiming(url_, "begin " + std::to_string(status) +

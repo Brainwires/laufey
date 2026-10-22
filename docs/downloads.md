@@ -92,27 +92,26 @@ whatever its type, as in a browser: `Content-Disposition: attachment` on a
 `text/plain` or `text/html` response saves it instead of showing it, on every
 backend.
 
-The WebKit engines can't do this on their own. They make a navigation into a
-download by handing its load to their network process, which never had a load
-the scheme handler served, so the download never starts. On WKWebView and
-WebKitGTK laufey cancels such a navigation (the page stays) and, once the dialog
-has a path, asks the app's scheme handler for the URL again with a `GET` (the
-original request's headers included) and writes the response itself: to a
-temporary file next to the chosen path, which replaces it only when the whole
-`2xx` response has arrived. So:
+The engines can't all do this on their own. WebKit makes a navigation into a
+download by handing its load to its network process, which never had a load the
+scheme handler served, and Chromium fetches a download link with a URL loader of
+its own, which has no way to reach the scheme: either way the download never
+starts. So on WKWebView, WebKitGTK and CEF laufey cancels such a download (the
+page stays) and, once the dialog has a path, asks the app's scheme handler for
+the URL again with a `GET` (the original request's headers included, where it
+saw them) and writes the response itself: to a temporary file next to the chosen
+path, which replaces it only when the whole `2xx` response has arrived. So:
 
-- the handler sees the URL twice (the navigation, then the save);
-- only a `GET` (or `HEAD`) response is saved: an attachment answering a `POST`
-  form is refused and logged
-  (`a POST response from the app's scheme
-  can't be saved`), since saving it
-  would send the form again. Serve the file from a `GET`, for example by
-  redirecting the form to it;
-- an `<a download="name">` link's own name isn't visible to the WebKit backends
-  here: the dialog proposes the response's `Content-Disposition` name, else the
-  URL's last path segment.
+- the handler sees an attachment's URL twice (the navigation, then the save);
+- on WKWebView and WebKitGTK only a `GET` (or `HEAD`) response is saved: an
+  attachment answering a `POST` form is refused and logged ("can't be saved
+  (serve the file from a GET)"), since saving it would send the form again.
+  Serve the file from a `GET`, for example by redirecting the form to it. CEF
+  saves a `POST` attachment through Chromium's own path;
+- an `<a download="name">` link's own name isn't seen here: the dialog proposes
+  the response's `Content-Disposition` name, else the URL's last path segment.
 
-CEF and WebView2 save such downloads through their own download path.
+WebView2 saves such downloads through its own download path.
 
 ## Per-engine notes
 

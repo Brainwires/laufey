@@ -332,6 +332,71 @@ int main() {
     EXPECT(!read_file(path + ".laufey-download", &got));
   }
 
+  {
+    // The name a custom-scheme save proposes.
+    EXPECT(SchemeDownloadName("myapp://app/x/r.csv",
+                              "attachment; filename=\"q.csv\"",
+                              "engine.csv") == "q.csv");
+    EXPECT(SchemeDownloadName("myapp://app/x/r.csv", "attachment",
+                              "engine.csv") == "engine.csv");
+    EXPECT(SchemeDownloadName("myapp://app/x/r.csv", "", "") == "r.csv");
+    // A save from the app's scheme: the policy, the dialog, then the fetch.
+    const uint32_t wid = 9001;
+    NavigationGuard::Instance().SetWindowUrl(wid, "myapp://app/");
+    std::string seen_default;
+    std::string fetched = "unset";
+    auto show = [&](const laufey_file_dialog_options_t* o,
+                    laufey_file_dialog_result_fn cb, void* ud) -> uint32_t {
+      seen_default = o->default_path ? o->default_path : "";
+      const char* paths[] = {"/home/u/saved.csv"};
+      cb(ud, 1, LAUFEY_FILE_DIALOG_ACCEPTED, paths, 1);
+      return 1;
+    };
+    auto fetch = [&](std::string path) { fetched = path; };
+    EXPECT(StartSchemeDownload(wid, "myapp://app/exports/r%201.csv", "", "GET",
+                               "", show, fetch));
+    EXPECT(seen_default == "r 1.csv");
+    EXPECT(fetched == "/home/u/saved.csv");
+    // A suggested name wins over the URL's.
+    fetched = "unset";
+    EXPECT(StartSchemeDownload(wid, "myapp://app/r.csv", "myapp://app", "GET",
+                               "named.csv", show, fetch));
+    EXPECT(seen_default == "named.csv" && fetched == "/home/u/saved.csv");
+    // A POST is never sent again; another origin, another frame's origin or
+    // no window is refused; none of them asks or fetches.
+    seen_default = "none";
+    fetched = "unset";
+    EXPECT(!StartSchemeDownload(wid, "myapp://app/r.csv", "", "POST", "", show,
+                                fetch));
+    EXPECT(!StartSchemeDownload(wid, "other://app/r.csv", "", "GET", "", show,
+                                fetch));
+    EXPECT(!StartSchemeDownload(wid, "myapp://app/r.csv", "https://ads.example",
+                                "GET", "", show, fetch));
+    EXPECT(!StartSchemeDownload(0, "myapp://app/r.csv", "", "GET", "", show,
+                                fetch));
+    EXPECT(seen_default == "none" && fetched == "unset");
+    // The window's prompt budget applies (2 taken above).
+    EXPECT(
+        StartSchemeDownload(wid, "myapp://app/r.csv", "", "", "", show, fetch));
+    fetched = "unset";
+    EXPECT(!StartSchemeDownload(wid, "myapp://app/r.csv", "", "GET", "", show,
+                                fetch));
+    EXPECT(fetched == "unset");
+    // A dismissed dialog fetches nothing.
+    DownloadPolicy::Instance().ForgetWindow(wid);
+    EXPECT(StartSchemeDownload(
+        wid, "myapp://app/r.csv", "", "GET", "",
+        [](const laufey_file_dialog_options_t*, laufey_file_dialog_result_fn cb,
+           void* ud) -> uint32_t {
+          cb(ud, 0, LAUFEY_FILE_DIALOG_CANCELLED, nullptr, 0);
+          return 0;
+        },
+        fetch));
+    EXPECT(fetched == "unset");
+    NavigationGuard::Instance().ForgetWindow(wid);
+    DownloadPolicy::Instance().ForgetWindow(wid);
+  }
+
   std::printf("downloads_test: ok\n");
   return 0;
 }

@@ -1475,8 +1475,8 @@ static bool SaveSchemeResponseIfDownload(uint32_t wid,
       webkit_uri_response_get_suggested_filename(response);
   laufey_webview::StartSchemeDownload(
       wid, url, "", method, flat,
-      laufey_webview::SchemeDownloadName(url, disposition,
-                                         engine_name ? engine_name : ""),
+      laufey_common::SchemeDownloadName(url, disposition,
+                                        engine_name ? engine_name : ""),
       GtkDownloadDialog(wid), GtkPost);
   return true;
 }

@@ -1368,7 +1368,7 @@ API_AVAILABLE(macos(11.3))
                     initiator:""
                        method:noted ? note.method : "GET"
                       headers:note.flat_request_headers
-                    suggested:laufey_webview::SchemeDownloadName(
+                    suggested:laufey_common::SchemeDownloadName(
                                   url, disposition,
                                   response.suggestedFilename.UTF8String ?: "")];
     return;

@@ -20,6 +20,21 @@
 // pages served over it behave like normal https origins.
 #define LAUFEY_APP_SCHEME "app"
 
+// One exchange the runtime's scheme handler answers: the object behind the
+// opaque `laufey_scheme_exchange_t` the scheme_* vtable functions take. A
+// page's request (LaufeySchemeHandler) or a download laufey makes itself
+// (LaufeySchemeDownload). Pass it across the C ABI as this base's pointer.
+class LaufeySchemeExchange {
+ public:
+  virtual intptr_t ReadRequestBody(uint8_t* buf, size_t cap) = 0;
+  virtual void Begin(int status, const char* headers, size_t headers_len) = 0;
+  virtual intptr_t WriteResponse(const uint8_t* buf, size_t len) = 0;
+  virtual void FinishResponse() = 0;
+
+ protected:
+  virtual ~LaufeySchemeExchange() = default;
+};
+
 // A CefResourceHandler that bridges a single webview request to the laufey
 // runtime's registered scheme handler. The handler object IS the opaque
 // `laufey_scheme_exchange_t` passed across the C ABI: the runtime pulls the
@@ -30,7 +45,8 @@
 // Begin/WriteResponse/FinishResponse/ReadRequestBody methods are called by the
 // runtime from its own thread. All shared state is guarded by `mutex_`, and
 // CEF's callbacks are resumed via Continue() (safe from any thread).
-class LaufeySchemeHandler : public CefResourceHandler {
+class LaufeySchemeHandler : public CefResourceHandler,
+                            public LaufeySchemeExchange {
  public:
   // `browser_id` is the CEF browser the request belongs to (0: none), and
   // `frame_document` whether it loads a frame's document (`main_frame`: the
@@ -54,10 +70,10 @@ class LaufeySchemeHandler : public CefResourceHandler {
 
   // Called by the runtime (via the scheme_* vtable functions), off the IO
   // thread. Return values mirror the C ABI contract.
-  intptr_t ReadRequestBody(uint8_t* buf, size_t cap);
-  void Begin(int status, const char* headers, size_t headers_len);
-  intptr_t WriteResponse(const uint8_t* buf, size_t len);
-  void FinishResponse();
+  intptr_t ReadRequestBody(uint8_t* buf, size_t cap) override;
+  void Begin(int status, const char* headers, size_t headers_len) override;
+  intptr_t WriteResponse(const uint8_t* buf, size_t len) override;
+  void FinishResponse() override;
 
   // The document's commit was taken in (or the gate's deadline passed): the
   // body may go to the renderer. Any thread.

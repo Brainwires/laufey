@@ -623,17 +623,18 @@ pub async fn run() {
     written,
   );
 
-  win.close();
-
   // --- 7. A custom-scheme origin (the app's own scheme handler). ----------
+  // Before the first window closes: closing a backend's last window can end
+  // the run.
   scheme_origin_checks(&dir, can_accept).await;
 
+  win.close();
   let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Step 7: downloads from a window on `laufey-e2e://dl`, the origin an app
-/// served by its own scheme handler runs at. Its own window, so its own
-/// prompt budget.
+/// served by its own scheme handler runs at. Its own window (closed here,
+/// while the battery's first one stays open), so its own prompt budget.
 async fn scheme_origin_checks(dir: &Path, can_accept: bool) {
   let win = Window::new(480, 320).title("native-e2e-downloads-scheme");
   win.show();

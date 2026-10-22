@@ -508,12 +508,75 @@ void LaufeyHandler::OnFileDropMessage(CefRefPtr<CefBrowser> browser,
 // saves into the Downloads folder unasked. A download that is not
 // continued is cancelled (its callback released, and Cancel() on its next
 // update).
+namespace {
+
+// A download from the app's own scheme, fetched by laufey through the app's
+// scheme handler (see CanDownload) and written to the chosen path.
+class LaufeySchemeDownload : public LaufeySchemeExchange {
+ public:
+  LaufeySchemeDownload(const std::string& url, const std::string& path)
+      : sink_(url, path) {}
+
+  intptr_t ReadRequestBody(uint8_t*, size_t) override {
+    return 0;
+  }
+  void Begin(int status, const char*, size_t) override {
+    sink_.Begin(status);
+  }
+  intptr_t WriteResponse(const uint8_t* buf, size_t len) override {
+    return sink_.Write(buf, len) ? static_cast<intptr_t>(len) : -1;
+  }
+  void FinishResponse() override {
+    sink_.Finish();
+    delete this;
+  }
+
+ private:
+  laufey_common::SchemeDownloadSink sink_;
+};
+
+void FetchSchemeDownload(uint32_t wid, std::string url, std::string headers,
+                         std::string path) {
+  RuntimeLoader::GetInstance()->DispatchSchemeRequest(
+      wid,
+      static_cast<LaufeySchemeExchange*>(new LaufeySchemeDownload(url, path)),
+      "GET", url, headers);
+}
+
+}  // namespace
+
 bool LaufeyHandler::CanDownload(CefRefPtr<CefBrowser> browser,
                                 const CefString& url,
-                                const CefString& /*request_method*/) {
+                                const CefString& request_method) {
   CEF_REQUIRE_UI_THREAD();
   uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
   std::string u = url.ToString();
+  // A download from the app's own scheme. Chromium fetches a download link
+  // (`<a download>`) with a URL loader of its own, which has no factory for
+  // the scheme, so that download silently never starts. laufey saves every
+  // GET download from the app's scheme itself (an attachment too, the same
+  // way on every engine): the policy and the dialog, then a GET through the
+  // app's scheme handler (laufey_downloads.h). Anything else keeps
+  // Chromium's path.
+  std::string method = request_method.ToString();
+  if (wid != 0 && laufey_common::IsAppSchemeUrl(u) &&
+      laufey_common::IsRepeatableDownloadMethod(method)) {
+    laufey_common::SchemeResponseNotes::Note note;
+    laufey_common::SchemeResponseNotes::Instance().Find(u, &note);
+    std::string headers = note.flat_request_headers;
+    laufey_common::StartSchemeDownload(
+        wid, u, "", method,
+        laufey_common::SchemeDownloadName(u, note.disposition, ""),
+        [wid](const laufey_file_dialog_options_t* options,
+              laufey_file_dialog_result_fn result, void* user_data) {
+          return LaufeyShowFileDialog(wid, options, result, user_data);
+        },
+        [wid, u, headers](std::string path) {
+          CefPostTask(TID_UI, base::BindOnce(&FetchSchemeDownload, wid, u,
+                                             headers, std::move(path)));
+        });
+    return false;
+  }
   if (wid != 0 &&
       laufey_common::DownloadPolicy::Instance().OriginAllowed(wid, u, ""))
     return true;

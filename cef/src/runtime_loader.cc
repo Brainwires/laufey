@@ -1347,28 +1347,28 @@ static void Backend_RegisterSchemeHandler(void* data, const char* scheme,
 static intptr_t Backend_SchemeRequestReadBody(
     void* /*data*/, laufey_scheme_exchange_t* exchange, uint8_t* buf,
     size_t cap) {
-  return reinterpret_cast<LaufeySchemeHandler*>(exchange)->ReadRequestBody(buf,
-                                                                           cap);
+  return reinterpret_cast<LaufeySchemeExchange*>(exchange)->ReadRequestBody(
+      buf, cap);
 }
 
 static void Backend_SchemeResponseBegin(void* /*data*/,
                                         laufey_scheme_exchange_t* exchange,
                                         int status, const char* headers,
                                         size_t headers_len) {
-  reinterpret_cast<LaufeySchemeHandler*>(exchange)->Begin(status, headers,
-                                                          headers_len);
+  reinterpret_cast<LaufeySchemeExchange*>(exchange)->Begin(status, headers,
+                                                           headers_len);
 }
 
 static intptr_t Backend_SchemeResponseWrite(void* /*data*/,
                                             laufey_scheme_exchange_t* exchange,
                                             const uint8_t* buf, size_t len) {
-  return reinterpret_cast<LaufeySchemeHandler*>(exchange)->WriteResponse(buf,
-                                                                         len);
+  return reinterpret_cast<LaufeySchemeExchange*>(exchange)->WriteResponse(buf,
+                                                                          len);
 }
 
 static void Backend_SchemeResponseFinish(void* /*data*/,
                                          laufey_scheme_exchange_t* exchange) {
-  reinterpret_cast<LaufeySchemeHandler*>(exchange)->FinishResponse();
+  reinterpret_cast<LaufeySchemeExchange*>(exchange)->FinishResponse();
 }
 
 static void Backend_InvokeJsCallback(void* data, uint64_t callback_id,
@@ -3941,6 +3941,6 @@ void RuntimeLoader::DispatchSchemeRequest(uint32_t window_id, void* exchange,
             flat_headers.size());
   } else {
     // No handler registered: finish the exchange so the request doesn't hang.
-    reinterpret_cast<LaufeySchemeHandler*>(exchange)->FinishResponse();
+    reinterpret_cast<LaufeySchemeExchange*>(exchange)->FinishResponse();
   }
 }
