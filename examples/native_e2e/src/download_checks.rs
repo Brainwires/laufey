@@ -262,9 +262,7 @@ async fn answer_dialog(accept: bool, path: Option<&Path>, tries: u32) -> bool {
   false
 }
 
-/// Waits (up to `secs`) for `path` to hold exactly `want`. Only where a save
-/// dialog can be accepted (`can_accept`): elsewhere nothing will be written,
-/// and the battery must stay within the runner's watchdog.
+/// Waits (up to `secs`) for `path` to hold exactly `want`.
 async fn wait_file(path: &Path, want: &[u8], secs: u64) -> bool {
   for _ in 0..secs * 5 {
     if let Ok(meta) = std::fs::metadata(path) {
@@ -439,8 +437,7 @@ pub async fn run() {
   .await;
   // The first save panel of a fresh macOS runner takes a while to come up.
   let asked = answer_dialog(true, Some(&blob_out), 100).await;
-  let written =
-    asked && can_accept && wait_file(&blob_out, blob_text.as_bytes(), 60).await;
+  let written = asked && wait_file(&blob_out, blob_text.as_bytes(), 60).await;
   saved_check(
     &format!(
       "downloads: a blob <a download> asks where, and saves there \
@@ -457,7 +454,6 @@ pub async fn run() {
   eval_string(&win, "location.href = '/attach.bin'; 'ok'").await;
   let asked = answer_dialog(true, Some(&attach_out), 100).await;
   let written = asked
-    && can_accept
     && wait_file(&attach_out, format!("attached-{nonce}").as_bytes(), 20).await;
   tokio::time::sleep(Duration::from_millis(500)).await;
   let evil = strays(&dir, &format!("laufey-dl-evil-{nonce}"));
@@ -614,7 +610,7 @@ pub async fn run() {
   eval_string(&win, "location.href = '/big.bin'; 'ok'").await;
   let asked = answer_dialog(true, Some(&big_out), 100).await;
   let want: Vec<u8> = (0..BIG_LEN).map(big_byte).collect();
-  let written = asked && can_accept && wait_file(&big_out, &want, 90).await;
+  let written = asked && wait_file(&big_out, &want, 90).await;
   saved_check(
     &format!(
       "downloads: a {} MiB attachment arrives whole (asked {asked}, size \
@@ -656,6 +652,9 @@ async fn scheme_origin_checks(dir: &Path, can_accept: bool) {
     ready.as_deref() == Some(SCHEME_ORIGIN),
   );
   let pid = std::process::id();
+  // Where a save dialog can't be accepted (macOS runners) nothing is written:
+  // these steps don't wait for the file, so the battery stays within the
+  // runner's watchdog.
 
   // 7a. A displayable attachment, navigated to at the top level.
   let text_out = dir.join("scheme-text-out.txt");
