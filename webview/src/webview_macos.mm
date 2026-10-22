@@ -27,6 +27,7 @@
 #include "laufey_system.h"
 #include "laufey_window.h"
 #include "init_script.h"
+#include "scheme_download.h"
 
 #include <dlfcn.h>
 
@@ -731,6 +732,11 @@ class MacSchemeExchange : public SchemeExchangeBase {
 
   void Begin(int status, const char* headers, size_t headers_len) override {
     auto pairs = LaufeyParseFlatHeaders(headers, headers_len);
+    // For the navigation's response policy (a download from the app's
+    // scheme, scheme_download.h).
+    if (NSString* noted = task_.request.URL.absoluteString)
+      laufey_common::SchemeResponseNotes::Instance().NoteResponse(
+          noted.UTF8String ?: "", pairs);
     NSMutableDictionary* hdr = [NSMutableDictionary dictionary];
     for (const auto& [k, v] : pairs) {
       NSString* name = [NSString stringWithUTF8String:k.c_str()];
@@ -850,6 +856,7 @@ class MacSchemeExchange : public SchemeExchangeBase {
     headers.emplace_back(key.UTF8String, fields[key].UTF8String);
   }
   std::string flat = LaufeyFlattenHeaders(headers);
+  laufey_common::SchemeResponseNotes::Instance().NoteRequest(url, method, flat);
 
   // Note: WKURLSchemeHandler does not expose the request body for all request
   // kinds (a long-standing WebKit limitation); HTTPBody is forwarded when
@@ -1280,6 +1287,28 @@ API_AVAILABLE(macos(11.3))
     if (navigationAction.shouldPerformDownload)
       allow = WKNavigationActionPolicyDownload;
   }
+  // A download link to the app's own scheme: WebKit's download of it never
+  // starts (scheme_download.h), so laufey saves it.
+  if (allow != WKNavigationActionPolicyAllow && absolute.UTF8String &&
+      laufey_common::IsAppSchemeUrl(absolute.UTF8String)) {
+    decisionHandler(WKNavigationActionPolicyCancel);
+    NSURLRequest* request = navigationAction.request;
+    std::vector<std::pair<std::string, std::string>> headers;
+    for (NSString* key in request.allHTTPHeaderFields) {
+      NSString* value = request.allHTTPHeaderFields[key];
+      if (key.UTF8String && value.UTF8String)
+        headers.emplace_back(key.UTF8String, value.UTF8String);
+    }
+    WKFrameInfo* source = navigationAction.sourceFrame;
+    [self startSchemeDownload:absolute.UTF8String
+                    initiator:source ? LaufeySecurityOriginString(
+                                           source.securityOrigin)
+                                     : std::string()
+                       method:request.HTTPMethod.UTF8String ?: "GET"
+                      headers:LaufeyFlattenHeaders(headers)
+                    suggested:""];
+    return;
+  }
   if (!target || !target.isMainFrame || !absolute) {
     decisionHandler(allow);
     return;
@@ -1313,13 +1342,68 @@ API_AVAILABLE(macos(11.3))
     decidePolicyForNavigationResponse:(WKNavigationResponse*)navigationResponse
                       decisionHandler:(void (^)(WKNavigationResponsePolicy))
                                           decisionHandler {
+  NSURLResponse* response = navigationResponse.response;
+  std::string url = response.URL.absoluteString.UTF8String ?: "";
+  // What the response said: a scheme response's own headers as the app's
+  // handler sent them (SchemeResponseNotes), else the engine's copy.
+  laufey_common::SchemeResponseNotes::Note note;
+  bool noted = laufey_common::IsAppSchemeUrl(url) &&
+               laufey_common::SchemeResponseNotes::Instance().Find(url, &note);
+  std::string disposition = note.disposition;
+  if (!noted && [response isKindOfClass:[NSHTTPURLResponse class]]) {
+    NSString* value = [(NSHTTPURLResponse*)response
+        valueForHTTPHeaderField:@"Content-Disposition"];
+    if (value.UTF8String)
+      disposition = value.UTF8String;
+  }
+  // A download: an attachment (even of a type the view could show, as in a
+  // browser), or a type it can't show.
+  bool download = laufey_common::IsAttachmentDisposition(disposition) ||
+                  !navigationResponse.canShowMIMEType;
+  if (download && laufey_common::IsAppSchemeUrl(url)) {
+    // WebKit's download of a scheme-handler load never starts
+    // (scheme_download.h): cancel it and save the URL here.
+    decisionHandler(WKNavigationResponsePolicyCancel);
+    [self startSchemeDownload:url
+                    initiator:""
+                       method:noted ? note.method : "GET"
+                      headers:note.flat_request_headers
+                    suggested:laufey_webview::SchemeDownloadName(
+                                  url, disposition,
+                                  response.suggestedFilename.UTF8String ?: "")];
+    return;
+  }
   WKNavigationResponsePolicy policy = WKNavigationResponsePolicyAllow;
   if (@available(macOS 11.3, *)) {
-    if (!navigationResponse.canShowMIMEType) {
+    if (download) {
       policy = WKNavigationResponsePolicyDownload;
     }
   }
   decisionHandler(policy);
+}
+
+// Saves `url`, on the app's own scheme, through the app's scheme handler
+// (scheme_download.h): the download policy, the save dialog, then a GET.
+- (void)startSchemeDownload:(const std::string&)url
+                  initiator:(const std::string&)initiator
+                     method:(const std::string&)method
+                    headers:(const std::string&)flatHeaders
+                  suggested:(const std::string&)suggested {
+  WKWebViewBackend* backend = self.backend;
+  uint32_t window_id = backend ? self.windowId : 0;
+  laufey_webview::StartSchemeDownload(
+      window_id, url, initiator, method, flatHeaders, suggested,
+      [backend, window_id](const laufey_file_dialog_options_t* options,
+                           laufey_file_dialog_result_fn callback,
+                           void* user_data) {
+        return backend->ShowFileDialog(window_id, options, callback, user_data);
+      },
+      [](std::function<void()> fn) {
+        auto task = std::make_shared<std::function<void()>>(std::move(fn));
+        dispatch_async(dispatch_get_main_queue(), ^{
+          (*task)();
+        });
+      });
 }
 
 - (void)adoptDownload:(WKDownload*)download

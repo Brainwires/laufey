@@ -82,6 +82,38 @@ every backend checks the download the same way
 A refused download is cancelled and logged on stderr
 (`laufey: not downloading <url>: …`); nothing is written.
 
+## Downloads from the app's own scheme
+
+An app served by its own scheme handler (`myapp://app`, see
+[Custom schemes](custom-schemes.md)) downloads the same way: an attachment it
+serves, at the top level or in a frame, and an `<a download>` link to one of its
+URLs ask with the same dialog, under the same rules. An attachment counts
+whatever its type, as in a browser: `Content-Disposition: attachment` on a
+`text/plain` or `text/html` response saves it instead of showing it, on every
+backend.
+
+The WebKit engines can't do this on their own. They make a navigation into a
+download by handing its load to their network process, which never had a load
+the scheme handler served, so the download never starts. On WKWebView and
+WebKitGTK laufey cancels such a navigation (the page stays) and, once the dialog
+has a path, asks the app's scheme handler for the URL again with a `GET` (the
+original request's headers included) and writes the response itself: to a
+temporary file next to the chosen path, which replaces it only when the whole
+`2xx` response has arrived. So:
+
+- the handler sees the URL twice (the navigation, then the save);
+- only a `GET` (or `HEAD`) response is saved: an attachment answering a `POST`
+  form is refused and logged
+  (`a POST response from the app's scheme
+  can't be saved`), since saving it
+  would send the form again. Serve the file from a `GET`, for example by
+  redirecting the form to it;
+- an `<a download="name">` link's own name isn't visible to the WebKit backends
+  here: the dialog proposes the response's `Content-Disposition` name, else the
+  URL's last path segment.
+
+CEF and WebView2 save such downloads through their own download path.
+
 ## Per-engine notes
 
 - **CEF**: CEF never gets `Continue()` without a path (with no path it would
@@ -106,9 +138,13 @@ blob `<a download>` export, an attachment whose filename is
 `../../laufey-dl-evil-….txt` (only the chosen path is written; nothing appears
 under the name the server proposed), a dismissed dialog (nothing written, the
 Downloads folder included), a cross-origin iframe exporting a blob and loading
-an attachment (no dialog), a loop of 8 downloads (at most 3 dialogs) and a 32
-MiB attachment (arrives whole). `backend-common/tests/downloads_test.cc` covers
-the name sanitizing, the origin rules and the prompt budget.
+an attachment (no dialog), a loop of 8 downloads (at most 3 dialogs), a 32 MiB
+attachment (arrives whole), and from a custom-scheme origin (`laufey-e2e://dl`)
+a `text/plain` attachment at the top level, an `application/octet-stream`
+attachment in a frame and an `<a download>` link (each asks and saves; nothing
+appears under the response's own name). `backend-common/tests/downloads_test.cc`
+covers the name sanitizing, the origin rules, the prompt budget, the
+`Content-Disposition` parsing and the custom-scheme save's file handling.
 
 ## Fork note
 

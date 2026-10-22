@@ -195,6 +195,143 @@ int main() {
     EXPECT(result.empty());
   }
 
+  // --- Downloads from the app's own scheme -----------------------------------
+  EXPECT(IsAttachmentDisposition("attachment"));
+  EXPECT(IsAttachmentDisposition(" Attachment ; filename=\"a.txt\""));
+  EXPECT(!IsAttachmentDisposition("inline; filename=\"a.txt\""));
+  EXPECT(!IsAttachmentDisposition(""));
+  EXPECT(!IsAttachmentDisposition("attachments"));
+  EXPECT(DispositionFileName("attachment; filename=\"a b.txt\"") == "a b.txt");
+  EXPECT(DispositionFileName("attachment; filename=plain.csv") == "plain.csv");
+  EXPECT(DispositionFileName("attachment; filename=\"q\\\"x.txt\"") ==
+         "q\"x.txt");
+  // filename* (RFC 8187) wins over filename, wherever it comes.
+  EXPECT(DispositionFileName("attachment; filename*=UTF-8''r%C3%A9sum%C3%A9."
+                             "pdf; filename=\"resume.pdf\"") ==
+         "r\xC3\xA9sum\xC3\xA9.pdf");
+  EXPECT(DispositionFileName("attachment; filename=\"resume.pdf\"; "
+                             "filename*=utf-8'en'r%C3%A9.pdf") ==
+         "r\xC3\xA9.pdf");
+  // Another charset is not decoded; the plain name stands.
+  EXPECT(DispositionFileName("attachment; filename*=ISO-8859-1''r%E9.pdf; "
+                             "filename=r.pdf") == "r.pdf");
+  EXPECT(DispositionFileName("attachment") == "");
+  EXPECT(DispositionFileName("attachment; size=3") == "");
+  // A traversing name is only proposed; the dialog's name is sanitized.
+  EXPECT(SanitizeDownloadFileName(DispositionFileName(
+             "attachment; filename=\"../../evil.txt\"")) == "evil.txt");
+  EXPECT(UrlFileName("myapp://app/exports/report%20q3.csv?x=1#y") ==
+         "report q3.csv");
+  EXPECT(UrlFileName("myapp://app/") == "");
+  EXPECT(UrlFileName("myapp://app") == "");
+  EXPECT(UrlFileName("myapp://app/a%2") == "a%2");
+  EXPECT(IsAppSchemeUrl("myapp://app/x"));
+  EXPECT(IsAppSchemeUrl("App://e2e/x"));
+  EXPECT(!IsAppSchemeUrl("http://127.0.0.1:3000/x"));
+  EXPECT(!IsAppSchemeUrl("https://example.com/x"));
+  EXPECT(!IsAppSchemeUrl("file:///tmp/x"));
+  EXPECT(!IsAppSchemeUrl("blob:myapp://app/1234"));
+  EXPECT(!IsAppSchemeUrl("data:text/plain,x"));
+  EXPECT(!IsAppSchemeUrl("about:blank"));
+  EXPECT(IsRepeatableDownloadMethod("GET"));
+  EXPECT(IsRepeatableDownloadMethod(""));
+  EXPECT(!IsRepeatableDownloadMethod("POST"));
+  EXPECT(!IsRepeatableDownloadMethod("PUT"));
+  {
+    SchemeResponseNotes& notes = SchemeResponseNotes::Instance();
+    SchemeResponseNotes::Note note;
+    EXPECT(!notes.Find("myapp://app/none", &note));
+    notes.NoteRequest("myapp://app/a.txt", "GET",
+                      std::string("accept\0*/*\0", 11));
+    notes.NoteResponse("myapp://app/a.txt",
+                       {{"Content-Type", "text/plain"},
+                        {"Content-Disposition", "attachment; filename=a.txt"}});
+    EXPECT(notes.Find("myapp://app/a.txt", &note));
+    EXPECT(note.method == "GET");
+    EXPECT(note.flat_request_headers == std::string("accept\0*/*\0", 11));
+    EXPECT(note.disposition == "attachment; filename=a.txt");
+    // A later request for the URL replaces the note.
+    notes.NoteRequest("myapp://app/a.txt", "POST", "");
+    EXPECT(notes.Find("myapp://app/a.txt", &note));
+    EXPECT(note.method == "POST" && note.disposition.empty());
+    // A response with no request noted is dropped.
+    notes.NoteResponse("myapp://app/unseen", {{"content-disposition", "x"}});
+    EXPECT(!notes.Find("myapp://app/unseen", &note));
+    // Bounded: the oldest notes go.
+    for (size_t i = 0; i < SchemeResponseNotes::kMaxNotes; ++i)
+      notes.NoteRequest("myapp://app/n" + std::to_string(i), "GET", "");
+    EXPECT(!notes.Find("myapp://app/a.txt", &note));
+    EXPECT(notes.Find("myapp://app/n0", &note));
+  }
+  {
+    // The sink writes only a whole 2xx response, to the chosen path.
+    std::string dir;
+    if (const char* tmp = std::getenv("TMPDIR"))
+      dir = tmp;
+    if (dir.empty())
+      dir = "/tmp";
+    std::string path = dir + "/laufey-dl-sink-" + std::to_string(std::rand());
+    auto read_file = [](const std::string& p, std::string* out) {
+      std::FILE* f = std::fopen(p.c_str(), "rb");
+      if (!f)
+        return false;
+      char buf[256];
+      out->clear();
+      size_t n;
+      while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+        out->append(buf, n);
+      std::fclose(f);
+      return true;
+    };
+    std::string got;
+    {
+      SchemeDownloadSink sink("myapp://app/a", path);
+      EXPECT(sink.Begin(200));
+      const uint8_t a[] = {'h', 'e', 'l'};
+      const uint8_t b[] = {'l', 'o'};
+      EXPECT(sink.Write(a, 3));
+      // Nothing at the chosen path until the response ends.
+      EXPECT(!read_file(path, &got));
+      EXPECT(sink.Write(b, 2));
+      EXPECT(sink.Finish());
+      EXPECT(!read_file(sink.temp_path(), &got));
+    }
+    EXPECT(read_file(path, &got) && got == "hello");
+    // A replaced file: the dialog asked first.
+    {
+      SchemeDownloadSink sink("myapp://app/a", path);
+      EXPECT(sink.Begin(201));
+      const uint8_t c[] = {'x'};
+      EXPECT(sink.Write(c, 1));
+      EXPECT(sink.Finish());
+    }
+    EXPECT(read_file(path, &got) && got == "x");
+    // Another status: nothing written, the file kept.
+    {
+      SchemeDownloadSink sink("myapp://app/a", path);
+      EXPECT(!sink.Begin(404));
+      const uint8_t d[] = {'n', 'o'};
+      EXPECT(!sink.Write(d, 2));
+      EXPECT(!sink.Finish());
+      EXPECT(!read_file(sink.temp_path(), &got));
+    }
+    EXPECT(read_file(path, &got) && got == "x");
+    // No head at all, or a sink dropped mid-response: no file.
+    std::remove(path.c_str());
+    {
+      SchemeDownloadSink sink("myapp://app/a", path);
+      EXPECT(!sink.Finish());
+    }
+    {
+      SchemeDownloadSink sink("myapp://app/a", path);
+      EXPECT(sink.Begin(200));
+      const uint8_t e[] = {'p'};
+      EXPECT(sink.Write(e, 1));
+    }
+    EXPECT(!read_file(path, &got));
+    EXPECT(!read_file(path + ".laufey-download", &got));
+  }
+
   std::printf("downloads_test: ok\n");
   return 0;
 }

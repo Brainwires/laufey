@@ -25,6 +25,7 @@
 #include "laufey_ui_tasks.h"
 #include "laufey_passkey.h"
 #include "init_script.h"
+#include "scheme_download.h"
 #include <webkit2/webkit2.h>
 #include <JavaScriptCore/JavaScript.h>
 #ifdef GDK_WINDOWING_WAYLAND
@@ -766,6 +767,13 @@ static bool GuardRefuses(uint32_t wid, const char* uri) {
   return true;
 }
 
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+static bool SaveSchemeResponseIfDownload(uint32_t wid,
+                                         WebKitResponsePolicyDecision* decision,
+                                         WebKitURIResponse* response,
+                                         const char* uri);
+#endif
+
 static gboolean on_decide_policy(WebKitWebView* /*webview*/,
                                  WebKitPolicyDecision* decision,
                                  WebKitPolicyDecisionType type,
@@ -774,17 +782,24 @@ static gboolean on_decide_policy(WebKitWebView* /*webview*/,
   if (type != WEBKIT_POLICY_DECISION_TYPE_RESPONSE)
     return FALSE;
   auto* response_decision = WEBKIT_RESPONSE_POLICY_DECISION(decision);
-  if (!webkit_response_policy_decision_is_main_frame_main_resource(
-          response_decision))
-    return FALSE;
   uint32_t wid = static_cast<uint32_t>(GPOINTER_TO_UINT(user_data));
   WebKitURIResponse* response =
       webkit_response_policy_decision_get_response(response_decision);
   const char* uri = response ? webkit_uri_response_get_uri(response) : nullptr;
-  if (wid == 0 || !GuardRefuses(wid, uri))
-    return FALSE;
-  webkit_policy_decision_ignore(decision);
-  return TRUE;
+  if (wid != 0 &&
+      webkit_response_policy_decision_is_main_frame_main_resource(
+          response_decision) &&
+      GuardRefuses(wid, uri)) {
+    webkit_policy_decision_ignore(decision);
+    return TRUE;
+  }
+  // A download from the app's own scheme, in any frame (scheme_download.h).
+  if (wid != 0 && uri &&
+      SaveSchemeResponseIfDownload(wid, response_decision, response, uri)) {
+    webkit_policy_decision_ignore(decision);
+    return TRUE;
+  }
+  return FALSE;
 #else
   (void)decision;
   (void)type;
@@ -1387,9 +1402,105 @@ static gboolean on_download_decide_destination(WebKitDownload* download,
   return TRUE;
 }
 
+static laufey_common::DownloadDialogShow GtkDownloadDialog(uint32_t wid) {
+  WebKitGTKBackend* backend = g_gtk_backend_for_downloads;
+  if (!backend)
+    return nullptr;
+  return
+      [backend, wid](const laufey_file_dialog_options_t* options,
+                     laufey_file_dialog_result_fn callback, void* user_data) {
+        return backend->ShowFileDialog(wid, options, callback, user_data);
+      };
+}
+
+static void GtkPost(std::function<void()> fn) {
+  laufey_common::GtkRunAsync(std::move(fn));
+}
+
+static std::string FlatRequestHeaders(WebKitURIRequest* request) {
+  std::vector<std::pair<std::string, std::string>> headers;
+  SoupMessageHeaders* soup =
+      request ? webkit_uri_request_get_http_headers(request) : nullptr;
+  if (soup) {
+    SoupMessageHeadersIter it;
+    soup_message_headers_iter_init(&it, soup);
+    const char* name;
+    const char* value;
+    while (soup_message_headers_iter_next(&it, &name, &value))
+      headers.emplace_back(name, value);
+  }
+  return LaufeyFlattenHeaders(headers);
+}
+
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+// A response from the app's own scheme that is a download (an attachment,
+// or a type the view can't show) never gets saved by WebKit
+// (scheme_download.h): when `uri` is one, save it here and return true (the
+// caller ignores the navigation).
+static bool SaveSchemeResponseIfDownload(uint32_t wid,
+                                         WebKitResponsePolicyDecision* decision,
+                                         WebKitURIResponse* response,
+                                         const char* uri) {
+  std::string url(uri);
+  if (!laufey_common::IsAppSchemeUrl(url))
+    return false;
+  // The headers as the app's handler sent them; WebKit's copy of a scheme
+  // response may not carry them.
+  laufey_common::SchemeResponseNotes::Note note;
+  bool noted = laufey_common::SchemeResponseNotes::Instance().Find(url, &note);
+  std::string disposition = note.disposition;
+  if (!noted) {
+    SoupMessageHeaders* headers =
+        webkit_uri_response_get_http_headers(response);
+    const char* value =
+        headers ? soup_message_headers_get_one(headers, "Content-Disposition")
+                : nullptr;
+    if (value)
+      disposition = value;
+  }
+  if (!laufey_common::IsAttachmentDisposition(disposition) &&
+      webkit_response_policy_decision_is_mime_type_supported(decision))
+    return false;
+  WebKitURIRequest* request =
+      webkit_response_policy_decision_get_request(decision);
+  std::string method = note.method;
+  std::string flat = note.flat_request_headers;
+  if (!noted) {
+    const char* m =
+        request ? webkit_uri_request_get_http_method(request) : nullptr;
+    method = m ? m : "GET";
+    flat = FlatRequestHeaders(request);
+  }
+  const char* engine_name =
+      webkit_uri_response_get_suggested_filename(response);
+  laufey_webview::StartSchemeDownload(
+      wid, url, "", method, flat,
+      laufey_webview::SchemeDownloadName(url, disposition,
+                                         engine_name ? engine_name : ""),
+      GtkDownloadDialog(wid), GtkPost);
+  return true;
+}
+#endif
+
 static void on_download_started(WebKitWebContext* /*context*/,
                                 WebKitDownload* download,
                                 gpointer /*user_data*/) {
+  // A download link to the app's own scheme: WebKit's download of it never
+  // starts (scheme_download.h), so laufey saves it.
+  WebKitURIRequest* request = webkit_download_get_request(download);
+  const char* uri = request ? webkit_uri_request_get_uri(request) : nullptr;
+  if (uri && laufey_common::IsAppSchemeUrl(uri)) {
+    WebKitWebView* view = webkit_download_get_web_view(download);
+    uint32_t wid = view ? LaufeyIdForWidget(GTK_WIDGET(view)) : 0;
+    std::string url(uri);
+    const char* method = webkit_uri_request_get_http_method(request);
+    std::string flat = FlatRequestHeaders(request);
+    webkit_download_cancel(download);
+    laufey_webview::StartSchemeDownload(wid, url, "", method ? method : "GET",
+                                        flat, "", GtkDownloadDialog(wid),
+                                        GtkPost);
+    return;
+  }
   // The destination is set from this download's `decide-destination`
   // (which carries the suggested filename); without a handler WebKitGTK
   // would save it into the Downloads folder unasked.
@@ -3513,6 +3624,11 @@ class LinuxSchemeExchange : public SchemeExchangeBase {
     }
     // set_http_headers takes ownership of `hdrs`.
     webkit_uri_scheme_response_set_http_headers(resp, hdrs);
+    // For the navigation's response policy (a download from the app's
+    // scheme, scheme_download.h), which WebKit asks once it has this.
+    if (const char* uri = webkit_uri_scheme_request_get_uri(d->request))
+      laufey_common::SchemeResponseNotes::Instance().NoteResponse(uri,
+                                                                  d->headers);
     webkit_uri_scheme_request_finish_with_response(d->request, resp);
     g_object_unref(resp);
     // WebKit holds the stream now; when it lets go (the load ended or was
@@ -3655,6 +3771,8 @@ void OnAppSchemeRequest(WebKitURISchemeRequest* request, gpointer) {
   pending->method = method ? method : "GET";
   pending->uri = uri ? uri : "";
   pending->flat_headers = LaufeyFlattenHeaders(headers);
+  laufey_common::SchemeResponseNotes::Instance().NoteRequest(
+      pending->uri, pending->method, pending->flat_headers);
 #if WEBKIT_CHECK_VERSION(2, 40, 0)
   // (transfer full), NULL when the request has no body.
   if (GInputStream* body = webkit_uri_scheme_request_get_http_body(request)) {
