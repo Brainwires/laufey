@@ -262,7 +262,9 @@ async fn answer_dialog(accept: bool, path: Option<&Path>, tries: u32) -> bool {
   false
 }
 
-/// Waits (up to `secs`) for `path` to hold exactly `want`.
+/// Waits (up to `secs`) for `path` to hold exactly `want`. Only where a save
+/// dialog can be accepted (`can_accept`): elsewhere nothing will be written,
+/// and the battery must stay within the runner's watchdog.
 async fn wait_file(path: &Path, want: &[u8], secs: u64) -> bool {
   for _ in 0..secs * 5 {
     if let Ok(meta) = std::fs::metadata(path) {
@@ -437,7 +439,8 @@ pub async fn run() {
   .await;
   // The first save panel of a fresh macOS runner takes a while to come up.
   let asked = answer_dialog(true, Some(&blob_out), 100).await;
-  let written = asked && wait_file(&blob_out, blob_text.as_bytes(), 60).await;
+  let written =
+    asked && can_accept && wait_file(&blob_out, blob_text.as_bytes(), 60).await;
   saved_check(
     &format!(
       "downloads: a blob <a download> asks where, and saves there \
@@ -454,6 +457,7 @@ pub async fn run() {
   eval_string(&win, "location.href = '/attach.bin'; 'ok'").await;
   let asked = answer_dialog(true, Some(&attach_out), 100).await;
   let written = asked
+    && can_accept
     && wait_file(&attach_out, format!("attached-{nonce}").as_bytes(), 20).await;
   tokio::time::sleep(Duration::from_millis(500)).await;
   let evil = strays(&dir, &format!("laufey-dl-evil-{nonce}"));
@@ -610,7 +614,7 @@ pub async fn run() {
   eval_string(&win, "location.href = '/big.bin'; 'ok'").await;
   let asked = answer_dialog(true, Some(&big_out), 100).await;
   let want: Vec<u8> = (0..BIG_LEN).map(big_byte).collect();
-  let written = asked && wait_file(&big_out, &want, 90).await;
+  let written = asked && can_accept && wait_file(&big_out, &want, 90).await;
   saved_check(
     &format!(
       "downloads: a {} MiB attachment arrives whole (asked {asked}, size \
@@ -658,6 +662,7 @@ async fn scheme_origin_checks(dir: &Path, can_accept: bool) {
   eval_string(&win, "location.href = '/attach.txt'; 'ok'").await;
   let asked = answer_dialog(true, Some(&text_out), 100).await;
   let written = asked
+    && can_accept
     && wait_file(&text_out, scheme_body("scheme-text").as_bytes(), 20).await;
   check(
     &format!(
@@ -691,6 +696,7 @@ async fn scheme_origin_checks(dir: &Path, can_accept: bool) {
   .await;
   let asked = answer_dialog(true, Some(&bin_out), 100).await;
   let written = asked
+    && can_accept
     && wait_file(&bin_out, scheme_body("scheme-bin").as_bytes(), 20).await;
   saved_check(
     &format!(
@@ -713,6 +719,7 @@ async fn scheme_origin_checks(dir: &Path, can_accept: bool) {
   .await;
   let asked = answer_dialog(true, Some(&link_out), 100).await;
   let written = asked
+    && can_accept
     && wait_file(&link_out, scheme_body("scheme-link").as_bytes(), 20).await;
   saved_check(
     &format!(
