@@ -79,6 +79,10 @@ fn check(name: &str, ok: bool) {
     eprintln!("[e2e] PASS {name}");
   } else {
     eprintln!("[e2e] FAIL {name}");
+    // A GitHub Actions annotation too: it shows on the run's page.
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+      println!("::error title=native-e2e::{}", name.replace('\n', " "));
+    }
     FAILED.store(true, Ordering::SeqCst);
   }
 }

@@ -266,13 +266,19 @@ int main() {
   {
     // The sink writes only a whole 2xx response, to the chosen path.
     std::string dir;
-    if (const char* tmp = std::getenv("TMPDIR"))
-      dir = tmp;
+    for (const char* var : {"TMPDIR", "TEMP", "TMP"}) {
+      if (const char* tmp = std::getenv(var)) {
+        dir = tmp;
+        break;
+      }
+    }
     if (dir.empty())
       dir = "/tmp";
-    std::string path = dir + "/laufey-dl-sink-" + std::to_string(std::rand());
+    // A non-ASCII name: Windows takes it through the wide file functions.
+    std::string path =
+        dir + "/laufey-dl-sink-\xC3\xA9-" + std::to_string(std::rand());
     auto read_file = [](const std::string& p, std::string* out) {
-      std::FILE* f = std::fopen(p.c_str(), "rb");
+      std::FILE* f = downloads_internal::OpenFileUtf8(p, "rb");
       if (!f)
         return false;
       char buf[256];
@@ -317,7 +323,7 @@ int main() {
     }
     EXPECT(read_file(path, &got) && got == "x");
     // No head at all, or a sink dropped mid-response: no file.
-    std::remove(path.c_str());
+    downloads_internal::RemoveFileUtf8(path);
     {
       SchemeDownloadSink sink("myapp://app/a", path);
       EXPECT(!sink.Finish());

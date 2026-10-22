@@ -48,6 +48,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <iostream>
@@ -417,6 +418,74 @@ inline std::string PercentDecode(const std::string& s) {
   return out;
 }
 
+#ifdef _WIN32
+// UTF-16 for a UTF-8 path (the C runtime's narrow file functions take the
+// ANSI code page on Windows). Invalid UTF-8 becomes U+FFFD.
+inline std::wstring Utf8ToWide(const std::string& s) {
+  std::wstring out;
+  for (size_t i = 0; i < s.size();) {
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    size_t n = c < 0x80             ? 1
+               : (c & 0xE0) == 0xC0 ? 2
+               : (c & 0xF0) == 0xE0 ? 3
+               : (c & 0xF8) == 0xF0 ? 4
+                                    : 0;
+    uint32_t cp = n == 1 ? c : n == 0 ? 0 : (c & (0xFF >> (n + 1)));
+    bool ok = n > 0 && i + n <= s.size();
+    for (size_t k = 1; ok && k < n; ++k) {
+      unsigned char cc = static_cast<unsigned char>(s[i + k]);
+      ok = (cc & 0xC0) == 0x80;
+      cp = (cp << 6) | (cc & 0x3F);
+    }
+    if (!ok || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+      out.push_back(static_cast<wchar_t>(0xFFFD));
+      ++i;
+      continue;
+    }
+    i += n;
+    if (cp >= 0x10000) {
+      cp -= 0x10000;
+      out.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
+      out.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
+    } else {
+      out.push_back(static_cast<wchar_t>(cp));
+    }
+  }
+  return out;
+}
+#endif
+
+// fopen / remove / rename (replacing the destination) on a UTF-8 path.
+inline std::FILE* OpenFileUtf8(const std::string& path, const char* mode) {
+#ifdef _WIN32
+  std::FILE* f = nullptr;
+  std::wstring wmode(mode, mode + std::strlen(mode));
+  if (_wfopen_s(&f, Utf8ToWide(path).c_str(), wmode.c_str()) != 0)
+    return nullptr;
+  return f;
+#else
+  return std::fopen(path.c_str(), mode);
+#endif
+}
+
+inline bool RemoveFileUtf8(const std::string& path) {
+#ifdef _WIN32
+  return _wremove(Utf8ToWide(path).c_str()) == 0;
+#else
+  return std::remove(path.c_str()) == 0;
+#endif
+}
+
+inline bool ReplaceFileUtf8(const std::string& from, const std::string& to) {
+#ifdef _WIN32
+  // _wrename doesn't replace; the save dialog asked before replacing.
+  _wremove(Utf8ToWide(to).c_str());
+  return _wrename(Utf8ToWide(from).c_str(), Utf8ToWide(to).c_str()) == 0;
+#else
+  return std::rename(from.c_str(), to.c_str()) == 0;
+#endif
+}
+
 // The `;`-separated parameters of a Content-Disposition value after its
 // type, as (lowercased name, raw value with quotes removed) pairs.
 inline std::vector<std::pair<std::string, std::string>> DispositionParams(
@@ -605,7 +674,7 @@ class SchemeDownloadSink {
   ~SchemeDownloadSink() {
     if (file_) {
       std::fclose(file_);
-      std::remove(temp_.c_str());
+      downloads_internal::RemoveFileUtf8(temp_);
     }
   }
 
@@ -618,7 +687,7 @@ class SchemeDownloadSink {
       Fail("the app answered " + std::to_string(status));
       return false;
     }
-    file_ = std::fopen(temp_.c_str(), "wb");
+    file_ = downloads_internal::OpenFileUtf8(temp_, "wb");
     if (!file_) {
       Fail("can't write " + temp_);
       return false;
@@ -633,7 +702,7 @@ class SchemeDownloadSink {
     if (len > 0 && std::fwrite(buf, 1, len, file_) != len) {
       std::fclose(file_);
       file_ = nullptr;
-      std::remove(temp_.c_str());
+      downloads_internal::RemoveFileUtf8(temp_);
       Fail("can't write " + temp_);
       return false;
     }
@@ -648,15 +717,10 @@ class SchemeDownloadSink {
       return false;
     bool ok = std::fclose(file_) == 0;
     file_ = nullptr;
-    if (ok) {
-#ifdef _WIN32
-      // rename() doesn't replace on Windows; the dialog asked already.
-      std::remove(path_.c_str());
-#endif
-      ok = std::rename(temp_.c_str(), path_.c_str()) == 0;
-    }
+    if (ok)
+      ok = downloads_internal::ReplaceFileUtf8(temp_, path_);
     if (!ok) {
-      std::remove(temp_.c_str());
+      downloads_internal::RemoveFileUtf8(temp_);
       Fail("can't write " + path_);
     }
     return ok;
