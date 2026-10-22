@@ -21,7 +21,11 @@
 //!   frame never reaches the save dialog: the navigation guard keeps the page
 //!   and hands the navigation to the OS browser (captured);
 //! - a page looping downloads opens at most 3 dialogs (one at a time);
-//! - a 32 MiB attachment arrives whole.
+//! - a 32 MiB attachment arrives whole;
+//! - on a custom-scheme origin (`laufey-e2e://dl`, the app's own scheme
+//!   handler), a `Content-Disposition: attachment` response (a displayable
+//!   text/plain one at the top level, an octet-stream one in a frame) and a
+//!   same-origin `<a download>` link ask and save, as on http.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -30,7 +34,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use laufey::{
-  FileDialogKind, FileDialogOptions, FileDialogOutcome, Value, Window,
+  FileDialogKind, FileDialogOptions, FileDialogOutcome, SchemeRequest, Value,
+  Window,
 };
 
 use super::{check, na, wait_for};
@@ -152,6 +157,64 @@ fn serve(mut stream: TcpStream, port: u16, nonce: &str, hits: &Hits) {
       let _ = stream.write_all(body.as_bytes());
     }
   }
+}
+
+/// The custom-scheme origin of step 7, served by the battery's scheme handler
+/// (lib.rs chains [`serve_scheme`] in).
+const SCHEME_ORIGIN: &str = "laufey-e2e://dl";
+
+/// The body of each custom-scheme download route.
+fn scheme_body(route: &str) -> String {
+  format!("{route}-{}", std::process::id())
+}
+
+/// Serves the custom-scheme download routes (`laufey-e2e://dl/...`); hands
+/// every other request back.
+pub fn serve_scheme(req: SchemeRequest) -> Option<SchemeRequest> {
+  let path = req.url.split(['?', '#']).next().unwrap_or("").to_string();
+  let Some(route) = path.strip_prefix(SCHEME_ORIGIN) else {
+    return Some(req);
+  };
+  let pid = std::process::id();
+  let (content_type, disposition, body) = match route {
+    // Displayable, so only the header makes it a download.
+    "/attach.txt" => (
+      "text/plain; charset=utf-8",
+      Some(format!(
+        "attachment; filename=\"laufey-dl-scheme-{pid}.txt\""
+      )),
+      scheme_body("scheme-text"),
+    ),
+    "/attach.bin" => (
+      "application/octet-stream",
+      Some(format!(
+        "attachment; filename=\"laufey-dl-scheme-{pid}.bin\""
+      )),
+      scheme_body("scheme-bin"),
+    ),
+    // No Content-Disposition: an `<a download>` link makes it one.
+    "/plain.txt" => (
+      "text/plain; charset=utf-8",
+      None,
+      scheme_body("scheme-link"),
+    ),
+    _ => (
+      "text/html; charset=utf-8",
+      None,
+      page(&format!("scheme downloads {pid}")),
+    ),
+  };
+  let mut headers = vec![
+    ("content-type".to_string(), content_type.to_string()),
+    ("cache-control".to_string(), "no-store".to_string()),
+  ];
+  if let Some(d) = disposition {
+    headers.push(("content-disposition".to_string(), d));
+  }
+  req.exchange.begin(200, &headers);
+  req.exchange.write(body.as_bytes());
+  req.exchange.finish();
+  None
 }
 
 fn start_server(nonce: String) -> Option<(u16, Hits)> {
@@ -561,5 +624,113 @@ pub async fn run() {
   );
 
   win.close();
+
+  // --- 7. A custom-scheme origin (the app's own scheme handler). ----------
+  scheme_origin_checks(&dir, can_accept).await;
+
   let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Step 7: downloads from a window on `laufey-e2e://dl`, the origin an app
+/// served by its own scheme handler runs at. Its own window, so its own
+/// prompt budget.
+async fn scheme_origin_checks(dir: &Path, can_accept: bool) {
+  let win = Window::new(480, 320).title("native-e2e-downloads-scheme");
+  win.show();
+  win.navigate(&format!("{SCHEME_ORIGIN}/"));
+  let mut ready = None;
+  for _ in 0..50 {
+    ready = eval_string(&win, "String(location.origin)").await;
+    if ready.as_deref() == Some(SCHEME_ORIGIN) {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+  check(
+    &format!("downloads: a window shows the custom-scheme page ({ready:?})"),
+    ready.as_deref() == Some(SCHEME_ORIGIN),
+  );
+  let pid = std::process::id();
+
+  // 7a. A displayable attachment, navigated to at the top level.
+  let text_out = dir.join("scheme-text-out.txt");
+  eval_string(&win, "location.href = '/attach.txt'; 'ok'").await;
+  let asked = answer_dialog(true, Some(&text_out), 100).await;
+  let written = asked
+    && wait_file(&text_out, scheme_body("scheme-text").as_bytes(), 20).await;
+  check(
+    &format!(
+      "downloads: a custom-scheme text/plain attachment asks where to save \
+       (asked {asked})"
+    ),
+    asked,
+  );
+  saved_check(
+    "downloads: ... and the chosen path is written",
+    can_accept,
+    asked,
+    written,
+  );
+  let kept = eval_string(&win, "String(location.origin)").await;
+  check(
+    &format!(
+      "downloads: the custom-scheme attachment left the page in place \
+       ({kept:?})"
+    ),
+    kept.as_deref() == Some(SCHEME_ORIGIN),
+  );
+
+  // 7b. An octet-stream attachment loaded in a same-origin frame.
+  let bin_out = dir.join("scheme-bin-out.bin");
+  eval_string(
+    &win,
+    "(function() { const f = document.createElement('iframe'); \
+     f.src = '/attach.bin'; document.body.appendChild(f); return 'ok'; })()",
+  )
+  .await;
+  let asked = answer_dialog(true, Some(&bin_out), 100).await;
+  let written = asked
+    && wait_file(&bin_out, scheme_body("scheme-bin").as_bytes(), 20).await;
+  saved_check(
+    &format!(
+      "downloads: a custom-scheme octet-stream attachment in a frame asks \
+       and saves (asked {asked})"
+    ),
+    can_accept,
+    asked,
+    written,
+  );
+
+  // 7c. A same-origin `<a download>` link to a plain response.
+  let link_out = dir.join("scheme-link-out.txt");
+  eval_string(
+    &win,
+    "(function() { const a = document.createElement('a'); \
+     a.href = '/plain.txt'; a.download = 'linked.txt'; \
+     document.body.appendChild(a); a.click(); return 'ok'; })()",
+  )
+  .await;
+  let asked = answer_dialog(true, Some(&link_out), 100).await;
+  let written = asked
+    && wait_file(&link_out, scheme_body("scheme-link").as_bytes(), 20).await;
+  saved_check(
+    &format!(
+      "downloads: a custom-scheme <a download> link asks and saves (asked \
+       {asked})"
+    ),
+    can_accept,
+    asked,
+    written,
+  );
+
+  tokio::time::sleep(Duration::from_millis(500)).await;
+  let stray = strays(dir, &format!("laufey-dl-scheme-{pid}"));
+  check(
+    &format!(
+      "downloads: nothing saved under the custom-scheme response's own name \
+       ({stray:?})"
+    ),
+    stray.is_empty(),
+  );
+  win.close();
 }
