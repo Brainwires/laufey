@@ -297,6 +297,16 @@ libwebauthn (LGPL-2.1-or-later) stays a separately replaceable library: an app
 that ships `liblaufey_webauthn.so` ships LGPL code, as a library the user can
 rebuild from `webauthn-linux/` and replace.
 
+The libwebauthn it builds is libwebauthn 0.10.0 with one change: it and its
+`snow` dependency are moved from `p256` 0.13 to 0.14, because `p256` 0.13 pulls
+`crypto-bigint` 0.5, which RUSTSEC-2026-0387 reports (timing variability in
+operations meant to be constant-time; fixed in `crypto-bigint` 0.7.6). Their
+source is the Brainwires forks
+([libwebauthn](https://github.com/Brainwires/libwebauthn/tree/p256-0.14),
+[snow](https://github.com/Brainwires/snow/tree/p256-0.14)), pinned to exact
+commits by `[patch.crates-io]` in `webauthn-linux/Cargo.toml`. The PIN/UV
+protocol output is unchanged (known-answer tests in the fork pin it).
+
 **Access to the key.** Keys are read through `/dev/hidraw*`. systemd's udev
 rules give the logged-in user access to FIDO devices (the `uaccess` tag, from
 systemd 244's FIDO detection); on a system without them, add a udev rule for the

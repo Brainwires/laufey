@@ -27,8 +27,9 @@ use libwebauthn::transport::hid::framing::{HidCommand, HidMessage};
 use libwebauthn::transport::hid::{virtual_device, HidDevice, HidPipeBackend};
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use p256::{EncodedPoint, PublicKey, SecretKey};
+use p256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
+use p256::elliptic_curve::Generate;
+use p256::{PublicKey, Sec1Point, SecretKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -84,7 +85,7 @@ impl KeyState {
       flags,
       pin,
       pin_retries: MAX_PIN_RETRIES,
-      agreement: SecretKey::random(&mut OsRng),
+      agreement: SecretKey::generate(),
       pin_token: None,
       credentials: Vec::new(),
       commands: Vec::new(),
@@ -265,7 +266,7 @@ fn encode(status: u8, body: Option<Value>) -> Vec<u8> {
   out
 }
 
-fn cose_key(point: &EncodedPoint, alg: i64) -> Value {
+fn cose_key(point: &Sec1Point, alg: i64) -> Value {
   map(vec![
     (int(1), int(2)),
     (int(3), int(alg)),
@@ -422,10 +423,10 @@ impl KeyState {
     if self.flags & FLAG_DENY != 0 {
       return encode(ERR_OPERATION_DENIED, None);
     }
-    let key = SigningKey::random(&mut OsRng);
+    let key = SigningKey::generate();
     let mut id = vec![0u8; 32];
     OsRng.fill_bytes(&mut id);
-    let point = key.verifying_key().to_encoded_point(false);
+    let point = key.verifying_key().to_sec1_point(false);
     let mut auth_data = rp_id_hash.to_vec();
     auth_data.push(0x01 | if uv { 0x04 } else { 0 } | 0x40);
     auth_data.extend_from_slice(&1u32.to_be_bytes());
@@ -536,13 +537,12 @@ impl KeyState {
     let key = get(params, 3)?.as_map()?;
     let x = as_bytes(get(key, -2))?;
     let y = as_bytes(get(key, -3))?;
-    let point = EncodedPoint::from_affine_coordinates(
-      x.as_slice().into(),
-      y.as_slice().into(),
+    let point = Sec1Point::from_affine_coordinates(
+      x.as_slice().try_into().ok()?,
+      y.as_slice().try_into().ok()?,
       false,
     );
-    let public =
-      Option::<PublicKey>::from(PublicKey::from_encoded_point(&point))?;
+    let public = Option::<PublicKey>::from(PublicKey::from_sec1_point(&point))?;
     let shared = p256::ecdh::diffie_hellman(
       self.agreement.to_nonzero_scalar(),
       public.as_affine(),
@@ -558,7 +558,7 @@ impl KeyState {
       }
       // getKeyAgreement
       Some(0x02) => {
-        let point = self.agreement.public_key().to_encoded_point(false);
+        let point = self.agreement.public_key().to_sec1_point(false);
         encode(OK, Some(map(vec![(int(1), cose_key(&point, -25))])))
       }
       // getPinToken / getPinUvAuthTokenUsingPinWithPermissions
@@ -583,7 +583,7 @@ impl KeyState {
             .map(|d| d.to_vec())
             .unwrap_or_default();
         // A new key agreement after every attempt, as a real key does.
-        self.agreement = SecretKey::random(&mut OsRng);
+        self.agreement = SecretKey::generate();
         if decrypted != sha256(pin.as_bytes())[..16] {
           self.pin_retries -= 1;
           return encode(

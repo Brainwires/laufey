@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use ciborium::value::Value as Cbor;
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
-use p256::EncodedPoint;
+use p256::Sec1Point;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -235,12 +235,12 @@ fn check_registration(doc: &Value, uv: bool) -> (String, VerifyingKey) {
       .unwrap()
       .clone()
   };
-  let point = EncodedPoint::from_affine_coordinates(
-    coord(-2).as_slice().into(),
-    coord(-3).as_slice().into(),
+  let point = Sec1Point::from_affine_coordinates(
+    coord(-2).as_slice().try_into().unwrap(),
+    coord(-3).as_slice().try_into().unwrap(),
     false,
   );
-  let key = VerifyingKey::from_encoded_point(&point).unwrap();
+  let key = VerifyingKey::from_sec1_point(&point).unwrap();
   let transports = doc["transports"].as_array().unwrap();
   assert!(transports.iter().any(|t| t == "usb"), "{doc}");
   (id_b64, key)

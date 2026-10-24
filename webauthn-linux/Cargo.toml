@@ -39,6 +39,14 @@ virt-test = [
   "dep:rand",
 ]
 
+# RUSTSEC-2026-0387 (crypto-bigint 0.5.5, through p256 0.13): libwebauthn
+# 0.10.0 and its snow 0.10 dependency both require p256 0.13, so both come
+# from Brainwires forks moved to p256 0.14 (crypto-bigint 0.7.6+). Pinned to
+# exact commits; drop these once upstream releases move to p256 0.14.
+[patch.crates-io]
+libwebauthn = { git = "https://github.com/Brainwires/libwebauthn.git", rev = "6f17d563350cdc534187b9f227ec2b3606203b78" }
+snow = { git = "https://github.com/Brainwires/snow.git", rev = "9cc3cc0613f63338e862fc933bed45ccdf690b3e" }
+
 # Small: it ships beside every Linux backend. Panics unwind (a ceremony's
 # panic becomes an `unknown` result on its own thread).
 [profile.release]
@@ -52,7 +60,7 @@ libwebauthn = "=0.10.0"
 tokio = { version = "1.45", features = ["rt", "time", "sync", "macros"] }
 serde_json = "1"
 sha2 = "0.10"
-p256 = { version = "0.13", features = ["ecdsa", "ecdh"], optional = true }
+p256 = { version = "0.14", features = ["ecdsa", "ecdh", "getrandom"], optional = true }
 ciborium = { version = "0.2", optional = true }
 aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", optional = true }
@@ -61,7 +69,7 @@ rand = { version = "0.8", optional = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libwebauthn = { version = "=0.10.0", features = ["virt"] }
-p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+p256 = { version = "0.14", features = ["ecdsa", "ecdh", "getrandom"] }
 ciborium = "0.2"
 aes = "0.8"
 cbc = "0.1"
