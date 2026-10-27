@@ -97,10 +97,25 @@ There is never a plaintext fallback.
 The secret lives in the Secret Service (`org.freedesktop.secrets`:
 gnome-keyring, KWallet's Secret Service, KeePassXC), read and written through
 libsecret (`libsecret-1.so.0`, loaded at run time: no build dependency, and
-every desktop ships it). Items carry the attributes `service` and `account`, the
-shape `secret-tool store --label=… service S account A` makes, so either reads
-the other's items; a store replaces what is there (and clears duplicates written
-before).
+every desktop ships it). Items carry the attributes `service`, `account` and
+`laufey-app-id` (the app id, `appId` or `LAUFEY_APP_ID`; empty for an app
+without one). The Secret Service doesn't keep the programs of a user apart, so
+without the app id two apps using the same service and account would read and
+overwrite each other's secret; with it each app has its own.
+`secret-tool lookup service S account A` still finds the app's items, and
+`secret-tool store … service S account A laufey-app-id <id>` writes one. A store
+replaces what the app has there (and clears duplicates written before).
+
+Items written before the app id was added (by an older build: `service` and
+`account` only, shared by every app) are moved into the app's namespace by its
+lookups during the first run of the updated app: a lookup that finds none of the
+app's items takes the old item, stores it with the app id and deletes the shared
+copy. That run is the first whose app data directory ([App data](app-data.md))
+has no `.laufey-secret-store-v2` marker, which the run's first secure-store call
+leaves; it moves anything only when that directory already existed when the
+process started (an earlier launch of the same app id ran here), so a newly
+installed app never takes another app's item. An app without an app id has no
+namespace to prove: it neither moves old items nor sees them.
 
 Around the secret, plain D-Bus reads that never prompt decide what can happen:
 
@@ -155,9 +170,11 @@ still fails with such an error is retried once with a new service.
   missing, no session bus, no provider, KWallet without the Secret Service, a
   provider that never answers, a locked item where no one can answer (refused at
   once for lookup, store and delete), and a real `gnome-keyring-daemon`: the
-  round trips, a second daemon taking the name over (written to and read from),
-  then locked without a prompter (at once) and with a prompter that never
-  answers (after the timeout).
+  round trips, two app ids keeping separate items for one service and account,
+  an item written the old way moving on the first run of the app that had run
+  before (not to a newly installed app, nor on a later run), a second daemon
+  taking the name over (written to and read from), then locked without a
+  prompter (at once) and with a prompter that never answers (after the timeout).
 - `scripts/native-e2e-run.sh <backend> --secret-store`: every call answers
   within its timeout through the backend (macOS: the round trip, in the host's
   login keychain); `LAUFEY_E2E_EXPECT_SECRET=ok|unavailable` for a real session.

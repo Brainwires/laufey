@@ -7,6 +7,7 @@
 // no framework: run via `ctest --test-dir webview/build` (or cef/build).
 // Exits non-zero on the first failure. No OS passkey API is touched.
 
+#include "laufey_launch_config.h"
 #include "laufey_passkey.h"
 #include "laufey_single_instance.h"
 
@@ -42,6 +43,7 @@ using laufey_common::PasskeyRegistrationEnvelope;
 using laufey_common::PasskeyRegistrationResult;
 using laufey_common::PasskeyReportNotSupported;
 using laufey_common::PasskeyRequestOptions;
+using laufey_common::PasskeyRpIdPin;
 using laufey_common::PasskeyWindowClosing;
 using laufey_common::json::JsonReader;
 using laufey_common::json::JsonValue;
@@ -692,6 +694,49 @@ static void TestRpIdPin() {
   EXPECT(CountOf(r) == 7 && !PasskeyBusyForTesting());
 }
 
+// The pin a launch file gives PasskeyBegin: its "passkeyRpIds"; without the
+// key none (any RP ID), except in a "strictPolicy" file (denext's), where no
+// key refuses every ceremony.
+static void TestRpIdPinFromLaunchFile() {
+  std::vector<std::string> warnings;
+  using laufey_common::LaunchConfig;
+  using laufey_common::ParseLaunchConfig;
+  LaunchConfig stock =
+      ParseLaunchConfig(R"({"appId":"com.example.app"})", &warnings);
+  EXPECT(PasskeyRpIdPin(stock) == nullptr);
+  LaunchConfig pinned = ParseLaunchConfig(
+      R"({"strictPolicy":true,"passkeyRpIds":["clerk.example.com"]})",
+      &warnings);
+  const std::vector<std::string>* pin = PasskeyRpIdPin(pinned);
+  EXPECT(pin && pin->size() == 1 && (*pin)[0] == "clerk.example.com");
+  LaunchConfig strict =
+      ParseLaunchConfig(R"({"strictPolicy":true})", &warnings);
+  pin = PasskeyRpIdPin(strict);
+  EXPECT(pin && pin->empty());
+  // A wrong-typed key is no pin: still refused under a strict file.
+  LaunchConfig wrong = ParseLaunchConfig(
+      R"({"strictPolicy":true,"passkeyRpIds":"clerk.example.com"})", &warnings);
+  pin = PasskeyRpIdPin(wrong);
+  EXPECT(pin && pin->empty());
+
+  Recorder r;
+  EXPECT(!PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r,
+                                PasskeyRpIdPin(strict)));
+  EXPECT(CountOf(r) == 1 && HasCode(LastOf(r), "invalid_rp"));
+  EXPECT(!PasskeyBusyForTesting());
+  auto c = PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r,
+                                 PasskeyRpIdPin(pinned));
+  EXPECT(c && PasskeyBusyForTesting());
+  c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+  EXPECT(CountOf(r) == 2 && !PasskeyBusyForTesting());
+  c.reset();
+  c = PasskeyBeginWithRpIds(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r,
+                            PasskeyRpIdPin(stock));
+  EXPECT(c && PasskeyBusyForTesting());
+  c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+  EXPECT(CountOf(r) == 3 && !PasskeyBusyForTesting());
+}
+
 static void TestOneAtATime() {
   Recorder first, second;
   auto c = PasskeyBegin(LAUFEY_PASSKEY_GET, kClerkGet, Record, &first);
@@ -976,6 +1021,7 @@ int main() {
   TestNotSupportedText();
   TestBeginRefusals();
   TestRpIdPin();
+  TestRpIdPinFromLaunchFile();
   TestOneAtATime();
   TestRequestFromCallback();
   TestAbortKeepsSlotUntilFinish();

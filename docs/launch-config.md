@@ -32,12 +32,13 @@ The directory comes from the running executable's real path
   "inspectable": false,
   "requireSandbox": true,
   "bridgeOrigins": ["myapp://app"],
-  "passkeyRpIds": ["example.com"]
+  "passkeyRpIds": ["example.com"],
+  "strictPolicy": true
 }
 ```
 
-Every key is optional, and each key but `passkeyRpIds` and `bridgeOrigins`
-stands in for one environment variable:
+Every key is optional, and each key but `passkeyRpIds`, `bridgeOrigins` and
+`strictPolicy` stands in for one environment variable:
 
 | Key              | Environment variable     | Value                                                             |
 | ---------------- | ------------------------ | ----------------------------------------------------------------- |
@@ -50,6 +51,7 @@ stands in for one environment variable:
 | `proxy`          | `LAUFEY_PROXY`           | `"system"` or `"direct"`                                          |
 | `bridgeOrigins`  | none (file only)         | array of origins, `<scheme>://*` or `*` (see below)               |
 | `passkeyRpIds`   | none (file only)         | array of RP IDs: domain names, no scheme, port or path            |
+| `strictPolicy`   | none (file only)         | `true` / `false`                                                  |
 
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
@@ -94,9 +96,9 @@ what its variable does:
   ID (`rp.id` for a registration, `rpId` for an authentication) is not in the
   list is refused with `invalid_rp` before any OS UI shows; names match without
   regard to case, and an empty list refuses every request. Without the key any
-  RP ID goes to the OS, as before. It has no environment variable: only the
-  installed app decides. The macOS and Windows backends (WebView and CEF) read
-  it.
+  RP ID goes to the OS, as before, unless the file sets `strictPolicy` (then
+  every request is refused). It has no environment variable: only the installed
+  app decides. The macOS and Windows backends (WebView and CEF) read it.
 
 - `bridgeOrigins` (API 44) pins the documents the JavaScript bridge serves
   ([JavaScript interop](javascript-interop.md#which-documents-can-call)). Each
@@ -111,6 +113,15 @@ what its variable does:
   skipped, but the key still pins: an empty list (or one with no valid entry)
   gives the bridge to no document. The WebView and CEF backends read it (CEF's
   renderers too).
+
+- `strictPolicy` (default `false`) set to `true` says the file comes from a
+  packager that pins every policy the app needs (denext's packaging writes it),
+  so a policy key the file leaves out (or gives a value of the wrong type)
+  refuses instead of allowing: without `bridgeOrigins` and `customSchemes` the
+  bridge serves no document, and without `passkeyRpIds` every passkey request is
+  refused with `invalid_rp`. Without `strictPolicy` (no file, or a file that
+  doesn't set it, such as the one stock `deno desktop` writes) both keep the
+  defaults above. It has no environment variable.
 
 ## Precedence
 

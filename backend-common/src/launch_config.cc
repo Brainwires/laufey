@@ -301,6 +301,14 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
         }
         config.bridge_origins.push_back(item.string);
       }
+    } else if (key == "strictPolicy") {
+      config.strict_policy = false;
+      if (value.type != JsonValue::Type::kBool) {
+        Warn(warnings, std::string("\"strictPolicy\" must be a boolean, not ") +
+                           TypeName(value.type) + "; ignoring it");
+        continue;
+      }
+      config.strict_policy = value.boolean;
     } else if (key == "passkeyRpIds") {
       config.has_passkey_rp_ids = false;
       config.passkey_rp_ids.clear();

@@ -132,6 +132,33 @@ int main() {
     EXPECT(!bad.has_bridge_origins && w2.size() == 1);
   }
 
+  // --- A "strictPolicy" file (denext's) fails closed -------------------------
+  {
+    // Neither key: the stock default serves every origin, a strict file none.
+    EXPECT(!PolicyOf("{}").restricted);
+    EXPECT(!PolicyOf(R"({"appId":"com.example.app"})").restricted);
+    BridgeOriginPolicy strict = PolicyOf(R"({"strictPolicy":true})");
+    EXPECT(strict.restricted);
+    EXPECT(!BridgeOriginAllowed(strict, "app://localhost"));
+    EXPECT(!BridgeOriginAllowed(strict, "https://idp.example"));
+    EXPECT(!BridgeOriginAllowed(strict, kOpaqueOrigin));
+    EXPECT(BridgeOriginGuardJs(strict).find("return false;") !=
+           std::string::npos);
+    // A wrong-typed "bridgeOrigins" is no pin either.
+    EXPECT(PolicyOf(R"({"strictPolicy":true,"bridgeOrigins":"x"})").restricted);
+    EXPECT(!PolicyOf(R"({"strictPolicy":false})").restricted);
+    // The custom schemes still pin it when there is no "bridgeOrigins".
+    BridgeOriginPolicy schemes =
+        PolicyOf(R"({"strictPolicy":true,"customSchemes":["myapp"]})");
+    EXPECT(schemes.restricted && BridgeOriginAllowed(schemes, "myapp://app"));
+    EXPECT(!BridgeOriginAllowed(schemes, "https://idp.example"));
+    // And "bridgeOrigins" decides when present.
+    BridgeOriginPolicy pinned = PolicyOf(
+        R"({"strictPolicy":true,"bridgeOrigins":["app://localhost"]})");
+    EXPECT(pinned.restricted && BridgeOriginAllowed(pinned, "app://localhost"));
+    EXPECT(!BridgeOriginAllowed(pinned, "https://idp.example"));
+  }
+
   // --- The page-side guard ---------------------------------------------------
   {
     BridgeOriginPolicy p =

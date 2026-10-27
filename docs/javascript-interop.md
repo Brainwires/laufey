@@ -62,4 +62,5 @@ binding that the page's origin should be trusted with. A packaged app can also
 pin its bridge to its own origins in its launch file (`"bridgeOrigins"`, by
 default its `"customSchemes"`; see [Launch configuration](launch-config.md)):
 documents on other origins then get no namespace, and their calls never reach
-your handlers.
+your handlers. A launch file with `"strictPolicy": true` that pins neither gives
+the bridge to no document.

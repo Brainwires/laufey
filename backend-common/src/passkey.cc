@@ -813,14 +813,19 @@ bool IsPasskeyRpIdAllowed(const std::string& rp_id,
   return false;
 }
 
+const std::vector<std::string>* PasskeyRpIdPin(const LaunchConfig& launch) {
+  static const std::vector<std::string> kNone;
+  if (launch.has_passkey_rp_ids)
+    return &launch.passkey_rp_ids;
+  return launch.strict_policy ? &kNone : nullptr;
+}
+
 std::shared_ptr<PasskeyCeremony> PasskeyBegin(uint32_t kind,
                                               const char* options_json,
                                               laufey_passkey_result_fn callback,
                                               void* user_data) {
-  const LaunchConfig& launch = ProcessLaunchConfig();
-  return PasskeyBeginWithRpIds(
-      kind, options_json, callback, user_data,
-      launch.has_passkey_rp_ids ? &launch.passkey_rp_ids : nullptr);
+  return PasskeyBeginWithRpIds(kind, options_json, callback, user_data,
+                               PasskeyRpIdPin(ProcessLaunchConfig()));
 }
 
 std::shared_ptr<PasskeyCeremony> PasskeyBeginWithRpIds(

@@ -302,6 +302,99 @@ void LockAll() {
   g_variant_unref(r);
 }
 
+// The default collection's path.
+std::string DefaultCollectionPath() {
+  GVariant* r = g_dbus_connection_call_sync(
+      g_conn, "org.freedesktop.secrets", "/org/freedesktop/secrets",
+      "org.freedesktop.Secret.Service", "ReadAlias",
+      g_variant_new("(s)", "default"), G_VARIANT_TYPE("(o)"),
+      G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+  EXPECT(r);
+  const gchar* path = nullptr;
+  g_variant_get(r, "(&o)", &path);
+  std::string out = path;
+  g_variant_unref(r);
+  return out;
+}
+
+// Writes an item the way an older laufey (or `secret-tool store service S
+// account A`) did: the service and account only, shared by every app.
+void StoreLegacyItem(const char* service, const char* account,
+                     const char* value) {
+  GVariant* opened = g_dbus_connection_call_sync(
+      g_conn, "org.freedesktop.secrets", "/org/freedesktop/secrets",
+      "org.freedesktop.Secret.Service", "OpenSession",
+      g_variant_new("(sv)", "plain", g_variant_new_string("")),
+      G_VARIANT_TYPE("(vo)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+  EXPECT(opened);
+  const gchar* session = nullptr;
+  g_variant_get(opened, "(v&o)", nullptr, &session);
+  GVariantBuilder attrs;
+  g_variant_builder_init(&attrs, G_VARIANT_TYPE("a{ss}"));
+  g_variant_builder_add(&attrs, "{ss}", "service", service);
+  g_variant_builder_add(&attrs, "{ss}", "account", account);
+  GVariantBuilder props;
+  g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+  g_variant_builder_add(&props, "{sv}", "org.freedesktop.Secret.Item.Label",
+                        g_variant_new_string("Legacy item"));
+  g_variant_builder_add(&props, "{sv}",
+                        "org.freedesktop.Secret.Item.Attributes",
+                        g_variant_builder_end(&attrs));
+  GVariant* bytes = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, value,
+                                              strlen(value), sizeof(char));
+  GVariant* secret = g_variant_new(
+      "(o@ay@ays)", session,
+      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, "", 0, sizeof(char)),
+      bytes, "text/plain");
+  GVariant* created = g_dbus_connection_call_sync(
+      g_conn, "org.freedesktop.secrets", DefaultCollectionPath().c_str(),
+      "org.freedesktop.Secret.Collection", "CreateItem",
+      g_variant_new("(a{sv}@(oayays)b)", &props, secret, TRUE),
+      G_VARIANT_TYPE("(oo)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+  EXPECT(created);
+  g_variant_unref(created);
+  g_variant_unref(opened);
+}
+
+// The items for this service and account without an app id: what an older
+// build wrote.
+int LegacyItems(const char* service, const char* account) {
+  GVariantBuilder attrs;
+  g_variant_builder_init(&attrs, G_VARIANT_TYPE("a{ss}"));
+  g_variant_builder_add(&attrs, "{ss}", "service", service);
+  g_variant_builder_add(&attrs, "{ss}", "account", account);
+  GVariant* r = g_dbus_connection_call_sync(
+      g_conn, "org.freedesktop.secrets", "/org/freedesktop/secrets",
+      "org.freedesktop.Secret.Service", "SearchItems",
+      g_variant_new("(a{ss})", &attrs), G_VARIANT_TYPE("(aoao)"),
+      G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+  EXPECT(r);
+  int legacy = 0;
+  for (int half = 0; half < 2; ++half) {
+    GVariant* items = g_variant_get_child_value(r, half);
+    GVariantIter iter;
+    const gchar* path = nullptr;
+    g_variant_iter_init(&iter, items);
+    while (g_variant_iter_next(&iter, "&o", &path)) {
+      GVariant* p = g_dbus_connection_call_sync(
+          g_conn, "org.freedesktop.secrets", path,
+          "org.freedesktop.DBus.Properties", "Get",
+          g_variant_new("(ss)", "org.freedesktop.Secret.Item", "Attributes"),
+          G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+      EXPECT(p);
+      GVariant* a = nullptr;
+      g_variant_get(p, "(v)", &a);
+      if (!g_variant_lookup(a, "laufey-app-id", "&s", nullptr))
+        legacy++;
+      g_variant_unref(a);
+      g_variant_unref(p);
+    }
+    g_variant_unref(items);
+  }
+  g_variant_unref(r);
+  return legacy;
+}
+
 }  // namespace
 
 int main() {
@@ -511,6 +604,73 @@ int main() {
     EXPECT(value == "b");
     // Deleting nothing is fine.
     EXPECT(SecretDelete(service, "alice", 5000, &reason) == SecretStatus::kOk);
+
+    // Each app has its own items (E-L3): the same service and account in
+    // two apps are two secrets.
+    gchar* data = g_dir_make_tmp("laufey-ss-data-XXXXXX", nullptr);
+    EXPECT(data);
+    const std::string data_a = std::string(data) + "/dev.laufey.app-a";
+    const std::string data_b = std::string(data) + "/dev.laufey.app-b";
+    SetSecretStoreAppForTesting("dev.laufey.app-a", data_a.c_str(), false);
+    EXPECT(SecretStore(service, "shared", "", "a-secret", 5000, &reason) ==
+           SecretStatus::kOk);
+    SetSecretStoreAppForTesting("dev.laufey.app-b", data_b.c_str(), false);
+    EXPECT(SecretLookup(service, "shared", 5000, &value, &reason) ==
+           SecretStatus::kNotFound);
+    EXPECT(SecretStore(service, "shared", "", "b-secret", 5000, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(SecretLookup(service, "shared", 5000, &value, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(value == "b-secret");
+    SetSecretStoreAppForTesting("dev.laufey.app-a", data_a.c_str(), false);
+    EXPECT(SecretLookup(service, "shared", 5000, &value, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(value == "a-secret");
+    // A delete takes the app's item only.
+    EXPECT(SecretDelete(service, "shared", 5000, &reason) == SecretStatus::kOk);
+    SetSecretStoreAppForTesting("dev.laufey.app-b", data_b.c_str(), false);
+    EXPECT(SecretLookup(service, "shared", 5000, &value, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(value == "b-secret");
+
+    // An item an older build wrote (service and account only, shared). A
+    // newly installed app (no data directory before this run) never takes
+    // it.
+    StoreLegacyItem(service.c_str(), "legacy", "old-secret");
+    EXPECT(LegacyItems(service.c_str(), "legacy") == 1);
+    const std::string data_c = std::string(data) + "/dev.laufey.app-c";
+    SetSecretStoreAppForTesting("dev.laufey.app-c", data_c.c_str(), false);
+    EXPECT(SecretLookup(service, "legacy", 5000, &value, &reason) ==
+           SecretStatus::kNotFound);
+    EXPECT(LegacyItems(service.c_str(), "legacy") == 1);
+    // The first run of the updated app that wrote it (its data directory
+    // was there): moved into the app's namespace, the shared copy gone.
+    const std::string data_d = std::string(data) + "/dev.laufey.app-d";
+    EXPECT(g_mkdir_with_parents(data_d.c_str(), 0700) == 0);
+    SetSecretStoreAppForTesting("dev.laufey.app-d", data_d.c_str(), true);
+    EXPECT(SecretLookup(service, "legacy", 5000, &value, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(value == "old-secret");
+    EXPECT(LegacyItems(service.c_str(), "legacy") == 0);
+    EXPECT(g_file_test((data_d + "/.laufey-secret-store-v2").c_str(),
+                       G_FILE_TEST_EXISTS));
+    EXPECT(SecretLookup(service, "legacy", 5000, &value, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(value == "old-secret");
+    // ... and no other app's.
+    SetSecretStoreAppForTesting("dev.laufey.app-c", data_c.c_str(), true);
+    EXPECT(SecretLookup(service, "legacy", 5000, &value, &reason) ==
+           SecretStatus::kNotFound);
+    // On the first run only: a later run of the same app leaves an item
+    // written the old way alone.
+    StoreLegacyItem(service.c_str(), "legacy-2", "late");
+    SetSecretStoreAppForTesting("dev.laufey.app-d", data_d.c_str(), true);
+    EXPECT(SecretLookup(service, "legacy-2", 5000, &value, &reason) ==
+           SecretStatus::kNotFound);
+    EXPECT(LegacyItems(service.c_str(), "legacy-2") == 1);
+    // Back to this test's app (none) for the rest.
+    SetSecretStoreAppForTesting("", "", false);
+    g_free(data);
 
     // A second gnome-keyring takes org.freedesktop.secrets over, as when a
     // session has two (PAM's --login one and a D-Bus-activated

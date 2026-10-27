@@ -623,6 +623,24 @@ static void TestProcessLaunchConfig() {
   EXPECT(LaunchAppId() == "dev.laufey.test");
 }
 
+// "strictPolicy": a JSON boolean, off by default and when invalid.
+static void TestStrictPolicy() {
+  size_t w = 0;
+  LaunchConfig c = Parse("{}", &w);
+  EXPECT(w == 0 && !c.strict_policy);
+  c = Parse("{\"strictPolicy\": true}", &w);
+  EXPECT(w == 0 && c.strict_policy);
+  c = Parse("{\"strictPolicy\": false}", &w);
+  EXPECT(w == 0 && !c.strict_policy);
+  const char* wrong[] = {"{\"strictPolicy\": 1}",
+                         "{\"strictPolicy\": \"true\"}",
+                         "{\"strictPolicy\": null}"};
+  for (const char* text : wrong) {
+    c = Parse(text, &w);
+    EXPECT(w == 1 && !c.strict_policy);
+  }
+}
+
 int main() {
   TestValid();
   TestMalformed();
@@ -634,6 +652,7 @@ int main() {
   TestRequireSandbox();
   TestProxy();
   TestPasskeyRpIds();
+  TestStrictPolicy();
   TestPaths();
   TestTrustedAppImage();
   TestProcessLaunchConfig();

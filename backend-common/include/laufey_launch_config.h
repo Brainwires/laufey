@@ -22,7 +22,8 @@
 //     "singleInstance": true,
 //     "inspectable": false,
 //     "requireSandbox": true,
-//     "passkeyRpIds": ["example.com"] }
+//     "passkeyRpIds": ["example.com"],
+//     "strictPolicy": true }
 //
 // Every key is optional. Each key stands in for its environment variable: an
 // environment variable that is set (non-empty) wins over the file, key by
@@ -86,6 +87,14 @@ struct LaunchConfig {
   // for any other RP ID is refused (an empty list refuses every one).
   bool has_passkey_rp_ids = false;
   std::vector<std::string> passkey_rp_ids;
+  // "strictPolicy": the file was written by a toolchain that pins every
+  // policy the app needs (denext's packaging does), so a policy key it
+  // leaves out (or that is invalid) refuses instead of allowing: no
+  // "bridgeOrigins" (and no "customSchemes") pins the JS bridge to no
+  // document, and no "passkeyRpIds" refuses every passkey ceremony. It has no
+  // environment variable. Without it (no file, or a file without the key)
+  // both keep their permissive defaults.
+  bool strict_policy = false;
 };
 
 // Parses and validates the text of a launch file. Reads nothing from the

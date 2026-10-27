@@ -115,10 +115,13 @@ An app can list the RP IDs it uses in its [launch file](launch-config.md):
 With `passkeyRpIds` present, a request whose RP ID is not in the list (compared
 without regard to case) is refused with `invalid_rp` before it takes the
 one-ceremony slot or shows any OS UI; an empty list refuses every request.
-Without the key every RP ID that passes the parser goes to the OS, as before.
-The key has no environment variable: the list ships with the installed app and
-nothing at run time can widen it. Ship it on Windows in particular, where the OS
-does not tie RP IDs to the app.
+Without the key every RP ID that passes the parser goes to the OS, as before,
+unless the launch file sets `"strictPolicy": true` (denext's packaging does):
+then a missing (or wrong-typed) `passkeyRpIds` refuses every request with
+`invalid_rp`, so an app packaged that way must list its relying parties to use
+passkeys at all. The key has no environment variable: the list ships with the
+installed app and nothing at run time can widen it. Ship it on Windows in
+particular, where the OS does not tie RP IDs to the app.
 
 ### Result
 

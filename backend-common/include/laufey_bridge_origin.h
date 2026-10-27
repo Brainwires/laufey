@@ -148,7 +148,8 @@ inline std::string OriginOfUrl(const std::string& url) {
 // The origins a packaged app's bridge serves.
 struct BridgeOriginPolicy {
   // False: every origin may call (no launch file, or one that pins neither
-  // "bridgeOrigins" nor "customSchemes", or "bridgeOrigins": ["*"]).
+  // "bridgeOrigins" nor "customSchemes" and isn't a "strictPolicy" file, or
+  // "bridgeOrigins": ["*"]).
   bool restricted = false;
   // Serialized origins allowed exactly.
   std::vector<std::string> origins;
@@ -199,7 +200,10 @@ inline bool ParseBridgeOriginEntry(const std::string& entry,
 
 // The policy a launch file sets: its "bridgeOrigins" if it has the key (the
 // entries ParseLaunchConfig kept), else one "<scheme>://*" per entry of its
-// "customSchemes", else none.
+// "customSchemes", else none: every origin when the file isn't a
+// "strictPolicy" one (the stock default), no origin at all when it is (fail
+// closed: the window can navigate anywhere, and a toolchain that pins its
+// policies left this one out).
 inline BridgeOriginPolicy BridgeOriginPolicyFrom(const LaunchConfig& config) {
   BridgeOriginPolicy policy;
   if (config.has_bridge_origins) {
@@ -226,7 +230,10 @@ inline BridgeOriginPolicy BridgeOriginPolicyFrom(const LaunchConfig& config) {
         lower.push_back(bridge_origin_internal::Lower(c));
       policy.schemes.push_back(lower);
     }
+    return policy;
   }
+  if (config.strict_policy)
+    policy.restricted = true;
   return policy;
 }
 

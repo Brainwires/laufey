@@ -8,8 +8,10 @@
 #include "laufey_secret_store.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <gio/gio.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -23,6 +25,8 @@
 #include <thread>
 #include <vector>
 
+#include "laufey_backend_common.h"
+#include "laufey_launch_config.h"
 #include "laufey_platform_features.h"
 
 namespace laufey_common {
@@ -67,19 +71,26 @@ struct Schema {
   gpointer reserved7;
 };
 
-// service + account, matched whatever wrote the item (secret-tool writes no
-// xdg:schema; DONT_MATCH_NAME neither matches nor writes one).
-const Schema kSchema = {"dev.laufey.SecureStore",
-                        kSchemaDontMatchName,
-                        {{"service", 0}, {"account", 0}, {nullptr, 0}},
-                        0,
-                        nullptr,
-                        nullptr,
-                        nullptr,
-                        nullptr,
-                        nullptr,
-                        nullptr,
-                        nullptr};
+// The attribute that keeps one app's items from another's: the app id
+// (LaunchAppId), "" for an app without one. The Secret Service has no access
+// control between the programs of a user, so without it two apps using the
+// same service and account read and overwrite each other's secret.
+constexpr char kAppAttribute[] = "laufey-app-id";
+
+// service + account + the app id, matched whatever wrote the item (secret-tool
+// writes no xdg:schema; DONT_MATCH_NAME neither matches nor writes one).
+const Schema kSchema = {
+    "dev.laufey.SecureStore",
+    kSchemaDontMatchName,
+    {{"service", 0}, {"account", 0}, {kAppAttribute, 0}, {nullptr, 0}},
+    0,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr};
 
 struct Libsecret {
   gchar* (*lookupv_sync)(const Schema*, GHashTable*, GCancellable*, GError**);
@@ -146,6 +157,73 @@ void ForgetLibsecretService() {
   const Libsecret* lib = LoadLibsecret();
   if (lib && lib->service_disconnect)
     lib->service_disconnect();
+}
+
+// --- The app's items ---------------------------------------------------------
+//
+// Items carry the app id (kAppAttribute). An older build wrote them with the
+// service and account alone, shared by every app ("legacy" items). Those are
+// moved into the app's namespace by its lookups during one run only: the
+// first run of the updated app, which is the first run whose app data
+// directory has no kMigratedMarker yet, and only when that directory already
+// existed when the process started (an earlier launch of the same app id, an
+// older build, ran here; a newly installed app never takes another app's
+// items). An app without an app id has no namespace of its own to prove and
+// migrates nothing.
+
+constexpr char kMigratedMarker[] = ".laufey-secret-store-v2";
+
+bool IsDirectory(const std::string& path) {
+  struct stat st;
+  return !path.empty() && stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// Whether the app's data directory existed when the process started, before
+// a backend created it (dynamic initialization, before main()).
+const bool g_data_dir_at_start = IsDirectory(AppDataDir());
+
+struct AppScope {
+  std::string app_id;       // the namespace ("" without an app id)
+  std::string data_dir;     // where the marker goes ("" without one)
+  bool ran_before = false;  // data_dir existed when the process started
+  bool decided = false;     // MigrationWindow ran
+  bool migrate = false;     // this run moves legacy items
+};
+
+// Under CallMutex.
+AppScope& Scope() {
+  static AppScope scope = [] {
+    AppScope s;
+    s.app_id = LaunchAppId();
+    s.data_dir = AppDataDir();
+    s.ran_before = g_data_dir_at_start;
+    return s;
+  }();
+  return scope;
+}
+
+// Whether this run moves legacy items into the app's namespace. Decided at
+// the process's first call (under CallMutex), which also leaves the marker,
+// so no later run does.
+bool MigrationWindow() {
+  AppScope& s = Scope();
+  if (s.decided)
+    return s.migrate;
+  s.decided = true;
+  if (s.app_id.empty() || s.data_dir.empty())
+    return false;
+  std::string marker = s.data_dir + "/" + kMigratedMarker;
+  struct stat st;
+  if (lstat(marker.c_str(), &st) == 0)
+    return false;
+  s.migrate = s.ran_before;
+  if (EnsureDirectory(s.data_dir)) {
+    int fd =
+        open(marker.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd >= 0)
+      close(fd);
+  }
+  return s.migrate;
 }
 
 // --- The session bus ---------------------------------------------------------
@@ -280,16 +358,21 @@ Provider FindProvider(GDBusConnection* bus) {
 // didn't answer in time.
 struct Search {
   int unlocked = 0;
+  std::vector<std::string> unlocked_items;
   std::vector<std::string> locked;
 };
 
+// The app's items (`app` = its id), or with `app` null every item with this
+// service and account (the legacy ones among them).
 bool SearchItems(GDBusConnection* bus, const std::string& service,
-                 const std::string& account, int timeout_ms, Search* out,
-                 std::string* error_text) {
+                 const std::string& account, const std::string* app,
+                 int timeout_ms, Search* out, std::string* error_text) {
   GVariantBuilder attrs;
   g_variant_builder_init(&attrs, G_VARIANT_TYPE("a{ss}"));
   g_variant_builder_add(&attrs, "{ss}", "service", service.c_str());
   g_variant_builder_add(&attrs, "{ss}", "account", account.c_str());
+  if (app)
+    g_variant_builder_add(&attrs, "{ss}", kAppAttribute, app->c_str());
   GError* error = nullptr;
   GVariant* r = g_dbus_connection_call_sync(
       bus, kSecretsName, kSecretsPath, kServiceInterface, "SearchItems",
@@ -304,9 +387,13 @@ bool SearchItems(GDBusConnection* bus, const std::string& service,
   GVariant* u = g_variant_get_child_value(r, 0);
   GVariant* l = g_variant_get_child_value(r, 1);
   out->unlocked = static_cast<int>(g_variant_n_children(u));
+  out->unlocked_items.clear();
   out->locked.clear();
   GVariantIter iter;
   const gchar* path = nullptr;
+  g_variant_iter_init(&iter, u);
+  while (g_variant_iter_next(&iter, "&o", &path))
+    out->unlocked_items.emplace_back(path);
   g_variant_iter_init(&iter, l);
   while (g_variant_iter_next(&iter, "&o", &path))
     out->locked.emplace_back(path);
@@ -506,12 +593,16 @@ int UnlockWithin(const std::vector<std::string>& objects, int timeout_ms) {
   return f.pending ? -1 : f.result;
 }
 
+// The app's attributes for an item (under CallMutex: the app id is
+// Scope()'s).
 GHashTable* Attributes(const std::string& service, const std::string& account) {
   GHashTable* t = g_hash_table_new(g_str_hash, g_str_equal);
   g_hash_table_insert(t, const_cast<char*>("service"),
                       const_cast<char*>(service.c_str()));
   g_hash_table_insert(t, const_cast<char*>("account"),
                       const_cast<char*>(account.c_str()));
+  g_hash_table_insert(t, const_cast<char*>(kAppAttribute),
+                      const_cast<char*>(Scope().app_id.c_str()));
   return t;
 }
 
@@ -623,7 +714,195 @@ int Remaining(uint32_t timeout_ms,
   return used >= timeout_ms ? 1 : static_cast<int>(timeout_ms - used);
 }
 
+// --- Moving legacy items -----------------------------------------------------
+
+// An item's property (`type`), or null.
+GVariant* ItemProperty(GDBusConnection* bus, const std::string& item,
+                       const char* name, const char* type) {
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, kSecretsName, item.c_str(), "org.freedesktop.DBus.Properties", "Get",
+      g_variant_new("(ss)", "org.freedesktop.Secret.Item", name),
+      G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, kQuickTimeoutMs, nullptr,
+      nullptr);
+  if (!r)
+    return nullptr;
+  GVariant* inner = nullptr;
+  g_variant_get(r, "(v)", &inner);
+  g_variant_unref(r);
+  if (inner && !g_variant_is_of_type(inner, G_VARIANT_TYPE(type))) {
+    g_variant_unref(inner);
+    return nullptr;
+  }
+  return inner;
+}
+
+// Whether `item` is a legacy item for exactly this service and account: no
+// app id attribute.
+bool IsLegacyItem(GDBusConnection* bus, const std::string& item,
+                  const std::string& service, const std::string& account) {
+  GVariant* attrs = ItemProperty(bus, item, "Attributes", "a{ss}");
+  if (!attrs)
+    return false;
+  const gchar* s = nullptr;
+  const gchar* a = nullptr;
+  bool legacy = g_variant_lookup(attrs, "service", "&s", &s) &&
+                g_variant_lookup(attrs, "account", "&s", &a) && service == s &&
+                account == a &&
+                !g_variant_lookup(attrs, kAppAttribute, "&s", nullptr);
+  g_variant_unref(attrs);
+  return legacy;
+}
+
+// The secret of `item` as UTF-8 text, through a "plain" transfer session.
+bool ReadItemSecret(GDBusConnection* bus, const std::string& item,
+                    int timeout_ms, std::string* value, std::string* error) {
+  GError* err = nullptr;
+  GVariant* opened = g_dbus_connection_call_sync(
+      bus, kSecretsName, kSecretsPath, kServiceInterface, "OpenSession",
+      g_variant_new("(sv)", "plain", g_variant_new_string("")),
+      G_VARIANT_TYPE("(vo)"), G_DBUS_CALL_FLAGS_NONE, timeout_ms, nullptr,
+      &err);
+  if (!opened) {
+    *error = err ? err->message : "no transfer session";
+    g_clear_error(&err);
+    return false;
+  }
+  const gchar* session_path = nullptr;
+  g_variant_get(opened, "(v&o)", nullptr, &session_path);
+  std::string session = session_path ? session_path : "/";
+  g_variant_unref(opened);
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, kSecretsName, item.c_str(), "org.freedesktop.Secret.Item",
+      "GetSecret", g_variant_new("(o)", session.c_str()),
+      G_VARIANT_TYPE("((oayays))"), G_DBUS_CALL_FLAGS_NONE, timeout_ms, nullptr,
+      &err);
+  bool ok = false;
+  if (r) {
+    GVariant* secret = g_variant_get_child_value(r, 0);
+    GVariant* bytes = g_variant_get_child_value(secret, 2);
+    gsize len = 0;
+    const char* data = static_cast<const char*>(
+        g_variant_get_fixed_array(bytes, &len, sizeof(guchar)));
+    std::string text(data ? data : "", data ? len : 0);
+    if (g_utf8_validate(text.data(), static_cast<gssize>(text.size()),
+                        nullptr) &&
+        text.find('\0') == std::string::npos) {
+      *value = text;
+      ok = true;
+    } else {
+      *error = "the item's secret is not UTF-8 text";
+    }
+    g_variant_unref(bytes);
+    g_variant_unref(secret);
+    g_variant_unref(r);
+  } else {
+    *error = err ? err->message : "no secret";
+    g_clear_error(&err);
+  }
+  GVariant* closed = g_dbus_connection_call_sync(
+      bus, kSecretsName, session.c_str(), "org.freedesktop.Secret.Session",
+      "Close", nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, kQuickTimeoutMs,
+      nullptr, nullptr);
+  if (closed)
+    g_variant_unref(closed);
+  return ok;
+}
+
+void DeleteItem(GDBusConnection* bus, const std::string& item) {
+  GVariant* r = g_dbus_connection_call_sync(
+      bus, kSecretsName, item.c_str(), "org.freedesktop.Secret.Item", "Delete",
+      nullptr, G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, kQuickTimeoutMs,
+      nullptr, nullptr);
+  if (r)
+    g_variant_unref(r);
+}
+
+// A lookup that found none of the app's items, in the migration window: a
+// legacy item for the service and account becomes the app's (stored with
+// its app id, every legacy copy deleted) and is the answer. kNotFound when
+// there is none. Under CallMutex.
+SecretStatus MoveLegacyItem(GDBusConnection* bus, const Provider& provider,
+                            const std::string& service,
+                            const std::string& account, uint32_t timeout_ms,
+                            std::chrono::steady_clock::time_point start,
+                            std::string* value, std::string* reason) {
+  Search all;
+  if (!SearchItems(bus, service, account, nullptr, Remaining(timeout_ms, start),
+                   &all, nullptr)) {
+    return SecretStatus::kNotFound;
+  }
+  std::vector<std::string> unlocked, locked;
+  for (const std::string& item : all.unlocked_items) {
+    if (IsLegacyItem(bus, item, service, account))
+      unlocked.push_back(item);
+  }
+  for (const std::string& item : all.locked) {
+    if (IsLegacyItem(bus, item, service, account))
+      locked.push_back(item);
+  }
+  if (unlocked.empty() && locked.empty())
+    return SecretStatus::kNotFound;
+  if (unlocked.empty()) {
+    if (!PrompterHere()) {
+      *reason = LockedSecretReason(provider.name, false, false, 0);
+      return SecretStatus::kUnavailable;
+    }
+    int answer = UnlockWithin(locked, Remaining(timeout_ms, start));
+    if (answer != 1) {
+      *reason =
+          LockedSecretReason(provider.name, true, answer < 0, Elapsed(start));
+      return SecretStatus::kUnavailable;
+    }
+  }
+  std::vector<std::string> legacy = unlocked;
+  legacy.insert(legacy.end(), locked.begin(), locked.end());
+  std::string secret, error_text;
+  if (!ReadItemSecret(bus, legacy.front(), Remaining(timeout_ms, start),
+                      &secret, &error_text)) {
+    *reason = "the Secret Service failed: " + error_text;
+    return SecretStatus::kUnavailable;
+  }
+  std::string label = service;
+  if (GVariant* l = ItemProperty(bus, legacy.front(), "Label", "s")) {
+    if (*g_variant_get_string(l, nullptr))
+      label = g_variant_get_string(l, nullptr);
+    g_variant_unref(l);
+  }
+  const Libsecret* lib = LoadLibsecret();
+  gboolean stored = FALSE;
+  GError* error = nullptr;
+  GHashTable* attrs = Attributes(service, account);
+  LibsecretCall(timeout_ms, start, &error, [&](GCancellable* c, GError** e) {
+    stored = lib->storev_sync(&kSchema, attrs, nullptr, label.c_str(),
+                              secret.c_str(), c, e);
+  });
+  g_hash_table_unref(attrs);
+  g_clear_error(&error);
+  // Moved: no copy stays behind for another app's first run. Not stored:
+  // left as it was (the value is still the answer).
+  if (stored) {
+    for (const std::string& item : legacy)
+      DeleteItem(bus, item);
+  } else {
+    std::fprintf(stderr,
+                 "laufey: secure store: could not move an item written by an "
+                 "older build into this app's namespace; it stays shared\n");
+  }
+  *value = secret;
+  return SecretStatus::kOk;
+}
+
 }  // namespace
+
+void SetSecretStoreAppForTesting(const char* app_id, const char* data_dir,
+                                 bool ran_before) {
+  std::lock_guard<std::mutex> serial(CallMutex());
+  AppScope& s = Scope();
+  s = AppScope();
+  s.app_id = app_id ? app_id : "";
+  s.data_dir = data_dir ? data_dir : "";
+  s.ran_before = ran_before;
+}
 
 std::string SecretProviderFromComm(const std::string& comm) {
   if (comm.empty())
@@ -684,23 +963,32 @@ SecretStatus SecretLookup(const std::string& service,
   timeout_ms = TimeoutOrDefault(timeout_ms);
   auto start = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> serial(CallMutex());
+  bool migrate = MigrationWindow();
   Provider provider;
   GDBusConnection* bus = Prepare(&provider, reason);
   if (!bus)
     return SecretStatus::kUnavailable;
   Search found;
   std::string error_text;
-  bool answered = SearchItems(
-      bus, service, account, Remaining(timeout_ms, start), &found, &error_text);
+  bool answered =
+      SearchItems(bus, service, account, &Scope().app_id,
+                  Remaining(timeout_ms, start), &found, &error_text);
   if (answered)
     UseCurrentOwner(bus);
-  g_object_unref(bus);
   if (!answered) {
+    g_object_unref(bus);
     *reason = NoAnswerReason(provider, error_text);
     return SecretStatus::kUnavailable;
   }
-  if (found.unlocked == 0 && found.locked.empty())
-    return SecretStatus::kNotFound;
+  if (found.unlocked == 0 && found.locked.empty()) {
+    SecretStatus status = migrate
+                              ? MoveLegacyItem(bus, provider, service, account,
+                                               timeout_ms, start, value, reason)
+                              : SecretStatus::kNotFound;
+    g_object_unref(bus);
+    return status;
+  }
+  g_object_unref(bus);
   if (found.unlocked == 0) {
     // Only locked items: unlocked first (by the person in front), or refused.
     if (!PrompterHere()) {
@@ -755,14 +1043,16 @@ SecretStatus SecretStore(const std::string& service, const std::string& account,
   timeout_ms = TimeoutOrDefault(timeout_ms);
   auto start = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> serial(CallMutex());
+  MigrationWindow();
   Provider provider;
   GDBusConnection* bus = Prepare(&provider, reason);
   if (!bus)
     return SecretStatus::kUnavailable;
   Search found;
   std::string error_text;
-  bool answered = SearchItems(
-      bus, service, account, Remaining(timeout_ms, start), &found, &error_text);
+  bool answered =
+      SearchItems(bus, service, account, &Scope().app_id,
+                  Remaining(timeout_ms, start), &found, &error_text);
   std::string collection =
       answered ? DefaultCollection(bus, kQuickTimeoutMs) : "";
   int collection_locked =
@@ -835,14 +1125,16 @@ SecretStatus SecretDelete(const std::string& service,
   timeout_ms = TimeoutOrDefault(timeout_ms);
   auto start = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> serial(CallMutex());
+  MigrationWindow();
   Provider provider;
   GDBusConnection* bus = Prepare(&provider, reason);
   if (!bus)
     return SecretStatus::kUnavailable;
   Search found;
   std::string error_text;
-  bool answered = SearchItems(
-      bus, service, account, Remaining(timeout_ms, start), &found, &error_text);
+  bool answered =
+      SearchItems(bus, service, account, &Scope().app_id,
+                  Remaining(timeout_ms, start), &found, &error_text);
   if (!answered) {
     g_object_unref(bus);
     *reason = NoAnswerReason(provider, error_text);
@@ -878,8 +1170,8 @@ SecretStatus SecretDelete(const std::string& service,
   // Whatever libsecret says, the store decides: anything left is not
   // deleted.
   Search left;
-  bool checked =
-      SearchItems(bus, service, account, kQuickTimeoutMs, &left, nullptr);
+  bool checked = SearchItems(bus, service, account, &Scope().app_id,
+                             kQuickTimeoutMs, &left, nullptr);
   g_object_unref(bus);
   if (checked && left.unlocked == 0 && left.locked.empty()) {
     g_clear_error(&error);

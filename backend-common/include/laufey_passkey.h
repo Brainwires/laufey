@@ -37,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include "laufey_launch_config.h"
 #include "laufey_passkey_rp_id.h"
 
 // Must live outside any namespace (see laufey_backend_common.h).
@@ -284,11 +285,16 @@ std::shared_ptr<PasskeyCeremony> PasskeyBegin(uint32_t kind,
 bool IsPasskeyRpIdAllowed(const std::string& rp_id,
                           const std::vector<std::string>& allowed);
 
+// The relying parties a launch file pins for PasskeyBegin: its
+// "passkeyRpIds" when it has the key; else, in a "strictPolicy" file, none
+// (an empty list: every ceremony is refused, fail closed); else null (any RP
+// ID the parser accepts, the stock default).
+const std::vector<std::string>* PasskeyRpIdPin(const LaunchConfig& launch);
+
 // PasskeyBegin with the app's relying parties given, for tests: with
 // `allowed_rp_ids` non-null, a ceremony whose RP ID (rp.id / rpId) is not in
 // it is refused with invalid_rp before it takes the slot or reaches the OS;
-// null allows any. PasskeyBegin passes the launch file's "passkeyRpIds" when
-// the file has the key (ProcessLaunchConfig), else null.
+// null allows any. PasskeyBegin passes PasskeyRpIdPin(ProcessLaunchConfig()).
 std::shared_ptr<PasskeyCeremony> PasskeyBeginWithRpIds(
     uint32_t kind, const char* options_json, laufey_passkey_result_fn callback,
     void* user_data, const std::vector<std::string>* allowed_rp_ids);

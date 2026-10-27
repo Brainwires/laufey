@@ -36,10 +36,16 @@
 //     keyring manager's job;
 //   - a lookup that finds nothing (and nothing locked) is "not found".
 //
-// Items are stored with the attributes `service` and `account` (the label is
-// the caller's), the shape `secret-tool store … service S account A` makes,
-// so either reads the other's items. A write replaces every item with those
-// attributes. See docs/secure-store.md.
+// Items are stored with the attributes `service`, `account` and
+// `laufey-app-id` (the app id, LaunchAppId; "" for an app without one), the
+// label the caller's, so one app never reads or overwrites another's item
+// (the Secret Service doesn't keep the programs of a user apart).
+// `secret-tool lookup service S account A` still finds them. A write
+// replaces every item of the app with those attributes. Items an older build
+// wrote with `service` and `account` alone (shared by every app) are moved
+// into the app's namespace by its lookups during the first run of the
+// updated app, and only when that app (its app id) had run here before. See
+// docs/secure-store.md.
 
 #ifndef LAUFEY_SECRET_STORE_H_
 #define LAUFEY_SECRET_STORE_H_
@@ -128,6 +134,13 @@ std::string LockedSecretReason(const std::string& provider, bool prompter,
 // Test-only: load libsecret from `path` instead of libsecret-1.so.0 (a
 // missing file tests the "not installed" reason). Before the first call.
 void SetLibsecretPathForTesting(const char* path);
+
+// Test-only (Linux): act as the app `app_id` whose data directory is
+// `data_dir`, `ran_before` saying whether that directory existed when the
+// process started, as if this were a new process: the next call decides
+// again whether this run moves items an older build wrote.
+void SetSecretStoreAppForTesting(const char* app_id, const char* data_dir,
+                                 bool ran_before);
 
 }  // namespace laufey_common
 
