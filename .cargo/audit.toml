@@ -1,0 +1,45 @@
+# cargo-audit configuration for laufey (read by `cargo audit` from the
+# repository root; CI's `cargo audit` job runs it there for Cargo.lock and
+# webauthn-linux/Cargo.lock).
+#
+# Every ignore below is an informational advisory (unmaintained or unsound,
+# never a vulnerability) with no semver-compatible fix we can take, whose code
+# is either not shipped or not reachable from what laufey ships. What ships:
+# the `laufey` crate (capi), the laufey_winit host, the C++ CEF / webview
+# hosts and liblaufey_webauthn.so. examples/* are test and demo runtimes and
+# are not released. Remove an entry as soon as a fix can be taken.
+#
+# Not listed because cargo-audit cannot ignore it by ID: deno_core 0.382.0 is
+# yanked. Only examples/ddcore (a demo runtime, never shipped) depends on it,
+# and no 0.382.x replacement exists; moving it to 0.383+ is a breaking deno_core
+# upgrade of that example.
+
+[advisories]
+ignore = [
+  # glib 0.18.5 (unsound): VariantStrIter's iterator impls. Patched only in
+  # glib 0.20, but gtk 0.18 (the last GTK3 bindings, needed by muda /
+  # tray-icon / libappindicator on Linux) pins glib 0.18. laufey_winit links
+  # it, yet nothing in laufey or those crates calls
+  # glib::Variant::array_iter_str / VariantStrIter, the only way to reach it.
+  "RUSTSEC-2024-0429",
+  # proc-macro-error 1.0.4 (unmaintained): a build-time proc macro of
+  # gtk3-macros / glib-macros 0.18. Nothing of it is in a shipped binary; it
+  # goes with the GTK3 bindings.
+  "RUSTSEC-2024-0370",
+  # bincode 1.3.3 (unmaintained, declared complete by its authors) and paste
+  # 1.0.15 (unmaintained): reached only through deno_core / v8 in
+  # examples/ddcore, which is not shipped.
+  "RUSTSEC-2025-0141",
+  "RUSTSEC-2024-0436",
+  # ttf-parser 0.25.1 (unmaintained): winit 0.30's sctk-adwaita draws the
+  # Wayland title bar with it in laufey_winit. Newer sctk-adwaita is a
+  # breaking bump winit 0.30 does not take; it parses the system's own fonts.
+  "RUSTSEC-2026-0192",
+  # zvariant 5.x, zvariant_derive 5.x, zbus_names 4.x (unmaintained): merged
+  # into zbus 6.0. zbus 5 (laufey_winit on Linux, through our own D-Bus code,
+  # notify-rust 4 and rfd 0.15 / ashpd 0.11) still depends on them; moving to
+  # zbus 6 is a breaking upgrade those crates have not made.
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
+]
