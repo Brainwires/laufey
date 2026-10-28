@@ -101,7 +101,24 @@ struct Libsecret {
   // Drops libsecret's default SecretService (and its transfer session).
   // Optional: missing, a stale service is kept.
   void (*service_disconnect)();
+  // Reading an item written by an older build (MoveLegacyItem), through the
+  // same SecretService and transfer session as the calls above. Optional:
+  // missing, nothing is moved.
+  gpointer (*service_get_sync)(int flags, GCancellable*, GError**);
+  const gchar* (*service_get_session_algorithms)(gpointer service);
+  GList* (*service_search_sync)(gpointer service, const Schema*, GHashTable*,
+                                int flags, GCancellable*, GError**);
+  gboolean (*item_load_secret_sync)(gpointer item, GCancellable*, GError**);
+  gpointer (*item_get_secret)(gpointer item);
+  const gchar* (*value_get)(gpointer value, gsize* length);
+  void (*value_unref)(gpointer value);
 };
+
+// libsecret's SecretServiceFlags / SecretSearchFlags (secret-service.h,
+// secret-types.h) and its encrypted transfer algorithm (secret-session.c).
+constexpr int kServiceOpenSession = 1 << 1;  // SECRET_SERVICE_OPEN_SESSION
+constexpr int kSearchAll = 1 << 1;           // SECRET_SEARCH_ALL
+constexpr char kEncryptedTransfer[] = "dh-ietf1024-sha256-aes128-cbc-pkcs7";
 
 std::string g_libsecret_path = "libsecret-1.so.0";
 
@@ -121,6 +138,23 @@ const Libsecret* LoadLibsecret() {
         dlsym(lib, "secret_password_free"));
     api.service_disconnect = reinterpret_cast<decltype(api.service_disconnect)>(
         dlsym(lib, "secret_service_disconnect"));
+    api.service_get_sync = reinterpret_cast<decltype(api.service_get_sync)>(
+        dlsym(lib, "secret_service_get_sync"));
+    api.service_get_session_algorithms =
+        reinterpret_cast<decltype(api.service_get_session_algorithms)>(
+            dlsym(lib, "secret_service_get_session_algorithms"));
+    api.service_search_sync =
+        reinterpret_cast<decltype(api.service_search_sync)>(
+            dlsym(lib, "secret_service_search_sync"));
+    api.item_load_secret_sync =
+        reinterpret_cast<decltype(api.item_load_secret_sync)>(
+            dlsym(lib, "secret_item_load_secret_sync"));
+    api.item_get_secret = reinterpret_cast<decltype(api.item_get_secret)>(
+        dlsym(lib, "secret_item_get_secret"));
+    api.value_get = reinterpret_cast<decltype(api.value_get)>(
+        dlsym(lib, "secret_value_get"));
+    api.value_unref = reinterpret_cast<decltype(api.value_unref)>(
+        dlsym(lib, "secret_value_unref"));
     if (!api.lookupv_sync || !api.storev_sync || !api.clearv_sync ||
         !api.password_free) {
       return nullptr;
@@ -753,59 +787,94 @@ bool IsLegacyItem(GDBusConnection* bus, const std::string& item,
   return legacy;
 }
 
-// The secret of `item` as UTF-8 text, through a "plain" transfer session.
-bool ReadItemSecret(GDBusConnection* bus, const std::string& item,
-                    int timeout_ms, std::string* value, std::string* error) {
-  GError* err = nullptr;
-  GVariant* opened = g_dbus_connection_call_sync(
-      bus, kSecretsName, kSecretsPath, kServiceInterface, "OpenSession",
-      g_variant_new("(sv)", "plain", g_variant_new_string("")),
-      G_VARIANT_TYPE("(vo)"), G_DBUS_CALL_FLAGS_NONE, timeout_ms, nullptr,
-      &err);
-  if (!opened) {
-    *error = err ? err->message : "no transfer session";
-    g_clear_error(&err);
-    return false;
+// How reading a legacy item ended.
+enum class LegacyRead { kRead, kPlainOnly, kFailed };
+
+// The secret of `item` (a legacy item's object path) as UTF-8 text, read
+// through libsecret: its SecretService and the transfer session it
+// negotiated, the one every other call here uses, so the secret is
+// encrypted on the bus (dh-ietf1024-sha256-aes128-cbc-pkcs7). libsecret
+// opens a "plain" session only when the provider answers the encrypted one
+// with NotSupported; then nothing is read (kPlainOnly): the move is
+// refused rather than sending the secret across the session bus in clear.
+// Under CallMutex.
+LegacyRead ReadLegacySecret(const std::string& item, const std::string& service,
+                            const std::string& account, uint32_t timeout_ms,
+                            std::chrono::steady_clock::time_point start,
+                            std::string* value, std::string* error_text) {
+  const Libsecret* lib = LoadLibsecret();
+  if (!lib->service_get_sync || !lib->service_get_session_algorithms ||
+      !lib->service_search_sync || !lib->item_load_secret_sync ||
+      !lib->item_get_secret || !lib->value_get || !lib->value_unref) {
+    *error_text = "this libsecret can't read an item by itself";
+    return LegacyRead::kFailed;
   }
-  const gchar* session_path = nullptr;
-  g_variant_get(opened, "(v&o)", nullptr, &session_path);
-  std::string session = session_path ? session_path : "/";
-  g_variant_unref(opened);
-  GVariant* r = g_dbus_connection_call_sync(
-      bus, kSecretsName, item.c_str(), "org.freedesktop.Secret.Item",
-      "GetSecret", g_variant_new("(o)", session.c_str()),
-      G_VARIANT_TYPE("((oayays))"), G_DBUS_CALL_FLAGS_NONE, timeout_ms, nullptr,
-      &err);
-  bool ok = false;
-  if (r) {
-    GVariant* secret = g_variant_get_child_value(r, 0);
-    GVariant* bytes = g_variant_get_child_value(secret, 2);
-    gsize len = 0;
-    const char* data = static_cast<const char*>(
-        g_variant_get_fixed_array(bytes, &len, sizeof(guchar)));
-    std::string text(data ? data : "", data ? len : 0);
-    if (g_utf8_validate(text.data(), static_cast<gssize>(text.size()),
-                        nullptr) &&
-        text.find('\0') == std::string::npos) {
-      *value = text;
-      ok = true;
-    } else {
-      *error = "the item's secret is not UTF-8 text";
-    }
-    g_variant_unref(bytes);
-    g_variant_unref(secret);
-    g_variant_unref(r);
+  GHashTable* attrs = g_hash_table_new(g_str_hash, g_str_equal);
+  g_hash_table_insert(attrs, const_cast<char*>("service"),
+                      const_cast<char*>(service.c_str()));
+  g_hash_table_insert(attrs, const_cast<char*>("account"),
+                      const_cast<char*>(account.c_str()));
+  bool plain_only = false;
+  bool found = false;
+  std::string text;
+  GError* error = nullptr;
+  bool timed_out = LibsecretCall(
+      timeout_ms, start, &error, [&](GCancellable* c, GError** e) {
+        plain_only = found = false;
+        text.clear();
+        gpointer svc = lib->service_get_sync(kServiceOpenSession, c, e);
+        if (!svc)
+          return;
+        const gchar* algorithm = lib->service_get_session_algorithms(svc);
+        if (!algorithm || std::strcmp(algorithm, kEncryptedTransfer) != 0) {
+          plain_only = true;
+          g_object_unref(svc);
+          return;
+        }
+        // The legacy item by its path (no xdg:schema: a null schema matches
+        // whatever wrote the item); locked ones too, never prompting.
+        GList* items =
+            lib->service_search_sync(svc, nullptr, attrs, kSearchAll, c, e);
+        for (GList* l = items; l && !found; l = l->next) {
+          if (item != g_dbus_proxy_get_object_path(G_DBUS_PROXY(l->data)))
+            continue;
+          found = true;
+          if (!lib->item_load_secret_sync(l->data, c, e))
+            break;
+          if (gpointer secret = lib->item_get_secret(l->data)) {
+            gsize len = 0;
+            const gchar* data = lib->value_get(secret, &len);
+            text.assign(data ? data : "", data ? len : 0);
+            lib->value_unref(secret);
+          }
+        }
+        g_list_free_full(items, g_object_unref);
+        g_object_unref(svc);
+      });
+  g_hash_table_unref(attrs);
+  LegacyRead result = LegacyRead::kFailed;
+  if (plain_only) {
+    *error_text =
+        "the Secret Service offers no encrypted transfer of secrets (only "
+        "\"plain\"), so an item written by an older build was not moved into "
+        "this app's namespace: it would have crossed the session bus in clear";
+    result = LegacyRead::kPlainOnly;
+  } else if (timed_out) {
+    *error_text = "no answer in time";
+  } else if (error) {
+    *error_text = error->message;
+  } else if (!found) {
+    *error_text = "the item is gone";
+  } else if (!g_utf8_validate(text.data(), static_cast<gssize>(text.size()),
+                              nullptr) ||
+             text.find('\0') != std::string::npos) {
+    *error_text = "the item's secret is not UTF-8 text";
   } else {
-    *error = err ? err->message : "no secret";
-    g_clear_error(&err);
+    *value = text;
+    result = LegacyRead::kRead;
   }
-  GVariant* closed = g_dbus_connection_call_sync(
-      bus, kSecretsName, session.c_str(), "org.freedesktop.Secret.Session",
-      "Close", nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, kQuickTimeoutMs,
-      nullptr, nullptr);
-  if (closed)
-    g_variant_unref(closed);
-  return ok;
+  g_clear_error(&error);
+  return result;
 }
 
 void DeleteItem(GDBusConnection* bus, const std::string& item) {
@@ -857,10 +926,17 @@ SecretStatus MoveLegacyItem(GDBusConnection* bus, const Provider& provider,
   std::vector<std::string> legacy = unlocked;
   legacy.insert(legacy.end(), locked.begin(), locked.end());
   std::string secret, error_text;
-  if (!ReadItemSecret(bus, legacy.front(), Remaining(timeout_ms, start),
-                      &secret, &error_text)) {
-    *reason = "the Secret Service failed: " + error_text;
-    return SecretStatus::kUnavailable;
+  switch (ReadLegacySecret(legacy.front(), service, account, timeout_ms, start,
+                           &secret, &error_text)) {
+    case LegacyRead::kRead:
+      break;
+    case LegacyRead::kPlainOnly:
+      // Left where it is, shared: never sent in clear.
+      *reason = error_text;
+      return SecretStatus::kUnavailable;
+    case LegacyRead::kFailed:
+      *reason = "the Secret Service failed: " + error_text;
+      return SecretStatus::kUnavailable;
   }
   std::string label = service;
   if (GVariant* l = ItemProperty(bus, legacy.front(), "Label", "s")) {

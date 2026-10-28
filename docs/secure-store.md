@@ -115,7 +115,13 @@ has no `.laufey-secret-store-v2` marker, which the run's first secure-store call
 leaves; it moves anything only when that directory already existed when the
 process started (an earlier launch of the same app id ran here), so a newly
 installed app never takes another app's item. An app without an app id has no
-namespace to prove: it neither moves old items nor sees them.
+namespace to prove: it neither moves old items nor sees them. The old item's
+secret is read through libsecret, with the same encrypted transfer session
+(`dh-ietf1024-sha256-aes128-cbc-pkcs7`) as every other call, so it never crosses
+the session bus in clear. A provider that offers only the `plain` transfer
+algorithm (libsecret falls back to it when the encrypted one is answered
+`NotSupported`) has the move refused: the lookup is `UNAVAILABLE`, saying so,
+and the old item stays where it was.
 
 Around the secret, plain D-Bus reads that never prompt decide what can happen:
 

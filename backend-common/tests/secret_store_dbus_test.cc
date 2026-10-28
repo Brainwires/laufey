@@ -23,6 +23,12 @@
 //     never answers, unavailable after the timeout (not a hang), the prompt
 //     never dismissed (gnome-keyring stays up) and a second call joining the
 //     pending unlock instead of a second prompt.
+//   - moving an item an older build wrote (no app id) into the app's
+//     namespace never sends its secret in clear: with gnome-keyring every
+//     transfer session this process opens (seen by a bus monitor) is
+//     dh-ietf1024-sha256-aes128-cbc-pkcs7, never "plain"; a provider that
+//     offers only "plain" (a mock answering the encrypted one NotSupported)
+//     has the move refused, the item's secret never asked for.
 // Exits 77 (skipped) without dbus-daemon or libsecret; the gnome-keyring
 // part is skipped without gnome-keyring-daemon.
 
@@ -38,8 +44,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "laufey_platform_features.h"
 #include "laufey_secret_store.h"
@@ -84,21 +92,75 @@ const char kXml[] =
     "  <method name='ReadAlias'>"
     "   <arg type='s' direction='in'/><arg type='o' direction='out'/>"
     "  </method>"
+    "  <method name='OpenSession'>"
+    "   <arg type='s' direction='in'/><arg type='v' direction='in'/>"
+    "   <arg type='v' direction='out'/><arg type='o' direction='out'/>"
+    "  </method>"
     " </interface>"
     " <interface name='org.freedesktop.Secret.Collection'>"
+    "  <property name='Locked' type='b' access='read'/>"
+    " </interface>"
+    " <interface name='org.freedesktop.Secret.Item'>"
+    "  <method name='GetSecret'>"
+    "   <arg type='o' direction='in'/>"
+    "   <arg type='(oayays)' direction='out'/>"
+    "  </method>"
+    "  <method name='Delete'><arg type='o' direction='out'/></method>"
+    "  <property name='Attributes' type='a{ss}' access='read'/>"
+    "  <property name='Label' type='s' access='read'/>"
     "  <property name='Locked' type='b' access='read'/>"
     " </interface>"
     "</node>";
 
 GDBusConnection* g_conn = nullptr;  // the mocks' connection
 GDBusNodeInfo* g_info = nullptr;
-// The mock Secret Service: never answers, or answers one locked item.
+// The mock Secret Service: never answers, or answers one locked item; or
+// (g_plain_only) a provider with only the "plain" transfer algorithm and one
+// unlocked item an older build wrote (svc / acct, no app id).
 std::atomic<bool> g_hang{false};
 std::atomic<int> g_searches{0};
+std::atomic<bool> g_plain_only{false};
+std::atomic<int> g_secrets_read{0};  // GetSecret calls on the legacy item
+constexpr char kMockLegacyItem[] =
+    "/org/freedesktop/secrets/collection/login/legacy";
 
-void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
-                const gchar* method, GVariant*,
+void CallMethod(GDBusConnection*, const gchar*, const gchar*,
+                const gchar* interface, const gchar* method, GVariant* params,
                 GDBusMethodInvocation* invocation, gpointer) {
+  if (strcmp(method, "OpenSession") == 0) {
+    const gchar* algorithm = nullptr;
+    g_variant_get(params, "(&sv)", &algorithm, nullptr);
+    if (strcmp(algorithm, "plain") != 0) {
+      // What the spec has a provider answer an algorithm it lacks.
+      g_dbus_method_invocation_return_dbus_error(
+          invocation, "org.freedesktop.DBus.Error.NotSupported", "only plain");
+      return;
+    }
+    g_dbus_method_invocation_return_value(
+        invocation,
+        g_variant_new("(@vo)", g_variant_new_variant(g_variant_new_string("")),
+                      "/org/freedesktop/secrets/session/s1"));
+    return;
+  }
+  if (strcmp(interface, "org.freedesktop.Secret.Item") == 0) {
+    if (strcmp(method, "GetSecret") == 0) {
+      g_secrets_read++;
+      const gchar* session = nullptr;
+      g_variant_get(params, "(&o)", &session);
+      g_dbus_method_invocation_return_value(
+          invocation,
+          g_variant_new(
+              "((o@ay@ays))", session,
+              g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, "", 0, 1),
+              g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, "old-secret", 10,
+                                        1),
+              "text/plain"));
+    } else {
+      g_dbus_method_invocation_return_value(invocation,
+                                            g_variant_new("(o)", "/"));
+    }
+    return;
+  }
   if (strcmp(method, "ReadAlias") == 0) {
     g_dbus_method_invocation_return_value(
         invocation,
@@ -110,16 +172,117 @@ void CallMethod(GDBusConnection*, const gchar*, const gchar*, const gchar*,
     // Never answered (the invocation leaks on purpose: the caller waits).
     return;
   }
+  const gchar* none[] = {nullptr};
+  if (g_plain_only) {
+    GVariant* attrs = g_variant_get_child_value(params, 0);
+    bool app = g_variant_lookup(attrs, "laufey-app-id", "&s", nullptr);
+    g_variant_unref(attrs);
+    const gchar* legacy[] = {kMockLegacyItem, nullptr};
+    g_dbus_method_invocation_return_value(
+        invocation, g_variant_new("(^ao^ao)", app ? none : legacy, none));
+    return;
+  }
   const gchar* locked[] = {"/org/freedesktop/secrets/collection/login/1",
                            nullptr};
-  const gchar* none[] = {nullptr};
   g_dbus_method_invocation_return_value(
       invocation, g_variant_new("(^ao^ao)", none, locked));
 }
 
 GVariant* GetProperty(GDBusConnection*, const gchar*, const gchar*,
-                      const gchar*, const gchar*, GError**, gpointer) {
+                      const gchar* interface, const gchar* property, GError**,
+                      gpointer) {
+  if (strcmp(interface, "org.freedesktop.Secret.Item") == 0) {
+    if (strcmp(property, "Attributes") == 0) {
+      GVariantBuilder b;
+      g_variant_builder_init(&b, G_VARIANT_TYPE("a{ss}"));
+      g_variant_builder_add(&b, "{ss}", "service", "svc");
+      g_variant_builder_add(&b, "{ss}", "account", "acct");
+      return g_variant_builder_end(&b);
+    }
+    if (strcmp(property, "Label") == 0)
+      return g_variant_new_string("Legacy item");
+    return g_variant_new_boolean(FALSE);  // Locked
+  }
   return g_variant_new_boolean(TRUE);
+}
+
+// Every OpenSession sent to org.freedesktop.secrets on the bus, as a bus
+// monitor sees it (org.freedesktop.DBus.Monitoring.BecomeMonitor): who sent
+// it and the transfer algorithm asked for.
+struct SessionRequest {
+  std::string sender;
+  std::string algorithm;
+};
+std::mutex g_sessions_mutex;
+std::vector<SessionRequest> g_sessions;
+
+GDBusMessage* MonitorFilter(GDBusConnection*, GDBusMessage* message,
+                            gboolean incoming, gpointer) {
+  if (!incoming ||
+      g_dbus_message_get_message_type(message) !=
+          G_DBUS_MESSAGE_TYPE_METHOD_CALL ||
+      g_strcmp0(g_dbus_message_get_member(message), "OpenSession") != 0) {
+    return message;
+  }
+  GVariant* body = g_dbus_message_get_body(message);
+  const gchar* algorithm = "";
+  if (body && g_variant_is_of_type(body, G_VARIANT_TYPE("(sv)")))
+    g_variant_get(body, "(&sv)", &algorithm, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(g_sessions_mutex);
+    g_sessions.push_back({g_dbus_message_get_sender(message)
+                              ? g_dbus_message_get_sender(message)
+                              : "",
+                          algorithm});
+  }
+  // Not for this connection: a monitor never answers.
+  g_object_unref(message);
+  return nullptr;
+}
+
+// Starts the monitor on `address`; false when the bus refuses it.
+bool StartSessionMonitor(const gchar* address) {
+  GDBusConnection* monitor = g_dbus_connection_new_for_address_sync(
+      address,
+      static_cast<GDBusConnectionFlags>(
+          G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+          G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+      nullptr, nullptr, nullptr);
+  if (!monitor)
+    return false;
+  g_dbus_connection_add_filter(monitor, MonitorFilter, nullptr, nullptr);
+  const gchar* rules[] = {
+      "type='method_call',interface='org.freedesktop.Secret.Service',"
+      "member='OpenSession'",
+      nullptr};
+  GVariant* r = g_dbus_connection_call_sync(
+      monitor, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+      "org.freedesktop.DBus.Monitoring", "BecomeMonitor",
+      g_variant_new("(^asu)", rules, 0u), nullptr, G_DBUS_CALL_FLAGS_NONE, -1,
+      nullptr, nullptr);
+  if (!r)
+    return false;
+  g_variant_unref(r);
+  return true;  // the connection lives as long as the test
+}
+
+// The OpenSession requests seen so far from anyone but `except` (the
+// test's own connection), after giving the monitor a moment to catch up.
+std::vector<SessionRequest> SessionRequests(const std::string& except) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  std::lock_guard<std::mutex> lock(g_sessions_mutex);
+  std::vector<SessionRequest> out;
+  for (const SessionRequest& r : g_sessions) {
+    if (r.sender != except)
+      out.push_back(r);
+  }
+  return out;
+}
+
+void ClearSessionRequests() {
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  std::lock_guard<std::mutex> lock(g_sessions_mutex);
+  g_sessions.clear();
 }
 
 const GDBusInterfaceVTable kVTable = {CallMethod, GetProperty, nullptr, {}};
@@ -462,6 +625,8 @@ int main() {
   // The system bus (logind, for the "graphical session" probe) is the same
   // private bus, where no logind answers.
   setenv("DBUS_SYSTEM_BUS_ADDRESS", g_test_dbus_get_bus_address(bus), 1);
+  // Every transfer session asked for from here on, as the bus sees it.
+  EXPECT(StartSessionMonitor(g_test_dbus_get_bus_address(bus)));
   unsetenv("XDG_SESSION_ID");
   for (const char* name : {"XDG_CURRENT_DESKTOP", "KDE_FULL_SESSION",
                            "DESKTOP_SESSION", "WAYLAND_DISPLAY"})
@@ -486,6 +651,11 @@ int main() {
                g_conn, "/org/freedesktop/secrets",
                g_dbus_node_info_lookup_interface(
                    g_info, "org.freedesktop.Secret.Service"),
+               &kVTable, nullptr, nullptr, &error) != 0);
+    EXPECT(g_dbus_connection_register_object(
+               g_conn, kMockLegacyItem,
+               g_dbus_node_info_lookup_interface(g_info,
+                                                 "org.freedesktop.Secret.Item"),
                &kVTable, nullptr, nullptr, &error) != 0);
     EXPECT(g_dbus_connection_register_object(
                g_conn, "/org/freedesktop/secrets/aliases/default",
@@ -563,6 +733,32 @@ int main() {
     // Refused at once, without waiting out the timeout.
     EXPECT(Ms(start) < 5000);
   }
+
+  // --- A provider with only the "plain" transfer algorithm ------------------
+  // The first run of an updated app finds an item an older build wrote: it
+  // is not moved (that would send its secret across the bus in clear), the
+  // lookup says why, and the secret is never asked for.
+  g_plain_only = true;
+  {
+    gchar* data = g_dir_make_tmp("laufey-ss-plain-XXXXXX", nullptr);
+    EXPECT(data);
+    const std::string app_dir = std::string(data) + "/dev.laufey.app-p";
+    EXPECT(g_mkdir_with_parents(app_dir.c_str(), 0700) == 0);
+    SetSecretStoreAppForTesting("dev.laufey.app-p", app_dir.c_str(), true);
+    std::string value, reason;
+    const SecretStatus s = SecretLookup("svc", "acct", 5000, &value, &reason);
+    if (s != SecretStatus::kUnavailable || g_secrets_read != 0)
+      std::fprintf(stderr, "  plain-only provider: status %d, %d read: %s\n",
+                   static_cast<int>(s), g_secrets_read.load(), reason.c_str());
+    EXPECT(s == SecretStatus::kUnavailable);
+    EXPECT(Contains(reason, "\"plain\""));
+    EXPECT(Contains(reason, "in clear"));
+    EXPECT(value.empty());
+    EXPECT(g_secrets_read == 0);
+    SetSecretStoreAppForTesting("", "", false);
+    g_free(data);
+  }
+  g_plain_only = false;
   BusName("ReleaseName", "org.freedesktop.secrets");
 
   // --- gnome-keyring
@@ -576,6 +772,10 @@ int main() {
     std::printf("laufey_secret_store_dbus_test: ok\n");
     Finish(0);
   }
+  // From here on only gnome-keyring answers OpenSession: every transfer
+  // session this process opens with it must be encrypted.
+  ClearSessionRequests();
+  const std::string test_conn = g_dbus_connection_get_unique_name(g_conn);
   {
     std::string value, reason;
     const std::string service = "dev.laufey.test";
@@ -657,6 +857,22 @@ int main() {
     EXPECT(SecretLookup(service, "legacy", 5000, &value, &reason) ==
            SecretStatus::kOk);
     EXPECT(value == "old-secret");
+    // The move read the old item's secret encrypted, as every call does:
+    // no transfer session this process asked gnome-keyring for was "plain"
+    // (the test's own connection, which seeds the items, aside).
+    {
+      std::vector<SessionRequest> sessions = SessionRequests(test_conn);
+      int encrypted = 0;
+      for (const SessionRequest& r : sessions) {
+        if (r.algorithm == "plain")
+          std::fprintf(stderr, "  %s opened a plain transfer session\n",
+                       r.sender.c_str());
+        EXPECT(r.algorithm != "plain");
+        if (r.algorithm == "dh-ietf1024-sha256-aes128-cbc-pkcs7")
+          encrypted++;
+      }
+      EXPECT(encrypted >= 1);
+    }
     // ... and no other app's.
     SetSecretStoreAppForTesting("dev.laufey.app-c", data_c.c_str(), true);
     EXPECT(SecretLookup(service, "legacy", 5000, &value, &reason) ==
