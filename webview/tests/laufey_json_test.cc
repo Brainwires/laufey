@@ -56,13 +56,23 @@ int main() {
   EXPECT(P("4294967296")->IsDouble());  // outside int: a double, as before
   EXPECT(P("5e-324") && P("5e-324")->IsDouble());
 
-  // Strings: escapes, surrogate pairs, lone surrogates.
-  EXPECT(P(R"("a\"b\\c\/d\n\t")")->GetString() == "a\"b\\c/d\n\t");
-  EXPECT(P(R"("\u00e9")")->GetString() == "\xC3\xA9");
-  EXPECT(P(R"("\ud83d\ude00")")->GetString() == "\xF0\x9F\x98\x80");
-  EXPECT(P(R"("\ud83d")")->GetString() == "\xEF\xBF\xBD");
-  EXPECT(P(R"("\ude00x")")->GetString() == "\xEF\xBF\xBDx");
-  EXPECT(P(R"("\u0000")")->GetString() == std::string(1, '\0'));
+  // Strings: escapes, surrogate pairs, lone surrogates. The raw-string
+  // inputs live outside EXPECT: MSVC's preprocessor can't take a raw string
+  // literal as a macro argument it stringizes.
+  {
+    const char* escapes = R"("a\"b\\c\/d\n\t")";
+    const char* latin = R"("\u00e9")";
+    const char* pair = R"("\ud83d\ude00")";
+    const char* high = R"("\ud83d")";
+    const char* low = R"("\ude00x")";
+    const char* nul = R"("\u0000")";
+    EXPECT(P(escapes)->GetString() == "a\"b\\c/d\n\t");
+    EXPECT(P(latin)->GetString() == "\xC3\xA9");
+    EXPECT(P(pair)->GetString() == "\xF0\x9F\x98\x80");
+    EXPECT(P(high)->GetString() == "\xEF\xBF\xBD");
+    EXPECT(P(low)->GetString() == "\xEF\xBF\xBDx");
+    EXPECT(P(nul)->GetString() == std::string(1, '\0'));
+  }
 
   // Malformed: each fails instead of looping, guessing or reading past the
   // end. The old parser looped forever on "[x" and "[-".
@@ -85,8 +95,12 @@ int main() {
   EXPECT(!json::ParseJson(static_cast<const char*>(nullptr)));
 
   // A malformed callback id is null, not an exception or a wrapped id.
-  EXPECT(P(R"({"__callback__":"12x"})")->IsNull());
-  EXPECT(P(R"({"__callback__":"99999999999999999999999"})")->IsNull());
+  {
+    const char* trailing = R"({"__callback__":"12x"})";
+    const char* huge = R"({"__callback__":"99999999999999999999999"})";
+    EXPECT(P(trailing)->IsNull());
+    EXPECT(P(huge)->IsNull());
+  }
 
   // Depth: the limit parses, one more fails; a deep document fails fast
   // instead of overflowing the stack.
