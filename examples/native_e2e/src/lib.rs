@@ -41,6 +41,7 @@ mod menu_notification_checks;
 mod navigation_checks;
 mod network_quiet_checks;
 mod os_view;
+mod overlay_checks;
 mod platform_checks;
 mod sandbox_checks;
 mod secret_checks;
@@ -1691,6 +1692,8 @@ fn e2e_main() {
     // Every tray menu click, counted for the Layer-1 hold below (the D-Bus
     // observer's dbusmenu Event must arrive here too).
     let tray_clicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tray_events =
+      Arc::new(std::sync::Mutex::new(Vec::<laufey::TrayEvent>::new()));
     let mut own_tray_clicks = 0usize;
     if tray.id() == 0 {
       let features = laufey::platform_features().unwrap_or_default();
@@ -1736,6 +1739,16 @@ fn e2e_main() {
           eprintln!("[e2e] tray menu click #{n}: {id}");
           *tc.lock().unwrap() = Some(id.to_string());
         },
+      );
+      // API 50: every tray event, for the Layer-1 observer's Activate /
+      // SecondaryActivate / ContextMenu below.
+      let events = tray_events.clone();
+      laufey::set_tray_event_handler(
+        tray.id(),
+        Some(Box::new(move |e| {
+          eprintln!("[e2e] tray event {e:?}");
+          events.lock().unwrap().push(e);
+        })),
       );
       tokio::time::sleep(std::time::Duration::from_millis(200)).await;
       if laufey::test_click_menu_item("tray_ping") {
@@ -2155,6 +2168,29 @@ fn e2e_main() {
         "Layer 1: the observer's dbusmenu Event reaches the tray's on_click",
         reached,
       );
+      // API 50: the StatusNotifierItem's own clicks, with the host's point.
+      let wanted = [
+        laufey::TrayEventKind::Click,
+        laufey::TrayEventKind::MiddleClick,
+        laufey::TrayEventKind::RightClick,
+      ];
+      let all = wait_for(
+        || {
+          let ev = tray_events.lock().unwrap();
+          wanted.iter().all(|k| {
+            ev.iter()
+              .any(|e| e.kind == *k && e.position == Some((12, 34)))
+          })
+        },
+        600,
+        50,
+      )
+      .await;
+      check(
+        "Layer 1: Activate / SecondaryActivate / ContextMenu reach the tray \
+         event handler with the host's point (API 50)",
+        all,
+      );
     }
 
     // A menu-bar-only macOS app uses the Accessory activation policy. Closing
@@ -2221,6 +2257,8 @@ async fn window_api_checks() {
     check("window-api window reports a size", false);
     return;
   }
+  // Overlay windows, tray events, activation policy, speech (API 50).
+  overlay_checks::run(&w, TITLE).await;
   // --hidpi: the rest of this battery then runs at that scale too.
   if let Some(scale) = std::env::var("LAUFEY_E2E_EXPECT_SCALE")
     .ok()

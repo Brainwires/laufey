@@ -627,6 +627,19 @@ double GetLinuxWindowOpacity(unsigned long xid);
 // so pair it with a frameless window. Implemented in main_linux.cc.
 void SetLinuxWindowClickPassthrough(unsigned long xid, bool enabled);
 bool IsLinuxWindowClickPassthrough(unsigned long xid);
+// A foreign GdkWindow* (a new reference; g_object_unref it) wrapping the
+// X11 window, or nullptr under Wayland. CEF UI thread. main_linux.cc.
+void* LinuxGdkWindowForXid(unsigned long xid);
+// Content DIPs to that window's GDK coordinates for a display at
+// `device_scale` (API 50 input regions). main_linux.cc.
+double LinuxInputScaleForXid(void* gdk_window, double device_scale);
+// EWMH state on the raw X11 window (GDK's toplevel hints crash on a foreign
+// window): add / remove `state1` (and `state2`, may be NULL) through a
+// _NET_WM_STATE request, or the property while unmapped. False off X11.
+bool LinuxX11ChangeWmState(unsigned long xid, bool add, const char* state1,
+                           const char* state2);
+// Sticky plus _NET_WM_DESKTOP 0xFFFFFFFF (every desktop).
+bool LinuxX11SetAllDesktops(unsigned long xid, bool all);
 // Mark the X11 window as a utility/panel window (_NET_WM_WINDOW_TYPE_UTILITY,
 // skip taskbar/pager) so the WM treats it as an auxiliary panel that doesn't
 // take part in normal focus/taskbar handling. Implemented in main_linux.cc.

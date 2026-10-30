@@ -48,7 +48,14 @@ struct WinTrayEntry {
   void* click_data;
   laufey_tray_click_fn dblclick_fn;
   void* dblclick_data;
+  // API 50: every event with its detail, and whether the cursor is over the
+  // icon (hover is followed by a timer once a WM_MOUSEMOVE arrived).
+  laufey_tray_event_fn event_fn;
+  void* event_data;
+  bool hovering;
 };
+
+constexpr UINT_PTR kHoverTimerId = 0x4C544856;  // 'LTHV'
 
 std::mutex& TrayMutex() {
   static std::mutex m;
@@ -105,6 +112,75 @@ void ReapplyAllIcons() {
   for (uint32_t id : ids) ApplyActiveIcon(id);
 }
 
+// The icon's rectangle in physical pixels.
+bool IconRectPx(HWND hwnd, uint32_t tray_id, RECT* rc) {
+  NOTIFYICONIDENTIFIER nii = {};
+  nii.cbSize = sizeof(nii);
+  nii.hWnd = hwnd;
+  nii.uID = tray_id;
+  return Shell_NotifyIconGetRect(&nii, rc) == S_OK;
+}
+
+void EmitTrayEvent(HWND hwnd, uint32_t tray_id, int32_t kind, int32_t button) {
+  laufey_tray_event_fn fn = nullptr;
+  void* data = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(TrayMutex());
+    auto it = TrayMap().find(tray_id);
+    if (it == TrayMap().end()) return;
+    fn = it->second.event_fn;
+    data = it->second.event_data;
+  }
+  if (!fn) return;
+  laufey_tray_event_t e = {};
+  e.tray_id = tray_id;
+  e.kind = kind;
+  e.button = button;
+  if (GetKeyState(VK_SHIFT) < 0) e.modifiers |= LAUFEY_MOD_SHIFT;
+  if (GetKeyState(VK_CONTROL) < 0) e.modifiers |= LAUFEY_MOD_CONTROL;
+  if (GetKeyState(VK_MENU) < 0) e.modifiers |= LAUFEY_MOD_ALT;
+  if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0)
+    e.modifiers |= LAUFEY_MOD_META;
+  POINT pt;
+  if (GetCursorPos(&pt)) {
+    // Physical pixels to DIPs, as get_tray_icon_bounds reports.
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (dpi == 0) dpi = 96;
+    e.x = MulDiv(pt.x, 96, dpi);
+    e.y = MulDiv(pt.y, 96, dpi);
+    e.has_position = true;
+  }
+  fn(data, &e);
+}
+
+// While some icon is hovered: a leave once the cursor is off its rectangle.
+void CALLBACK HoverTimer(HWND hwnd, UINT, UINT_PTR, DWORD) {
+  std::vector<uint32_t> hovered;
+  {
+    std::lock_guard<std::mutex> lock(TrayMutex());
+    for (auto& [tid, e] : TrayMap())
+      if (e.hovering) hovered.push_back(tid);
+  }
+  POINT pt;
+  GetCursorPos(&pt);
+  bool any = false;
+  for (uint32_t tid : hovered) {
+    RECT rc;
+    if (IconRectPx(hwnd, tid, &rc) && PtInRect(&rc, pt)) {
+      any = true;
+      continue;
+    }
+    {
+      std::lock_guard<std::mutex> lock(TrayMutex());
+      auto it = TrayMap().find(tid);
+      if (it != TrayMap().end()) it->second.hovering = false;
+    }
+    EmitTrayEvent(hwnd, tid, LAUFEY_TRAY_EVENT_MOUSE_LEAVE,
+                  LAUFEY_MOUSE_BUTTON_LEFT);
+  }
+  if (!any) KillTimer(hwnd, kHoverTimerId);
+}
+
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_SETTINGCHANGE) {
     if (lp && wcscmp((LPCWSTR)lp, L"ImmersiveColorSet") == 0) {
@@ -116,6 +192,43 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
   uint32_t tray_id = (uint32_t)wp;
   UINT event = LOWORD(lp);
+  // API 50: the detailed event first (the legacy callback's messages).
+  switch (event) {
+    case WM_LBUTTONUP:
+      EmitTrayEvent(hwnd, tray_id, LAUFEY_TRAY_EVENT_CLICK,
+                    LAUFEY_MOUSE_BUTTON_LEFT);
+      break;
+    case WM_LBUTTONDBLCLK:
+      EmitTrayEvent(hwnd, tray_id, LAUFEY_TRAY_EVENT_DOUBLE_CLICK,
+                    LAUFEY_MOUSE_BUTTON_LEFT);
+      break;
+    case WM_RBUTTONUP:
+      EmitTrayEvent(hwnd, tray_id, LAUFEY_TRAY_EVENT_RIGHT_CLICK,
+                    LAUFEY_MOUSE_BUTTON_RIGHT);
+      break;
+    case WM_MBUTTONUP:
+      EmitTrayEvent(hwnd, tray_id, LAUFEY_TRAY_EVENT_MIDDLE_CLICK,
+                    LAUFEY_MOUSE_BUTTON_MIDDLE);
+      return 0;
+    case WM_MOUSEMOVE: {
+      bool enter = false;
+      {
+        std::lock_guard<std::mutex> lock(TrayMutex());
+        auto it = TrayMap().find(tray_id);
+        if (it != TrayMap().end() && it->second.event_fn &&
+            !it->second.hovering) {
+          it->second.hovering = true;
+          enter = true;
+        }
+      }
+      if (enter) {
+        EmitTrayEvent(hwnd, tray_id, LAUFEY_TRAY_EVENT_MOUSE_ENTER,
+                      LAUFEY_MOUSE_BUTTON_LEFT);
+        SetTimer(hwnd, kHoverTimerId, 100, HoverTimer);
+      }
+      return 0;
+    }
+  }
   if (event == WM_LBUTTONDBLCLK) {
     laufey_tray_click_fn fn = nullptr;
     void* data = nullptr;
@@ -496,6 +609,37 @@ void SetTrayDoubleClickHandlerWin(uint32_t tray_id,
   if (it == TrayMap().end()) return;
   it->second.dblclick_fn = handler;
   it->second.dblclick_data = user_data;
+}
+
+void SetTrayEventHandlerWin(uint32_t tray_id, laufey_tray_event_fn handler,
+                            void* user_data) {
+  std::lock_guard<std::mutex> lock(TrayMutex());
+  auto it = TrayMap().find(tray_id);
+  if (it == TrayMap().end()) return;
+  it->second.event_fn = handler;
+  it->second.event_data = user_data;
+  if (!handler) it->second.hovering = false;
+}
+
+uint32_t TrayCapabilitiesWin() {
+  return LAUFEY_TRAY_CAP_CLICK | LAUFEY_TRAY_CAP_DOUBLE_CLICK |
+         LAUFEY_TRAY_CAP_RIGHT_CLICK | LAUFEY_TRAY_CAP_MIDDLE_CLICK |
+         LAUFEY_TRAY_CAP_HOVER | LAUFEY_TRAY_CAP_MODIFIERS |
+         LAUFEY_TRAY_CAP_POSITION | LAUFEY_TRAY_CAP_POP_UP_MENU;
+}
+
+bool PopUpTrayMenuWin(uint32_t tray_id) {
+  HWND hwnd = g_tray_msg_hwnd;
+  if (!hwnd) return false;
+  {
+    std::lock_guard<std::mutex> lock(TrayMutex());
+    auto it = TrayMap().find(tray_id);
+    if (it == TrayMap().end() || !it->second.hmenu) return false;
+  }
+  // The same path as a right click (on the tray window's thread).
+  PostMessageW(hwnd, WM_LAUFEY_COMMON_TRAYICON, (WPARAM)tray_id,
+               MAKELPARAM(WM_CONTEXTMENU, 0));
+  return true;
 }
 
 bool GetTrayIconBoundsWin(uint32_t tray_id, int* x, int* y, int* width,

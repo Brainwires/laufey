@@ -352,6 +352,10 @@ std::string BasicPasswordStoreReason(const PlatformFeatures& f) {
 bool TrayAvailable(const PlatformFeatures& f) {
   if (f.os != "linux")
     return true;
+  // The StatusNotifierItem path needs no library; AppIndicator (an XEmbed
+  // tray, or a forced appindicator backend) does.
+  if (f.tray_watcher && f.tray_sni)
+    return true;
   return f.tray_library && (f.tray_watcher || f.tray_xembed);
 }
 

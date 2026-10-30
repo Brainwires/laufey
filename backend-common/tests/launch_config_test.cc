@@ -321,6 +321,25 @@ static void TestInspectable() {
   EXPECT(LaunchInspectableFrom("", false, true, &warning));
 }
 
+static void TestActivationPolicy() {
+  size_t w = 0;
+  LaunchConfig c = Parse("{}", &w);
+  EXPECT(w == 0 && !c.has_activation_policy);
+  for (const char* p : {"regular", "accessory", "prohibited"}) {
+    c = Parse(std::string("{\"activationPolicy\": \"") + p + "\"}", &w);
+    EXPECT(w == 0 && c.has_activation_policy && c.activation_policy == p);
+  }
+  const char* wrong[] = {"{\"activationPolicy\": \"agent\"}",
+                         "{\"activationPolicy\": false}",
+                         "{\"activationPolicy\": \"\"}"};
+  for (const char* text : wrong) {
+    c = Parse(text, &w);
+    EXPECT(w == 1 && !c.has_activation_policy);
+  }
+  EXPECT(IsValidActivationPolicyName("accessory"));
+  EXPECT(!IsValidActivationPolicyName("Accessory"));
+}
+
 static void TestProxy() {
   size_t w = 0;
   LaunchConfig c = Parse("{}", &w);
@@ -651,6 +670,7 @@ int main() {
   TestInspectable();
   TestRequireSandbox();
   TestProxy();
+  TestActivationPolicy();
   TestPasskeyRpIds();
   TestStrictPolicy();
   TestPaths();

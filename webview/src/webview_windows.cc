@@ -116,6 +116,10 @@ struct WinWindowState {
   // LAUFEY_BACKDROP_* behind the page (API 38); not NONE means the client
   // area is left unpainted and the web view background is transparent.
   int backdrop = LAUFEY_BACKDROP_NONE;
+  // LAUFEY_WINDOW_FLAG_TRANSPARENT (API 50 on WebView2): per-pixel alpha
+  // through DWM, the client area left unpainted and the web view's default
+  // background transparent.
+  bool transparent = false;
   // DevTools (API 40). WebView2 opens them in a top-level window of its
   // browser process and has no API to close them or ask whether they are
   // open, so the window open_devtools brought up is tracked.
@@ -355,6 +359,21 @@ class WebView2Backend : public LaufeyBackend {
   double GetWindowOpacity(uint32_t window_id) override;
   void SetClickPassthrough(uint32_t window_id, bool enabled) override;
   bool IsClickPassthrough(uint32_t window_id) override;
+  uint32_t OverlayCapabilities() override;
+  void SetInputRegion(uint32_t window_id,
+                      const laufey_common::InputRegion& region) override;
+  bool SetSkipTaskbar(uint32_t window_id, bool skip) override;
+  bool SetWindowLevel(uint32_t window_id, int32_t level) override;
+  void SetTrayEventHandler(uint32_t tray_id, laufey_tray_event_fn handler,
+                           void* user_data) override {
+    laufey_common::SetTrayEventHandlerWin(tray_id, handler, user_data);
+  }
+  uint32_t TrayCapabilities() override {
+    return laufey_common::TrayCapabilitiesWin();
+  }
+  bool PopUpTrayMenu(uint32_t tray_id) override {
+    return laufey_common::PopUpTrayMenuWin(tray_id);
+  }
   bool IsVisible(uint32_t window_id) override;
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
@@ -781,7 +800,8 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         std::lock_guard<std::recursive_mutex> lock(
             g_win_backend->windows_mutex_);
         auto* state = g_win_backend->GetWindow(wid);
-        if (state && state->backdrop != LAUFEY_BACKDROP_NONE) {
+        if (state &&
+            (state->backdrop != LAUFEY_BACKDROP_NONE || state->transparent)) {
           RECT rect;
           GetClientRect(hwnd, &rect);
           FillRect(reinterpret_cast<HDC>(wParam), &rect,
@@ -898,6 +918,7 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       // A passkey dialog owned by this window ends with it (`cancelled`).
       // Before the lock below: the result callback may re-enter the backend.
       laufey_common::PasskeyWindowClosing(hwnd);
+      laufey_common::WinForgetOverlayWindow(hwnd);
       // Single exit point for window teardown: fires for WM_CLOSE-initiated
       // closes and for CloseWindow()'s direct DestroyWindow alike, so a
       // deferred close resolved via close_window still quits the message
@@ -1097,6 +1118,10 @@ void WebView2Backend::CreateWindowEx(uint32_t window_id, int width, int height,
   WinWindowState state;
   state.window_id = window_id;
   state.hwnd = hwnd;
+  if (flags & LAUFEY_WINDOW_FLAG_TRANSPARENT) {
+    laufey_common::WinMakeWindowTransparent(hwnd);
+    state.transparent = true;
+  }
 
   {
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
@@ -1254,6 +1279,11 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             }
 
             state->controller = controller;
+            if (state->transparent) {
+              ComPtr<ICoreWebView2Controller2> controller2;
+              if (SUCCEEDED(state->controller.As(&controller2)) && controller2)
+                controller2->put_DefaultBackgroundColor({0, 0, 0, 0});
+            }
             controller->get_CoreWebView2(&state->webview);
             if (state->webview) {
               state->webview->get_BrowserProcessId(&state->browser_pid);
@@ -2030,47 +2060,58 @@ void WebView2Backend::SetClickPassthrough(uint32_t window_id, bool enabled) {
   auto* state = GetWindow(window_id);
   if (!state)
     return;
-  LONG ex = GetWindowLong(state->hwnd, GWL_EXSTYLE);
-  if (enabled) {
-    // WS_EX_TRANSPARENT excludes the whole top-level window (children
-    // included, so also the WebView2 host) from mouse hit-testing, but only
-    // takes effect on a layered window.
-    bool newly_layered = !(ex & WS_EX_LAYERED);
-    SetWindowLong(state->hwnd, GWL_EXSTYLE,
-                  ex | WS_EX_TRANSPARENT | WS_EX_LAYERED);
-    if (newly_layered) {
-      // A window that just became layered renders nothing until its
-      // transparency attributes are set; fully opaque keeps it visually
-      // unchanged.
-      SetLayeredWindowAttributes(state->hwnd, 0, 255, LWA_ALPHA);
-    }
-  } else {
-    LONG new_ex = ex & ~WS_EX_TRANSPARENT;
-    // Drop the layered style too unless a window opacity < 1.0 still needs it.
-    BYTE alpha = 255;
-    DWORD flags = 0;
-    bool has_alpha =
-        (ex & WS_EX_LAYERED) &&
-        GetLayeredWindowAttributes(state->hwnd, nullptr, &alpha, &flags) &&
-        (flags & LWA_ALPHA) && alpha < 255;
-    if (!has_alpha)
-      new_ex &= ~WS_EX_LAYERED;
-    if (new_ex != ex) {
-      SetWindowLong(state->hwnd, GWL_EXSTYLE, new_ex);
-      if ((ex & WS_EX_LAYERED) && !(new_ex & WS_EX_LAYERED)) {
-        RedrawWindow(state->hwnd, nullptr, nullptr,
-                     RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
-      }
-    }
-  }
+  // WS_EX_TRANSPARENT | WS_EX_LAYERED, recorded apart from an input
+  // region's own toggling (API 50; overlay_win.cc).
+  laufey_common::WinSetClickPassthrough(state->hwnd, enabled);
 }
 
 bool WebView2Backend::IsClickPassthrough(uint32_t window_id) {
-  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
-  auto* state = GetWindow(window_id);
-  return state ? (GetWindowLong(state->hwnd, GWL_EXSTYLE) &
-                  WS_EX_TRANSPARENT) != 0
-               : false;
+  bool result = false;
+  RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    result = state && laufey_common::WinIsClickPassthrough(state->hwnd);
+  });
+  return result;
+}
+
+// --- Overlay windows (API 50) ---
+
+uint32_t WebView2Backend::OverlayCapabilities() {
+  // No all-workspaces call (no public API); transparent through DWM.
+  return LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH |
+         LAUFEY_OVERLAY_CAP_INPUT_REGION | LAUFEY_OVERLAY_CAP_SKIP_TASKBAR |
+         LAUFEY_OVERLAY_CAP_WINDOW_LEVELS | LAUFEY_OVERLAY_CAP_TRANSPARENT |
+         LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+}
+
+void WebView2Backend::SetInputRegion(uint32_t window_id,
+                                     const laufey_common::InputRegion& region) {
+  RunOnUiThread([this, window_id, region] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      laufey_common::WinSetInputRegion(state->hwnd, region);
+  });
+}
+
+bool WebView2Backend::SetSkipTaskbar(uint32_t window_id, bool skip) {
+  bool ok = false;
+  RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      ok = laufey_common::WinSetSkipTaskbar(state->hwnd, skip);
+  });
+  return ok;
+}
+
+bool WebView2Backend::SetWindowLevel(uint32_t window_id, int32_t level) {
+  bool ok = false;
+  RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      ok = laufey_common::WinSetWindowLevel(state->hwnd, level);
+  });
+  return ok;
 }
 
 bool WebView2Backend::IsVisible(uint32_t window_id) {
@@ -2395,7 +2436,7 @@ bool WebView2Backend::SetWindowBackdrop(uint32_t window_id, int backdrop,
     if (state->controller && SUCCEEDED(state->controller.As(&controller2)) &&
         controller2) {
       COREWEBVIEW2_COLOR color = {255, 255, 255, 255};
-      if (backdrop != LAUFEY_BACKDROP_NONE)
+      if (backdrop != LAUFEY_BACKDROP_NONE || state->transparent)
         color = {0, 0, 0, 0};
       controller2->put_DefaultBackgroundColor(color);
     }

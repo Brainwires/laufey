@@ -96,6 +96,9 @@ struct PlatformFeatures {
                               // whose $DISPLAY is Xwayland's)
   bool tray_library = true;   // libayatana-appindicator3 / libappindicator3
   bool tray_clicks = true;    // the icon reports left / double clicks
+  bool tray_sni = false;      // Linux (API 50): trays are laufey's own
+                              // StatusNotifierItem (a watcher is there and
+                              // LAUFEY_TRAY_BACKEND is not appindicator)
   bool tray_tooltip = true;   // set_tray_tooltip shows something
 
   SecretServiceState secret_service = SecretServiceState::kNotApplicable;

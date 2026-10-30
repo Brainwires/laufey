@@ -1065,6 +1065,24 @@ class WebKitGTKBackend : public LaufeyBackend {
   double GetWindowOpacity(uint32_t window_id) override;
   void SetClickPassthrough(uint32_t window_id, bool enabled) override;
   bool IsClickPassthrough(uint32_t window_id) override;
+  // Overlay windows (API 50; overlay_linux.cc).
+  uint32_t OverlayCapabilities() override;
+  void SetInputRegion(uint32_t window_id,
+                      const laufey_common::InputRegion& region) override;
+  bool SetSkipTaskbar(uint32_t window_id, bool skip) override;
+  bool SetVisibleOnAllWorkspaces(uint32_t window_id, bool visible,
+                                 bool full_screen) override;
+  bool SetWindowLevel(uint32_t window_id, int32_t level) override;
+  void SetTrayEventHandler(uint32_t tray_id, laufey_tray_event_fn handler,
+                           void* user_data) override {
+    laufey_common::SetTrayEventHandlerLinux(tray_id, handler, user_data);
+  }
+  uint32_t TrayCapabilities() override {
+    return laufey_common::TrayCapabilitiesLinux();
+  }
+  bool PopUpTrayMenu(uint32_t /*tray_id*/) override {
+    return false;
+  }
   bool IsVisible(uint32_t window_id) override;
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
@@ -1534,6 +1552,7 @@ void WebKitGTKBackend::ForgetDestroyedWindow(uint32_t window_id) {
       state->content_manager, "laufey");
   g_content_manager_to_laufey_id.erase(state->content_manager);
   windows_.erase(window_id);
+  laufey_common::LinuxForgetOverlayWindow(window_id);
 }
 
 LinuxWindowState* WebKitGTKBackend::GetWindow(uint32_t window_id) {
@@ -1783,6 +1802,11 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     std::call_once(dark_theme_once, init_dark_theme_sync);
 
     GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    if (flags & LAUFEY_WINDOW_FLAG_OVERLAY) {
+      // A wlr-layer-shell overlay surface where the compositor has one (API
+      // 50); an ordinary window elsewhere. Before the window is realized.
+      laufey_common::LayerShellInitOverlay(window);
+    }
     if (flags & LAUFEY_WINDOW_FLAG_FRAMELESS) {
       gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
     }
@@ -2178,7 +2202,7 @@ void WebKitGTKBackend::SetWindowPosition(uint32_t window_id, int x, int y) {
   gtk_invoke_sync([&] {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
-    if (state) {
+    if (state && !laufey_common::LayerShellMove(state->window, x, y)) {
       gtk_window_move(GTK_WINDOW(state->window), x, y);
     }
   });
@@ -2667,18 +2691,13 @@ void WebKitGTKBackend::SetClickPassthrough(uint32_t window_id, bool enabled) {
     auto* state = GetWindow(window_id);
     if (!state)
       return;
-    if (enabled) {
-      // An empty input shape makes the whole window transparent to pointer
-      // events; they fall through to whatever is beneath. Best-effort under a
-      // reparenting X11 window manager (the WM frame may still catch clicks),
-      // so pair it with a frameless window.
-      cairo_region_t* empty = cairo_region_create();
-      gtk_widget_input_shape_combine_region(state->window, empty);
-      cairo_region_destroy(empty);
-    } else {
-      // NULL restores the default input shape (the full window).
-      gtk_widget_input_shape_combine_region(state->window, nullptr);
-    }
+    // An empty input shape: pointer events fall through to whatever is
+    // beneath. Best-effort under a reparenting X11 window manager (the WM
+    // frame may still catch clicks), so pair it with a frameless window.
+    // Kept apart from an input region (API 50): turning passthrough off
+    // restores the region, not the whole window.
+    laufey_common::LinuxSetClickPassthrough(window_id, state->window, nullptr,
+                                            enabled, 1.0);
     state->click_passthrough = enabled;
   });
 }
@@ -2693,6 +2712,71 @@ bool WebKitGTKBackend::IsClickPassthrough(uint32_t window_id) {
     }
   });
   return result;
+}
+
+// --- Overlay windows (API 50) ---
+
+uint32_t WebKitGTKBackend::OverlayCapabilities() {
+  uint32_t caps =
+      LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH | LAUFEY_OVERLAY_CAP_INPUT_REGION |
+      LAUFEY_OVERLAY_CAP_WINDOW_LEVELS | LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+  gtk_invoke_sync([&] {
+    GdkScreen* screen = gdk_screen_get_default();
+    if (screen && gdk_screen_is_composited(screen))
+      caps |= LAUFEY_OVERLAY_CAP_TRANSPARENT;
+    if (!laufey_common::LinuxIsWayland())
+      caps |=
+          LAUFEY_OVERLAY_CAP_SKIP_TASKBAR | LAUFEY_OVERLAY_CAP_ALL_WORKSPACES;
+    if (laufey_common::LayerShellAvailable())
+      caps |= LAUFEY_OVERLAY_CAP_LAYER_SHELL;
+  });
+  return caps;
+}
+
+void WebKitGTKBackend::SetInputRegion(
+    uint32_t window_id, const laufey_common::InputRegion& region) {
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      laufey_common::LinuxSetInputRegion(window_id, state->window, nullptr,
+                                         region, 1.0);
+  });
+}
+
+bool WebKitGTKBackend::SetSkipTaskbar(uint32_t window_id, bool skip) {
+  bool ok = false;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      ok = laufey_common::LinuxSetSkipTaskbar(state->window, skip);
+  });
+  return ok;
+}
+
+bool WebKitGTKBackend::SetVisibleOnAllWorkspaces(uint32_t window_id,
+                                                 bool visible,
+                                                 bool /*full_screen*/) {
+  bool ok = false;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id)) {
+      // A layer surface is on every workspace already.
+      ok =
+          laufey_common::LayerShellIsLayerWindow(state->window) ||
+          laufey_common::LinuxSetVisibleOnAllWorkspaces(state->window, visible);
+    }
+  });
+  return ok;
+}
+
+bool WebKitGTKBackend::SetWindowLevel(uint32_t window_id, int32_t level) {
+  bool ok = false;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      ok = laufey_common::LinuxSetWindowLevel(state->window, level);
+  });
+  return ok;
 }
 
 bool WebKitGTKBackend::IsVisible(uint32_t window_id) {

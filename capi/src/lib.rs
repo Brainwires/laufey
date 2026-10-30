@@ -60,12 +60,15 @@ pub use share::*;
 mod user_activity;
 pub use user_activity::*;
 
+mod overlay;
+pub use overlay::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 49;
+pub const LAUFEY_API_VERSION: u32 = 50;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -74,6 +77,7 @@ pub const LAUFEY_WINDOW_FLAG_NO_ACTIVATE: u32 = 1 << 1;
 pub const LAUFEY_WINDOW_FLAG_TRANSPARENT_TITLEBAR: u32 = 1 << 2;
 pub const LAUFEY_WINDOW_FLAG_HIDDEN: u32 = 1 << 3;
 pub const LAUFEY_WINDOW_FLAG_TRANSPARENT: u32 = 1 << 4;
+pub const LAUFEY_WINDOW_FLAG_OVERLAY: u32 = 1 << 5;
 
 pub const LAUFEY_WINDOW_HANDLE_UNKNOWN: i32 = 0;
 pub const LAUFEY_WINDOW_HANDLE_APPKIT: i32 = 1;
@@ -82,6 +86,8 @@ pub const LAUFEY_WINDOW_HANDLE_X11: i32 = 3;
 pub const LAUFEY_WINDOW_HANDLE_WAYLAND: i32 = 4;
 pub type LaufeyValue = ffi::laufey_value_t;
 pub type LaufeyBackendApi = ffi::laufey_backend_api_t;
+/// `laufey_tray_event_t` as the header lays it out (API 50).
+pub type TrayEventRaw = ffi::laufey_tray_event_t;
 
 unsafe impl Send for LaufeyBackendApi {}
 unsafe impl Sync for LaufeyBackendApi {}
@@ -1051,6 +1057,10 @@ pub struct WindowOptions {
   /// on macOS and Linux and by the Winit backend; ignored by the Windows
   /// WebView2 and CEF backends, which paint an opaque window background.
   pub transparent: bool,
+  /// A desktop overlay surface (API 50): a wlr-layer-shell surface on the
+  /// overlay layer where the Wayland compositor has one (see
+  /// [`OverlayCapabilities::layer_shell`]); an ordinary window elsewhere.
+  pub overlay: bool,
 }
 
 impl WindowOptions {
@@ -1070,6 +1080,9 @@ impl WindowOptions {
     }
     if self.transparent {
       flags |= LAUFEY_WINDOW_FLAG_TRANSPARENT;
+    }
+    if self.overlay {
+      flags |= LAUFEY_WINDOW_FLAG_OVERLAY;
     }
     flags
   }

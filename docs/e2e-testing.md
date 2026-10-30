@@ -1129,13 +1129,13 @@ an editor or a terminal is in front when an app is started from it. See
   visible and draws a frame within 2 s. An engine does not throttle a visible
   window for lacking focus (a fully covered one is occluded and rightly stops,
   as in a browser).
-- **A non-activating panel** (`no_activate`): its page is visible and draws a
-  frame within 2 s. Known limitation, reported N/A on the WebKit engines:
-  WKWebView runs no animation frames in a non-activating `NSPanel` that has
-  never been key, though the page reads as visible, and WebKitGTK sometimes
-  doesn't either; both draw once the panel is shown with `show()` / `focus()`.
-  The same WKWebView panel in a standalone AppKit program draws, so the trigger
-  is in laufey's panel setup and is still open.
+- **A non-activating panel** (`no_activate`), never focused: its page is visible
+  and draws a frame within 2 s, on every engine. (This used to be N/A on the
+  WebKit engines as "WebKit runs no animation frames in a panel never focused".
+  It was the check's own race: it asked for the frame as soon as the window
+  answered a script, which the initial `about:blank` does, and the frame request
+  was lost with that document when the app's page committed. The checks now wait
+  for the app's own document.)
 - **A window created hidden** stays hidden through both reveals (the WebView
   backends; CEF and Winit have no hidden-on-create and report N/A).
 

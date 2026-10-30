@@ -32,3 +32,29 @@ one applies (`badge`, `badgeReason`). Requesting attention bounces the dock icon
 on macOS, flashes the taskbar button on Windows, and sets the window's urgency
 hint on Linux. The dock menu, the ability to hide the dock icon, and the reopen
 callback exist only on macOS.
+
+## Activation policy (API ≥ 50)
+
+A tray / menu-bar app has no Dock icon. `set_dock_visible(false)` switches the
+app to the Accessory policy at runtime, but a host that starts Regular shows the
+icon (and the menu bar) for a moment first. From API 50 the macOS hosts start in
+the policy the [launch configuration](launch-config.md) names
+(`"activationPolicy": "accessory"`, or `LAUFEY_ACTIVATION_POLICY=accessory`), or
+Accessory when the bundle's `Info.plist` has `LSUIElement` set, so an accessory
+app never shows a Dock icon. Before API 50 the hosts forced Regular at launch,
+which undid `LSUIElement`.
+
+```rust
+// Open a full window: show the Dock icon and the menu bar while it is open.
+laufey::set_activation_policy(laufey::LAUFEY_ACTIVATION_POLICY_REGULAR);
+// Back to a tray app.
+laufey::set_activation_policy(laufey::LAUFEY_ACTIVATION_POLICY_ACCESSORY);
+assert_eq!(laufey::activation_policy(), Some(1));
+```
+
+Switching to Regular also activates the app, so the window it shows next comes
+to the front. An Accessory app keeps running when its last window closes (see
+[Keeping a tray app alive](window-management.md)). Windows and Linux have no
+app-level policy (`activation_policy()` is `None`); keep windows off the taskbar
+with `set_skip_taskbar` instead
+([Overlay windows](window-management.md#overlay-windows-api--50)).

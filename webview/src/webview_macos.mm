@@ -104,6 +104,22 @@ class WKWebViewBackend : public LaufeyBackend {
   bool IsClickPassthrough(uint32_t window_id) override;
   void SetClickPassthroughForward(uint32_t window_id, bool forward) override;
   bool IsClickPassthroughForward(uint32_t window_id) override;
+  uint32_t OverlayCapabilities() override;
+  void SetInputRegion(uint32_t window_id,
+                      const laufey_common::InputRegion& region) override;
+  bool SetVisibleOnAllWorkspaces(uint32_t window_id, bool visible,
+                                 bool full_screen) override;
+  bool SetWindowLevel(uint32_t window_id, int32_t level) override;
+  void SetTrayEventHandler(uint32_t tray_id, laufey_tray_event_fn handler,
+                           void* user_data) override {
+    laufey_common::SetTrayEventHandlerMac(tray_id, handler, user_data);
+  }
+  uint32_t TrayCapabilities() override {
+    return laufey_common::TrayCapabilitiesMac();
+  }
+  bool PopUpTrayMenu(uint32_t tray_id) override {
+    return laufey_common::PopUpTrayMenuMac(tray_id);
+  }
   bool IsVisible(uint32_t window_id) override;
   void Show(uint32_t window_id) override;
   void Hide(uint32_t window_id) override;
@@ -2743,7 +2759,9 @@ void WKWebViewBackend::SetClickPassthrough(uint32_t window_id, bool enabled) {
       std::lock_guard<std::mutex> lock(windows_mutex_);
       auto* state = GetWindow(window_id);
       if (state) {
-        [state->window setIgnoresMouseEvents:enabled];
+        // Recorded apart from an input region's own toggling (API 50).
+        laufey_common::MacSetClickPassthrough((__bridge void*)state->window,
+                                              enabled);
       }
     }
   });
@@ -2755,10 +2773,73 @@ bool WKWebViewBackend::IsClickPassthrough(uint32_t window_id) {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
-      result = [state->window ignoresMouseEvents];
+      result =
+          laufey_common::MacIsClickPassthrough((__bridge void*)state->window);
     }
   });
   return result;
+}
+
+uint32_t WKWebViewBackend::OverlayCapabilities() {
+  return LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH |
+         LAUFEY_OVERLAY_CAP_PASSTHROUGH_FORWARD |
+         LAUFEY_OVERLAY_CAP_INPUT_REGION | LAUFEY_OVERLAY_CAP_ALL_WORKSPACES |
+         LAUFEY_OVERLAY_CAP_VISIBLE_ON_FULL_SCREEN |
+         LAUFEY_OVERLAY_CAP_WINDOW_LEVELS | LAUFEY_OVERLAY_CAP_TRANSPARENT |
+         LAUFEY_OVERLAY_CAP_ACTIVATION_POLICY |
+         LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+}
+
+void WKWebViewBackend::SetInputRegion(
+    uint32_t window_id, const laufey_common::InputRegion& region) {
+  laufey_common::InputRegion copy = region;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* win = nil;
+      {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id))
+          win = state->window;
+      }
+      if (win)
+        laufey_common::MacSetInputRegion((__bridge void*)win, copy);
+    }
+  });
+}
+
+bool WKWebViewBackend::SetVisibleOnAllWorkspaces(uint32_t window_id,
+                                                 bool visible,
+                                                 bool full_screen) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* win = nil;
+      {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id))
+          win = state->window;
+      }
+      if (win)
+        laufey_common::MacSetVisibleOnAllWorkspaces((__bridge void*)win,
+                                                    visible, full_screen);
+    }
+  });
+  return true;
+}
+
+bool WKWebViewBackend::SetWindowLevel(uint32_t window_id, int32_t level) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @autoreleasepool {
+      NSWindow* win = nil;
+      {
+        std::lock_guard<std::mutex> lock(windows_mutex_);
+        if (auto* state = GetWindow(window_id))
+          win = state->window;
+      }
+      if (win)
+        laufey_common::MacSetWindowLevel((__bridge void*)win, level);
+    }
+  });
+  return true;
 }
 
 void WKWebViewBackend::SetClickPassthroughForward(uint32_t window_id,

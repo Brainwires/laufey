@@ -58,6 +58,7 @@ set(LAUFEY_COMMON_SRCS
   src/auth_session.cc
   src/platform_features.cc
   src/title_bar.cc
+  src/overlay.cc
 )
 
 if(WIN32)
@@ -88,6 +89,8 @@ if(APPLE)
     src/cef_keychain_mac.mm
     src/share_mac.mm
     src/user_activity_mac.mm
+    src/overlay_mac.mm
+    src/speech_mac.mm
   )
 elseif(UNIX)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -102,6 +105,7 @@ elseif(UNIX)
     src/keymap_gdk.cc
     src/menu_linux.cc
     src/tray_linux.cc
+    src/tray_sni_linux.cc
     src/io_linux.cc
     src/shortcuts_linux.cc
     src/login_item_linux.cc
@@ -113,6 +117,8 @@ elseif(UNIX)
     src/passkey_linux.cc
     src/secret_store_linux.cc
     src/termination_signals_linux.cc
+    src/overlay_linux.cc
+    src/speech_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -128,6 +134,8 @@ elseif(WIN32)
     src/shortcuts_win.cc
     src/login_item_win.cc
     src/title_bar_win.cc
+    src/overlay_win.cc
+    src/speech_win.cc
   )
 endif()
 
@@ -156,6 +164,10 @@ if(WIN32)
     version
     # Notification click keys (BCryptGenRandom).
     bcrypt
+    # Text to speech (SAPI's ISpVoice, API 50): COM through ole32 / uuid.
+    sapi
+    # SetWindowSubclass (the skip-taskbar setter, API 50).
+    comctl32
   )
 elseif(APPLE)
   find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
@@ -170,7 +182,10 @@ elseif(APPLE)
   find_library(SERVICEMANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
   # The secure store (SecItem*, SecAccess, SecTask).
   find_library(SECURITY_FRAMEWORK Security REQUIRED)
+  # Text to speech (AVSpeechSynthesizer, API 50).
+  find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
   target_link_libraries(laufey_backend_common PUBLIC
+    ${AVFOUNDATION_FRAMEWORK}
     ${USERNOTIFICATIONS_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
     ${COCOA_FRAMEWORK}
@@ -315,6 +330,11 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_downloads_test tests/downloads_test.cc)
   target_link_libraries(laufey_downloads_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_downloads_test COMMAND laufey_downloads_test)
+
+  # Overlay windows, the activation policy and speech (API 50; no OS).
+  add_executable(laufey_overlay_test tests/overlay_test.cc)
+  target_link_libraries(laufey_overlay_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_overlay_test COMMAND laufey_overlay_test)
 
   # The share sheet's request parsing (API 49; no OS).
   add_executable(laufey_share_test tests/share_test.cc)

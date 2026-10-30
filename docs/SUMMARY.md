@@ -21,6 +21,7 @@
 - [Deep links](deep-links.md)
 - [Tray / status bar](tray.md)
 - [Notifications](notifications.md)
+- [Text to speech](speech.md)
 - [Clipboard](clipboard.md)
 - [Global shortcuts](global-shortcuts.md)
 - [Launch at login](launch-at-login.md)

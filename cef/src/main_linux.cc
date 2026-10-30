@@ -33,6 +33,7 @@
 #include "renderer_app.h"
 #include "laufey_window.h"
 #include "runtime_loader.h"
+#include "laufey_overlay.h"
 
 #include <gio/gio.h>
 
@@ -633,40 +634,136 @@ void LaufeySetDialogTransientFor(void* dialog, unsigned long parent_xid) {
 #endif
 }
 
-// X11 has no cheap query for "is the input shape empty", so remember which
-// windows we made click-passthrough. Only touched on the CEF UI thread.
-static std::set<unsigned long> g_click_passthrough_xids;
-
-void SetLinuxWindowClickPassthrough(unsigned long xid, bool enabled) {
+void* LinuxGdkWindowForXid(unsigned long xid) {
 #ifdef GDK_WINDOWING_X11
   GdkDisplay* gdk_display = gdk_display_get_default();
-  if (!gdk_display || !GDK_IS_X11_DISPLAY(gdk_display))
-    return;
-  // Wrap the foreign XID in a GdkWindow so GDK's own XShape linkage sets the
-  // input region — no direct libXext dependency needed.
-  GdkWindow* gdk_win = gdk_x11_window_foreign_new_for_display(gdk_display, xid);
-  if (!gdk_win)
-    return;
-  if (enabled) {
-    // An empty input shape makes the whole window transparent to pointer
-    // events; they fall through to whatever is beneath. Best-effort under a
-    // reparenting window manager (the WM frame may still catch clicks), so
-    // pair it with a frameless window.
-    cairo_region_t* empty = cairo_region_create();
-    gdk_window_input_shape_combine_region(gdk_win, empty, 0, 0);
-    cairo_region_destroy(empty);
-    g_click_passthrough_xids.insert(xid);
-  } else {
-    // NULL restores the default input shape (the full window).
-    gdk_window_input_shape_combine_region(gdk_win, nullptr, 0, 0);
-    g_click_passthrough_xids.erase(xid);
-  }
-  g_object_unref(gdk_win);
+  if (!gdk_display || !GDK_IS_X11_DISPLAY(gdk_display) || !xid)
+    return nullptr;
+  // A foreign wrapper of the XID, so GDK's own XShape / EWMH code does the
+  // work: no direct libXext dependency.
+  return gdk_x11_window_foreign_new_for_display(gdk_display, xid);
+#else
+  (void)xid;
+  return nullptr;
 #endif
 }
 
+double LinuxInputScaleForXid(void* gdk_window, double device_scale) {
+  // Content DIPs to the foreign window's GDK coordinates: CEF draws in
+  // device pixels, GDK counts in its own scale (GDK_SCALE, usually 1).
+  int gdk_scale =
+      gdk_window ? gdk_window_get_scale_factor(GDK_WINDOW(gdk_window)) : 1;
+  if (gdk_scale < 1)
+    gdk_scale = 1;
+  if (!(device_scale > 0))
+    device_scale = 1.0;
+  return device_scale / gdk_scale;
+}
+
+bool LinuxX11ChangeWmState(unsigned long xid, bool add, const char* state1,
+                           const char* state2) {
+#ifdef GDK_WINDOWING_X11
+  GdkDisplay* gdk_display = gdk_display_get_default();
+  if (!gdk_display || !GDK_IS_X11_DISPLAY(gdk_display) || !xid)
+    return false;
+  Display* dpy = GDK_DISPLAY_XDISPLAY(gdk_display);
+  Atom net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
+  Atom a1 = XInternAtom(dpy, state1, False);
+  Atom a2 = state2 ? XInternAtom(dpy, state2, False) : None;
+  XWindowAttributes attrs;
+  if (XGetWindowAttributes(dpy, xid, &attrs) && attrs.map_state != IsUnmapped) {
+    // A mapped window: ask the window manager (EWMH _NET_WM_STATE request).
+    XEvent ev = {};
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = xid;
+    ev.xclient.message_type = net_wm_state;
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = add ? 1 : 0;  // _NET_WM_STATE_ADD / _REMOVE
+    ev.xclient.data.l[1] = (long)a1;
+    ev.xclient.data.l[2] = (long)a2;
+    ev.xclient.data.l[3] = 1;  // a normal application
+    XSendEvent(dpy, DefaultRootWindow(dpy), False,
+               SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+  } else {
+    // Unmapped: the property the window manager reads when it maps.
+    std::vector<Atom> states;
+    Atom type = None;
+    int format = 0;
+    unsigned long n = 0, after = 0;
+    unsigned char* prop = nullptr;
+    if (XGetWindowProperty(dpy, xid, net_wm_state, 0, 64, False, XA_ATOM, &type,
+                           &format, &n, &after, &prop) == Success &&
+        prop) {
+      Atom* atoms = reinterpret_cast<Atom*>(prop);
+      for (unsigned long i = 0; i < n; i++) {
+        if (atoms[i] != a1 && atoms[i] != a2)
+          states.push_back(atoms[i]);
+      }
+      XFree(prop);
+    }
+    if (add) {
+      states.push_back(a1);
+      if (a2 != None)
+        states.push_back(a2);
+    }
+    XChangeProperty(dpy, xid, net_wm_state, XA_ATOM, 32, PropModeReplace,
+                    reinterpret_cast<unsigned char*>(states.data()),
+                    (int)states.size());
+  }
+  XFlush(dpy);
+  return true;
+#else
+  (void)xid;
+  (void)add;
+  (void)state1;
+  (void)state2;
+  return false;
+#endif
+}
+
+bool LinuxX11SetAllDesktops(unsigned long xid, bool all) {
+#ifdef GDK_WINDOWING_X11
+  if (!LinuxX11ChangeWmState(xid, all, "_NET_WM_STATE_STICKY", nullptr))
+    return false;
+  if (all) {
+    GdkDisplay* gdk_display = gdk_display_get_default();
+    Display* dpy = GDK_DISPLAY_XDISPLAY(gdk_display);
+    // _NET_WM_DESKTOP 0xFFFFFFFF: every desktop (a request to the WM).
+    XEvent ev = {};
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = xid;
+    ev.xclient.message_type = XInternAtom(dpy, "_NET_WM_DESKTOP", False);
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = 0xFFFFFFFF;
+    ev.xclient.data.l[1] = 1;
+    XSendEvent(dpy, DefaultRootWindow(dpy), False,
+               SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+    XFlush(dpy);
+  }
+  return true;
+#else
+  (void)xid;
+  (void)all;
+  return false;
+#endif
+}
+
+void SetLinuxWindowClickPassthrough(unsigned long xid, bool enabled) {
+  void* gdk_win = LinuxGdkWindowForXid(xid);
+  if (!gdk_win)
+    return;
+  // An empty input shape makes the whole window transparent to pointer
+  // events; they fall through to whatever is beneath. Best-effort under a
+  // reparenting window manager (the WM frame may still catch clicks), so
+  // pair it with a frameless window. Turning it off restores an input
+  // region (API 50) if one is set, else the whole window. The region's own
+  // scale was recorded with it.
+  laufey_common::LinuxSetClickPassthrough(xid, nullptr, gdk_win, enabled, 0);
+  g_object_unref(gdk_win);
+}
+
 bool IsLinuxWindowClickPassthrough(unsigned long xid) {
-  return g_click_passthrough_xids.count(xid) != 0;
+  return laufey_common::LinuxIsClickPassthrough(xid);
 }
 
 void MonitorLinuxWindowEvents(unsigned long xid) {

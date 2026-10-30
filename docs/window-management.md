@@ -71,10 +71,14 @@ These are two distinct things:
   .load("index.html");
   ```
 
-  Transparency is supported by the system-WebView backend on macOS and on Linux
-  (WebKitGTK, on a compositing window manager), and by the Winit backend. It is
-  not supported by the Windows WebView2 backend or the CEF backend, which paint
-  an opaque window background; the flag is ignored there.
+  Transparency is supported by the system-WebView backend on macOS, on Linux
+  (WebKitGTK, on a compositing window manager) and, from API 50, on Windows
+  (WebView2: DWM blur-behind over an empty region turns on per-pixel alpha, and
+  the web view's default background is transparent), and by the Winit backend.
+  The CEF backend paints an opaque window in windowed mode and ignores the flag
+  (it would need off-screen rendering). `overlay_capabilities()` reports
+  `LAUFEY_OVERLAY_CAP_TRANSPARENT` where it takes effect (on Linux only with a
+  compositor).
 
 ## Click passthrough
 
@@ -156,6 +160,87 @@ does not expose global input. One macOS caveat: global monitors never see events
 delivered to your _own_ application, so if the event lands on another
 (non-passthrough) window of the same app that overlaps the overlay, the
 overlay's handlers do not fire for it.
+
+## Overlay windows (API ≥ 50)
+
+A desktop companion, a HUD or a tray popover needs more than passthrough: only
+part of the window takes clicks, it stays on every Space and over full-screen
+apps, it keeps off the taskbar, and on Wayland it can be placed at all.
+`overlay_capabilities()` (`OverlayCapabilities`) says which of these work on
+this backend and OS; a setter for something not reported changes nothing and
+returns `false`.
+
+```rust
+use laufey::{InputRect, Window, WindowOptions, LAUFEY_WINDOW_LEVEL_STATUS};
+
+let w = Window::new_with_options(
+  260,
+  300,
+  WindowOptions {
+    frameless: true,
+    transparent: true,
+    no_activate: true,
+    overlay: true, // a layer-shell surface on wlroots / KDE Wayland
+    ..Default::default()
+  },
+)
+.load("companion.html");
+// Only the character and its bubble take clicks; the rest passes through.
+w.set_input_region(Some(&[InputRect { x: 40, y: 60, width: 180, height: 220 }]));
+w.set_visible_on_all_workspaces(true, true);
+w.set_level(LAUFEY_WINDOW_LEVEL_STATUS);
+w.set_skip_taskbar(true);
+```
+
+- **Input region** (`set_input_region`, `LAUFEY_OVERLAY_CAP_INPUT_REGION`):
+  rectangles in content DIPs (CSS pixels) that take mouse input; elsewhere a
+  click reaches the window beneath. `None` removes the region; an empty list
+  lets everything through. It is independent of `set_click_passthrough`, which
+  wins while on and reads back only what it was set to. macOS has no input
+  shape: the window's `ignoresMouseEvents` follows the cursor (a global and a
+  local mouse monitor, no permission, plus a 30 Hz timer for a window that moves
+  under a cursor at rest). Windows: `WS_EX_TRANSPARENT` follows the cursor on a
+  60 Hz timer of the window's own thread, so the region is input-only (nothing
+  is clipped; `SetWindowRgn` would clip the painting, and `HTTRANSPARENT` only
+  passes clicks within one thread). Linux: the window's input shape (X11 SHAPE,
+  Wayland `wl_surface.set_input_region`), through GDK.
+- **Skip the taskbar** (`set_skip_taskbar`): Windows `ITaskbarList` `DeleteTab`
+  / `AddTab`, re-applied after each show (the window stays in Alt-Tab); Linux
+  X11 the skip-taskbar and skip-pager hints (`_NET_WM_STATE`); not on Wayland
+  (no protocol) or macOS, where the Dock is app-level (see
+  [the activation policy](dock-taskbar.md#activation-policy-api--50)).
+- **Every workspace** (`set_visible_on_all_workspaces(visible, full_screen)`):
+  macOS `collectionBehavior` `CanJoinAllSpaces | Stationary`, plus
+  `FullScreenAuxiliary` with `full_screen` (over another app's full-screen Space
+  the window must also be at `STATUS` or above, and an accessory app is the
+  reliable case); Linux X11 sticky (`_NET_WM_STATE_STICKY`, `_NET_WM_DESKTOP`
+  `0xFFFFFFFF`). Windows has no public API for it (a `no_activate` tool window
+  shows on every virtual desktop already); a layer surface is on every workspace
+  by construction.
+- **Levels** (`set_level`, Electron's names): `NORMAL`, `FLOATING`, `STATUS`,
+  `POP_UP_MENU`, `SCREEN_SAVER`, mapped to the macOS window levels. Windows and
+  Linux have one floating level (topmost / keep-above) for every level above
+  `NORMAL`.
+- **Layer shell** (`WindowOptions::overlay`, `LAUFEY_OVERLAY_CAP_LAYER_SHELL`):
+  on a Wayland compositor with `zwlr_layer_shell_v1` (wlroots compositors, KDE
+  Plasma, COSMIC) the WebKitGTK window becomes an overlay-layer surface through
+  `libgtk-layer-shell.so.0`, loaded at runtime (a package `Recommends`, not a
+  build dependency): above every window, on every workspace, out of the task
+  list, no keyboard focus, and placeable — `set_position` sets its margins from
+  the top-left corner. GNOME has no layer shell: there, and on X11, the flag is
+  ignored and the window is an ordinary one.
+
+|                  | macOS        | Windows      | Linux X11            | Linux Wayland          |
+| ---------------- | ------------ | ------------ | -------------------- | ---------------------- |
+| input region     | WebView, CEF | WebView, CEF | WebView, CEF         | WebView                |
+| skip taskbar     | —            | WebView, CEF | WebView, CEF         | —                      |
+| every workspace  | WebView, CEF | —            | WebView, CEF         | layer shell            |
+| over full screen | WebView, CEF | —            | —                    | layer shell            |
+| levels           | WebView, CEF | WebView, CEF | WebView, CEF         | WebView (hint)         |
+| transparent      | WebView      | WebView      | WebView (compositor) | WebView                |
+| layer shell      | —            | —            | —                    | WebView (wlroots, KDE) |
+
+The Winit backend reports none of them yet.
 
 ## Maximize, minimize and fullscreen (API ≥ 38)
 

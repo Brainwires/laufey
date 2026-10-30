@@ -21,6 +21,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
+#include "laufey_overlay.h"
 #include "laufey_window.h"
 #include "laufey_cef_keychain.h"
 #include "laufey_cef_keychain_interpose.h"
@@ -393,7 +394,10 @@ int main(int argc, char* argv[]) {
     // app. Call this before CefInitialize so CEF's startup sees a
     // properly-registered NSApp — otherwise NSDockTile.setBadgeLabel: is
     // silently ignored.
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    // Regular unless the launch config's "activationPolicy" or the bundle's
+    // LSUIElement says accessory (API 50): a tray / menu-bar app then never
+    // shows a Dock icon, not even for the first frame.
+    laufey_common::MacApplyLaunchActivationPolicy();
 
     // Allow the host to override the dock icon at launch (e.g. a project's
     // favicon during `deno desktop --hmr`). Setting it programmatically

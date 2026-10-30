@@ -114,6 +114,15 @@ void SetTrayDoubleClickHandlerWin(uint32_t tray_id,
 // unknown or the shell can't report the position.
 bool GetTrayIconBoundsWin(uint32_t tray_id, int* x, int* y, int* width,
                           int* height);
+// Tray events with detail (API 50): every click kind from the legacy
+// callback's messages, modifiers from GetKeyState, the cursor in DIPs, and
+// hover enter / leave (a leave timer while the cursor is over the icon).
+void SetTrayEventHandlerWin(uint32_t tray_id, laufey_tray_event_fn handler,
+                            void* user_data);
+uint32_t TrayCapabilitiesWin();
+// Opens the tray's menu at the cursor, as a right click does; false
+// without one. Any thread.
+bool PopUpTrayMenuWin(uint32_t tray_id);
 #endif
 
 // ---------------------------------------------------------------------------
@@ -429,6 +438,13 @@ void SetTrayDoubleClickHandlerMac(uint32_t tray_id,
 // is unknown or the icon has no on-screen button yet.
 bool GetTrayIconBoundsMac(uint32_t tray_id, int* x, int* y, int* width,
                           int* height);
+// Tray events with detail (API 50): every click kind, modifiers, the cursor
+// and hover enter / leave (a tracking area on the status item's button).
+void SetTrayEventHandlerMac(uint32_t tray_id, laufey_tray_event_fn handler,
+                            void* user_data);
+uint32_t TrayCapabilitiesMac();
+// Opens the tray's menu at the icon; false without one. Any thread.
+bool PopUpTrayMenuMac(uint32_t tray_id);
 #endif
 
 #ifdef __linux__
@@ -496,10 +512,10 @@ bool TestTriggerMenuAcceleratorGtk(GtkWidget* window, const char* accelerator);
 // reason is platform_features()' "trayReason". Calls on a 0 id no-op.
 //
 // AppIndicator has no left-click event — a click anywhere pops the
-// indicator's menu — so SetTrayClickHandlerLinux and
+// indicator's menu — so on that path SetTrayClickHandlerLinux and
 // SetTrayDoubleClickHandlerLinux accept handlers for API symmetry but
 // don't surface clicks back (platform_features() reports "trayClicks":
-// false). The tooltip is the indicator's title, which StatusNotifier hosts
+// false). The StatusNotifierItem path (API 50, below) reports them. The tooltip is the indicator's title, which StatusNotifier hosts
 // show on hover.
 
 // Whether the appindicator library loads (loads it once). Any thread.
@@ -517,6 +533,14 @@ void SetTrayClickHandlerLinux(uint32_t tray_id, laufey_tray_click_fn handler,
 void SetTrayDoubleClickHandlerLinux(uint32_t tray_id,
                                     laufey_tray_click_fn handler,
                                     void* user_data);
+// API 50: with a StatusNotifierWatcher (and not
+// LAUFEY_TRAY_BACKEND=appindicator) the icon is laufey's own
+// StatusNotifierItem, which reports clicks: the click / double-click
+// handlers fire, and SetTrayEventHandlerLinux gets each event with the
+// host's click point. TrayCapabilitiesLinux is 0 on the AppIndicator path.
+void SetTrayEventHandlerLinux(uint32_t tray_id, laufey_tray_event_fn handler,
+                              void* user_data);
+uint32_t TrayCapabilitiesLinux();
 #endif
 
 // ---------------------------------------------------------------------------

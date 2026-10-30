@@ -78,6 +78,11 @@ struct LaunchConfig {
   // See LaunchProxyMode.
   bool has_proxy = false;
   std::string proxy;
+  // "activationPolicy" (macOS, API 50): "regular" (a Dock icon, the
+  // default), "accessory" (no Dock icon or menu bar: a tray / menu-bar app)
+  // or "prohibited". See LaunchActivationPolicyName.
+  bool has_activation_policy = false;
+  std::string activation_policy;
   // "bridgeOrigins" (API 44): the documents the JS bridge serves, as kept
   // entries ("*", "<scheme>://*" or an origin); see laufey_bridge_origin.h.
   bool has_bridge_origins = false;
@@ -251,6 +256,15 @@ std::string LaunchProxyModeFrom(const std::string& env_value, bool file_has,
 
 // LAUFEY_PROXY, else the launch file's "proxy", else "system".
 std::string LaunchProxyMode();
+
+// Whether `name` is an "activationPolicy" value: "regular", "accessory" or
+// "prohibited".
+bool IsValidActivationPolicyName(const std::string& name);
+
+// LAUFEY_ACTIVATION_POLICY when it is a valid name, else the launch file's
+// "activationPolicy", else "" (the host decides: LSUIElement, else regular).
+// An invalid environment value is reported on stderr and ignored.
+std::string LaunchActivationPolicyName();
 
 }  // namespace laufey_common
 

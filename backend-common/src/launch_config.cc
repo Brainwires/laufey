@@ -276,6 +276,19 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
       }
       config.has_proxy = true;
       config.proxy = value.string;
+    } else if (key == "activationPolicy") {
+      config.has_activation_policy = false;
+      config.activation_policy.clear();
+      if (!CheckString("activationPolicy", value, warnings))
+        continue;
+      if (!IsValidActivationPolicyName(value.string)) {
+        Warn(warnings, "\"activationPolicy\" \"" + value.string +
+                           "\" is not \"regular\", \"accessory\" or "
+                           "\"prohibited\"; ignoring it");
+        continue;
+      }
+      config.has_activation_policy = true;
+      config.activation_policy = value.string;
     } else if (key == "bridgeOrigins") {
       config.has_bridge_origins = false;
       config.bridge_origins.clear();
@@ -631,6 +644,23 @@ std::string LaunchProxyMode() {
   if (!warning.empty())
     std::cerr << "laufey: " << warning << std::endl;
   return mode;
+}
+
+bool IsValidActivationPolicyName(const std::string& name) {
+  return name == "regular" || name == "accessory" || name == "prohibited";
+}
+
+std::string LaunchActivationPolicyName() {
+  const LaunchConfig& file = ProcessLaunchConfig();
+  std::string env = GetEnvUtf8("LAUFEY_ACTIVATION_POLICY");
+  if (!env.empty()) {
+    if (IsValidActivationPolicyName(env))
+      return env;
+    std::cerr << "laufey: LAUFEY_ACTIVATION_POLICY=" << env
+              << " is not regular, accessory or prohibited; ignoring it"
+              << std::endl;
+  }
+  return file.has_activation_policy ? file.activation_policy : "";
 }
 
 bool LaunchSingleInstance() {
