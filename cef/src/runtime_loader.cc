@@ -26,6 +26,7 @@
 #include "laufey_single_instance.h"
 #include "laufey_sync_call.h"
 #include "laufey_system.h"
+#include "laufey_overlay.h"
 #include "laufey_window.h"
 #include "scheme_handler.h"
 
@@ -684,60 +685,31 @@ static void Backend_SetClickPassthrough(void* data, uint32_t window_id,
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
-    CefPostTask(
-        TID_UI,
-        base::BindOnce(
-            [](CefRefPtr<CefBrowser> b, bool en) {
-              auto browser_view = CefBrowserView::GetForBrowser(b);
-              if (!browser_view)
-                return;
-              auto window = browser_view->GetWindow();
-              if (!window)
-                return;
+    CefPostTask(TID_UI, base::BindOnce(
+                            [](CefRefPtr<CefBrowser> b, bool en) {
+                              auto browser_view =
+                                  CefBrowserView::GetForBrowser(b);
+                              if (!browser_view)
+                                return;
+                              auto window = browser_view->GetWindow();
+                              if (!window)
+                                return;
 #ifdef _WIN32
-              HWND hwnd = window->GetWindowHandle();
-              LONG ex = GetWindowLong(hwnd, GWL_EXSTYLE);
-              if (en) {
-                // WS_EX_TRANSPARENT excludes the whole top-level window
-                // (children included, so also CEF's widget windows) from
-                // mouse hit-testing, but only on a layered window.
-                bool newly_layered = !(ex & WS_EX_LAYERED);
-                SetWindowLong(hwnd, GWL_EXSTYLE,
-                              ex | WS_EX_TRANSPARENT | WS_EX_LAYERED);
-                if (newly_layered) {
-                  // A window that just became layered renders nothing until
-                  // its transparency attributes are set; fully opaque keeps
-                  // it visually unchanged.
-                  SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
-                }
-              } else {
-                LONG new_ex = ex & ~WS_EX_TRANSPARENT;
-                // Drop the layered style too unless a window opacity < 1.0
-                // still needs it.
-                BYTE alpha = 255;
-                DWORD flags = 0;
-                bool has_alpha =
-                    (ex & WS_EX_LAYERED) &&
-                    GetLayeredWindowAttributes(hwnd, nullptr, &alpha, &flags) &&
-                    (flags & LWA_ALPHA) && alpha < 255;
-                if (!has_alpha)
-                  new_ex &= ~WS_EX_LAYERED;
-                if (new_ex != ex) {
-                  SetWindowLong(hwnd, GWL_EXSTYLE, new_ex);
-                  if ((ex & WS_EX_LAYERED) && !(new_ex & WS_EX_LAYERED)) {
-                    RedrawWindow(hwnd, nullptr, nullptr,
-                                 RDW_ERASE | RDW_INVALIDATE | RDW_FRAME |
-                                     RDW_ALLCHILDREN);
-                  }
-                }
-              }
+                              // WS_EX_TRANSPARENT | WS_EX_LAYERED (it takes
+                              // CEF's widget windows with it), recorded apart
+                              // from an input region's own toggling (API 50;
+                              // overlay_win.cc).
+                              laufey_common::WinSetClickPassthrough(
+                                  window->GetWindowHandle(), en);
 #elif defined(__APPLE__)
-              SetNSWindowClickPassthrough(window->GetWindowHandle(), en);
+                              SetNSWindowClickPassthrough(
+                                  window->GetWindowHandle(), en);
 #elif defined(__linux__)
-              SetLinuxWindowClickPassthrough(window->GetWindowHandle(), en);
+                              SetLinuxWindowClickPassthrough(
+                                  window->GetWindowHandle(), en);
 #endif
-            },
-            browser, enabled));
+                            },
+                            browser, enabled));
   }
 }
 
@@ -754,8 +726,7 @@ static bool Backend_IsClickPassthrough(void* data, uint32_t window_id) {
       if (!window)
         return;
 #ifdef _WIN32
-      HWND hwnd = window->GetWindowHandle();
-      result = (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0;
+      result = laufey_common::WinIsClickPassthrough(window->GetWindowHandle());
 #elif defined(__APPLE__)
       result = IsNSWindowClickPassthrough(window->GetWindowHandle());
 #elif defined(__linux__)
@@ -802,6 +773,139 @@ static bool Backend_IsClickPassthroughForward(void* data, uint32_t window_id) {
   (void)window_id;
   return false;
 #endif
+}
+
+// --- Overlay windows (API 50; laufey_overlay.h) -----------------------------
+
+// Runs `fn(window)` on the UI thread for the window's CEF Views window, and
+// waits for it.
+template <typename Fn>
+static bool WithCefWindowSync(void* data, uint32_t window_id, Fn fn) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
+  if (!browser)
+    return false;
+  bool ok = false;
+  cef_invoke_sync([&] {
+    auto browser_view = CefBrowserView::GetForBrowser(browser);
+    if (!browser_view)
+      return;
+    auto window = browser_view->GetWindow();
+    if (!window)
+      return;
+    ok = fn(window);
+  });
+  return ok;
+}
+
+static uint32_t Backend_OverlayCapabilities(void* /*data*/) {
+  // CEF's windowed mode paints an opaque window: no TRANSPARENT.
+#if defined(__APPLE__)
+  return LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH |
+         LAUFEY_OVERLAY_CAP_PASSTHROUGH_FORWARD |
+         LAUFEY_OVERLAY_CAP_INPUT_REGION | LAUFEY_OVERLAY_CAP_ALL_WORKSPACES |
+         LAUFEY_OVERLAY_CAP_VISIBLE_ON_FULL_SCREEN |
+         LAUFEY_OVERLAY_CAP_WINDOW_LEVELS |
+         LAUFEY_OVERLAY_CAP_ACTIVATION_POLICY |
+         LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+#elif defined(_WIN32)
+  return LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH |
+         LAUFEY_OVERLAY_CAP_INPUT_REGION | LAUFEY_OVERLAY_CAP_SKIP_TASKBAR |
+         LAUFEY_OVERLAY_CAP_WINDOW_LEVELS | LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+#elif defined(__linux__)
+  // The CEF windows are X11 windows (Xwayland in a Wayland session).
+  bool x11 = false;
+  cef_invoke_sync([&] {
+    x11 = gdk_display_get_default() && !laufey_common::LinuxIsWayland();
+  });
+  return x11 ? LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH |
+                   LAUFEY_OVERLAY_CAP_INPUT_REGION |
+                   LAUFEY_OVERLAY_CAP_SKIP_TASKBAR |
+                   LAUFEY_OVERLAY_CAP_ALL_WORKSPACES |
+                   LAUFEY_OVERLAY_CAP_WINDOW_LEVELS |
+                   LAUFEY_OVERLAY_CAP_NON_ACTIVATING
+             : 0;
+#else
+  return 0;
+#endif
+}
+
+static void Backend_SetInputRegion(void* data, uint32_t window_id,
+                                   const laufey_rect_t* rects, size_t count) {
+  laufey_common::InputRegion region =
+      laufey_common::MakeInputRegion(rects, count);
+  WithCefWindowSync(data, window_id, [&](CefRefPtr<CefWindow> window) {
+#if defined(__APPLE__)
+    laufey_common::MacSetInputRegion(
+        NSWindowForCefHandle(window->GetWindowHandle()), region);
+#elif defined(_WIN32)
+    laufey_common::WinSetInputRegion(window->GetWindowHandle(), region);
+#elif defined(__linux__)
+    unsigned long xid = window->GetWindowHandle();
+    void* gdk_win = LinuxGdkWindowForXid(xid);
+    if (!gdk_win)
+      return false;
+    auto display = window->GetDisplay();
+    double scale = LinuxInputScaleForXid(
+        gdk_win, display ? display->GetDeviceScaleFactor() : 1.0);
+    laufey_common::LinuxSetInputRegion(xid, nullptr, gdk_win, region, scale);
+    g_object_unref(gdk_win);
+#endif
+    return true;
+  });
+}
+
+static bool Backend_SetSkipTaskbar(void* data, uint32_t window_id, bool skip) {
+  return WithCefWindowSync(data, window_id, [&](CefRefPtr<CefWindow> window) {
+#if defined(_WIN32)
+    return laufey_common::WinSetSkipTaskbar(window->GetWindowHandle(), skip);
+#elif defined(__linux__)
+    return LinuxX11ChangeWmState(window->GetWindowHandle(), skip,
+                                 "_NET_WM_STATE_SKIP_TASKBAR",
+                                 "_NET_WM_STATE_SKIP_PAGER");
+#else
+    (void)window;
+    (void)skip;
+    return false;
+#endif
+  });
+}
+
+static bool Backend_SetVisibleOnAllWorkspaces(void* data, uint32_t window_id,
+                                              bool visible, bool full_screen) {
+  return WithCefWindowSync(data, window_id, [&](CefRefPtr<CefWindow> window) {
+#if defined(__APPLE__)
+    return laufey_common::MacSetVisibleOnAllWorkspaces(
+        NSWindowForCefHandle(window->GetWindowHandle()), visible, full_screen);
+#elif defined(__linux__)
+    return LinuxX11SetAllDesktops(window->GetWindowHandle(), visible);
+#else
+    (void)window;
+    (void)visible;
+    (void)full_screen;
+    return false;
+#endif
+  });
+}
+
+static bool Backend_SetWindowLevel(void* data, uint32_t window_id,
+                                   int32_t level) {
+  if (!laufey_common::IsValidWindowLevel(level))
+    return false;
+  return WithCefWindowSync(data, window_id, [&](CefRefPtr<CefWindow> window) {
+#if defined(__APPLE__)
+    return laufey_common::MacSetWindowLevel(
+        NSWindowForCefHandle(window->GetWindowHandle()), level);
+#elif defined(_WIN32)
+    return laufey_common::WinSetWindowLevel(window->GetWindowHandle(), level);
+#elif defined(__linux__)
+    return LinuxX11ChangeWmState(window->GetWindowHandle(),
+                                 level != LAUFEY_WINDOW_LEVEL_NORMAL,
+                                 "_NET_WM_STATE_ABOVE", nullptr);
+#else
+    return false;
+#endif
+  });
 }
 
 static bool Backend_IsVisible(void* data, uint32_t window_id) {
@@ -3247,6 +3351,32 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_click_passthrough_forward =
       Backend_SetClickPassthroughForward;
   backend_api_.is_click_passthrough_forward = Backend_IsClickPassthroughForward;
+  // Overlay windows, the activation policy and speech (API 50).
+  backend_api_.overlay_capabilities = Backend_OverlayCapabilities;
+  backend_api_.set_input_region = Backend_SetInputRegion;
+  backend_api_.set_skip_taskbar = Backend_SetSkipTaskbar;
+  backend_api_.set_visible_on_all_workspaces =
+      Backend_SetVisibleOnAllWorkspaces;
+  backend_api_.set_window_level = Backend_SetWindowLevel;
+#if defined(__APPLE__)
+  backend_api_.set_activation_policy = [](void*, int32_t policy) -> bool {
+    return laufey_common::MacSetActivationPolicy(policy);
+  };
+  backend_api_.get_activation_policy = [](void*) -> int32_t {
+    return laufey_common::MacGetActivationPolicy();
+  };
+#else
+  backend_api_.set_activation_policy = [](void*, int32_t) { return false; };
+  backend_api_.get_activation_policy = [](void*) -> int32_t { return -1; };
+#endif
+  backend_api_.speak = [](void*, const char* json, laufey_speech_fn cb,
+                          void* user_data) -> uint32_t {
+    return laufey_common::Speak(json, cb, user_data);
+  };
+  backend_api_.stop_speaking = [](void*) { laufey_common::StopSpeaking(); };
+  backend_api_.speech_voices = [](void*) -> char* {
+    return laufey_common::SpeechVoicesJson();
+  };
   backend_api_.is_visible = Backend_IsVisible;
   backend_api_.show = Backend_Show;
   backend_api_.hide = Backend_Hide;
@@ -3520,6 +3650,17 @@ void RuntimeLoader::InitializeBackendApi() {
       Backend_SetTrayDoubleClickHandler_Mac;
   backend_api_.set_tray_icon_dark = Backend_SetTrayIconDark_Mac;
   backend_api_.get_tray_icon_bounds = Backend_GetTrayIconBounds_Mac;
+  // Tray events (API 50): backend-common's tray is thread-safe.
+  backend_api_.set_tray_event_handler =
+      [](void*, uint32_t tray_id, laufey_tray_event_fn fn, void* user_data) {
+        laufey_common::SetTrayEventHandlerMac(tray_id, fn, user_data);
+      };
+  backend_api_.tray_capabilities = [](void*) -> uint32_t {
+    return laufey_common::TrayCapabilitiesMac();
+  };
+  backend_api_.pop_up_tray_menu = [](void*, uint32_t tray_id) -> bool {
+    return laufey_common::PopUpTrayMenuMac(tray_id);
+  };
 #elif defined(_WIN32)
   backend_api_.create_tray_icon = Backend_CreateTrayIcon_Win;
   backend_api_.destroy_tray_icon = Backend_DestroyTrayIcon_Win;
@@ -3531,6 +3672,16 @@ void RuntimeLoader::InitializeBackendApi() {
       Backend_SetTrayDoubleClickHandler_Win;
   backend_api_.set_tray_icon_dark = Backend_SetTrayIconDark_Win;
   backend_api_.get_tray_icon_bounds = Backend_GetTrayIconBounds_Win;
+  backend_api_.set_tray_event_handler =
+      [](void*, uint32_t tray_id, laufey_tray_event_fn fn, void* user_data) {
+        laufey_common::SetTrayEventHandlerWin(tray_id, fn, user_data);
+      };
+  backend_api_.tray_capabilities = [](void*) -> uint32_t {
+    return laufey_common::TrayCapabilitiesWin();
+  };
+  backend_api_.pop_up_tray_menu = [](void*, uint32_t tray_id) -> bool {
+    return laufey_common::PopUpTrayMenuWin(tray_id);
+  };
 #elif defined(__linux__)
   backend_api_.create_tray_icon = Backend_CreateTrayIcon_Linux;
   backend_api_.destroy_tray_icon = Backend_DestroyTrayIcon_Linux;
@@ -3544,6 +3695,14 @@ void RuntimeLoader::InitializeBackendApi() {
   // No get_tray_icon_bounds on Linux: the AppIndicator / StatusNotifier
   // protocol does not expose the icon's screen position, so it stays NULL
   // and Tray.getBounds() reports null.
+  backend_api_.set_tray_event_handler =
+      [](void*, uint32_t tray_id, laufey_tray_event_fn fn, void* user_data) {
+        laufey_common::SetTrayEventHandlerLinux(tray_id, fn, user_data);
+      };
+  backend_api_.tray_capabilities = [](void*) -> uint32_t {
+    return laufey_common::TrayCapabilitiesLinux();
+  };
+  backend_api_.pop_up_tray_menu = [](void*, uint32_t) { return false; };
 #endif
 
   // --- Notifications and permissions (laufey_notifications.h) ---

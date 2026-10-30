@@ -329,6 +329,19 @@ mod linux {
         .call::<_, _, ()>("Event", &(target.id, "clicked", &empty, 0u32))
         .await?;
       eprintln!("[e2e] fired dbusmenu Event(clicked) on id={}", target.id);
+      // API 50: the item's own clicks, as a host sends them. The battery
+      // checks each reaches its tray event handler with this point.
+      let item =
+        Proxy::new(conn, bus_name, sni_path, "org.kde.StatusNotifierItem")
+          .await?;
+      for method in ["Activate", "SecondaryActivate", "ContextMenu"] {
+        let sent: zbus::Result<()> = item.call(method, &(12i32, 34i32)).await;
+        check(
+          &format!("StatusNotifierItem.{method} answers"),
+          sent.is_ok(),
+          failed,
+        );
+      }
     } else {
       check("menu contains 'Ping' item", false, failed);
     }

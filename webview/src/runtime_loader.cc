@@ -322,6 +322,60 @@ static bool Backend_IsClickPassthroughForward(void* data, uint32_t window_id) {
   return false;
 }
 
+// --- Overlay windows and tray events (API 50) -------------------------------
+
+static LaufeyBackend* OverlayBackendOf(void* data) {
+  return static_cast<RuntimeLoader*>(data)->GetBackend();
+}
+
+static uint32_t Backend_OverlayCapabilities(void* data) {
+  LaufeyBackend* backend = OverlayBackendOf(data);
+  return backend ? backend->OverlayCapabilities() : 0;
+}
+
+static void Backend_SetInputRegion(void* data, uint32_t window_id,
+                                   const laufey_rect_t* rects, size_t count) {
+  if (LaufeyBackend* backend = OverlayBackendOf(data))
+    backend->SetInputRegion(window_id,
+                            laufey_common::MakeInputRegion(rects, count));
+}
+
+static bool Backend_SetSkipTaskbar(void* data, uint32_t window_id, bool skip) {
+  LaufeyBackend* backend = OverlayBackendOf(data);
+  return backend && backend->SetSkipTaskbar(window_id, skip);
+}
+
+static bool Backend_SetVisibleOnAllWorkspaces(void* data, uint32_t window_id,
+                                              bool visible, bool full_screen) {
+  LaufeyBackend* backend = OverlayBackendOf(data);
+  return backend &&
+         backend->SetVisibleOnAllWorkspaces(window_id, visible, full_screen);
+}
+
+static bool Backend_SetWindowLevel(void* data, uint32_t window_id,
+                                   int32_t level) {
+  LaufeyBackend* backend = OverlayBackendOf(data);
+  return backend && laufey_common::IsValidWindowLevel(level) &&
+         backend->SetWindowLevel(window_id, level);
+}
+
+static void Backend_SetTrayEventHandler(void* data, uint32_t tray_id,
+                                        laufey_tray_event_fn handler,
+                                        void* user_data) {
+  if (LaufeyBackend* backend = OverlayBackendOf(data))
+    backend->SetTrayEventHandler(tray_id, handler, user_data);
+}
+
+static uint32_t Backend_TrayCapabilities(void* data) {
+  LaufeyBackend* backend = OverlayBackendOf(data);
+  return backend ? backend->TrayCapabilities() : 0;
+}
+
+static bool Backend_PopUpTrayMenu(void* data, uint32_t tray_id) {
+  LaufeyBackend* backend = OverlayBackendOf(data);
+  return backend && backend->PopUpTrayMenu(tray_id);
+}
+
 static bool Backend_IsVisible(void* data, uint32_t window_id) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   LaufeyBackend* backend = loader->GetBackend();
@@ -1445,6 +1499,35 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_click_passthrough_forward =
       Backend_SetClickPassthroughForward;
   backend_api_.is_click_passthrough_forward = Backend_IsClickPassthroughForward;
+  // Overlay windows, tray events, the activation policy, speech (API 50).
+  backend_api_.overlay_capabilities = Backend_OverlayCapabilities;
+  backend_api_.set_input_region = Backend_SetInputRegion;
+  backend_api_.set_skip_taskbar = Backend_SetSkipTaskbar;
+  backend_api_.set_visible_on_all_workspaces =
+      Backend_SetVisibleOnAllWorkspaces;
+  backend_api_.set_window_level = Backend_SetWindowLevel;
+  backend_api_.set_tray_event_handler = Backend_SetTrayEventHandler;
+  backend_api_.tray_capabilities = Backend_TrayCapabilities;
+  backend_api_.pop_up_tray_menu = Backend_PopUpTrayMenu;
+#if defined(__APPLE__)
+  backend_api_.set_activation_policy = [](void*, int32_t policy) -> bool {
+    return laufey_common::MacSetActivationPolicy(policy);
+  };
+  backend_api_.get_activation_policy = [](void*) -> int32_t {
+    return laufey_common::MacGetActivationPolicy();
+  };
+#else
+  backend_api_.set_activation_policy = [](void*, int32_t) { return false; };
+  backend_api_.get_activation_policy = [](void*) -> int32_t { return -1; };
+#endif
+  backend_api_.speak = [](void*, const char* json, laufey_speech_fn cb,
+                          void* user_data) -> uint32_t {
+    return laufey_common::Speak(json, cb, user_data);
+  };
+  backend_api_.stop_speaking = [](void*) { laufey_common::StopSpeaking(); };
+  backend_api_.speech_voices = [](void*) -> char* {
+    return laufey_common::SpeechVoicesJson();
+  };
   backend_api_.is_visible = Backend_IsVisible;
   backend_api_.show = Backend_Show;
   backend_api_.hide = Backend_Hide;

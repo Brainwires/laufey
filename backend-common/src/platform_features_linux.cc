@@ -54,6 +54,7 @@
 #include "laufey_notifications.h"
 #include "laufey_passkey.h"
 #include "laufey_platform_features.h"
+#include "tray_sni_linux.h"
 #include "laufey_window_blur.h"
 
 namespace laufey_common {
@@ -663,6 +664,12 @@ void ProbeTray(PlatformFeatures* out) {
   }
   out->tray_xembed = XEmbedTrayPresent(out->session_type);
   out->tray_library = AppIndicatorLibraryAvailableLinux();
+  // API 50: with a watcher the tray is laufey's own StatusNotifierItem,
+  // which reports clicks (tray_sni_linux.cc).
+  out->tray_sni =
+      out->tray_watcher && out->session_bus && SniTrayEnabledLinux();
+  if (out->tray_sni)
+    out->tray_clicks = true;
 }
 
 PlatformFeatures ProbePlatformFeatures() {

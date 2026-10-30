@@ -9,6 +9,7 @@
 #include "laufey_launch_args.h"
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
+#include "laufey_overlay.h"
 #include "laufey_window.h"
 
 #include <cstdlib>
@@ -288,7 +289,10 @@ int main(int argc, char* argv[]) {
     }
 
     [NSApplication sharedApplication];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    // Regular unless the launch config's "activationPolicy" or the bundle's
+    // LSUIElement says accessory (API 50): a tray / menu-bar app then never
+    // shows a Dock icon, not even for the first frame.
+    laufey_common::MacApplyLaunchActivationPolicy();
 
     // Allow the host to override the dock icon at launch (e.g. a project's
     // favicon during `deno desktop --hmr`). Setting it programmatically

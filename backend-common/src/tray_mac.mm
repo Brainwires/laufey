@@ -27,6 +27,10 @@ struct TrayEntry {
   void* click_data;
   laufey_tray_click_fn dblclick_fn;
   void* dblclick_data;
+  // API 50: every event with its detail.
+  laufey_tray_event_fn event_fn;
+  void* event_data;
+  NSTrackingArea* hover_area;
   NSImage* light_image;
   NSImage* dark_image;
 };
@@ -56,6 +60,47 @@ std::atomic<uint32_t> g_next_tray_id{1};
   return instance;
 }
 
+// Reports a tray event with the current modifiers and cursor (top-left
+// screen space, the get_window_position convention).
+static void LaufeyEmitTrayEvent(uint32_t tray_id, int32_t kind,
+                                int32_t button, NSEventModifierFlags flags) {
+  auto& map = laufey_common::TrayMap();
+  auto it = map.find(tray_id);
+  if (it == map.end() || !it->second.event_fn) return;
+  laufey_tray_event_t e = {};
+  e.tray_id = tray_id;
+  e.kind = kind;
+  e.button = button;
+  if (flags & NSEventModifierFlagShift) e.modifiers |= LAUFEY_MOD_SHIFT;
+  if (flags & NSEventModifierFlagControl) e.modifiers |= LAUFEY_MOD_CONTROL;
+  if (flags & NSEventModifierFlagOption) e.modifiers |= LAUFEY_MOD_ALT;
+  if (flags & NSEventModifierFlagCommand) e.modifiers |= LAUFEY_MOD_META;
+  NSPoint p = [NSEvent mouseLocation];
+  NSArray<NSScreen*>* screens = [NSScreen screens];
+  CGFloat primary_height =
+      screens.count > 0 ? [screens[0] frame].size.height : 0;
+  e.x = (int32_t)p.x;
+  e.y = (int32_t)(primary_height - p.y);
+  e.has_position = true;
+  it->second.event_fn(it->second.event_data, &e);
+}
+
+- (void)mouseEntered:(NSEvent*)event {
+  NSNumber* tray =
+      [(NSDictionary*)[[event trackingArea] userInfo] objectForKey:@"tray"];
+  if (tray)
+    LaufeyEmitTrayEvent([tray unsignedIntValue], LAUFEY_TRAY_EVENT_MOUSE_ENTER,
+                        LAUFEY_MOUSE_BUTTON_LEFT, [NSEvent modifierFlags]);
+}
+
+- (void)mouseExited:(NSEvent*)event {
+  NSNumber* tray =
+      [(NSDictionary*)[[event trackingArea] userInfo] objectForKey:@"tray"];
+  if (tray)
+    LaufeyEmitTrayEvent([tray unsignedIntValue], LAUFEY_TRAY_EVENT_MOUSE_LEAVE,
+                        LAUFEY_MOUSE_BUTTON_LEFT, [NSEvent modifierFlags]);
+}
+
 - (void)trayClicked:(id)sender {
   NSStatusBarButton* button = (NSStatusBarButton*)sender;
   NSNumber* tagObj = [[button cell] representedObject];
@@ -65,6 +110,24 @@ std::atomic<uint32_t> g_next_tray_id{1};
   auto it = map.find(tray_id);
   if (it == map.end()) return;
   NSEvent* event = [NSApp currentEvent];
+  if (event && it->second.event_fn) {
+    int32_t kind = LAUFEY_TRAY_EVENT_CLICK;
+    int32_t mouse_button = LAUFEY_MOUSE_BUTTON_LEFT;
+    if (event.type == NSEventTypeRightMouseUp) {
+      kind = LAUFEY_TRAY_EVENT_RIGHT_CLICK;
+      mouse_button = LAUFEY_MOUSE_BUTTON_RIGHT;
+    } else if (event.type == NSEventTypeOtherMouseUp) {
+      kind = LAUFEY_TRAY_EVENT_MIDDLE_CLICK;
+      mouse_button = LAUFEY_MOUSE_BUTTON_MIDDLE;
+    } else if (event.clickCount >= 2) {
+      kind = LAUFEY_TRAY_EVENT_DOUBLE_CLICK;
+    }
+    LaufeyEmitTrayEvent(tray_id, kind, mouse_button, event.modifierFlags);
+    // The handler may have destroyed the tray.
+    it = map.find(tray_id);
+    if (it == map.end()) return;
+  }
+  if (event && event.type == NSEventTypeOtherMouseUp) return;
   if (event && event.type == NSEventTypeRightMouseUp && it->second.menu) {
     [it->second.item popUpStatusItemMenu:it->second.menu];
     return;
@@ -146,7 +209,8 @@ uint32_t CreateTrayIconMac() {
       [[button cell] setRepresentedObject:@(tray_id)];
       [button setTarget:[LaufeyCommonTrayTarget shared]];
       [button setAction:@selector(trayClicked:)];
-      [button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
+      [button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp |
+                            NSEventMaskOtherMouseUp];
     }
     TrayEntry entry = {};
     entry.item = item;
@@ -291,6 +355,61 @@ bool GetTrayIconBoundsMac(uint32_t tray_id, int* x, int* y, int* width,
   if (y) *y = (int)(primary_height - (rect.origin.y + rect.size.height));
   if (width) *width = (int)rect.size.width;
   if (height) *height = (int)rect.size.height;
+  return true;
+}
+
+void SetTrayEventHandlerMac(uint32_t tray_id, laufey_tray_event_fn handler,
+                            void* user_data) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    auto& map = TrayMap();
+    auto it = map.find(tray_id);
+    if (it == map.end()) return;
+    it->second.event_fn = handler;
+    it->second.event_data = user_data;
+    NSStatusBarButton* button = [it->second.item button];
+    if (!button) return;
+    if (handler && !it->second.hover_area) {
+      NSTrackingArea* area = [[NSTrackingArea alloc]
+          initWithRect:NSZeroRect
+               options:NSTrackingMouseEnteredAndExited |
+                       NSTrackingActiveAlways | NSTrackingInVisibleRect
+                 owner:[LaufeyCommonTrayTarget shared]
+              userInfo:@{@"tray" : @(tray_id)}];
+      [button addTrackingArea:area];
+      it->second.hover_area = area;
+    } else if (!handler && it->second.hover_area) {
+      [button removeTrackingArea:it->second.hover_area];
+      it->second.hover_area = nil;
+    }
+  });
+}
+
+uint32_t TrayCapabilitiesMac() {
+  return LAUFEY_TRAY_CAP_CLICK | LAUFEY_TRAY_CAP_DOUBLE_CLICK |
+         LAUFEY_TRAY_CAP_RIGHT_CLICK | LAUFEY_TRAY_CAP_MIDDLE_CLICK |
+         LAUFEY_TRAY_CAP_HOVER | LAUFEY_TRAY_CAP_MODIFIERS |
+         LAUFEY_TRAY_CAP_POSITION | LAUFEY_TRAY_CAP_POP_UP_MENU;
+}
+
+bool PopUpTrayMenuMac(uint32_t tray_id) {
+  __block bool has_menu = false;
+  RunOnMainSync(^{
+    auto& map = TrayMap();
+    auto it = map.find(tray_id);
+    has_menu = it != map.end() && it->second.item && it->second.menu;
+  });
+  if (!has_menu) return false;
+  // The menu runs a modal tracking loop: open it from the run loop, not
+  // inside a main-queue block (see RunFromMainRunLoopMac).
+  RunFromMainRunLoopMac([tray_id] {
+    auto& map = TrayMap();
+    auto it = map.find(tray_id);
+    if (it == map.end() || !it->second.item || !it->second.menu) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [it->second.item popUpStatusItemMenu:it->second.menu];
+#pragma clang diagnostic pop
+  });
   return true;
 }
 

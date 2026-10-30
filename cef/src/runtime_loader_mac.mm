@@ -3,6 +3,7 @@
 // helpers.
 
 #include "runtime_loader.h"
+#include "laufey_overlay.h"
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
 
@@ -81,7 +82,8 @@ void SetNSWindowClickPassthrough(void* cef_handle, bool enabled) {
   NSView* view = (__bridge NSView*)cef_handle;
   NSWindow* nswindow = [view window];
   if (nswindow) {
-    [nswindow setIgnoresMouseEvents:enabled];
+    // Recorded apart from an input region's own toggling (API 50).
+    laufey_common::MacSetClickPassthrough((__bridge void*)nswindow, enabled);
   }
 }
 
@@ -89,7 +91,7 @@ bool IsNSWindowClickPassthrough(void* cef_handle) {
   NSView* view = (__bridge NSView*)cef_handle;
   NSWindow* nswindow = [view window];
   if (nswindow) {
-    return [nswindow ignoresMouseEvents];
+    return laufey_common::MacIsClickPassthrough((__bridge void*)nswindow);
   }
   return false;
 }

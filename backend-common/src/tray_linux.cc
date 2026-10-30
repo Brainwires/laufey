@@ -21,6 +21,8 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_platform_features.h"
+#include "laufey_menu.h"
+#include "tray_sni_linux.h"
 
 #include <atomic>
 #include <cstdio>
@@ -149,10 +151,16 @@ uint32_t CreateTrayIconLinux() {
     return 0;
   }
   const AppIndicatorApi* api = GetAppIndicatorApi();
-  if (!api) return 0;
+  // With a StatusNotifierWatcher the icon is our own StatusNotifierItem
+  // (API 50: it reports clicks); AppIndicator stays the path for an XEmbed
+  // tray and for LAUFEY_TRAY_BACKEND=appindicator.
+  bool sni = features.tray_sni;
+  if (!api && !sni) return 0;
   uint32_t tray_id =
       g_next_tray_id_linux.fetch_add(1, std::memory_order_relaxed);
-  OnGtkMain([api, tray_id] {
+  OnGtkMain([api, tray_id, sni] {
+    if (sni && SniCreateTrayLinux(tray_id)) return;
+    if (!api) return;
     std::string idstr = "laufey-tray-" + std::to_string(tray_id);
     AppIndicator* ind = api->app_indicator_new(
         idstr.c_str(), "", kAppIndicatorCategoryApplicationStatus);
@@ -173,8 +181,12 @@ uint32_t CreateTrayIconLinux() {
 
 void DestroyTrayIconLinux(uint32_t tray_id) {
   const AppIndicatorApi* api = GetAppIndicatorApi();
-  if (!api) return;
   OnGtkMain([api, tray_id] {
+    if (SniOwnsTrayLinux(tray_id)) {
+      SniDestroyTrayLinux(tray_id);
+      return;
+    }
+    if (!api) return;
     std::lock_guard<std::mutex> lock(LinuxTrayMutex());
     auto it = LinuxTrayMap().find(tray_id);
     if (it == LinuxTrayMap().end()) return;
@@ -188,13 +200,18 @@ void DestroyTrayIconLinux(uint32_t tray_id) {
 
 void SetTrayIconLinux(uint32_t tray_id, const void* png_bytes, size_t len) {
   const AppIndicatorApi* api = GetAppIndicatorApi();
-  if (!api || !png_bytes || len == 0) return;
+  if (!png_bytes || len == 0) return;
   // AppIndicator on most DEs reads icons by name from the icon theme,
   // not from raw bytes. Write the bytes to a per-tray temp file and
   // point the indicator at its full path.
   std::vector<uint8_t> bytes(static_cast<const uint8_t*>(png_bytes),
                               static_cast<const uint8_t*>(png_bytes) + len);
   OnGtkMain([api, tray_id, bytes = std::move(bytes)]() mutable {
+    if (SniOwnsTrayLinux(tray_id)) {
+      SniSetIconLinux(tray_id, bytes.data(), bytes.size());
+      return;
+    }
+    if (!api) return;
     std::string path = "/tmp/laufey-tray-" + std::to_string(tray_id) + ".png";
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return;
@@ -218,9 +235,13 @@ void SetTrayTooltipLinux(uint32_t tray_id, const char* tooltip_or_null) {
   // AppIndicator has no tooltip of its own; StatusNotifier hosts (Plasma,
   // the GNOME AppIndicator extension) show the indicator's title on hover.
   const AppIndicatorApi* api = GetAppIndicatorApi();
-  if (!api || !api->set_title) return;
   std::string title = tooltip_or_null ? tooltip_or_null : "";
   OnGtkMain([api, tray_id, title] {
+    if (SniOwnsTrayLinux(tray_id)) {
+      SniSetTooltipLinux(tray_id, title.c_str());
+      return;
+    }
+    if (!api || !api->set_title) return;
     std::lock_guard<std::mutex> lock(LinuxTrayMutex());
     auto it = LinuxTrayMap().find(tray_id);
     if (it == LinuxTrayMap().end() || !it->second.indicator) return;
@@ -232,11 +253,20 @@ void SetTrayMenuLinux(uint32_t tray_id, laufey_value_t* menu_template,
                        const laufey_backend_api_t* api,
                        laufey_menu_click_fn on_click, void* on_click_data) {
   const AppIndicatorApi* ind_api = GetAppIndicatorApi();
-  if (!ind_api) {
-    if (menu_template && api) api->value_free(menu_template);
-    return;
-  }
   OnGtkMain([ind_api, tray_id, menu_template, api, on_click, on_click_data] {
+    if (SniOwnsTrayLinux(tray_id)) {
+      std::vector<MenuEntry> entries;
+      if (menu_template) {
+        entries = ParseMenuTemplate(menu_template, api, false);
+        api->value_free(menu_template);
+      }
+      SniSetMenuLinux(tray_id, entries, on_click, on_click_data);
+      return;
+    }
+    if (!ind_api) {
+      if (menu_template && api) api->value_free(menu_template);
+      return;
+    }
     // tray_id passed as window_id so the shared click dispatcher routes
     // back through on_click with the right tray identifier.
     GtkWidget* new_menu = nullptr;
@@ -267,16 +297,39 @@ void SetTrayMenuLinux(uint32_t tray_id, laufey_value_t* menu_template,
   });
 }
 
-void SetTrayClickHandlerLinux(uint32_t /*tray_id*/,
-                                laufey_tray_click_fn /*handler*/,
-                                void* /*user_data*/) {
-  // AppIndicator has no left-click event; clicks always open the menu.
+void SetTrayClickHandlerLinux(uint32_t tray_id, laufey_tray_click_fn handler,
+                              void* user_data) {
+  // AppIndicator has no left-click event (clicks open the menu); the
+  // StatusNotifierItem path reports Activate.
+  OnGtkMain([tray_id, handler, user_data] {
+    SniSetClickHandlerLinux(tray_id, handler, user_data);
+  });
 }
 
-void SetTrayDoubleClickHandlerLinux(uint32_t /*tray_id*/,
-                                      laufey_tray_click_fn /*handler*/,
-                                      void* /*user_data*/) {
-  // Same: no double-click event from AppIndicator.
+void SetTrayDoubleClickHandlerLinux(uint32_t tray_id,
+                                    laufey_tray_click_fn handler,
+                                    void* user_data) {
+  OnGtkMain([tray_id, handler, user_data] {
+    SniSetDoubleClickHandlerLinux(tray_id, handler, user_data);
+  });
+}
+
+void SetTrayEventHandlerLinux(uint32_t tray_id, laufey_tray_event_fn handler,
+                              void* user_data) {
+  OnGtkMain([tray_id, handler, user_data] {
+    SniSetEventHandlerLinux(tray_id, handler, user_data);
+  });
+}
+
+uint32_t TrayCapabilitiesLinux() {
+  PlatformFeatures features;
+  ProbeTray(&features);
+  if (!features.tray_sni) return 0;
+  // A host sends the click point if it has one (Plasma does); no modifiers
+  // or hover in the protocol, and the host opens the menu itself.
+  return LAUFEY_TRAY_CAP_CLICK | LAUFEY_TRAY_CAP_DOUBLE_CLICK |
+         LAUFEY_TRAY_CAP_RIGHT_CLICK | LAUFEY_TRAY_CAP_MIDDLE_CLICK |
+         LAUFEY_TRAY_CAP_POSITION;
 }
 
 }  // namespace laufey_common

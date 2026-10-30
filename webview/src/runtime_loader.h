@@ -13,6 +13,7 @@
 #include <map>
 
 #include "laufey.h"
+#include "laufey_overlay.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_js_calls.h"
 #include "laufey_sync_call.h"
@@ -479,6 +480,34 @@ class LaufeyBackend {
   virtual void SetClickPassthroughForward(uint32_t /*window_id*/,
                                           bool /*forward*/) {}
   virtual bool IsClickPassthroughForward(uint32_t /*window_id*/) {
+    return false;
+  }
+  // Overlay windows (API >= 50; laufey_overlay.h). Defaults: a backend that
+  // can do none of it.
+  virtual uint32_t OverlayCapabilities() {
+    return 0;
+  }
+  virtual void SetInputRegion(uint32_t /*window_id*/,
+                              const laufey_common::InputRegion& /*region*/) {}
+  virtual bool SetSkipTaskbar(uint32_t /*window_id*/, bool /*skip*/) {
+    return false;
+  }
+  virtual bool SetVisibleOnAllWorkspaces(uint32_t /*window_id*/,
+                                         bool /*visible*/,
+                                         bool /*full_screen*/) {
+    return false;
+  }
+  virtual bool SetWindowLevel(uint32_t /*window_id*/, int32_t /*level*/) {
+    return false;
+  }
+  // Tray events (API >= 50).
+  virtual void SetTrayEventHandler(uint32_t /*tray_id*/,
+                                   laufey_tray_event_fn /*handler*/,
+                                   void* /*user_data*/) {}
+  virtual uint32_t TrayCapabilities() {
+    return 0;
+  }
+  virtual bool PopUpTrayMenu(uint32_t /*tray_id*/) {
     return false;
   }
   virtual bool IsVisible(uint32_t window_id) = 0;

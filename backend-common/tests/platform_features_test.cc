@@ -516,6 +516,15 @@ int main() {
   f.tray_library = false;
   EXPECT(!TrayAvailable(f));
   EXPECT(Contains(TrayUnavailableReason(f), "libayatana-appindicator3"));
+  // API 50: with a watcher, laufey's own StatusNotifierItem needs no
+  // library; an XEmbed tray alone still does.
+  f.tray_watcher = true;
+  f.tray_sni = true;
+  EXPECT(TrayAvailable(f));
+  EXPECT(TrayUnavailableReason(f).empty());
+  f.tray_watcher = false;
+  EXPECT(!TrayAvailable(f));
+  f.tray_sni = false;
 
   // --- JSON
   // ----------------------------------------------------------------------

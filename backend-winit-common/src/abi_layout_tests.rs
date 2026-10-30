@@ -231,6 +231,23 @@ fn vtable_layout_matches_the_header() {
     remove_delivered_notifications,
     share,
     set_user_activity,
-    set_user_activity_handler
+    set_user_activity_handler,
+    overlay_capabilities,
+    set_input_region,
+    set_skip_taskbar,
+    set_visible_on_all_workspaces,
+    set_window_level,
+    set_activation_policy,
+    get_activation_policy,
+    set_tray_event_handler,
+    tray_capabilities,
+    pop_up_tray_menu,
+    speak,
+    stop_speaking,
+    speech_voices
+  );
+  assert_eq!(
+    size_of::<crate::LaufeyTrayEvent>(),
+    size_of::<laufey::TrayEventRaw>()
   );
 }

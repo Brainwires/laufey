@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 49
+#define LAUFEY_API_VERSION 50
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -69,6 +69,19 @@ extern "C" {
 #define LAUFEY_WINDOW_FLAG_TRANSPARENT_TITLEBAR (1u << 2)
 #define LAUFEY_WINDOW_FLAG_HIDDEN (1u << 3)
 #define LAUFEY_WINDOW_FLAG_TRANSPARENT (1u << 4)
+
+// OVERLAY (API >= 50) asks for a desktop overlay surface: on a Wayland
+// compositor that implements wlr-layer-shell (wlroots compositors, KDE
+// Plasma, COSMIC) the WebKitGTK backend makes the window a layer surface
+// on the overlay layer through gtk-layer-shell (dlopen'd, optional): above
+// every window, on every workspace, out of the task list, with no keyboard
+// focus, and placeable with set_window_position (an anchor to the top-left
+// edge plus margins). Everywhere else the flag is ignored and the window is
+// an ordinary one (combine it with NO_ACTIVATE, set_window_level and
+// set_visible_on_all_workspaces for the same effect where the OS allows).
+// overlay_capabilities reports LAUFEY_OVERLAY_CAP_LAYER_SHELL where it takes
+// effect.
+#define LAUFEY_WINDOW_FLAG_OVERLAY (1u << 5)
 
 // --- Window state, screens and chrome (API >= 38) ---------------------------
 //
@@ -509,6 +522,107 @@ typedef void (*laufey_title_bar_preferences_changed_fn)(void* user_data);
 #define LAUFEY_SECRET_NOT_FOUND 1
 #define LAUFEY_SECRET_UNAVAILABLE 2
 #define LAUFEY_SECRET_FAILED 3
+
+// --- Overlay windows, tray events, activation policy, speech (API >= 50) ----
+
+// A rectangle in a window's content area, in DIPs (CSS pixels) from its
+// top-left corner (set_input_region).
+typedef struct laufey_rect {
+  int32_t x;
+  int32_t y;
+  int32_t width;
+  int32_t height;
+} laufey_rect_t;
+
+// Window levels for set_window_level, Electron's names. NORMAL is an
+// ordinary window; the others float above normal windows, in this order
+// (macOS NSFloatingWindowLevel, NSStatusWindowLevel, NSPopUpMenuWindowLevel,
+// NSScreenSaverWindowLevel). Windows and Linux have one floating level:
+// every level above NORMAL is "topmost" / "keep above".
+#define LAUFEY_WINDOW_LEVEL_NORMAL 0
+#define LAUFEY_WINDOW_LEVEL_FLOATING 1
+#define LAUFEY_WINDOW_LEVEL_STATUS 2
+#define LAUFEY_WINDOW_LEVEL_POP_UP_MENU 3
+#define LAUFEY_WINDOW_LEVEL_SCREEN_SAVER 4
+
+// Bits returned by overlay_capabilities: what the overlay-window calls do on
+// this backend and OS (and, on Linux, in this session).
+#define LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH (1u << 0)  // set_click_passthrough
+#define LAUFEY_OVERLAY_CAP_PASSTHROUGH_FORWARD \
+  (1u << 1)  // set_click_passthrough_forward reports moves (macOS)
+#define LAUFEY_OVERLAY_CAP_INPUT_REGION (1u << 2)  // set_input_region
+#define LAUFEY_OVERLAY_CAP_SKIP_TASKBAR (1u << 3)  // set_skip_taskbar
+#define LAUFEY_OVERLAY_CAP_ALL_WORKSPACES \
+  (1u << 4)  // set_visible_on_all_workspaces: every Space / desktop
+#define LAUFEY_OVERLAY_CAP_VISIBLE_ON_FULL_SCREEN \
+  (1u << 5)  // ... and over other apps' full-screen windows (macOS)
+#define LAUFEY_OVERLAY_CAP_WINDOW_LEVELS (1u << 6)  // set_window_level
+#define LAUFEY_OVERLAY_CAP_TRANSPARENT \
+  (1u << 7)  // LAUFEY_WINDOW_FLAG_TRANSPARENT shows what is behind the window
+#define LAUFEY_OVERLAY_CAP_LAYER_SHELL \
+  (1u << 8)  // LAUFEY_WINDOW_FLAG_OVERLAY makes a wlr-layer-shell surface
+#define LAUFEY_OVERLAY_CAP_ACTIVATION_POLICY \
+  (1u << 9)  // set_activation_policy (macOS)
+#define LAUFEY_OVERLAY_CAP_NON_ACTIVATING \
+  (1u << 10)  // LAUFEY_WINDOW_FLAG_NO_ACTIVATE makes a non-activating panel
+
+// Activation policies (macOS NSApplicationActivationPolicy):
+//   REGULAR    a Dock icon and a menu bar (the default)
+//   ACCESSORY  no Dock icon or menu bar; windows still show (a tray /
+//              menu-bar app, LSUIElement)
+//   PROHIBITED no windows of its own (rarely wanted)
+#define LAUFEY_ACTIVATION_POLICY_REGULAR 0
+#define LAUFEY_ACTIVATION_POLICY_ACCESSORY 1
+#define LAUFEY_ACTIVATION_POLICY_PROHIBITED 2
+
+// Tray event kinds (laufey_tray_event_t.kind).
+#define LAUFEY_TRAY_EVENT_CLICK 1         // primary (left) button
+#define LAUFEY_TRAY_EVENT_DOUBLE_CLICK 2  // after the first CLICK
+#define LAUFEY_TRAY_EVENT_RIGHT_CLICK 3   // the tray menu still opens
+#define LAUFEY_TRAY_EVENT_MIDDLE_CLICK 4
+#define LAUFEY_TRAY_EVENT_MOUSE_ENTER 5  // hover (macOS, Windows)
+#define LAUFEY_TRAY_EVENT_MOUSE_LEAVE 6
+
+// One tray event. `button` is LAUFEY_MOUSE_BUTTON_* (LEFT for the hover
+// kinds); `modifiers` LAUFEY_MOD_* bits held at the time; `x` / `y` the
+// cursor in get_window_position's screen space when `has_position`
+// (Linux hosts that send no point report false).
+typedef struct laufey_tray_event {
+  uint32_t tray_id;
+  int32_t kind;
+  int32_t button;
+  uint32_t modifiers;
+  int32_t x;
+  int32_t y;
+  bool has_position;
+} laufey_tray_event_t;
+
+// Receives every tray event of a tray (set_tray_event_handler). Fires on the
+// UI thread; the event is valid only during the call.
+typedef void (*laufey_tray_event_fn)(void* user_data,
+                                     const laufey_tray_event_t* event);
+
+// Bits returned by tray_capabilities: which events and data this backend's
+// tray delivers on this OS / in this session.
+#define LAUFEY_TRAY_CAP_CLICK (1u << 0)
+#define LAUFEY_TRAY_CAP_DOUBLE_CLICK (1u << 1)
+#define LAUFEY_TRAY_CAP_RIGHT_CLICK (1u << 2)
+#define LAUFEY_TRAY_CAP_MIDDLE_CLICK (1u << 3)
+#define LAUFEY_TRAY_CAP_HOVER (1u << 4)
+#define LAUFEY_TRAY_CAP_MODIFIERS (1u << 5)
+#define LAUFEY_TRAY_CAP_POSITION (1u << 6)
+#define LAUFEY_TRAY_CAP_POP_UP_MENU (1u << 7)  // pop_up_tray_menu
+
+// Outcomes of speak (laufey_speech_fn `status`).
+#define LAUFEY_SPEECH_DONE 0         // spoken to the end
+#define LAUFEY_SPEECH_CANCELLED 1    // stop_speaking, or a later speak
+#define LAUFEY_SPEECH_FAILED 2       // `message` says why
+#define LAUFEY_SPEECH_UNSUPPORTED 3  // no speech engine here
+
+// Fires EXACTLY ONCE per speak call that returned an id, on any thread.
+// `message` (UTF-8, never NULL) is valid only during the call.
+typedef void (*laufey_speech_fn)(void* user_data, uint32_t utterance_id,
+                                 int32_t status, const char* message);
 
 typedef struct laufey_backend_api laufey_backend_api_t;
 
@@ -2368,6 +2482,104 @@ struct laufey_backend_api {
   void (*set_user_activity_handler)(void* backend_data,
                                     laufey_user_activity_fn handler,
                                     void* user_data);
+
+  // --- Overlay windows (API >= 50) -----------------------------------------
+  //
+  // LAUFEY_OVERLAY_CAP_* bits for this backend on this OS (on Linux, in this
+  // session). Any thread. See docs/window-management.md, "Overlay windows".
+  uint32_t (*overlay_capabilities)(void* backend_data);
+
+  // Set the window's input region: only the `count` rectangles (content
+  // DIPs, from the content area's top-left) take mouse input, and a click
+  // anywhere else goes to whatever is beneath the window, as with
+  // set_click_passthrough. `rects` NULL removes the region (the whole window
+  // takes input again); a non-NULL `rects` with `count` 0 lets every click
+  // through. Independent of set_click_passthrough, which wins while on.
+  // macOS: the window ignores mouse events while the cursor is outside the
+  // rectangles (followed by a global and a local mouse monitor; no
+  // permission). Windows: WS_EX_TRANSPARENT toggled the same way on a
+  // cursor timer (the region is input-only; nothing is clipped). Linux: the
+  // window's input shape (X11 SHAPE ShapeInput, Wayland
+  // wl_surface.set_input_region). UI work is posted; any thread.
+  void (*set_input_region)(void* backend_data, uint32_t window_id,
+                           const laufey_rect_t* rects, size_t count);
+
+  // Keep the window off (true) or put it back on (false) the taskbar / task
+  // list while it lives, like Electron's setSkipTaskbar. Windows:
+  // ITaskbarList DeleteTab / AddTab (the window stays in Alt-Tab). Linux:
+  // the skip-taskbar and skip-pager hints (X11 _NET_WM_STATE; no protocol on
+  // Wayland). macOS has no per-window taskbar entry (see
+  // set_activation_policy). Returns false where it has no effect. Any
+  // thread.
+  bool (*set_skip_taskbar)(void* backend_data, uint32_t window_id, bool skip);
+
+  // Show the window on every Space / virtual desktop (`visible`), and, with
+  // `visible_on_full_screen`, over other apps' full-screen windows, like
+  // Electron's setVisibleOnAllWorkspaces(visible, { visibleOnFullScreen }).
+  // macOS: collectionBehavior CanJoinAllSpaces | FullScreenAuxiliary (and
+  // Stationary), MoveToActiveSpace dropped. Linux X11: sticky
+  // (_NET_WM_STATE_STICKY / _NET_WM_DESKTOP 0xFFFFFFFF). Windows has no
+  // public API for it (a NO_ACTIVATE tool window is shown on every desktop
+  // already). Returns false where it has no effect. Any thread.
+  bool (*set_visible_on_all_workspaces)(void* backend_data, uint32_t window_id,
+                                        bool visible,
+                                        bool visible_on_full_screen);
+
+  // Set the window's level (LAUFEY_WINDOW_LEVEL_*). set_always_on_top(true)
+  // is FLOATING, (false) NORMAL. Returns false for an unknown level or
+  // where it has no effect. Any thread.
+  bool (*set_window_level)(void* backend_data, uint32_t window_id,
+                           int32_t level);
+
+  // The app's activation policy (LAUFEY_ACTIVATION_POLICY_*), macOS. A host
+  // starts in the policy the launch configuration's "activationPolicy"
+  // ("regular" / "accessory") or the bundle's LSUIElement names (else
+  // REGULAR), so an accessory app never shows a Dock icon. Switching to
+  // REGULAR also activates the app, so the window the app shows next comes
+  // to the front. Returns false where there is no such policy (Windows,
+  // Linux). get_activation_policy answers -1 there. Any thread.
+  bool (*set_activation_policy)(void* backend_data, int32_t policy);
+  int32_t (*get_activation_policy)(void* backend_data);
+
+  // --- Tray events (API >= 50) ---------------------------------------------
+  //
+  // Every event of the tray (LAUFEY_TRAY_EVENT_*) with its button, modifiers
+  // and position; NULL clears it. The click and double-click handlers keep
+  // firing as before. macOS: from the status item's event, hover through a
+  // tracking area. Windows: NOTIFYICON_VERSION_4 (NIN_SELECT, WM_CONTEXTMENU,
+  // WM_MBUTTONUP, NIN_POPUPOPEN / NIN_POPUPCLOSE). Linux: the
+  // StatusNotifierItem's Activate (click), SecondaryActivate (middle) and
+  // ContextMenu (right) with the host's point; AppIndicator delivers none.
+  void (*set_tray_event_handler)(void* backend_data, uint32_t tray_id,
+                                 laufey_tray_event_fn handler, void* user_data);
+
+  // LAUFEY_TRAY_CAP_* bits. Any thread.
+  uint32_t (*tray_capabilities)(void* backend_data);
+
+  // Open the tray's menu (set_tray_menu) at the icon now, as a click on it
+  // would (Electron's tray.popUpContextMenu). False without a menu or where
+  // the OS can't. Any thread.
+  bool (*pop_up_tray_menu)(void* backend_data, uint32_t tray_id);
+
+  // --- Text to speech (API >= 50) ------------------------------------------
+  //
+  // Speak `request_json`:
+  //   {"text": string (required), "voice": voice id, "lang": BCP 47,
+  //    "rate": 0.1..10 (1 normal), "pitch": 0..2 (1 normal),
+  //    "volume": 0..1}
+  // through the OS engine (macOS AVSpeechSynthesizer, Windows SAPI,
+  // Linux speech-dispatcher, dlopen'd). A new utterance cancels the one
+  // speaking. Returns the utterance's id (> 0; `callback` then fires exactly
+  // once) or 0 when the request is invalid (no callback). Where there is no
+  // engine the callback reports LAUFEY_SPEECH_UNSUPPORTED. Any thread.
+  uint32_t (*speak)(void* backend_data, const char* request_json,
+                    laufey_speech_fn callback, void* user_data);
+  // Stop speaking (the utterance's callback reports CANCELLED). Any thread.
+  void (*stop_speaking)(void* backend_data);
+  // The installed voices as a JSON array of {"id", "name", "lang",
+  // "default"}, freed with string_free; "[]" when there are none or no
+  // engine. May block briefly; not on the UI thread.
+  char* (*speech_voices)(void* backend_data);
 };
 
 #ifdef __cplusplus

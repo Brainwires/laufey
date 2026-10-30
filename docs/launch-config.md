@@ -40,18 +40,19 @@ The directory comes from the running executable's real path
 Every key is optional, and each key but `passkeyRpIds`, `bridgeOrigins` and
 `strictPolicy` stands in for one environment variable:
 
-| Key              | Environment variable     | Value                                                             |
-| ---------------- | ------------------------ | ----------------------------------------------------------------- |
-| `appId`          | `LAUFEY_APP_ID`          | `A-Z a-z 0-9 . _ -` only, not `.` or `..`                         |
-| `customSchemes`  | `LAUFEY_CUSTOM_SCHEMES`  | array of URL scheme names (a letter, then letters, digits, `+-.`) |
-| `dataDir`        | `LAUFEY_DATA_DIR`        | absolute path                                                     |
-| `singleInstance` | `LAUFEY_SINGLE_INSTANCE` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
-| `inspectable`    | `LAUFEY_INSPECTABLE`     | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
-| `requireSandbox` | `LAUFEY_REQUIRE_SANDBOX` | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
-| `proxy`          | `LAUFEY_PROXY`           | `"system"` or `"direct"`                                          |
-| `bridgeOrigins`  | none (file only)         | array of origins, `<scheme>://*` or `*` (see below)               |
-| `passkeyRpIds`   | none (file only)         | array of RP IDs: domain names, no scheme, port or path            |
-| `strictPolicy`   | none (file only)         | `true` / `false`                                                  |
+| Key                | Environment variable       | Value                                                             |
+| ------------------ | -------------------------- | ----------------------------------------------------------------- |
+| `appId`            | `LAUFEY_APP_ID`            | `A-Z a-z 0-9 . _ -` only, not `.` or `..`                         |
+| `customSchemes`    | `LAUFEY_CUSTOM_SCHEMES`    | array of URL scheme names (a letter, then letters, digits, `+-.`) |
+| `dataDir`          | `LAUFEY_DATA_DIR`          | absolute path                                                     |
+| `singleInstance`   | `LAUFEY_SINGLE_INSTANCE`   | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
+| `inspectable`      | `LAUFEY_INSPECTABLE`       | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
+| `requireSandbox`   | `LAUFEY_REQUIRE_SANDBOX`   | `true` / `false` (the variable: `1` / `0`, or `true` / `false`)   |
+| `proxy`            | `LAUFEY_PROXY`             | `"system"` or `"direct"`                                          |
+| `activationPolicy` | `LAUFEY_ACTIVATION_POLICY` | `"regular"`, `"accessory"` or `"prohibited"` (macOS)              |
+| `bridgeOrigins`    | none (file only)           | array of origins, `<scheme>://*` or `*` (see below)               |
+| `passkeyRpIds`     | none (file only)           | array of RP IDs: domain names, no scheme, port or path            |
+| `strictPolicy`     | none (file only)           | `true` / `false`                                                  |
 
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
@@ -83,6 +84,13 @@ what its variable does:
   initialization as the browser context is created. `"direct"` uses no proxy
   (`--no-proxy-server`). A proxy switch on the command line wins. Other backends
   and platforms ignore it.
+- `activationPolicy` (macOS, API 50) is the activation policy the host starts
+  in. `"accessory"` is a tray / menu-bar app: no Dock icon and no menu bar from
+  the first frame, where the host used to force `"regular"` at launch (and so
+  showed the Dock icon even with `LSUIElement`). Without the key the bundle's
+  `LSUIElement` decides (accessory when it is true), else `"regular"`.
+  `set_activation_policy` switches it at runtime
+  ([Dock and taskbar](dock-taskbar.md)). Other platforms ignore it.
 - `requireSandbox` (default `false`) set to `true` makes the Linux CEF host
   refuse to start (exit status 78, one line on stderr) where it would run web
   content without the Chromium sandbox: no user namespaces and no usable

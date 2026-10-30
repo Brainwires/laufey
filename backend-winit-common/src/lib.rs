@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 49;
+pub const LAUFEY_API_VERSION: u32 = 50;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -949,6 +949,62 @@ pub struct LaufeyBackendApi {
       *mut c_void,
     ),
   >,
+  // --- Overlay windows, tray events, activation policy, speech (API >= 50)
+  pub overlay_capabilities: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub set_input_region:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const LaufeyRect, usize)>,
+  pub set_skip_taskbar:
+    Option<unsafe extern "C" fn(*mut c_void, u32, bool) -> bool>,
+  pub set_visible_on_all_workspaces:
+    Option<unsafe extern "C" fn(*mut c_void, u32, bool, bool) -> bool>,
+  pub set_window_level:
+    Option<unsafe extern "C" fn(*mut c_void, u32, i32) -> bool>,
+  pub set_activation_policy:
+    Option<unsafe extern "C" fn(*mut c_void, i32) -> bool>,
+  pub get_activation_policy: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+  pub set_tray_event_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      Option<unsafe extern "C" fn(*mut c_void, *const LaufeyTrayEvent)>,
+      *mut c_void,
+    ),
+  >,
+  pub tray_capabilities: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub pop_up_tray_menu: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub speak: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      *const c_char,
+      Option<unsafe extern "C" fn(*mut c_void, u32, i32, *const c_char)>,
+      *mut c_void,
+    ) -> u32,
+  >,
+  pub stop_speaking: Option<unsafe extern "C" fn(*mut c_void)>,
+  pub speech_voices: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+}
+
+/// `laufey_rect_t` (API 50).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LaufeyRect {
+  pub x: i32,
+  pub y: i32,
+  pub width: i32,
+  pub height: i32,
+}
+
+/// `laufey_tray_event_t` (API 50).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LaufeyTrayEvent {
+  pub tray_id: u32,
+  pub kind: i32,
+  pub button: i32,
+  pub modifiers: u32,
+  pub x: i32,
+  pub y: i32,
+  pub has_position: bool,
 }
 
 /// `auth_session_cancel` (API 43) on Winit, which has no auth sessions:
@@ -1860,6 +1916,21 @@ pub fn create_api_base() -> LaufeyBackendApi {
     set_user_activity: None,
     set_user_activity_handler: None,
     share: None,
+    // API 50: none of the overlay, tray-event, activation-policy or speech
+    // entry points on Winit.
+    overlay_capabilities: None,
+    set_input_region: None,
+    set_skip_taskbar: None,
+    set_visible_on_all_workspaces: None,
+    set_window_level: None,
+    set_activation_policy: None,
+    get_activation_policy: None,
+    set_tray_event_handler: None,
+    tray_capabilities: None,
+    pop_up_tray_menu: None,
+    speak: None,
+    stop_speaking: None,
+    speech_voices: None,
   }
 }
 
