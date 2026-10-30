@@ -74,6 +74,9 @@ fn is_mouse_transparent(title: &str) -> Option<bool> {
 }
 
 pub async fn run(w: &Window, title: &str) {
+  // Only the Windows passthrough probe looks the window up by its title.
+  #[cfg(not(windows))]
+  let _ = title;
   let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
   let caps: OverlayCapabilities = laufey::overlay_capabilities();
   eprintln!("[e2e] overlay capabilities = {:#x}", caps.bits());

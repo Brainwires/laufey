@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use laufey::{JsCall, Value, Window};
 
-use crate::{check, na, wait_for};
+use crate::{check, wait_for};
 
 const TITLE: &str = "native-e2e-user-close";
 
@@ -120,7 +120,9 @@ async fn os_close(title: &str) -> Option<bool> {
     if crate::os_view::xdotool().is_none()
       || std::env::var_os("LAUFEY_E2E_WM_RUNNING").is_none()
     {
-      na("a user close through the window manager (needs xdotool and a WM)");
+      crate::na(
+        "a user close through the window manager (needs xdotool and a WM)",
+      );
       return None;
     }
     if !crate::os_view::x_focus(title).await {
@@ -165,7 +167,7 @@ async fn os_close(title: &str) -> Option<bool> {
   #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
   {
     let _ = title;
-    na("a user close through the window system");
+    crate::na("a user close through the window system");
     None
   }
 }

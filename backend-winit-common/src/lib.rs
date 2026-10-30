@@ -2022,6 +2022,8 @@ pub unsafe extern "C" fn backend_get_window_handle_type(
 
 pub fn store_window_handles(window_id: u32, window: &Window) {
   let mut handle_ptr = std::ptr::null_mut();
+  // Only the Linux display handles below assign it.
+  #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
   let mut display_ptr = std::ptr::null_mut();
   let mut handle_type = LAUFEY_WINDOW_HANDLE_UNKNOWN;
 
