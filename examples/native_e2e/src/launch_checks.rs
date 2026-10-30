@@ -21,8 +21,8 @@
 //!   3. a second ordinary window, left unfocused when the launch window is
 //!      focused again: visible, and frames are not throttled for lacking
 //!      focus;
-//!   4. a non-activating panel (a tray popover): visible and drawing frames
-//!      (N/A on WebKit, which may draw none in a panel never focused).
+//!   4. a non-activating panel (a tray popover), never focused: visible and
+//!      drawing frames.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -58,12 +58,23 @@ fn as_f64(v: &Value) -> Option<f64> {
   }
 }
 
-/// Waits until the page in `win` answers scripts (it has loaded far enough).
+/// Waits until the page in `win` answers scripts from the app's own
+/// document. The initial about:blank answers too, and a script run there
+/// (a requestAnimationFrame asked for, a flag set) is lost with it when the
+/// navigation commits: that race read as "WebKit runs no frames in a
+/// panel" (e2e-testing.md §21).
 async fn page_answers(win: &Window) -> bool {
   let deadline = Instant::now() + Duration::from_secs(20);
   while Instant::now() < deadline {
-    if let Some(Value::String(_)) = eval(win, "document.readyState").await {
-      return true;
+    if let Some(Value::String(s)) = eval(
+      win,
+      "location.protocol === 'laufey-e2e:' ? document.readyState : ''",
+    )
+    .await
+    {
+      if !s.is_empty() {
+        return true;
+      }
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
   }
@@ -293,15 +304,7 @@ pub async fn run() {
       FRAME_BUDGET.as_millis(),
       d.map_or("none ran".into(), |d| format!("{} ms", d.as_millis()))
     );
-    if d.is_none() && !cfg!(windows) && backend == "webview" {
-      // Known: WebKit (WKWebView, and WebKitGTK at times) runs no animation
-      // frames in a non-activating panel that has never been focused,
-      // though the page reads as visible. Not a launch issue; see
-      // e2e-testing.md §21.
-      na(&format!("{name}: known WebKit panel limitation"));
-    } else {
-      check(&name, d.is_some());
-    }
+    check(&name, d.is_some());
   } else if engine {
     check("the panel's page answers scripts", false);
   }
