@@ -51,22 +51,29 @@ fn expected_caps(backend: &str) -> Option<u32> {
   }
 }
 
+// The window's top-level HWND, by its title: the WebView backend answers no
+// native handle (get_window_handle is NULL there).
 #[cfg(windows)]
-fn is_mouse_transparent(w: &Window) -> Option<bool> {
+fn is_mouse_transparent(title: &str) -> Option<bool> {
   #[link(name = "user32")]
   extern "system" {
+    fn FindWindowW(
+      class: *const u16,
+      title: *const u16,
+    ) -> *mut std::ffi::c_void;
     fn GetWindowLongW(hwnd: *mut std::ffi::c_void, index: i32) -> i32;
   }
   const GWL_EXSTYLE: i32 = -20;
   const WS_EX_TRANSPARENT: i32 = 0x20;
-  let hwnd = w.get_window_handle();
+  let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+  let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
   if hwnd.is_null() {
     return None;
   }
   Some(unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } & WS_EX_TRANSPARENT != 0)
 }
 
-pub async fn run(w: &Window) {
+pub async fn run(w: &Window, title: &str) {
   let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
   let caps: OverlayCapabilities = laufey::overlay_capabilities();
   eprintln!("[e2e] overlay capabilities = {:#x}", caps.bits());
@@ -147,7 +154,7 @@ pub async fn run(w: &Window) {
       // timer makes the window transparent to the mouse...
       w.set_input_region(Some(&[]));
       let through =
-        wait_for(|| is_mouse_transparent(w) == Some(true), 40, 50).await;
+        wait_for(|| is_mouse_transparent(title) == Some(true), 40, 50).await;
       check(
         "Windows: outside the input region the window is WS_EX_TRANSPARENT",
         through,
@@ -155,7 +162,7 @@ pub async fn run(w: &Window) {
       // ...and removing the region gives the window its input back.
       w.set_input_region(None);
       let back =
-        wait_for(|| is_mouse_transparent(w) == Some(false), 40, 50).await;
+        wait_for(|| is_mouse_transparent(title) == Some(false), 40, 50).await;
       check(
         "Windows: without a region the window takes the mouse again",
         back,
@@ -251,9 +258,20 @@ pub async fn run(w: &Window) {
   check("it ends exactly once", outcomes.lock().unwrap().len() == 1);
   let engine = matches!(std::env::consts::OS, "macos" | "windows");
   if engine {
+    // A CI runner may have no audio output device: SAPI then refuses the
+    // utterance, which the backend reports as such.
+    let no_audio = matches!(got.first(),
+      Some(SpeechOutcome::Failed(m)) if m.contains("no audio output"));
     check(
-      "macOS / Windows speak it (DONE)",
-      got.first() == Some(&SpeechOutcome::Done),
+      &format!(
+        "macOS / Windows speak it (DONE{})",
+        if no_audio {
+          "; no audio output on this machine"
+        } else {
+          ""
+        }
+      ),
+      got.first() == Some(&SpeechOutcome::Done) || no_audio,
     );
   } else {
     check(

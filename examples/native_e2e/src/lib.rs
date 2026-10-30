@@ -2258,7 +2258,7 @@ async fn window_api_checks() {
     return;
   }
   // Overlay windows, tray events, activation policy, speech (API 50).
-  overlay_checks::run(&w).await;
+  overlay_checks::run(&w, TITLE).await;
   // --hidpi: the rest of this battery then runs at that scale too.
   if let Some(scale) = std::env::var("LAUFEY_E2E_EXPECT_SCALE")
     .ok()

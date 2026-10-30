@@ -124,8 +124,15 @@ void SpeakJob(ISpVoice* voice, const Job& job) {
   HRESULT hr = voice->Speak(
       xml.c_str(), SPF_ASYNC | SPF_PURGEBEFORESPEAK | SPF_IS_XML, nullptr);
   if (FAILED(hr)) {
-    char buf[64];
-    snprintf(buf, sizeof buf, "SAPI refused the text (0x%08lx)", (long)hr);
+    char buf[96];
+    // SPERR_NOT_FOUND from Speak: SAPI found no audio output device (a
+    // machine with no sound card, a service session).
+    if (hr == (HRESULT)0x8004503A)
+      snprintf(buf, sizeof buf,
+               "no audio output device (SAPI SPERR_NOT_FOUND 0x%08lx)",
+               (long)hr);
+    else
+      snprintf(buf, sizeof buf, "SAPI refused the text (0x%08lx)", (long)hr);
     Speech().Finish(job.id, LAUFEY_SPEECH_FAILED, buf);
     return;
   }
