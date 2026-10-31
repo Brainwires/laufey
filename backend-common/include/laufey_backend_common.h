@@ -123,6 +123,12 @@ uint32_t TrayCapabilitiesWin();
 // Opens the tray's menu at the cursor, as a right click does; false
 // without one. Any thread.
 bool PopUpTrayMenuWin(uint32_t tray_id);
+// The app's quit, which a tray menu's quit role runs (on the tray window's
+// thread, the UI thread): the backend's own quit, as quit() from the runtime,
+// so the role is an app-level quit as on macOS (terminate:), never a window's
+// close request. Each backend sets it when it creates a tray; without one the
+// role reports "quit" to the menu's click handler, as on Linux.
+void SetTrayQuitHandlerWin(void (*quit)());
 #endif
 
 // ---------------------------------------------------------------------------

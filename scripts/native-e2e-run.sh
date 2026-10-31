@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--tray-roles|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -30,6 +30,9 @@
 # --lifetime runs only the app-lifetime checks (keep-alive with no window,
 # then quit() ending the event loop); they end the process, so they can't
 # share the main battery's run.
+# --tray-roles (Windows) runs only the tray menu role checks
+# (tray_role_checks.rs): the rows Windows draws for role items, then a click
+# on the quit role, which ends the app (so it can't share the main run).
 # --window-api runs only the API 38 window checks (state, constraints,
 # screens, title bar, backdrops). On Linux it runs a window manager (openbox)
 # under Xvfb, so maximize / minimize / fullscreen must really apply: the
@@ -128,6 +131,9 @@ if [ "$mode" = "--scheme-body" ]; then
 fi
 if [ "$mode" = "--lifetime" ]; then
   export LAUFEY_E2E_ONLY=lifetime
+fi
+if [ "$mode" = "--tray-roles" ]; then
+  export LAUFEY_E2E_ONLY=tray-roles
 fi
 if [ "$mode" = "--bridge-origin" ]; then
   export LAUFEY_E2E_ONLY=bridge-origin

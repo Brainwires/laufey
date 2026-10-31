@@ -852,6 +852,14 @@ jobs:
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --lifetime
 
+      # A Windows tray menu's role items: labelled rows (no macOS-only ones),
+      # and a click on the quit role quits the app. Ends the process.
+      - name: Tray menu roles (Windows)
+        if: runner.os == 'Windows' && matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --tray-roles
+
       # Drag and drop, native file dialogs and the rich clipboard (API 39):
       # drops through the test hook, real OS dialogs driven by the test hook,
       # clipboard text / HTML / PNG / formats / change events. Every leg,

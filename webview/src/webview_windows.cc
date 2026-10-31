@@ -818,13 +818,20 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
             WinToDip((short)HIWORD(lParam), scale));
       }
       return 0;
+    case WM_ACTIVATE:
+      // focus / blur follow the window's activation, not the keyboard focus:
+      // a click in the page moves the focus from this window to WebView2's
+      // child HWND (a WM_KILLFOCUS here) while the window stays the active
+      // one, which is no blur (a tray panel that hides on blur would hide
+      // before the click reached the page). Another app taking the
+      // foreground deactivates this window wherever its focus was.
+      if (wid > 0) {
+        RuntimeLoader::GetInstance()->DispatchFocusedEvent(
+            wid, LOWORD(wParam) != WA_INACTIVE ? 1 : 0);
+      }
+      break;  // DefWindowProc gives the activated window the focus
     case WM_SETFOCUS:
-      if (wid > 0)
-        RuntimeLoader::GetInstance()->DispatchFocusedEvent(wid, 1);
-      return 0;
     case WM_KILLFOCUS:
-      if (wid > 0)
-        RuntimeLoader::GetInstance()->DispatchFocusedEvent(wid, 0);
       return 0;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
@@ -957,6 +964,43 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+// The executable's own icon (its first icon group, the one Explorer shows):
+// the window class's big and small icons, so the title bar, Alt+Tab and the
+// taskbar show the app's icon (`deno desktop` stamps it into the launcher)
+// instead of the generic one. Both null when the executable has none.
+static void LoadExecutableIcons(HINSTANCE instance, HICON* big_icon,
+                                HICON* small_icon) {
+  *big_icon = nullptr;
+  *small_icon = nullptr;
+  std::wstring name;
+  WORD id = 0;
+  struct Found {
+    std::wstring* name;
+    WORD* id;
+  } found{&name, &id};
+  EnumResourceNamesW(
+      instance, MAKEINTRESOURCEW(14),  // RT_GROUP_ICON (wide)
+      [](HMODULE, LPCWSTR, LPWSTR res, LONG_PTR param) -> BOOL {
+        auto* f = reinterpret_cast<Found*>(param);
+        if (IS_INTRESOURCE(res))
+          *f->id = static_cast<WORD>(reinterpret_cast<ULONG_PTR>(res));
+        else
+          *f->name = res;
+        return FALSE;  // the first group only
+      },
+      reinterpret_cast<LONG_PTR>(&found));
+  LPCWSTR res =
+      id ? MAKEINTRESOURCEW(id) : (name.empty() ? nullptr : name.c_str());
+  if (!res)
+    return;
+  *big_icon = static_cast<HICON>(LoadImageW(instance, res, IMAGE_ICON,
+                                            GetSystemMetrics(SM_CXICON),
+                                            GetSystemMetrics(SM_CYICON), 0));
+  *small_icon = static_cast<HICON>(
+      LoadImageW(instance, res, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                 GetSystemMetrics(SM_CYSMICON), 0));
+}
+
 WebView2Backend::WebView2Backend() {
   g_win_backend = this;
 
@@ -972,6 +1016,7 @@ WebView2Backend::WebView2Backend() {
   wc.lpszClassName = L"LaufeyWebView2";
   wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
   wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+  LoadExecutableIcons(wc.hInstance, &wc.hIcon, &wc.hIconSm);
   RegisterClassExW(&wc);
   class_registered_ = true;
 
@@ -3074,6 +3119,12 @@ void WebView2Backend::SetDockBadge(const char* badge_or_null) {
 // Thin trampolines over backend-common/src/tray_win.cc.
 
 uint32_t WebView2Backend::CreateTrayIcon() {
+  // A tray menu's quit role is this backend's quit (as quit() from the
+  // runtime).
+  laufey_common::SetTrayQuitHandlerWin([] {
+    if (g_win_backend)
+      g_win_backend->Quit();
+  });
   uint32_t tray_id = laufey_common::CreateTrayIconWin();
   // The tray's hidden window must belong to the thread that pumps
   // messages (this backend's UI thread): created on the caller's thread --
