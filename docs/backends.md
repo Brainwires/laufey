@@ -52,14 +52,15 @@ an idle period (each request's traffic annotation names the feature), and what
 the host does about each in the browser process (`cef/src/app.cc`,
 `backend-common/include/laufey_cef_network_quiet.h`):
 
-| Request                                                           | Cause (traffic annotation)                                                                 | Default                                                |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| `clients2.google.com/time/1/current`                              | network time tracker (`network_time_component`)                                            | `--disable-features=NetworkTimeServiceQuerying`        |
-| `www.google.com/async/folae`                                      | AI Mode eligibility (`aim_eligibility_fetch`)                                              | `--disable-features=AimEnabled`                        |
-| preconnects to `www.google.com`                                   | default search engine preconnector                                                         | `--disable-features=PreconnectToSearch`                |
-| `accounts.google.com/ListAccounts`                                | the Google accounts in the cookie jar (`gaia_auth_list_accounts`), asked by signin metrics | `--gaia-url=https://localhost:9` (see below)           |
-| `update.googleapis.com`, `edgedl.me.gvt1.com` (60 s after launch) | component updater (`update_client`)                                                        | `--disable-component-update`                           |
-| `redirector.gvt1.com/edgedl/chrome/dict/*.bdic` (Linux)           | Hunspell dictionary download (`spellcheck_hunspell_dictionary`)                            | only dictionaries already on disk are kept (see below) |
+| Request                                                                  | Cause (traffic annotation)                                                                                           | Default                                                     |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `clients2.google.com/time/1/current`                                     | network time tracker (`network_time_component`)                                                                      | `--disable-features=NetworkTimeServiceQuerying`             |
+| `www.google.com/async/folae`                                             | AI Mode eligibility (`aim_eligibility_fetch`)                                                                        | `--disable-features=AimEnabled`                             |
+| preconnects to `www.google.com`                                          | default search engine preconnector                                                                                   | `--disable-features=PreconnectToSearch`                     |
+| `accounts.google.com/ListAccounts`                                       | the Google accounts in the cookie jar (`gaia_auth_list_accounts`), asked by signin metrics                           | `--gaia-url=https://localhost:9` (see below)                |
+| `update.googleapis.com`, `edgedl.me.gvt1.com` (60 s after launch)        | component updater (`update_client`)                                                                                  | `--disable-component-update`                                |
+| `update.googleapis.com`, `edgedl.me.gvt1.com` (at launch, Chromium 156+) | on-device model manifest broker's manifest component (`update_client`), registered past `--disable-component-update` | `--optimization-guide-manifest-override` with an empty path |
+| `redirector.gvt1.com/edgedl/chrome/dict/*.bdic` (Linux)                  | Hunspell dictionary download (`spellcheck_hunspell_dictionary`)                                                      | only dictionaries already on disk are kept (see below)      |
 
 - **Google accounts.** No switch or feature turns the ListAccounts check off:
   Chrome's signin metrics services ask for the accounts in the cookie jar when
@@ -85,8 +86,10 @@ the host does about each in the browser process (`cef/src/app.cc`,
 
 An app's own command line wins: a feature named in `--enable-features` is not
 disabled, a `--gaia-url` of its own is kept, and `--component-updater=...`
-(configuring the updater) keeps the component updater running. On Windows the
-net log also shows DNS lookups of `wpad`: the system's proxy auto-discovery
+(configuring the updater) keeps the component updater running, and with it
+Chromium's on-device model manifest (as does an
+`--optimization-guide-manifest-override` of the app's own). On Windows the net
+log also shows DNS lookups of `wpad`: the system's proxy auto-discovery
 ("Automatically detect settings"), which follows the OS's proxy settings.
 
 The `--network-quiet` e2e mode checks it on every CEF leg in CI
@@ -298,6 +301,14 @@ changed for the host:
   callbacks cancel a download whose `OnBeforeDownload` callback is dropped;
   neither changes the host, which never registered a V8 extension and already
   cancels refused downloads itself.
+- Chromium 156's on-device model manifest broker is always built and installs
+  its manifest component at launch past `--disable-component-update`; the host's
+  network-quiet defaults add an empty `--optimization-guide-manifest-override`
+  (see the table above), which the `--network-quiet` e2e leg caught.
+- On macOS a `set_window_size()` while a window is still being created could
+  read the frame around the page as none, so the page lost the title bar's 28
+  px; the host takes the frame from AppKit when Views reports none
+  (`MacFrameAroundContent`).
 - Chromium 156's English Hunspell dictionaries are `-10-2` (were `-10-1`):
   `hunspell_dictionaries` moved from `cccf64a8` to `cee14e31`, so a
   distribution's bundled `.bdic` files must be refreshed with it.

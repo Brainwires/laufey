@@ -1104,10 +1104,12 @@ void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line) {
     // broker reads its manifest from that file instead and never touches the
     // updater; an empty path (no file anyone could put there) gives it none,
     // as 150 had none with the updater off. An app's own override wins.
+    // AppendSwitch, not AppendSwitchWithValue(name, ""): CEF's C API drops
+    // a call whose value is empty.
     if (!command_line->HasSwitch(
             laufey_common::kCefQuietManifestOverrideSwitch))
-      command_line->AppendSwitchWithValue(
-          laufey_common::kCefQuietManifestOverrideSwitch, "");
+      command_line->AppendSwitch(
+          laufey_common::kCefQuietManifestOverrideSwitch);
   }
 }
 
