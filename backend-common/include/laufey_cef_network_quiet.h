@@ -24,11 +24,16 @@
 //                                        downloaded on first use)
 //   update.googleapis.com,               update_client: the component
 //     edgedl.me.gvt1.com (after 60 s)    updater's checks and downloads
+//   update.googleapis.com,               update_client (Chromium 156+): the
+//     edgedl.me.gvt1.com (at once)       on-device model manifest broker's
+//                                        manifest component, registered
+//                                        past --disable-component-update
 //
 // The host turns the first three features off (MergeQuietDisabledFeatures),
 // points Chrome's Google-accounts origin at a port Chromium refuses to
 // connect to (kCefQuietGaiaUrl: the requests fail before any DNS lookup or
-// socket), passes --disable-component-update, and on Linux keeps only the
+// socket), passes --disable-component-update and an empty
+// --optimization-guide-manifest-override, and on Linux keeps only the
 // spellcheck dictionaries whose file is already on disk
 // (LocalHunspellDictionaries).
 
@@ -81,6 +86,16 @@ std::string MergeQuietDisabledFeatures(const std::string& disable,
 // each such request ends with ERR_UNSAFE_PORT before a DNS lookup or a
 // socket; "localhost" never leaves the machine even if that changed.
 inline constexpr char kCefQuietGaiaUrl[] = "https://localhost:9";
+
+// The switch the host sets, with an empty value, wherever it turns the
+// component updater off (no --component-updater, and the app sets no override
+// of its own): Chromium 156's on-device model manifest broker then reads its
+// manifest from that (missing) file instead of registering and installing
+// its manifest component with the component updater, which it does past
+// --disable-component-update (optimization_guide_global_state.cc,
+// CreateManifestDelegate).
+inline constexpr char kCefQuietManifestOverrideSwitch[] =
+    "optimization-guide-manifest-override";
 
 // Of the spellcheck languages in `languages` (the profile's
 // "spellcheck.dictionaries"), the ones whose Hunspell dictionary is among

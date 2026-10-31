@@ -1093,8 +1093,22 @@ void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line) {
   // running: a minute after launch it checks update.googleapis.com and
   // downloads components from edgedl.me.gvt1.com. An app that configures
   // it (--component-updater=...) keeps it.
-  if (!command_line->HasSwitch("component-updater"))
+  if (!command_line->HasSwitch("component-updater")) {
     command_line->AppendSwitch("disable-component-update");
+    // Chromium 156's on-device model manifest broker (always built, no
+    // feature turns it off) registers its "Optimization Guide On DeviceModels
+    // Manifest" component (ceofaddefefcbblgcgnibnonglccbfja) with the
+    // component updater itself and installs it at once, past
+    // --disable-component-update: update.googleapis.com, then
+    // edgedl.me.gvt1.com, at every launch. With a manifest override the
+    // broker reads its manifest from that file instead and never touches the
+    // updater; an empty path (no file anyone could put there) gives it none,
+    // as 150 had none with the updater off. An app's own override wins.
+    if (!command_line->HasSwitch(
+            laufey_common::kCefQuietManifestOverrideSwitch))
+      command_line->AppendSwitchWithValue(
+          laufey_common::kCefQuietManifestOverrideSwitch, "");
+  }
 }
 
 #if defined(__linux__)
