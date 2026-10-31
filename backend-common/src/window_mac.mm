@@ -7,6 +7,8 @@
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
 
+#include <algorithm>
+#include <cmath>
 #include <map>
 #include <mutex>
 
@@ -338,6 +340,21 @@ Bounds MacWindowBounds(void* nswindow) {
   b.width = static_cast<int>(content.size.width);
   b.height = static_cast<int>(content.size.height);
   return b;
+}
+
+bool MacFrameAroundContent(void* nswindow, int* width, int* height) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w || IsFullscreen(w))
+    return false;
+  NSRect frame = w.frame;
+  NSRect content = [w contentRectForFrameRect:frame];
+  if (width)
+    *width = static_cast<int>(std::lround(
+        std::max<CGFloat>(0, frame.size.width - content.size.width)));
+  if (height)
+    *height = static_cast<int>(std::lround(
+        std::max<CGFloat>(0, frame.size.height - content.size.height)));
+  return true;
 }
 
 void MacWatchWindowState(void* nswindow, uint32_t window_id) {

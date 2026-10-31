@@ -173,6 +173,11 @@ void MacApplySizeConstraints(void* nswindow, const SizeConstraints& c);
 // Top-left-origin bounds (anchored to the primary screen) of the window frame
 // and content size, the get_window_position / get_window_size convention.
 Bounds MacWindowBounds(void* nswindow);
+// The size AppKit's frame adds around the window's content view, in points:
+// the title bar of a titled window, nothing for a borderless or
+// full-size-content one. False without a window, and for a full-screen one
+// (no frame is drawn there). Main thread.
+bool MacFrameAroundContent(void* nswindow, int* width, int* height);
 // Observes the window's miniaturize / zoom / fullscreen / resize / move
 // notifications and feeds ReportWindowState and the normal-bounds tracker.
 void MacWatchWindowState(void* nswindow, uint32_t window_id);
