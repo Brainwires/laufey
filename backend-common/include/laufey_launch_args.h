@@ -89,11 +89,66 @@ std::vector<std::string> DeepLinkSwitchesToStrip(
 //    switch (DeepLinkSwitchesToStrip) and crashes in Chrome's tab code. With
 //    the switch the app runs at the level it was started at, as every other
 //    backend's does (the executable's manifest asks for asInvoker).
-//    Chromium reads it in PreEarlyInitialization, after the hook. A Chromium
-//    that checks earlier (in ChromeMainDelegate::BasicStartupComplete, which
-//    CEF calls before the hook; main@{#1700144}) needs it before CEF parses
-//    the command line instead: see docs/backends.md.
+//    Chromium 149 and 150 read it in PreEarlyInitialization, after the hook.
+//    From Chromium 156 (main@{#1700144}) Chromium checks in
+//    ChromeMainDelegate::BasicStartupComplete, which CEF calls before the
+//    hook, so the switch must already be on the process's own command line:
+//    an elevated launch without it starts itself again with it first
+//    (NeedsDeElevationRelaunch). The hook still appends it, so the command
+//    line the browser process runs with always carries it.
 const std::vector<std::string>& CefWindowsBrowserSwitches();
+
+// --- Elevated launches on Windows (CEF, Chromium 156+) ----------------------
+//
+// Chromium 156 checks for auto de-elevation before the host's command line
+// hook (CefWindowsBrowserSwitches), so a Windows CEF browser process that
+// starts elevated without --do-not-de-elevate on its command line starts
+// itself again first: the same executable, the same command line with
+// kDoNotDeElevateArgument after the program name, the same environment
+// (kDeElevationRelaunchEnv added), working directory and standard handles,
+// still elevated. The first process waits for it and exits with its exit
+// code. The relaunched process drops the argument it was given from the
+// arguments the app sees (DropDeElevationRelaunchArgument), so an elevated
+// launch shows the app the same arguments as any other.
+
+// The argument the relaunch adds after the program name.
+inline constexpr char kDoNotDeElevateArgument[] = "--do-not-de-elevate";
+
+// Set (to "1") in the relaunched process's environment; the host removes it
+// at once (it reaches no process the app starts).
+inline constexpr char kDeElevationRelaunchEnv[] =
+    "LAUFEY_DE_ELEVATION_RELAUNCH";
+
+// Whether a browser process started with `args` (argv without the program)
+// must start itself again with kDoNotDeElevateArgument: its token is
+// elevated with UAC on (`full_token`: TokenElevationTypeFull, Chromium's
+// base::win::UserAccountIsUnnecessarilyElevated) and Chromium would
+// de-elevate it: no switch before "--" that skips that (do-not-de-elevate,
+// enable-automation, isolated, test-type; Chromium's MaybeAutoDeElevate).
+bool NeedsDeElevationRelaunch(const std::vector<std::string>& args,
+                              bool full_token);
+
+// `command_line` (a process's raw command line, GetCommandLineW) with " " and
+// `argument` inserted right after the program name, where
+// CommandLineToArgvW ends argv[0]: at the closing '"' of a quoted name, else
+// at the first space or tab. The rest of the command line is kept as it is,
+// so every other argument reaches the new process exactly as it was given.
+// An empty (or all-blank) `command_line` gives `program` in quotes followed
+// by the argument.
+std::wstring InsertArgumentAfterProgram(const std::wstring& command_line,
+                                        const std::wstring& program,
+                                        const std::wstring& argument);
+
+// Marks this process as the relaunch (it found kDeElevationRelaunchEnv).
+// Process-wide; set once, before any argument is read.
+void SetDeElevationRelaunched(bool relaunched);
+bool DeElevationRelaunched();
+
+// In the relaunched process (DeElevationRelaunched), removes the leading
+// kDoNotDeElevateArgument the relaunch added from `args` (argv without the
+// program). Anywhere else, and when `args` doesn't start with it, `args` is
+// left as it is.
+void DropDeElevationRelaunchArgument(std::vector<std::string>* args);
 
 // Whether the running executable is a packaged app: its launch file
 // (laufey-launch.json) exists, or `has_colocated_runtime` (the backend found
