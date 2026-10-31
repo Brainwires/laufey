@@ -21,7 +21,7 @@ const std::vector<std::string>& CefQuietDisabledFeatures() {
 }
 
 const std::vector<std::string>& CefOwnDisabledFeatures() {
-  // CEF 7871 chrome_main_delegate_cef.cc:356-374 (laufey_cef_network_quiet.h).
+  // CEF 8078 chrome_main_delegate_cef.cc:360-400 (laufey_cef_network_quiet.h).
   static const std::vector<std::string> features = {
       "GlicActorUi",
       "AutofillActorMode",

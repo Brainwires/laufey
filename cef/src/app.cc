@@ -1040,7 +1040,10 @@ bool LaufeyIsDevToolsCommand(int command_id) {
     case IDC_CONTENT_CONTEXT_INSPECTELEMENT:
     case IDC_CONTENT_CONTEXT_INSPECTBACKGROUNDPAGE:
     case IDC_CONTENT_CONTEXT_INSPECTELEMENT_WITH_DEVTOOLS:
+#ifdef IDC_CONTENT_CONTEXT_INSPECTELEMENT_WITH_GEMINI
+    // Removed from cef_command_ids.h in CEF 156 (Chromium dropped the item).
     case IDC_CONTENT_CONTEXT_INSPECTELEMENT_WITH_GEMINI:
+#endif
       return true;
   }
   return false;
