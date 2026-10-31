@@ -244,7 +244,8 @@ fn vtable_layout_matches_the_header() {
     pop_up_tray_menu,
     speak,
     stop_speaking,
-    speech_voices
+    speech_voices,
+    get_background_throttling
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

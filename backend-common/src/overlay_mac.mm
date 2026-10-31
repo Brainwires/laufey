@@ -6,10 +6,18 @@
 // macOS has no input-shape API for a window. A window with an input region
 // keeps ignoresMouseEvents on while the cursor is outside its rectangles and
 // turns it off while the cursor is over one, so the click that follows lands
-// in the window. The cursor is followed by a global and a local mouse
-// monitor (mouse moves need no permission) plus a 30 Hz timer for a window
-// that moves under a cursor at rest. The state lives in a weak-keyed map, so
-// a window that is gone drops out by itself.
+// in the window. The state is recomputed on every event that can change it,
+// never polled: a cursor move (a global and a local mouse monitor; mouse
+// moves need no permission), a new region, and the window moving, resizing,
+// showing or hiding, or changing screen, so a click right after any of them
+// meets the current state. The state lives in a weak-keyed map, so a window
+// that is gone drops out by itself.
+//
+// What stays: the window server routes a click by the state it has when the
+// click arrives, and a cursor move reaches this process only after the
+// window server has seen it. A click posted within about 2 ms of the move
+// that brought the cursor over a rectangle (a synthetic warp-and-click) can
+// still go to the window beneath; a pointing device's click comes much later.
 
 #include "laufey_overlay.h"
 
@@ -20,11 +28,17 @@
 
 @interface LaufeyOverlayState : NSObject
 @property(nonatomic) BOOL explicitPassthrough;
+// The window's frame / visibility / screen observers while it has a region.
+@property(nonatomic, strong) NSArray<id>* windowObservers;
 @end
 
 @implementation LaufeyOverlayState {
  @public
   laufey_common::InputRegion region;
+}
+- (void)dealloc {
+  for (id observer in _windowObservers)
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
 }
 @end
 
@@ -48,7 +62,8 @@ LaufeyOverlayState* StateFor(NSWindow* window, bool create) {
 
 id g_global_monitor = nil;
 id g_local_monitor = nil;
-NSTimer* g_timer = nil;
+// The app-wide observers (screens reconfigured, the active Space changed).
+NSArray<id>* g_app_observers = nil;
 
 void Recompute(NSWindow* window, LaufeyOverlayState* st) {
   bool pass = st.explicitPassthrough;
@@ -80,6 +95,42 @@ bool AnyRegion() {
   return false;
 }
 
+// Recompute `window` whenever its frame, visibility or screen changes, while
+// it has a region: a window that moves under a cursor at rest (a walking
+// desktop companion) takes or passes the next click by where it is now.
+void WatchWindow(NSWindow* window, LaufeyOverlayState* st) {
+  bool want = st->region.active;
+  if (want == (st.windowObservers != nil))
+    return;
+  NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+  if (!want) {
+    for (id observer in st.windowObservers)
+      [center removeObserver:observer];
+    st.windowObservers = nil;
+    return;
+  }
+  NSMutableArray<id>* observers = [NSMutableArray array];
+  __weak NSWindow* weak_window = window;
+  for (NSNotificationName name in @[
+         NSWindowDidMoveNotification, NSWindowDidResizeNotification,
+         NSWindowDidChangeOcclusionStateNotification,
+         NSWindowDidChangeScreenNotification,
+         NSWindowDidDeminiaturizeNotification
+       ]) {
+    [observers addObject:[center addObserverForName:name
+                                             object:window
+                                              queue:nil
+                                         usingBlock:^(NSNotification*) {
+                                           NSWindow* w = weak_window;
+                                           LaufeyOverlayState* s =
+                                               w ? StateFor(w, false) : nil;
+                                           if (s && s->region.active)
+                                             Recompute(w, s);
+                                         }]];
+  }
+  st.windowObservers = observers;
+}
+
 void UpdateFollowers() {
   bool want = AnyRegion();
   NSEventMask mask = NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged |
@@ -97,19 +148,30 @@ void UpdateFollowers() {
                                                 RecomputeAll();
                                                 return e;
                                               }];
-    g_timer = [NSTimer timerWithTimeInterval:1.0 / 30.0
-                                     repeats:YES
-                                       block:^(NSTimer*) {
-                                         RecomputeAll();
-                                       }];
-    [[NSRunLoop mainRunLoop] addTimer:g_timer forMode:NSRunLoopCommonModes];
+    id screens = [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSApplicationDidChangeScreenParametersNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification*) {
+                  RecomputeAll();
+                }];
+    id space = [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification*) {
+                  RecomputeAll();
+                }];
+    g_app_observers = @[ screens, space ];
   } else if (!want && g_global_monitor) {
     [NSEvent removeMonitor:g_global_monitor];
     [NSEvent removeMonitor:g_local_monitor];
-    [g_timer invalidate];
+    [[NSNotificationCenter defaultCenter] removeObserver:g_app_observers[0]];
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        removeObserver:g_app_observers[1]];
     g_global_monitor = nil;
     g_local_monitor = nil;
-    g_timer = nil;
+    g_app_observers = nil;
   }
 }
 
@@ -165,6 +227,7 @@ void MacSetInputRegion(void* nswindow, const InputRegion& region) {
   LaufeyOverlayState* st = StateFor(window, true);
   st->region = region;
   Recompute(window, st);
+  WatchWindow(window, st);
   UpdateFollowers();
 }
 
@@ -172,6 +235,10 @@ void MacForgetOverlayWindow(void* nswindow) {
   NSWindow* window = (__bridge NSWindow*)nswindow;
   if (!window)
     return;
+  if (LaufeyOverlayState* st = StateFor(window, false)) {
+    st->region = InputRegion();
+    WatchWindow(window, st);
+  }
   [States() removeObjectForKey:window];
   UpdateFollowers();
 }

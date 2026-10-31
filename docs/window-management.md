@@ -198,10 +198,15 @@ w.set_skip_taskbar(true);
   lets everything through. It is independent of `set_click_passthrough`, which
   wins while on and reads back only what it was set to. macOS has no input
   shape: the window's `ignoresMouseEvents` follows the cursor (a global and a
-  local mouse monitor, no permission, plus a 30 Hz timer for a window that moves
-  under a cursor at rest). Windows: `WS_EX_TRANSPARENT` follows the cursor on a
-  60 Hz timer of the window's own thread, so the region is input-only (nothing
-  is clipped; `SetWindowRgn` would clip the painting, and `HTTRANSPARENT` only
+  local mouse monitor, no permission) and is recomputed at once when the region
+  changes and when the window moves, resizes, shows, hides or changes screen
+  (API 51; a 30 Hz timer before), so a click right after any of them meets the
+  current region. A click the window server receives within about 2 ms of the
+  move that brought the cursor over a rectangle (a synthetic warp-and-click) can
+  still reach the window beneath: the move reaches the app after the window
+  server has seen it. Windows: `WS_EX_TRANSPARENT` follows the cursor on a 60 Hz
+  timer of the window's own thread, so the region is input-only (nothing is
+  clipped; `SetWindowRgn` would clip the painting, and `HTTRANSPARENT` only
   passes clicks within one thread). Linux: the window's input shape (X11 SHAPE,
   Wayland `wl_surface.set_input_region`), through GDK.
 - **Skip the taskbar** (`set_skip_taskbar`): Windows `ITaskbarList` `DeleteTab`
@@ -241,6 +246,52 @@ w.set_skip_taskbar(true);
 | layer shell      | —            | —            | —                    | WebView (wlroots, KDE) |
 
 The Winit backend reports none of them yet.
+
+## Background throttling (API ≥ 51)
+
+What the web engine does to a window's page while the window is not on screen
+(created hidden, hidden, minimized or covered), like Electron's
+`webPreferences.backgroundThrottling`. It is chosen when the window is created
+(`WindowOptions::background_throttling`, the `LAUFEY_WINDOW_FLAG_BACKGROUND_*`
+flags): WebKit reads it when it sets the page up.
+
+```rust
+use laufey::{BackgroundThrottling, Window, WindowOptions};
+
+// A hidden window whose page answers the tray and its sockets at full speed.
+let worker = Window::new_with_options(
+  400,
+  300,
+  WindowOptions {
+    hidden: true,
+    background_throttling: BackgroundThrottling::None,
+    ..Default::default()
+  },
+)
+.load("background.html");
+assert_eq!(worker.background_throttling(), Some(BackgroundThrottling::None)); // macOS 14+
+```
+
+| policy                   | flag                                        | the page while not on screen                                                 |
+| ------------------------ | ------------------------------------------- | ---------------------------------------------------------------------------- |
+| `Throttle` (the default) | none                                        | keeps running: timers fire at a reduced rate, events and sockets are handled |
+| `None`                   | `LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED` | runs as if it were on screen (Electron's `backgroundThrottling: false`)      |
+| `Suspend`                | `LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND`     | may be frozen until it is on screen again                                    |
+
+macOS (the WebView backend, macOS 14+) maps them to
+`WKPreferences.inactiveSchedulingPolicy` (`Throttle`, `None`, `Suspend`); for
+`None` it also turns off WebKit's hidden-page timer throttling (a WebKit SPI,
+asked for by selector: without it a hidden page's timers still fire at most once
+a second, but it is never frozen). A hidden page's 100 ms interval ran about
+once a second throttled and at its full rate with `None`. WKWebView's own
+default, `Suspend`, froze the page of a window created hidden about a second
+after it loaded (its timers, the runtime's events and its sockets waited until
+it showed), which a tray app handling clicks in a hidden window can't have:
+every window now starts at `Throttle`. `background_throttling()` reads the
+policy back. Before macOS 14 WebKit never suspends a page; CEF, WebView2 and
+WebKitGTK throttle a hidden page's timers without freezing it and take no flag:
+there the flags are ignored and `background_throttling()` is `None`. Winit has
+no page.
 
 ## Maximize, minimize and fullscreen (API ≥ 38)
 

@@ -28,6 +28,7 @@
 //! it unchanged.
 
 mod auth_thread_checks;
+mod background_checks;
 mod body_echo;
 mod bridge_origin_checks;
 mod close_checks;
@@ -2259,6 +2260,8 @@ async fn window_api_checks() {
   }
   // Overlay windows, tray events, activation policy, speech (API 50).
   overlay_checks::run(&w, TITLE).await;
+  // Background throttling (API 51).
+  background_checks::run().await;
   // --hidpi: the rest of this battery then runs at that scale too.
   if let Some(scale) = std::env::var("LAUFEY_E2E_EXPECT_SCALE")
     .ok()
