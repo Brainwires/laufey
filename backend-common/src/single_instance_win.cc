@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "laufey_backend_common.h"
+#include "laufey_launch_args.h"
 
 namespace laufey_common {
 
@@ -402,6 +403,9 @@ SecondInstanceMessage CurrentProcessInvocation(int /*argc*/, char** /*argv*/) {
       message.args.push_back(SanitizeUtf8(WideToUtf8(argv[i])));
     LocalFree(argv);
   }
+  // An elevated CEF launch's relaunch forwards the arguments it was started
+  // with, not the switch the relaunch added (laufey_launch_args.h).
+  DropDeElevationRelaunchArgument(&message.args);
   DWORD n = GetCurrentDirectoryW(0, nullptr);
   if (n > 0) {
     std::wstring cwd(n, L'\0');

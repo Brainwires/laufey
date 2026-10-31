@@ -374,6 +374,103 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
   IMPLEMENT_REFCOUNTING(LaufeyCombinedApp);
 };
 
+// Whether this process's token is elevated with UAC on (an administrator's
+// full token): Chromium's base::win::UserAccountIsUnnecessarilyElevated.
+static bool LaufeyTokenIsFullyElevated() {
+  TOKEN_ELEVATION_TYPE type = TokenElevationTypeDefault;
+  DWORD size = 0;
+  return GetTokenInformation(GetCurrentProcessToken(), TokenElevationType,
+                             &type, sizeof(type), &size) &&
+         type == TokenElevationTypeFull;
+}
+
+// Chromium 156+ de-elevates an elevated browser process before CEF runs the
+// command line hook that adds --do-not-de-elevate (laufey_launch_args.h,
+// NeedsDeElevationRelaunch), so the browser process starts itself again with
+// the switch on its command line: the same executable and arguments, the
+// same environment, working directory, standard handles and window state,
+// still elevated. Waits for it and returns true with its exit code in
+// `*exit_code`; false (with a warning) when it could not be started, and the
+// launch then goes on (Chromium relaunches it de-elevated).
+static bool LaufeyRelaunchKeepingElevation(int* exit_code) {
+  std::wstring exe(MAX_PATH, L'\0');
+  for (;;) {
+    DWORD n =
+        GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
+    if (n == 0)
+      return false;
+    if (n < exe.size()) {
+      exe.resize(n);
+      break;
+    }
+    exe.resize(exe.size() * 2);
+  }
+  std::wstring command_line = laufey_common::InsertArgumentAfterProgram(
+      GetCommandLineW(), exe,
+      laufey_common::Utf8ToWide(laufey_common::kDoNotDeElevateArgument));
+
+  // CEF's bootstrap moves a browser process to the executable's directory;
+  // LAUFEY_CWD brings the relaunch back to this one (which RunWinMain has
+  // already restored). Set only for the child: both are removed again below.
+  const std::wstring marker_env =
+      laufey_common::Utf8ToWide(laufey_common::kDeElevationRelaunchEnv);
+  std::wstring cwd;
+  DWORD cwd_len = GetCurrentDirectoryW(0, nullptr);
+  if (cwd_len > 0) {
+    cwd.resize(cwd_len);
+    DWORD got = GetCurrentDirectoryW(cwd_len, cwd.data());
+    cwd.resize(got > 0 && got < cwd_len ? got : 0);
+  }
+  if (!cwd.empty())
+    SetEnvironmentVariableW(L"LAUFEY_CWD", cwd.c_str());
+  SetEnvironmentVariableW(marker_env.c_str(), L"1");
+
+  // This process's own startup information: the standard handles a launcher
+  // gave it (inherited below), the show state, the taskbar identity.
+  STARTUPINFOW si = {};
+  GetStartupInfoW(&si);
+  si.cb = sizeof(si);
+  si.lpReserved = nullptr;
+  si.cbReserved2 = 0;
+  si.lpReserved2 = nullptr;
+  PROCESS_INFORMATION pi = {};
+  BOOL started =
+      CreateProcessW(exe.c_str(), command_line.data(), nullptr, nullptr,
+                     /*bInheritHandles=*/TRUE, 0, nullptr, nullptr, &si, &pi);
+  DWORD error = started ? 0 : GetLastError();
+  SetEnvironmentVariableW(marker_env.c_str(), nullptr);
+  SetEnvironmentVariableW(L"LAUFEY_CWD", nullptr);
+  if (!started) {
+    std::cerr << "laufey: started elevated, and could not start again with "
+                 "--do-not-de-elevate (error "
+              << error << "); Chromium may relaunch the app de-elevated"
+              << std::endl;
+    return false;
+  }
+  // The shell let this process take the foreground; pass that on, so the
+  // app's first window comes to the front as it would have.
+  AllowSetForegroundWindow(pi.dwProcessId);
+  CloseHandle(pi.hThread);
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  if (!GetExitCodeProcess(pi.hProcess, &code))
+    code = 1;
+  CloseHandle(pi.hProcess);
+  *exit_code = static_cast<int>(code);
+  return true;
+}
+
+// Whether this process is the one LaufeyRelaunchKeepingElevation started
+// (it finds the marker in its environment, which it removes at once).
+static bool LaufeyTakeDeElevationRelaunchMarker() {
+  const std::wstring name =
+      laufey_common::Utf8ToWide(laufey_common::kDeElevationRelaunchEnv);
+  if (GetEnvironmentVariableW(name.c_str(), nullptr, 0) == 0)
+    return false;
+  SetEnvironmentVariableW(name.c_str(), nullptr);
+  return true;
+}
+
 // The host's entry point, in every process (browser, renderer, GPU, ...;
 // single-exe model). `sandbox_info` is bootstrap.exe's sandbox information,
 // or null for an unsandboxed build (-DUSE_SANDBOX=OFF), which then runs every
@@ -382,6 +479,10 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
   // LAUFEY_CWD is for the host behind CEF's bootstrap (RunWinMain, which has
   // already consumed it): never pass it on to what the app starts.
   SetEnvironmentVariableW(L"LAUFEY_CWD", nullptr);
+  // An elevated launch's relaunch (LaufeyRelaunchKeepingElevation): the
+  // argument it added is not the app's.
+  laufey_common::SetDeElevationRelaunched(
+      LaufeyTakeDeElevationRelaunchMarker());
   CefMainArgs main_args(hInstance);
 
   std::vector<std::string> args;
@@ -393,6 +494,7 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
     if (argv)
       LocalFree(argv);
   }
+  laufey_common::DropDeElevationRelaunchArgument(&args);
   // A CEF subprocess (renderer, GPU, utility, ...) carries --type=; anything
   // else is the browser process or a headless worker.
   bool cef_child = false;
@@ -429,6 +531,17 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
     // may outlive or move the app's install directory.
     if (laufey_common::IsHeadlessWorkerLaunch(args)) {
       return run_headless(g_runtime_path);
+    }
+
+    // Started elevated: keep the elevation (laufey_launch_args.h,
+    // NeedsDeElevationRelaunch). Never from the relaunch itself, whose
+    // `args` no longer show the switch it was given.
+    if (!laufey_common::DeElevationRelaunched() &&
+        laufey_common::NeedsDeElevationRelaunch(args,
+                                                LaufeyTokenIsFullyElevated())) {
+      int relaunch_exit = 0;
+      if (LaufeyRelaunchKeepingElevation(&relaunch_exit))
+        return relaunch_exit;
     }
   }
 
@@ -623,7 +736,7 @@ void LaufeyRestoreLaunchWorkingDirectory() {
 // Called by bootstrap.exe, the app's executable (`<app>.exe` loads this DLL
 // as `<app>.dll`), in every process, with the sandbox information it created.
 // See docs/backends.md, "The Chromium sandbox".
-CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance, LPTSTR lpCmdLine,
+CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance, LPWSTR lpCmdLine,
                                     int nCmdShow, void* sandbox_info,
                                     cef_version_info_t* version_info) {
   // DLL planting: the bootstrap starts a browser-type process in the

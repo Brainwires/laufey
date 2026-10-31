@@ -9,7 +9,7 @@ features that a given engine can't express on a given OS (see
 
 | Backend                                                           | Engine        | Process model | Bundled | JS bridge |
 | ----------------------------------------------------------------- | ------------- | ------------- | ------- | --------- |
-| [CEF](https://github.com/littledivy/laufey/tree/main/cef)         | Chromium 150  | multi-process | yes     | yes       |
+| [CEF](https://github.com/littledivy/laufey/tree/main/cef)         | Chromium 156  | multi-process | yes     | yes       |
 | [WebView](https://github.com/littledivy/laufey/tree/main/webview) | system native | single        | no      | yes       |
 | [Winit](https://github.com/littledivy/laufey/tree/main/winit)     | none          | single        | n/a     | no        |
 
@@ -19,7 +19,7 @@ There is also an **iOS** backend (UIKit + WKWebView, statically linked) — see
 
 ## CEF
 
-Embeds Chromium 150 (CEF 150.0.21, Chromium 150.0.7871.255) through the Chromium
+Embeds Chromium 156 (CEF 156.0.14, Chromium 156.0.8078.48) through the Chromium
 Embedded Framework and runs Chromium's real multi-process architecture — a
 browser process plus renderer, GPU, and utility subprocesses, with the same
 rendering and DevTools you get in Chrome. The engine is bundled into the app, so
@@ -52,14 +52,15 @@ an idle period (each request's traffic annotation names the feature), and what
 the host does about each in the browser process (`cef/src/app.cc`,
 `backend-common/include/laufey_cef_network_quiet.h`):
 
-| Request                                                           | Cause (traffic annotation)                                                                 | Default                                                |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| `clients2.google.com/time/1/current`                              | network time tracker (`network_time_component`)                                            | `--disable-features=NetworkTimeServiceQuerying`        |
-| `www.google.com/async/folae`                                      | AI Mode eligibility (`aim_eligibility_fetch`)                                              | `--disable-features=AimEnabled`                        |
-| preconnects to `www.google.com`                                   | default search engine preconnector                                                         | `--disable-features=PreconnectToSearch`                |
-| `accounts.google.com/ListAccounts`                                | the Google accounts in the cookie jar (`gaia_auth_list_accounts`), asked by signin metrics | `--gaia-url=https://localhost:9` (see below)           |
-| `update.googleapis.com`, `edgedl.me.gvt1.com` (60 s after launch) | component updater (`update_client`)                                                        | `--disable-component-update`                           |
-| `redirector.gvt1.com/edgedl/chrome/dict/*.bdic` (Linux)           | Hunspell dictionary download (`spellcheck_hunspell_dictionary`)                            | only dictionaries already on disk are kept (see below) |
+| Request                                                                  | Cause (traffic annotation)                                                                                           | Default                                                     |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `clients2.google.com/time/1/current`                                     | network time tracker (`network_time_component`)                                                                      | `--disable-features=NetworkTimeServiceQuerying`             |
+| `www.google.com/async/folae`                                             | AI Mode eligibility (`aim_eligibility_fetch`)                                                                        | `--disable-features=AimEnabled`                             |
+| preconnects to `www.google.com`                                          | default search engine preconnector                                                                                   | `--disable-features=PreconnectToSearch`                     |
+| `accounts.google.com/ListAccounts`                                       | the Google accounts in the cookie jar (`gaia_auth_list_accounts`), asked by signin metrics                           | `--gaia-url=https://localhost:9` (see below)                |
+| `update.googleapis.com`, `edgedl.me.gvt1.com` (60 s after launch)        | component updater (`update_client`)                                                                                  | `--disable-component-update`                                |
+| `update.googleapis.com`, `edgedl.me.gvt1.com` (at launch, Chromium 156+) | on-device model manifest broker's manifest component (`update_client`), registered past `--disable-component-update` | `--optimization-guide-manifest-override` with an empty path |
+| `redirector.gvt1.com/edgedl/chrome/dict/*.bdic` (Linux)                  | Hunspell dictionary download (`spellcheck_hunspell_dictionary`)                                                      | only dictionaries already on disk are kept (see below)      |
 
 - **Google accounts.** No switch or feature turns the ListAccounts check off:
   Chrome's signin metrics services ask for the accounts in the cookie jar when
@@ -73,7 +74,7 @@ the host does about each in the browser process (`cef/src/app.cc`,
   downloads each language's dictionary from Google the first time it is used, so
   at startup the host keeps only the languages whose dictionary is already in
   the profile's `Dictionaries` folder (`<data dir>/CEF/Dictionaries`, a file
-  such as `en-US-10-1.bdic`), and spelling is not checked otherwise. Before
+  such as `en-US-10-2.bdic`), and spelling is not checked otherwise. Before
   that, it copies the dictionaries of the languages in use into that folder from
   the bundled ones: the folder named by `LAUFEY_SPELLCHECK_DICTIONARIES` (for a
   launcher or a developer) first, then `dictionaries/` beside the host
@@ -85,8 +86,10 @@ the host does about each in the browser process (`cef/src/app.cc`,
 
 An app's own command line wins: a feature named in `--enable-features` is not
 disabled, a `--gaia-url` of its own is kept, and `--component-updater=...`
-(configuring the updater) keeps the component updater running. On Windows the
-net log also shows DNS lookups of `wpad`: the system's proxy auto-discovery
+(configuring the updater) keeps the component updater running, and with it
+Chromium's on-device model manifest (as does an
+`--optimization-guide-manifest-override` of the app's own). On Windows the net
+log also shows DNS lookups of `wpad`: the system's proxy auto-discovery
 ("Automatically detect settings"), which follows the OS's proxy settings.
 
 The `--network-quiet` e2e mode checks it on every CEF leg in CI
@@ -240,10 +243,22 @@ session; a deep-link launch drops that switch with every other Chromium switch
   environment instead of the launcher's, and a deep link given on the command
   line never reached the app. A machine with UAC off (a GitHub runner) never
   takes that path. Chromium 149 and 150 check the switch in
-  `PreEarlyInitialization`, after the host's command line hook; a later Chromium
-  checks it in `ChromeMainDelegate::BasicStartupComplete`, which CEF runs before
-  the hook, so a CEF update past that change has to put the switch on the
-  command line before CEF parses it.
+  `PreEarlyInitialization`, after the host's command line hook. From Chromium
+  156 Chromium checks it in `ChromeMainDelegate::BasicStartupComplete`, which
+  CEF runs before the hook, so the host puts it on the command line before CEF
+  parses it: a browser process that starts with an elevated token
+  (`TokenElevationTypeFull`) and none of the switches that skip de-elevation
+  (`--do-not-de-elevate`, `--enable-automation`, `--isolated`, `--test-type`)
+  starts itself again first, with `--do-not-de-elevate` after the program name
+  and the rest of its command line unchanged, in the same environment and
+  working directory with the same standard handles, and still elevated
+  (`NeedsDeElevationRelaunch` in `laufey_launch_args.h`,
+  `LaufeyRelaunchKeepingElevation` in `cef/src/main_windows.cc`). The first
+  process waits for it and exits with its exit code. The relaunch drops the
+  switch it was given from the arguments the app sees, the runtime's and a
+  forwarded second launch's alike. Only an elevated launch pays for the extra
+  process; `scripts/check-cef-de-elevation.sh` fails if a Chromium 156+ pin
+  loses the relaunch.
 
 The native e2e battery checks the result from outside the backend
 (`examples/native_e2e/src/sandbox_checks.rs`,
@@ -263,20 +278,53 @@ doesn't), checked against the host's `laufey: sandbox:` line too.
 
 The CEF version is pinned twice, in the `Makefile` (`CEF_FULL_VERSION`, with a
 SHA-256 for each platform's minimal distribution, checked after the download)
-and in `cef/flake.nix` (the macOS hashes). This fork moved from CEF 149.0.5
-(Chromium 149.0.7827.197) to CEF 150.0.21 (Chromium 150.0.7871.255, CEF branch
-7871, API version 15000), the newest CEF 150 build published for all six
-platforms; upstream tracks the same major in
-[littledivy/laufey#83](https://github.com/littledivy/laufey/pull/83) (150.0.14).
-What CEF 150 changed for the host: `CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS` is
-now `CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS_DEPRECATED` (same bit, still
-answered by the Local Network Access prompt handler in `cef/src/app.cc`), and
-`CefTextfield`'s removed methods, which laufey never used. CEF's own default
-`--disable-features` list, the features the network-quiet defaults turn off, the
-Hunspell dictionaries' commit and the place Chromium checks
-`--do-not-de-elevate` (`PreEarlyInitialization`) are all unchanged from 149.
+and in `cef/flake.nix` (the macOS hashes). This fork moved from CEF 150.0.21
+(Chromium 150.0.7871.255) to CEF 156.0.14 (Chromium 156.0.8078.48, CEF branch
+8078, API version 15600), the newest CEF stable build published for all six
+platforms, matching Chrome stable's milestone at the time (CEF published no 153
+to 155 builds for every platform). The hashes were checked against the `.sha1`
+and `.sha256` files CEF publishes beside each archive. What CEF 151 to 156
+changed for the host:
 
-At every CEF update:
+- Chromium 156 checks `--do-not-de-elevate` before the host's command line hook;
+  an elevated launch now starts itself again with the switch (see the
+  elevated-launch paragraph above).
+- `IDC_CONTENT_CONTEXT_INSPECTELEMENT_WITH_GEMINI` left `cef_command_ids.h`; the
+  DevTools command filter (`LaufeyIsDevToolsCommand`) names it only where it
+  exists.
+- `RunWinMain` takes `LPWSTR` (was `LPTSTR`), and `cef_version_info_t` gained
+  the bootstrap installer's fields after `sandbox_compat_hash` (laufey compares
+  only the fields before them). The bootstrap's installer, which can download
+  CEF from a CDN, runs only with a `CEF_INSTALLER_CONFIG` resource, which
+  laufey's host DLL doesn't have, so it is skipped.
+- `CefRegisterExtension` is gone (API 15400) and `CefDownloadHandler`'s
+  callbacks cancel a download whose `OnBeforeDownload` callback is dropped;
+  neither changes the host, which never registered a V8 extension and already
+  cancels refused downloads itself.
+- Chromium 156's on-device model manifest broker is always built and installs
+  its manifest component at launch past `--disable-component-update`; the host's
+  network-quiet defaults add an empty `--optimization-guide-manifest-override`
+  (see the table above), which the `--network-quiet` e2e leg caught.
+- On macOS a `set_window_size()` while a window is still being created could
+  read the frame around the page as none, so the page lost the title bar's 28
+  px; the host takes the frame from AppKit when Views reports none
+  (`MacFrameAroundContent`).
+- Chromium 156's English Hunspell dictionaries are `-10-2` (were `-10-1`):
+  `hunspell_dictionaries` moved from `cccf64a8` to `cee14e31`, so a
+  distribution's bundled `.bdic` files must be refreshed with it.
+- New in API 15600 and not used yet: `CefSettings.keychain_service_name` /
+  `keychain_account_name` (the host keeps its own keychain item through
+  `cef_keychain_interpose_mac.mm`) and `CefPreferenceRegistrar`'s default
+  preference accessors.
+
+CEF's own default `--disable-features` list and the features the network-quiet
+defaults turn off (`NetworkTimeServiceQuerying`, `AimEnabled`,
+`PreconnectToSearch`, all still on by default) are unchanged from 150; CEF 156
+also adds `--disable-signin-promo-on-avatar-pill-for-testing` before the hook,
+which a deep-link launch's strip doesn't touch.
+
+CI warns (`scripts/check-cef-staleness.sh`, never a failure) when the pinned
+Chromium is more than 2 majors behind Chrome stable. At every CEF update:
 
 1. Pick a version published for every platform in the
    [CEF builds index](https://cef-builds.spotifycdn.com/index.html) and update
@@ -287,10 +335,14 @@ At every CEF update:
    features enabled by default there are added), and check that the
    network-quiet features still exist and are still on by default; the
    `--network-quiet` e2e leg fails on any new host in the net log.
-3. Check where Chromium reads `--do-not-de-elevate` (see the elevated-launch
-   paragraph above); `scripts/check-cef-de-elevation.sh` fails from Chromium 156
-   on.
-4. Run the full CI matrix (`ci.yml` with `full=true`), native e2e on every OS
+3. Check where Chromium reads `--do-not-de-elevate` and which switches skip
+   de-elevation (`MaybeAutoDeElevate` in `chrome/app/chrome_main_delegate.cc`;
+   see the elevated-launch paragraph above). `scripts/check-cef-de-elevation.sh`
+   fails on a Chromium 156+ pin without the host's relaunch.
+4. Refresh the Hunspell dictionaries a distribution bundles if Chromium's
+   `hunspell_dictionaries` commit or a language's version
+   (`components/spellcheck/common/spellcheck_common.cc`) changed.
+5. Run the full CI matrix (`ci.yml` with `full=true`), native e2e on every OS
    included.
 
 ## WebView

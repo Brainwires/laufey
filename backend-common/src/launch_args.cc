@@ -184,6 +184,63 @@ const std::vector<std::string>& CefWindowsBrowserSwitches() {
   return switches;
 }
 
+bool NeedsDeElevationRelaunch(const std::vector<std::string>& args,
+                              bool full_token) {
+  if (!full_token)
+    return false;
+  // Chromium's kNoRestartSwitches in MaybeAutoDeElevate
+  // (chrome/app/chrome_main_delegate.cc).
+  static const char* const kSkips[] = {"do-not-de-elevate", "enable-automation",
+                                       "isolated", "test-type"};
+  for (const std::string& name : CommandLineSwitchNames(args)) {
+    for (const char* skip : kSkips) {
+      if (name == skip)
+        return false;
+    }
+  }
+  return true;
+}
+
+std::wstring InsertArgumentAfterProgram(const std::wstring& command_line,
+                                        const std::wstring& program,
+                                        const std::wstring& argument) {
+  size_t start = command_line.find_first_not_of(L" \t");
+  if (start == std::wstring::npos)
+    return L"\"" + program + L"\" " + argument;
+  // CommandLineToArgvW: argv[0] is the text up to the next '"' when it
+  // starts with one (no escapes), else up to the first space or tab.
+  size_t end;
+  if (command_line[start] == L'"') {
+    end = command_line.find(L'"', start + 1);
+    end = end == std::wstring::npos ? command_line.size() : end + 1;
+  } else {
+    end = command_line.find_first_of(L" \t", start);
+    if (end == std::wstring::npos)
+      end = command_line.size();
+  }
+  return command_line.substr(0, end) + L" " + argument +
+         command_line.substr(end);
+}
+
+namespace {
+bool g_de_elevation_relaunched = false;
+}  // namespace
+
+void SetDeElevationRelaunched(bool relaunched) {
+  g_de_elevation_relaunched = relaunched;
+}
+
+bool DeElevationRelaunched() {
+  return g_de_elevation_relaunched;
+}
+
+void DropDeElevationRelaunchArgument(std::vector<std::string>* args) {
+  if (g_de_elevation_relaunched && args && !args->empty() &&
+      (*args)[0] == kDoNotDeElevateArgument) {
+    args->erase(args->begin());
+  }
+}
+
 bool IsPackagedLaunch(bool has_colocated_runtime) {
   if (has_colocated_runtime)
     return true;

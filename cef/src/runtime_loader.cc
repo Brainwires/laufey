@@ -317,10 +317,28 @@ static CefSize CefFrameAroundPage(CefRefPtr<CefBrowserView> browser_view) {
     CefRect client = window->GetClientAreaBoundsInScreen();
     page = CefSize(client.width, client.height);
   }
-  if (page.width <= 0 || page.height <= 0)
-    return CefSize();
-  return CefSize((std::max)(0, outer.width - page.width),
-                 (std::max)(0, outer.height - page.height));
+  CefSize frame;
+  if (page.width > 0 && page.height > 0) {
+    frame = CefSize((std::max)(0, outer.width - page.width),
+                    (std::max)(0, outer.height - page.height));
+  }
+#if defined(__APPLE__)
+  // CEF 156 (Chromium 156): while a window is still being created, Views can
+  // report the page (or the client area) as large as the whole window, so
+  // the frame read as none, and a set_window_size() then sized the whole
+  // window to the page size: the title bar took 28 px off the page for good.
+  // AppKit knows the frame from the window's style; take it whenever Views
+  // sees none. A frameless or full-size-content window has none either way.
+  if (frame.width == 0 && frame.height == 0) {
+    int frame_width = 0, frame_height = 0;
+    if (laufey_common::MacFrameAroundContent(
+            NSWindowForCefHandle(window->GetWindowHandle()), &frame_width,
+            &frame_height)) {
+      frame = CefSize(frame_width, frame_height);
+    }
+  }
+#endif
+  return frame;
 }
 
 static void CefSetPageSize(CefRefPtr<CefBrowserView> browser_view, int width,

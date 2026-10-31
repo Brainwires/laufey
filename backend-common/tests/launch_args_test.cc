@@ -146,6 +146,76 @@ static void TestCefWindowsBrowserSwitches() {
       "do-not-de-elevate"));
 }
 
+static void TestDeElevationRelaunch() {
+  // Only an elevated (full-token) launch relaunches, and only when Chromium
+  // would de-elevate it: none of its skip switches before "--".
+  EXPECT(!NeedsDeElevationRelaunch({}, false));
+  EXPECT(!NeedsDeElevationRelaunch({"--", "acme://x"}, false));
+  EXPECT(NeedsDeElevationRelaunch({}, true));
+  EXPECT(NeedsDeElevationRelaunch({"--lang=en-US", "file.txt"}, true));
+  // A deep link: positional, so the launch still relaunches.
+  EXPECT(NeedsDeElevationRelaunch({"--", "acme://x"}, true));
+  EXPECT(!NeedsDeElevationRelaunch({"--do-not-de-elevate"}, true));
+  EXPECT(!NeedsDeElevationRelaunch({"--enable-automation"}, true));
+  EXPECT(!NeedsDeElevationRelaunch({"--isolated"}, true));
+  EXPECT(!NeedsDeElevationRelaunch({"--test-type=browser"}, true));
+  EXPECT(!NeedsDeElevationRelaunch({"-do-not-de-elevate"}, true));
+  // After "--" a switch is an argument: Chromium doesn't see it.
+  EXPECT(NeedsDeElevationRelaunch({"--", "--do-not-de-elevate"}, true));
+  // A link can't carry the switch in either: it is one argument.
+  EXPECT(NeedsDeElevationRelaunch({"acme://x --do-not-de-elevate"}, true));
+  EXPECT(std::string(kDoNotDeElevateArgument) ==
+         "--" + CefWindowsBrowserSwitches()[0]);
+
+  // The argument goes right after the program name; the rest stays as it was.
+  const std::wstring arg = L"--do-not-de-elevate";
+  EXPECT(InsertArgumentAfterProgram(L"\"C:\\Program Files\\A\\a.exe\" -- "
+                                    L"\"acme://x?q=\"a b\"\"",
+                                    L"C:\\unused.exe", arg) ==
+         L"\"C:\\Program Files\\A\\a.exe\" --do-not-de-elevate -- "
+         L"\"acme://x?q=\"a b\"\"");
+  EXPECT(InsertArgumentAfterProgram(L"a.exe  x\ty", L"C:\\a.exe", arg) ==
+         L"a.exe --do-not-de-elevate  x\ty");
+  EXPECT(InsertArgumentAfterProgram(L"a.exe", L"C:\\a.exe", arg) ==
+         L"a.exe --do-not-de-elevate");
+  EXPECT(InsertArgumentAfterProgram(L"  a.exe x", L"C:\\a.exe", arg) ==
+         L"  a.exe --do-not-de-elevate x");
+  // CommandLineToArgvW ends a quoted program name at the next '"', even with
+  // text right after it (argv[0] is then "C:\\a b"; `.exe` starts argv[1]).
+  EXPECT(InsertArgumentAfterProgram(L"\"C:\\a b\".exe x", L"C:\\a.exe", arg) ==
+         L"\"C:\\a b\" --do-not-de-elevate.exe x");
+  // An unterminated quote: the whole line is the program name.
+  EXPECT(InsertArgumentAfterProgram(L"\"C:\\a b.exe", L"C:\\a.exe", arg) ==
+         L"\"C:\\a b.exe --do-not-de-elevate");
+  EXPECT(InsertArgumentAfterProgram(L"", L"C:\\A B\\a.exe", arg) ==
+         L"\"C:\\A B\\a.exe\" --do-not-de-elevate");
+  EXPECT(InsertArgumentAfterProgram(L" \t", L"C:\\a.exe", arg) ==
+         L"\"C:\\a.exe\" --do-not-de-elevate");
+
+  // Only the relaunch drops the leading switch it was given.
+  Args args = {"--do-not-de-elevate", "--", "acme://x"};
+  SetDeElevationRelaunched(false);
+  DropDeElevationRelaunchArgument(&args);
+  EXPECT(args.size() == 3);
+  SetDeElevationRelaunched(true);
+  EXPECT(DeElevationRelaunched());
+  DropDeElevationRelaunchArgument(&args);
+  EXPECT((args == Args{"--", "acme://x"}));
+  // Once: a second switch is the app's own.
+  args = {"--do-not-de-elevate", "--do-not-de-elevate"};
+  DropDeElevationRelaunchArgument(&args);
+  EXPECT((args == Args{"--do-not-de-elevate"}));
+  // Not leading: the app's own.
+  args = {"x", "--do-not-de-elevate"};
+  DropDeElevationRelaunchArgument(&args);
+  EXPECT(args.size() == 2);
+  args = {};
+  DropDeElevationRelaunchArgument(&args);
+  DropDeElevationRelaunchArgument(nullptr);
+  EXPECT(args.empty());
+  SetDeElevationRelaunched(false);
+}
+
 // A fake filesystem for ChooseRuntimePath: the paths in `files` exist.
 static std::function<bool(const std::string&)> Files(Args files) {
   return [files](const std::string& path) { return Contains(files, path); };
@@ -290,6 +360,7 @@ int main() {
   TestSwitchNames();
   TestDeepLinkStrip();
   TestCefWindowsBrowserSwitches();
+  TestDeElevationRelaunch();
   TestChooseRuntimePath();
   TestMissingPackagedRuntime();
   TestWebView2EnvironmentOverrides();
