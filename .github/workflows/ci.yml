@@ -72,11 +72,17 @@ jobs:
       - name: deno lint
         run: deno lint
 
-      # Fails once the pinned CEF's Chromium checks auto de-elevation before
-      # the host's command line hook (docs/backends.md, apps started
-      # elevated): --do-not-de-elevate then has to move first.
+      # Fails when the pinned CEF's Chromium checks auto de-elevation before
+      # the host's command line hook (Chromium 156+) and the host no longer
+      # puts --do-not-de-elevate on its command line first (docs/backends.md,
+      # apps started elevated).
       - name: CEF de-elevation tripwire
         run: scripts/check-cef-de-elevation.sh
+
+      # A warning (never a failure) when the pinned CEF's Chromium is more
+      # than 2 majors behind Chrome stable: time to update CEF.
+      - name: CEF staleness
+        run: scripts/check-cef-staleness.sh
 
   # RustSec advisories against Cargo.lock on every CI run (the weekly
   # cargo_audit.yml on main only sees main's lockfile). Fails on any
