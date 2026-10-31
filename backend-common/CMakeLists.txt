@@ -119,6 +119,7 @@ elseif(UNIX)
     src/termination_signals_linux.cc
     src/overlay_linux.cc
     src/speech_linux.cc
+    src/window_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS
@@ -707,6 +708,20 @@ if(LAUFEY_BUILD_TESTS)
     add_test(NAME laufey_dialog_quit_test COMMAND laufey_dialog_quit_test)
     set_tests_properties(laufey_dialog_quit_test PROPERTIES
                          SKIP_RETURN_CODE 77)
+
+    # A non-resizable window keeps the size it is given (it snapped to its
+    # 800x600 default), and still takes a new one (private Xvfb; skipped
+    # without it).
+    add_executable(laufey_window_size_linux_test
+                   tests/window_size_linux_test.cc)
+    target_link_libraries(laufey_window_size_linux_test PRIVATE
+      laufey_backend_common
+    )
+    add_test(NAME laufey_window_size_linux_test
+             COMMAND laufey_window_size_linux_test)
+    set_tests_properties(laufey_window_size_linux_test PROPERTIES
+                         SKIP_RETURN_CODE 77
+                         ENVIRONMENT "G_DEBUG=fatal-criticals")
 
     # SIGTERM / SIGINT / SIGHUP: the first quits through the callback on
     # the loop's thread, a second takes the default action.

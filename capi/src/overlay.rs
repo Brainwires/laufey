@@ -111,7 +111,9 @@ impl OverlayCapabilities {
   pub fn activation_policy(&self) -> bool {
     self.has(LAUFEY_OVERLAY_CAP_ACTIVATION_POLICY)
   }
-  /// A `no_activate` window is a real non-activating panel.
+  /// A `no_activate` window is a real non-activating panel (on Linux
+  /// Wayland only an `overlay` one, a layer surface: reported only where
+  /// layer-shell is).
   pub fn non_activating(&self) -> bool {
     self.has(LAUFEY_OVERLAY_CAP_NON_ACTIVATING)
   }

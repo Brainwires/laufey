@@ -199,9 +199,12 @@ bool LinuxIsWayland();
 // Whether the session is Wayland with a compositor that has
 // zwlr_layer_shell_v1 and libgtk-layer-shell loads (cached).
 bool LayerShellAvailable();
-// Makes an unrealized GtkWindow* an overlay layer surface (keyboard none,
-// anchored top-left, exclusive zone 0). False when unavailable.
-bool LayerShellInitOverlay(void* gtk_window);
+// Makes an unrealized GtkWindow* an overlay layer surface (anchored top-left,
+// exclusive zone 0). The keyboard: none for a non-activating window (it never
+// takes focus), else on demand (focus when clicked, as a popover panel needs
+// for its fields and for a blur when the user clicks elsewhere; gtk-layer-shell
+// 0.6+, none before). False when unavailable.
+bool LayerShellInitOverlay(void* gtk_window, bool non_activating);
 // Whether the GtkWindow* is a layer surface.
 bool LayerShellIsLayerWindow(void* gtk_window);
 // Moves a layer surface (its margins from the top-left anchor). False if

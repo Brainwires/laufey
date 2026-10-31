@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "laufey.h"
@@ -160,6 +161,44 @@ int RequestedExitCode();
 // ends"). Call it only once everything that must persist has been written:
 // after CefShutdown, or after the WebView2 controllers are released.
 [[noreturn]] void EndProcess(int code);
+#endif
+
+#if defined(__linux__)
+// --- Linux, GTK3 (window_linux.cc). GTK thread. -----------------------------
+
+// `gtk_window` is a GtkWindow*.
+// A vertical GtkBox (a GtkWidget*) for a window's content whose natural size
+// is its minimum size. WebKitWebView's natural height is its page's content
+// height, and GTK3 sizes a non-resizable window to its natural size, so a page
+// taller than the window grew it (a 360x480 tray panel opened 360x504); in this
+// box the window keeps the size it is given.
+void* LinuxNewContentBox();
+// Resizes the window's content to w x h. The default size moves with it:
+// GTK3 holds a non-resizable window at max(default size, requested size) and
+// drops gtk_window_resize, so a window created at 800x600 stayed that size
+// once it was made non-resizable, whatever size was asked for afterwards.
+void LinuxResizeWindow(void* gtk_window, int width, int height);
+// gtk_window_set_resizable, keeping the window's current size when it stops
+// being resizable (else it snaps to its default size).
+void LinuxSetResizable(void* gtk_window, bool resizable);
+// For a frameless (undecorated) window, before it is realized: on Wayland,
+// announce client-side decorations once it is realized, so a compositor that
+// decorates by default (KWin's server-decoration protocol) draws no title bar
+// or frame. GTK3 announces them only for a window it decorates itself. Not
+// for a layer surface. Nothing on X11.
+void LinuxWatchFramelessDecorations(void* gtk_window);
+// GTK_MODULES for a GTK3 process about to open a Wayland display
+// (`wayland_display` is WAYLAND_DISPLAY, `gdk_backend` GDK_BACKEND, either
+// NULL when unset): `gtk_modules` without "appmenu-gtk-module". That module
+// (in Ubuntu's GNOME session environment) exports a window's menu bar for an
+// X11 global menu; on Wayland it has none to serve, and on every launch it
+// called gdk_wayland_window_set_dbus_properties_libgtk_only on a window
+// WebKitGTK realizes without a GdkWindow (a Gdk-CRITICAL twice per launch).
+// Unchanged for an X11 session or GDK_BACKEND that doesn't start with
+// "wayland" (or "*").
+std::string LinuxGtkModulesForDisplay(const char* gtk_modules,
+                                      const char* wayland_display,
+                                      const char* gdk_backend);
 #endif
 
 #if defined(__APPLE__)
