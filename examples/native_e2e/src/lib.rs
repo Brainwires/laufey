@@ -933,6 +933,16 @@ fn e2e_main() {
       window_api_checks().await;
       finish();
     }
+    // LAUFEY_E2E_ONLY=background: only the background throttling checks
+    // (background_checks.rs), beside one window on screen as in the
+    // window-api battery; LAUFEY_E2E_BACKGROUND_REPEAT=N repeats them.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("background") {
+      let w = Window::new(520, 420).title("native-e2e-background");
+      w.show();
+      background_checks::run().await;
+      w.close();
+      finish();
+    }
     // LAUFEY_E2E_ONLY=sandbox: only the CEF sandbox checks
     // (sandbox_checks.rs).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("sandbox") {

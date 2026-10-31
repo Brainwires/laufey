@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -34,6 +34,10 @@
 # screens, title bar, backdrops). On Linux it runs a window manager (openbox)
 # under Xvfb, so maximize / minimize / fullscreen must really apply: the
 # battery fails them instead of reporting N/A.
+# --background runs only the background throttling checks (API 51,
+# background_checks.rs, also part of --window-api): hidden windows' pages,
+# each policy alone and all three together; LAUFEY_E2E_BACKGROUND_REPEAT=N
+# repeats the rounds, LAUFEY_E2E_BACKGROUND_IDLE_S=S idles S s per round.
 # --hidpi runs the same checks at a device scale factor of 2: CEF with
 # --force-device-scale-factor=2, WebKitGTK with GDK_SCALE=2, and on Windows
 # whatever scale the display was set to before (LAUFEY_E2E_EXPECT_SCALE,
@@ -96,7 +100,7 @@
 # a copy of the log there.
 set -euo pipefail
 
-backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet]}"
+backend="${1:?usage: native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--lifetime|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet]}"
 mode="${2:-}"
 
 # Locate the runtime cdylib (.so / .dylib / .dll).
@@ -146,6 +150,9 @@ if [ "$mode" = "--keychain" ]; then
 fi
 if [ "$mode" = "--window-api" ] || [ "$mode" = "--hidpi" ]; then
   export LAUFEY_E2E_ONLY=window-api
+fi
+if [ "$mode" = "--background" ]; then
+  export LAUFEY_E2E_ONLY=background
 fi
 if [ "$mode" = "--hidpi" ]; then
   export LAUFEY_E2E_EXPECT_SCALE="${LAUFEY_E2E_EXPECT_SCALE:-2}"

@@ -283,15 +283,16 @@ macOS (the WebView backend, macOS 14+) maps them to
 `None` it also turns off WebKit's hidden-page timer throttling (a WebKit SPI,
 asked for by selector: without it a hidden page's timers still fire at most once
 a second, but it is never frozen). A hidden page's 100 ms interval ran about
-once a second throttled and at its full rate with `None`. WKWebView's own
-default, `Suspend`, froze the page of a window created hidden about a second
-after it loaded (its timers, the runtime's events and its sockets waited until
-it showed), which a tray app handling clicks in a hidden window can't have:
-every window now starts at `Throttle`. `background_throttling()` reads the
-policy back. Before macOS 14 WebKit never suspends a page; CEF, WebView2 and
-WebKitGTK throttle a hidden page's timers without freezing it and take no flag:
-there the flags are ignored and `background_throttling()` is `None`. Winit has
-no page.
+once a second throttled and at its full rate with `None`, over three minutes
+alone and beside hidden windows of the other policies (the policy is per page,
+though the windows share WebKit's process pool). WKWebView's own default,
+`Suspend`, froze the page of a window created hidden about a second after it
+loaded (its timers, the runtime's events and its sockets waited until it
+showed), which a tray app handling clicks in a hidden window can't have: every
+window now starts at `Throttle`. `background_throttling()` reads the policy
+back. Before macOS 14 WebKit never suspends a page; CEF, WebView2 and WebKitGTK
+throttle a hidden page's timers without freezing it and take no flag: there the
+flags are ignored and `background_throttling()` is `None`. Winit has no page.
 
 ## Maximize, minimize and fullscreen (API ≥ 38)
 
