@@ -352,9 +352,8 @@ async fn os_checks() {
     // in process gpu-process"); Mesa's llvmpipe, the software GL under Xvfb,
     // starts its threads first, so there the GPU process stays unsandboxed
     // by Chromium's own choice. A hardware GL driver doesn't.
-    let llvmpipe = thread_names(g.pid)
-      .iter()
-      .any(|t| t.starts_with("llvmpipe"));
+    let threads = thread_names(g.pid);
+    let llvmpipe = threads.iter().any(|t| t.starts_with("llvmpipe"));
     if want && !filtered && llvmpipe {
       na(&format!(
         "sandbox: GPU process {} runs Mesa llvmpipe, which Chromium leaves \
@@ -363,14 +362,27 @@ async fn os_checks() {
       ));
       continue;
     }
+    // The GPU process's thread names (digits dropped, each once) on a
+    // mismatch: what it started before Chromium tried to sandbox it.
+    let mut kinds: Vec<String> = threads
+      .iter()
+      .map(|t| t.trim_end_matches(|c: char| c.is_ascii_digit()).to_string())
+      .collect();
+    kinds.sort();
+    kinds.dedup();
     check(
       &format!(
-        "sandbox: GPU process {} {} (Seccomp {seccomp:?})",
+        "sandbox: GPU process {} {} (Seccomp {seccomp:?}{})",
         g.pid,
         if want {
           "runs under seccomp-bpf"
         } else {
           "runs unsandboxed"
+        },
+        if filtered == want {
+          String::new()
+        } else {
+          format!("; threads {kinds:?}")
         }
       ),
       filtered == want,
