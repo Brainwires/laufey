@@ -143,6 +143,20 @@ int main(int argc, char* argv[]) {
   // delivered.
   laufey_common::InitNotificationsAtLaunch();
 
+  // Ubuntu's GNOME session loads appmenu-gtk-module into every GTK3 process;
+  // on Wayland it serves no global menu and logged two Gdk-CRITICALs per
+  // launch (laufey_window.h, LinuxGtkModulesForDisplay). Before GTK reads it.
+  if (const char* modules = getenv("GTK_MODULES")) {
+    std::string kept = laufey_common::LinuxGtkModulesForDisplay(
+        modules, getenv("WAYLAND_DISPLAY"), getenv("GDK_BACKEND"));
+    if (kept != modules) {
+      if (kept.empty())
+        unsetenv("GTK_MODULES");
+      else
+        setenv("GTK_MODULES", kept.c_str(), 1);
+    }
+  }
+
   gtk_init(&argc, &argv);
 
   // WebKitGTK on an X11 display: frames in shared memory

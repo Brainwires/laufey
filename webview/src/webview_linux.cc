@@ -1805,10 +1805,12 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     if (flags & LAUFEY_WINDOW_FLAG_OVERLAY) {
       // A wlr-layer-shell overlay surface where the compositor has one (API
       // 50); an ordinary window elsewhere. Before the window is realized.
-      laufey_common::LayerShellInitOverlay(window);
+      laufey_common::LayerShellInitOverlay(
+          window, (flags & LAUFEY_WINDOW_FLAG_NO_ACTIVATE) != 0);
     }
     if (flags & LAUFEY_WINDOW_FLAG_FRAMELESS) {
       gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+      laufey_common::LinuxWatchFramelessDecorations(window);
     }
     bool transparent = (flags & LAUFEY_WINDOW_FLAG_TRANSPARENT) != 0;
     if (transparent) {
@@ -1964,7 +1966,10 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     webkit_user_content_manager_add_script(content_manager, script);
     webkit_user_script_unref(script);
 
-    GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    // Its natural size is its minimum: a page's content height (the web
+    // view's natural height) never grows a non-resizable window.
+    GtkWidget* vbox =
+        static_cast<GtkWidget*>(laufey_common::LinuxNewContentBox());
     gtk_container_add(GTK_CONTAINER(window), vbox);
     gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(webview), TRUE, TRUE, 0);
 
@@ -2141,7 +2146,7 @@ void WebKitGTKBackend::SetWindowSize(uint32_t window_id, int width,
     if (state) {
       int w = width, h = height;
       laufey_common::ClampSizeForWindow(window_id, &w, &h);
-      gtk_window_resize(GTK_WINDOW(state->window), w, h);
+      laufey_common::LinuxResizeWindow(state->window, w, h);
     }
   });
 }
@@ -2472,7 +2477,7 @@ void WebKitGTKBackend::SetWindowSizeConstraints(uint32_t window_id,
     int w = 0, h = 0;
     gtk_window_get_size(GTK_WINDOW(state->window), &w, &h);
     if (laufey_common::ClampSize(c, &w, &h))
-      gtk_window_resize(GTK_WINDOW(state->window), w, h);
+      laufey_common::LinuxResizeWindow(state->window, w, h);
   });
 }
 
@@ -2616,7 +2621,7 @@ void WebKitGTKBackend::SetResizable(uint32_t window_id, bool resizable) {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
-      gtk_window_set_resizable(GTK_WINDOW(state->window), resizable);
+      laufey_common::LinuxSetResizable(state->window, resizable);
     }
   });
 }
@@ -2717,18 +2722,25 @@ bool WebKitGTKBackend::IsClickPassthrough(uint32_t window_id) {
 // --- Overlay windows (API 50) ---
 
 uint32_t WebKitGTKBackend::OverlayCapabilities() {
-  uint32_t caps =
-      LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH | LAUFEY_OVERLAY_CAP_INPUT_REGION |
-      LAUFEY_OVERLAY_CAP_WINDOW_LEVELS | LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+  uint32_t caps = LAUFEY_OVERLAY_CAP_CLICK_PASSTHROUGH |
+                  LAUFEY_OVERLAY_CAP_INPUT_REGION |
+                  LAUFEY_OVERLAY_CAP_WINDOW_LEVELS;
   gtk_invoke_sync([&] {
     GdkScreen* screen = gdk_screen_get_default();
     if (screen && gdk_screen_is_composited(screen))
       caps |= LAUFEY_OVERLAY_CAP_TRANSPARENT;
-    if (!laufey_common::LinuxIsWayland())
+    if (!laufey_common::LinuxIsWayland()) {
+      caps |= LAUFEY_OVERLAY_CAP_SKIP_TASKBAR |
+              LAUFEY_OVERLAY_CAP_ALL_WORKSPACES |
+              LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+    } else if (laufey_common::LayerShellAvailable()) {
+      // On Wayland the utility type hint, skip-taskbar and focus-on-map are
+      // no-ops (KWin and Mutter focus a NO_ACTIVATE toplevel when it maps):
+      // only a layer surface (LAUFEY_WINDOW_FLAG_OVERLAY, keyboard none) is
+      // non-activating, so the capability goes with layer-shell.
       caps |=
-          LAUFEY_OVERLAY_CAP_SKIP_TASKBAR | LAUFEY_OVERLAY_CAP_ALL_WORKSPACES;
-    if (laufey_common::LayerShellAvailable())
-      caps |= LAUFEY_OVERLAY_CAP_LAYER_SHELL;
+          LAUFEY_OVERLAY_CAP_LAYER_SHELL | LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+    }
   });
   return caps;
 }

@@ -565,6 +565,8 @@ typedef struct laufey_rect {
   (1u << 9)  // set_activation_policy (macOS)
 #define LAUFEY_OVERLAY_CAP_NON_ACTIVATING \
   (1u << 10)  // LAUFEY_WINDOW_FLAG_NO_ACTIVATE makes a non-activating panel
+              // (Linux Wayland: only with LAUFEY_WINDOW_FLAG_OVERLAY, a
+              // layer surface; reported only where layer-shell is)
 
 // Activation policies (macOS NSApplicationActivationPolicy):
 //   REGULAR    a Dock icon and a menu bar (the default)

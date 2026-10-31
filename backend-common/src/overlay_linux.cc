@@ -63,10 +63,11 @@ void ApplyInputShape(void* gtk_window, void* gdk_window,
 // --- gtk-layer-shell (GTK3), dlopen'd ---------------------------------------
 
 // The enums of gtk-layer-shell.h, stable since 0.1.
-constexpr int kLayerOverlay = 3;  // GTK_LAYER_SHELL_LAYER_OVERLAY
-constexpr int kEdgeLeft = 0;      // GTK_LAYER_SHELL_EDGE_LEFT
-constexpr int kEdgeTop = 2;       // GTK_LAYER_SHELL_EDGE_TOP
-constexpr int kKeyboardNone = 0;  // GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
+constexpr int kLayerOverlay = 3;      // GTK_LAYER_SHELL_LAYER_OVERLAY
+constexpr int kEdgeLeft = 0;          // GTK_LAYER_SHELL_EDGE_LEFT
+constexpr int kEdgeTop = 2;           // GTK_LAYER_SHELL_EDGE_TOP
+constexpr int kKeyboardNone = 0;      // GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
+constexpr int kKeyboardOnDemand = 2;  // ..._KEYBOARD_MODE_ON_DEMAND (0.6+)
 
 struct LayerShellApi {
   bool loaded = false;
@@ -229,7 +230,7 @@ bool LayerShellAvailable() {
   return ok;
 }
 
-bool LayerShellInitOverlay(void* gtk_window) {
+bool LayerShellInitOverlay(void* gtk_window, bool non_activating) {
   if (!gtk_window || !LayerShellAvailable())
     return false;
   const LayerShellApi& ls = LayerShell();
@@ -249,7 +250,7 @@ bool LayerShellInitOverlay(void* gtk_window) {
   ls.set_margin(w, kEdgeTop, 0);
   ls.set_exclusive_zone(w, 0);
   if (ls.set_keyboard_mode)
-    ls.set_keyboard_mode(w, kKeyboardNone);
+    ls.set_keyboard_mode(w, non_activating ? kKeyboardNone : kKeyboardOnDemand);
   else if (ls.set_keyboard_interactivity)
     ls.set_keyboard_interactivity(w, FALSE);
   return true;
