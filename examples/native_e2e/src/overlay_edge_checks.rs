@@ -110,10 +110,10 @@ pub async fn run() {
     return;
   };
   let (sx, sy, sw, sh) = (
-    screen.bounds.x as i32,
-    screen.bounds.y as i32,
-    screen.bounds.width as i32,
-    screen.bounds.height as i32,
+    screen.bounds.x,
+    screen.bounds.y,
+    screen.bounds.width,
+    screen.bounds.height,
   );
   eprintln!("[e2e] INFO output {sx},{sy} {sw}x{sh}");
 
