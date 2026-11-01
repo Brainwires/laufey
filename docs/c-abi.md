@@ -409,8 +409,8 @@ Concretely:
   force-closes with `CloseBrowser(true)`, which skips the beforeunload prompt
   (it does _not_ bypass `CanClose`/`DoClose`; the close-allowed marks are what
   skip the negotiation) — see `cef/src/main_mac.mm` and `CloseAllBrowsers` in
-  `cef/src/app.cc`. WebView's `applicationShouldTerminate:` asks the quit handler,
-  never `windowShouldClose:`, so it's outside this handler's reach too.
+  `cef/src/app.cc`. WebView's `applicationShouldTerminate:` asks the quit
+  handler, never `windowShouldClose:`, so it's outside this handler's reach too.
 - Windows and Linux: the `"quit"` menu role has no automatic OS-level binding on
   either platform — clicking it just invokes the runtime's own registered
   menu-click callback (`menu_linux.cc`; unhandled on Windows, where `"quit"`
@@ -450,22 +450,22 @@ whether it may. `handler` fires on the UI thread, and the OS waits for one of:
 `answer_quit_request(allow)`; `quit()` or `exit_app()`, which allow it; or the
 deadline, when the quit goes ahead however the app behaves.
 
-| OS      | What asks                                                                     | `kind`        | Deadline |
-| ------- | ----------------------------------------------------------------------------- | ------------- | -------- |
-| macOS   | `terminate:` (Cmd+Q, the `"quit"` role, the Dock's Quit, a quit Apple Event)  | `APP`         | 5 s      |
-| macOS   | The same, with a logout, restart or shutdown as the event's `kAEQuitReason`   | `SESSION_END` | 10 s     |
-| Windows | `WM_QUERYENDSESSION`, to a hidden top-level window (so a tray app is asked)   | `SESSION_END` | 4 s      |
+| OS      | What asks                                                                    | `kind`        | Deadline |
+| ------- | ---------------------------------------------------------------------------- | ------------- | -------- |
+| macOS   | `terminate:` (Cmd+Q, the `"quit"` role, the Dock's Quit, a quit Apple Event) | `APP`         | 5 s      |
+| macOS   | The same, with a logout, restart or shutdown as the event's `kAEQuitReason`  | `SESSION_END` | 10 s     |
+| Windows | `WM_QUERYENDSESSION`, to a hidden top-level window (so a tray app is asked)  | `SESSION_END` | 4 s      |
 
-After the deadline an answer does nothing, and `quit_request_pending` is false: a
-runtime that tracks a held request checks it before reporting one.
+After the deadline an answer does nothing, and `quit_request_pending` is false:
+a runtime that tracks a held request checks it before reporting one.
 
 A refusal on a session end stops it: macOS cancels the logout; on Windows the
 window answers `FALSE`. A critical Windows shutdown (`ENDSESSION_CRITICAL`) asks
 nobody, and `WM_ENDSESSION` runs the app's quit. On Windows the wait stays under
 the 5 s after which the OS shows the "preventing shutdown" screen.
 
-On a plain quit answer at once: `answer_quit_request(false)` and then, if the app
-decides later, call `quit()` (macOS keeps its menus and events from the user
+On a plain quit answer at once: `answer_quit_request(false)` and then, if the
+app decides later, call `quit()` (macOS keeps its menus and events from the user
 while a request is unanswered). A session end is what to hold while the app asks
 its pages.
 
