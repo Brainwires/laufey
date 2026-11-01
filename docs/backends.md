@@ -19,7 +19,7 @@ There is also an **iOS** backend (UIKit + WKWebView, statically linked) — see
 
 ## CEF
 
-Embeds Chromium 156 (CEF 156.0.14, Chromium 156.0.8078.48) through the Chromium
+Embeds Chromium 156 (CEF 156.0.15, Chromium 156.0.8078.80) through the Chromium
 Embedded Framework and runs Chromium's real multi-process architecture — a
 browser process plus renderer, GPU, and utility subprocesses, with the same
 rendering and DevTools you get in Chrome. The engine is bundled into the app, so
@@ -282,9 +282,11 @@ and in `cef/flake.nix` (the macOS hashes). This fork moved from CEF 150.0.21
 (Chromium 150.0.7871.255) to CEF 156.0.14 (Chromium 156.0.8078.48, CEF branch
 8078, API version 15600), the newest CEF stable build published for all six
 platforms, matching Chrome stable's milestone at the time (CEF published no 153
-to 155 builds for every platform). The hashes were checked against the `.sha1`
-and `.sha256` files CEF publishes beside each archive. What CEF 151 to 156
-changed for the host:
+to 155 builds for every platform), then to CEF 156.0.15 (Chromium 156.0.8078.80,
+the same branch and API version) for Chrome's security fixes from 156.0.8078.73
+on; that step's CEF commit only moves the Chromium version and patch offsets.
+The hashes were checked against the `.sha1` and `.sha256` files CEF publishes
+beside each archive. What CEF 151 to 156 changed for the host:
 
 - Chromium 156 checks `--do-not-de-elevate` before the host's command line hook;
   an elevated launch now starts itself again with the switch (see the
