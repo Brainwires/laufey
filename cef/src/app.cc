@@ -151,8 +151,16 @@ CefSize LaufeyWindowDelegate::GetMaximumSize(CefRefPtr<CefView> view) {
 
 void LaufeyWindowDelegate::OnWindowBoundsChanged(CefRefPtr<CefWindow> window,
                                                  const CefRect& new_bounds) {
-  if (laufey_id_ > 0)
-    CefRecheckWindowState(laufey_id_);
+  if (laufey_id_ == 0)
+    return;
+#if defined(__linux__)
+  // Nothing else tells us of a state the window manager changed: no fullscreen
+  // transition callback runs, and a new size can arrive before Chromium's
+  // window state flips, so a check now alone would read the old state.
+  CefScheduleWindowStateRecheck(laufey_id_);
+#else
+  CefRecheckWindowState(laufey_id_);
+#endif
 }
 
 void LaufeyWindowDelegate::OnWindowFullscreenTransition(

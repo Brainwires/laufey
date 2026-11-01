@@ -338,9 +338,11 @@ void ClipboardWriteTextLinux(const std::string& text) {
   });
 }
 
-uint32_t ClipboardCapabilitiesLinux() {
+uint32_t ClipboardCapabilitiesLinux(bool gtk_has_windows) {
   uint32_t caps = LAUFEY_CLIPBOARD_CAP_TEXT | LAUFEY_CLIPBOARD_CAP_HTML |
                   LAUFEY_CLIPBOARD_CAP_IMAGE | LAUFEY_CLIPBOARD_CAP_FORMATS;
+  // Off the GTK thread: the first call connects, and waits for it.
+  const bool free_events = !gtk_has_windows && FreeAvailable();
   GtkRunSync([&] {
     GdkDisplay* display = gdk_display_get_default();
     if (!display) {
@@ -349,9 +351,12 @@ uint32_t ClipboardCapabilitiesLinux() {
     }
     // X11 reports selection changes through XFixes; GTK's Wayland backend
     // reports them from the data device (focused app only), ext-data-control
-    // for every selection, and on mutter XFixes on Xwayland.
+    // for every selection, and on mutter XFixes on Xwayland. A process whose
+    // windows aren't GTK's (CEF) never has keyboard focus on GTK's connection,
+    // so its data device reports nothing: only the other two can.
     bool wayland = strstr(G_OBJECT_TYPE_NAME(display), "Wayland") != nullptr;
-    if (wayland || gdk_display_supports_selection_notification(display))
+    if (wayland ? (gtk_has_windows || free_events)
+                : gdk_display_supports_selection_notification(display))
       caps |= LAUFEY_CLIPBOARD_CAP_CHANGE_EVENTS;
   });
   return caps;

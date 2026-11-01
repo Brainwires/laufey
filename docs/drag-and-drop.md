@@ -107,15 +107,16 @@ followed by a move. The callback fires exactly once:
   before `start_file_drag` returns, for no paths, more than 4096, or a path that
   is not an existing absolute path; and from the UI thread (on Windows, laufey's
   I/O thread, where the drag runs) when no left button is held, another drag is
-  running, or the window is gone.
+  running, the window is gone, or, on Wayland, the pointer is not over one of
+  the app's GTK windows.
 
-| Backend        | Implementation                                                                                                                             |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| macOS (both)   | `beginDraggingSessionWithItems:event:source:` from the web view (WKWebView) or the window's content view (CEF), one `NSURL` item per file. |
-| Windows (both) | `DoDragDrop` with a shell data object carrying `CF_HDROP` and the preferred drop effect, plus an `IDragSourceHelper` drag image.           |
-| WebKitGTK      | A GTK drag source on the window offering `text/uri-list` (X11 and Wayland).                                                                |
-| CEF on Linux   | A GTK drag source on a private `GtkInvisible`, which needs an X11 display: `LAUFEY_WINDOW_CAP_FILE_DRAG_OUT` is reported only there.       |
-| Winit          | Not supported (`NULL`).                                                                                                                    |
+| Backend        | Implementation                                                                                                                                                   |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS (both)   | `beginDraggingSessionWithItems:event:source:` from the web view (WKWebView) or the window's content view (CEF), one `NSURL` item per file.                       |
+| Windows (both) | `DoDragDrop` with a shell data object carrying `CF_HDROP` and the preferred drop effect, plus an `IDragSourceHelper` drag image.                                 |
+| WebKitGTK      | A GTK drag source on the window offering `text/uri-list` (X11 and Wayland, where it needs the pointer over one of the app's windows).                            |
+| CEF on Linux   | A GTK drag source on a private `GtkInvisible`, which needs an X11 display: `LAUFEY_WINDOW_CAP_FILE_DRAG_OUT` is reported only there, and a drag fails elsewhere. |
+| Winit          | Not supported (`NULL`).                                                                                                                                          |
 
 The window can be the drop target of its own drag: the drop is then reported
 through the file-drop handler like any other.
