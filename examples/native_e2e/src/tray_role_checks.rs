@@ -37,7 +37,7 @@ mod imp {
   use laufey::{MenuItem, TrayIcon, Window};
 
   use crate::io_checks::ole_input;
-  use crate::{check, wait_for};
+  use crate::{check, na, wait_for};
 
   type Hwnd = *mut c_void;
 
@@ -215,23 +215,41 @@ mod imp {
       GetMenuItemRect(std::ptr::null_mut(), hmenu, quit_row, &mut rect)
     } != 0;
     check("the Quit row has a place on screen", placed);
-    if placed {
-      let (x, y) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+    let row = placed
+      .then_some(((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2));
+    // A real click lands on whatever is on top there: another process's
+    // window over the menu (a sign-in prompt on a CI image) takes it.
+    let foreign = row.filter(|&(x, y)| {
+      eprintln!(
+        "[e2e] INFO the Quit row at ({x}, {y}) is under {}",
+        ole_input::window_at(x, y)
+      );
+      !ole_input::ours_at(x, y)
+    });
+    if let Some((x, y)) = foreign {
+      na(&format!(
+        "choosing the quit role (the Quit row is under {})",
+        ole_input::window_at(x, y)
+      ));
+    } else if let Some((x, y)) = row {
       ole_input::move_to(x, y);
       tokio::time::sleep(Duration::from_millis(150)).await;
       ole_input::button(true);
       tokio::time::sleep(Duration::from_millis(60)).await;
       ole_input::button(false);
     }
-    let ended = wait_for(laufey::should_shutdown, 200, 50).await;
-    check(
-      "choosing the quit role quits the app (the event loop ends)",
-      ended,
-    );
-    check(
-      "the quit role does not reach the menu's click handler",
-      clicks.lock().unwrap().is_empty(),
-    );
+    let ended =
+      foreign.is_none() && wait_for(laufey::should_shutdown, 200, 50).await;
+    if foreign.is_none() {
+      check(
+        "choosing the quit role quits the app (the event loop ends)",
+        ended,
+      );
+      check(
+        "the quit role does not reach the menu's click handler",
+        clicks.lock().unwrap().is_empty(),
+      );
+    }
     if !ended {
       unsafe { PostMessageW(tray_hwnd, WM_CANCELMODE, 0, 0) };
       laufey::quit();
