@@ -359,6 +359,13 @@ static bool Backend_SetWindowLevel(void* data, uint32_t window_id,
          backend->SetWindowLevel(window_id, level);
 }
 
+// --- Background throttling (API 51) -----------------------------------------
+
+static int32_t Backend_GetBackgroundThrottling(void* data, uint32_t window_id) {
+  LaufeyBackend* backend = OverlayBackendOf(data);
+  return backend ? backend->GetBackgroundThrottling(window_id) : -1;
+}
+
 static void Backend_SetTrayEventHandler(void* data, uint32_t tray_id,
                                         laufey_tray_event_fn handler,
                                         void* user_data) {
@@ -1528,6 +1535,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.speech_voices = [](void*) -> char* {
     return laufey_common::SpeechVoicesJson();
   };
+  backend_api_.get_background_throttling = Backend_GetBackgroundThrottling;
   backend_api_.is_visible = Backend_IsVisible;
   backend_api_.show = Backend_Show;
   backend_api_.hide = Backend_Hide;

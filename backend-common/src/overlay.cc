@@ -53,6 +53,14 @@ bool IsValidWindowLevel(int32_t level) {
          level <= LAUFEY_WINDOW_LEVEL_SCREEN_SAVER;
 }
 
+int32_t BackgroundThrottlingFromFlags(uint32_t flags) {
+  if (flags & LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED)
+    return LAUFEY_BACKGROUND_THROTTLING_NONE;
+  if (flags & LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND)
+    return LAUFEY_BACKGROUND_THROTTLING_SUSPEND;
+  return LAUFEY_BACKGROUND_THROTTLING_THROTTLE;
+}
+
 int32_t ParseActivationPolicy(const std::string& value) {
   if (value == "regular")
     return LAUFEY_ACTIVATION_POLICY_REGULAR;

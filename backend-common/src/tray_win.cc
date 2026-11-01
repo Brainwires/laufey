@@ -27,6 +27,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,8 @@ struct WinTrayEntry {
   HICON hicon_dark;
   HMENU hmenu;
   std::map<UINT, std::string> cmd_to_id;
+  // The commands of the menu's quit role items (the app's quit).
+  std::set<UINT> quit_cmds;
   laufey_menu_click_fn menu_click_fn;
   void* menu_click_data;
   laufey_tray_click_fn click_fn;
@@ -68,6 +71,7 @@ std::map<uint32_t, WinTrayEntry>& TrayMap() {
 std::atomic<uint32_t> g_next_tray_id{1};
 std::atomic<UINT> g_next_cmd_id{1000};
 HWND g_tray_msg_hwnd = nullptr;
+std::atomic<void (*)()> g_tray_quit{nullptr};
 
 bool WinIsDarkMode() {
   DWORD data = 1, size = sizeof(data), kind = 0;
@@ -284,15 +288,23 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     laufey_menu_click_fn fn = nullptr;
     void* data = nullptr;
     std::string item_id;
+    bool quit = false;
     {
       std::lock_guard<std::mutex> lock(TrayMutex());
       auto it = TrayMap().find(tray_id);
       if (it != TrayMap().end()) {
+        quit = it->second.quit_cmds.count(cmd) != 0;
         auto cit = it->second.cmd_to_id.find(cmd);
         if (cit != it->second.cmd_to_id.end()) item_id = cit->second;
         fn = it->second.menu_click_fn;
         data = it->second.menu_click_data;
       }
+    }
+    if (quit) {
+      // The app's quit, as macOS's terminate: (never a window's close
+      // request; the runtime sees the app end as after its quit()).
+      if (void (*q)() = g_tray_quit.load()) q();
+      return 0;
     }
     if (fn && !item_id.empty()) fn(data, tray_id, item_id.c_str());
   }
@@ -394,7 +406,8 @@ struct OwnedValue {
 };
 
 HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api,
-                             std::map<UINT, std::string>& cmd_to_id) {
+                             std::map<UINT, std::string>& cmd_to_id,
+                             std::set<UINT>& quit_cmds) {
   if (!val || !api->value_is_list(val)) return nullptr;
   HMENU menu = CreatePopupMenu();
   size_t count = api->value_list_size(val);
@@ -420,10 +433,12 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
     OwnedValue label{api, api->value_dict_get(itemVal, "label")};
     laufey_value_t* labelVal = label.v;
     std::wstring wlabel;
+    std::string label_utf8;
     if (labelVal && api->value_is_string(labelVal)) {
       size_t len = 0;
       char* s = api->value_get_string(labelVal, &len);
       if (s) {
+        label_utf8.assign(s, len);
         int n = MultiByteToWideChar(CP_UTF8, 0, s, (int)len, nullptr, 0);
         wlabel.resize(n);
         MultiByteToWideChar(CP_UTF8, 0, s, (int)len, wlabel.data(), n);
@@ -431,10 +446,32 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
       }
     }
 
+    // A role (W3: these were blank rows that did nothing): drawn with its
+    // label; quit is the app's quit, the portable roles report their name
+    // (as on Linux) and the macOS-only ones are left out.
+    OwnedValue role{api, api->value_dict_get(itemVal, "role")};
+    if (role.v && api->value_is_string(role.v)) {
+      size_t len = 0;
+      char* s = api->value_get_string(role.v, &len);
+      std::string role_name = s ? std::string(s, len) : std::string();
+      if (s) api->value_free_string(s);
+      TrayRoleItem desc = DescribeTrayRole(role_name, label_utf8);
+      if (desc.action == TrayRoleItem::Action::kSkip) continue;
+      UINT cmd = g_next_cmd_id.fetch_add(1, std::memory_order_relaxed);
+      AppendMenuW(menu, MF_STRING, cmd, Utf8ToWide(desc.label).c_str());
+      if (desc.action == TrayRoleItem::Action::kQuit &&
+          g_tray_quit.load() != nullptr) {
+        quit_cmds.insert(cmd);
+      } else {
+        cmd_to_id[cmd] = role_name;
+      }
+      continue;
+    }
+
     OwnedValue submenu{api, api->value_dict_get(itemVal, "submenu")};
     laufey_value_t* submenuVal = submenu.v;
     if (submenuVal && api->value_is_list(submenuVal)) {
-      HMENU sub = BuildWinMenuFromValue(submenuVal, api, cmd_to_id);
+      HMENU sub = BuildWinMenuFromValue(submenuVal, api, cmd_to_id, quit_cmds);
       AppendMenuW(menu, MF_POPUP | MF_STRING, (UINT_PTR)sub, wlabel.c_str());
       continue;
     }
@@ -570,9 +607,10 @@ void SetTrayMenuWin(uint32_t tray_id, laufey_value_t* menu_template,
                      const laufey_backend_api_t* api,
                      laufey_menu_click_fn on_click, void* on_click_data) {
   std::map<UINT, std::string> cmd_to_id;
-  HMENU menu = menu_template
-                    ? BuildWinMenuFromValue(menu_template, api, cmd_to_id)
-                    : nullptr;
+  std::set<UINT> quit_cmds;
+  HMENU menu = menu_template ? BuildWinMenuFromValue(menu_template, api,
+                                                     cmd_to_id, quit_cmds)
+                             : nullptr;
   if (menu_template) api->value_free(menu_template);
   std::lock_guard<std::mutex> lock(TrayMutex());
   auto it = TrayMap().find(tray_id);
@@ -583,6 +621,7 @@ void SetTrayMenuWin(uint32_t tray_id, laufey_value_t* menu_template,
   if (it->second.hmenu) DestroyMenu(it->second.hmenu);
   it->second.hmenu = menu;
   it->second.cmd_to_id = cmd_to_id;
+  it->second.quit_cmds = quit_cmds;
   it->second.menu_click_fn = on_click;
   it->second.menu_click_data = on_click_data;
   // Register each id for the test-click hook (window_id == tray_id, matching
@@ -619,6 +658,10 @@ void SetTrayEventHandlerWin(uint32_t tray_id, laufey_tray_event_fn handler,
   it->second.event_fn = handler;
   it->second.event_data = user_data;
   if (!handler) it->second.hovering = false;
+}
+
+void SetTrayQuitHandlerWin(void (*quit)()) {
+  g_tray_quit.store(quit);
 }
 
 uint32_t TrayCapabilitiesWin() {

@@ -71,6 +71,24 @@ static void TestLevelsAndPolicy() {
   EXPECT(!IsValidWindowLevel(-1));
   EXPECT(!IsValidWindowLevel(5));
 
+  // The page's background policy from the creation flags; the other flags
+  // don't touch it.
+  EXPECT(BackgroundThrottlingFromFlags(0) ==
+         LAUFEY_BACKGROUND_THROTTLING_THROTTLE);
+  EXPECT(BackgroundThrottlingFromFlags(LAUFEY_WINDOW_FLAG_HIDDEN |
+                                       LAUFEY_WINDOW_FLAG_FRAMELESS) ==
+         LAUFEY_BACKGROUND_THROTTLING_THROTTLE);
+  EXPECT(BackgroundThrottlingFromFlags(
+             LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED) ==
+         LAUFEY_BACKGROUND_THROTTLING_NONE);
+  EXPECT(BackgroundThrottlingFromFlags(LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND |
+                                       LAUFEY_WINDOW_FLAG_HIDDEN) ==
+         LAUFEY_BACKGROUND_THROTTLING_SUSPEND);
+  EXPECT(
+      BackgroundThrottlingFromFlags(LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED |
+                                    LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND) ==
+      LAUFEY_BACKGROUND_THROTTLING_NONE);
+
   EXPECT(ParseActivationPolicy("regular") == LAUFEY_ACTIVATION_POLICY_REGULAR);
   EXPECT(ParseActivationPolicy("accessory") ==
          LAUFEY_ACTIVATION_POLICY_ACCESSORY);

@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 50
+#define LAUFEY_API_VERSION 51
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -82,6 +82,15 @@ extern "C" {
 // overlay_capabilities reports LAUFEY_OVERLAY_CAP_LAYER_SHELL where it takes
 // effect.
 #define LAUFEY_WINDOW_FLAG_OVERLAY (1u << 5)
+
+// BACKGROUND_UNTHROTTLED and BACKGROUND_SUSPEND (API >= 51) choose what the
+// web engine does to the window's page while the window is not on screen
+// (created hidden, hidden, minimized or covered); without either the page is
+// throttled (LAUFEY_BACKGROUND_THROTTLING_*, get_background_throttling).
+// UNTHROTTLED wins when both are given. Decided at creation: WebKit reads it
+// when it sets up the page.
+#define LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED (1u << 6)
+#define LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND (1u << 7)
 
 // --- Window state, screens and chrome (API >= 38) ---------------------------
 //
@@ -576,6 +585,25 @@ typedef struct laufey_rect {
 #define LAUFEY_ACTIVATION_POLICY_REGULAR 0
 #define LAUFEY_ACTIVATION_POLICY_ACCESSORY 1
 #define LAUFEY_ACTIVATION_POLICY_PROHIBITED 2
+
+// Background throttling policies (get_background_throttling, API >= 51):
+// what the web engine does to a window's page while the window is not on
+// screen (created hidden, hidden, minimized or fully covered). Electron's
+// `backgroundThrottling` is THROTTLE (true, its default) or NONE (false).
+//   THROTTLE  the page keeps running with its timers slowed down: setInterval
+//             / setTimeout fire at a reduced rate, animation frames stop, and
+//             events, messages and sockets are still handled (the default).
+//   NONE      the page runs as if it were on screen (no throttling beyond what
+//             the OS does to the whole app, such as App Nap).
+//   SUSPEND   the engine may freeze the page entirely until it is on screen
+//             again: no timers, no events (WKWebView's own default on macOS
+//             14+, which laufey no longer uses).
+// A window's policy comes from its creation flags: THROTTLE without a
+// LAUFEY_WINDOW_FLAG_BACKGROUND_* flag, NONE with BACKGROUND_UNTHROTTLED,
+// SUSPEND with BACKGROUND_SUSPEND.
+#define LAUFEY_BACKGROUND_THROTTLING_THROTTLE 0
+#define LAUFEY_BACKGROUND_THROTTLING_NONE 1
+#define LAUFEY_BACKGROUND_THROTTLING_SUSPEND 2
 
 // Tray event kinds (laufey_tray_event_t.kind).
 #define LAUFEY_TRAY_EVENT_CLICK 1         // primary (left) button
@@ -2582,6 +2610,21 @@ struct laufey_backend_api {
   // "default"}, freed with string_free; "[]" when there are none or no
   // engine. May block briefly; not on the UI thread.
   char* (*speech_voices)(void* backend_data);
+
+  // --- Background throttling (API >= 51) -----------------------------------
+  //
+  // The window's LAUFEY_BACKGROUND_THROTTLING_* policy, from its creation
+  // flags (LAUFEY_WINDOW_FLAG_BACKGROUND_*), or -1 for an unknown window and
+  // where the backend doesn't choose. macOS (the WebView backend, macOS
+  // 14+): WKPreferences.inactiveSchedulingPolicy Throttle / None / Suspend,
+  // and for NONE also WebKit's hidden-page timer throttling off, so timers
+  // keep their rate (Electron's backgroundThrottling: false). WKWebView's
+  // own default, Suspend, froze the page of a window created hidden about a
+  // second after it loaded, so every window now starts throttled instead.
+  // CEF, WebView2 and WebKitGTK throttle a hidden page's timers without
+  // freezing it and take no flag (-1); before macOS 14 WebKit never
+  // suspends a page (-1). Any thread.
+  int32_t (*get_background_throttling)(void* backend_data, uint32_t window_id);
 };
 
 #ifdef __cplusplus

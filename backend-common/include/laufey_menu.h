@@ -67,6 +67,21 @@ std::vector<MenuEntry> ParseMenuTemplate(laufey_value_t* menu_template,
 // Whether `role` (case-insensitive) is `name` ("selectall" == "selectAll").
 bool RoleIs(const std::string& role, const char* name);
 
+// A role item in a Windows tray menu (which, unlike an app menu, has no
+// focused window to send an edit command to): how it is drawn and what
+// choosing it does.
+struct TrayRoleItem {
+  enum class Action {
+    kSkip,    // not drawn: a macOS-only role (hide, front, services, ...)
+    kQuit,    // the app's quit (SetTrayQuitHandlerWin)
+    kReport,  // reported to the click handler as the role's name, as on Linux
+  };
+  Action action = Action::kSkip;
+  std::string label;  // the template's label, else the role's own ("Quit")
+};
+TrayRoleItem DescribeTrayRole(const std::string& role,
+                              const std::string& label);
+
 // The accelerator as menus display it on Windows and Linux: the canonical
 // form with "Super" spelled "Win" on Windows ("Ctrl+Shift+N", "Alt+F4").
 std::string AcceleratorDisplayText(const Accelerator& accel);

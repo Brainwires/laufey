@@ -1963,6 +1963,9 @@ uint32_t Backend_CreateTrayIcon_Win(void* /*data*/) {
   // Allocate the id synchronously; do the Shell_NotifyIcon setup on the
   // UI thread so the hidden tray window is owned by the thread that
   // pumps messages for it.
+  // A tray menu's quit role is this backend's quit (as quit() from the
+  // runtime).
+  laufey_common::SetTrayQuitHandlerWin(LaufeyRequestQuit);
   uint32_t tray_id = laufey_common::CreateTrayIconWin();
   CefPostTask(TID_UI,
               base::BindOnce(

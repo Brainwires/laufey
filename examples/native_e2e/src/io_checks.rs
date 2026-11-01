@@ -700,7 +700,7 @@ async fn ole_drop_run(source: &str) {
 /// Real pointer input for the OLE drop check: absolute moves and the left
 /// button, through mouse_event (one SendInput mouse INPUT).
 #[cfg(windows)]
-mod ole_input {
+pub(crate) mod ole_input {
   #[repr(C)]
   struct Point {
     x: i32,

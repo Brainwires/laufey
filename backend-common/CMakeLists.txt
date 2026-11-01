@@ -291,6 +291,13 @@ function(laufey_add_headless_launch_test host_target host_executable)
   )
   add_dependencies(laufey_headless_launch_test
                    ${host_target} laufey_headless_runtime)
+  # Not beside the host: CEF's build puts targets in its output directory,
+  # which is what gets packaged. The test finds both by full path.
+  set_target_properties(laufey_headless_launch_test laufey_headless_runtime
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/headless_launch_test"
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/headless_launch_test"
+  )
   add_test(NAME laufey_headless_launch_test
            COMMAND laufey_headless_launch_test)
   set_tests_properties(laufey_headless_launch_test PROPERTIES TIMEOUT 180)

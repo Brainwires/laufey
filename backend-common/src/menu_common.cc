@@ -190,6 +190,35 @@ bool RoleIs(const std::string& role, const char* name) {
   return true;
 }
 
+TrayRoleItem DescribeTrayRole(const std::string& role,
+                              const std::string& label) {
+  // The roles Linux's tray (tray_sni_linux.cc) and app menus draw, with the
+  // same labels; the rest are macOS's own.
+  static const char* const kRoles[][2] = {
+      {"quit", "Quit"},
+      {"copy", "Copy"},
+      {"paste", "Paste"},
+      {"cut", "Cut"},
+      {"selectall", "Select All"},
+      {"undo", "Undo"},
+      {"redo", "Redo"},
+      {"minimize", "Minimize"},
+      {"close", "Close"},
+      {"about", "About"},
+      {"togglefullscreen", "Toggle Full Screen"},
+  };
+  TrayRoleItem item;
+  for (const auto& r : kRoles) {
+    if (!RoleIs(role, r[0]))
+      continue;
+    item.action = RoleIs(role, "quit") ? TrayRoleItem::Action::kQuit
+                                       : TrayRoleItem::Action::kReport;
+    item.label = label.empty() ? r[1] : label;
+    return item;
+  }
+  return item;
+}
+
 std::string AcceleratorDisplayText(const Accelerator& accel) {
   std::string s = CanonicalAccelerator(accel);
 #ifdef _WIN32
