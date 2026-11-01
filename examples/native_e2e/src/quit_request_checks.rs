@@ -148,19 +148,32 @@ mod imp {
        ev.setAttributeDescriptorForKeyword(
          $.NSAppleEventDescriptor.descriptorWithEnumCode(0x6c6f676f),
          0x7768793f);
-       ev.sendEventWithOptionsTimeoutError(0x1, 5, null);",
+       const error = Ref();
+       const reply = ev.sendEventWithOptionsTimeoutError(0x3, 5, error);
+       const number = reply
+         ? reply.paramDescriptorForKeyword(0x6572726e).int32Value
+         : error[0].code;
+       console.log(number);",
       std::process::id()
     );
-    let sent = tokio::task::spawn_blocking(move || {
+    let started = Instant::now();
+    // What the sender got back: the first line osascript logs to stderr, its
+    // keyErrorNumber ("undefined" with no error parameter).
+    let reply = tokio::task::spawn_blocking(move || {
       std::process::Command::new("osascript")
         .args(["-l", "JavaScript", "-e", &script])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+          let log = String::from_utf8_lossy(&o.stderr).into_owned();
+          log.lines().next().map(str::to_string)
+        })
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or(None);
+    let waited = started.elapsed();
     if wait_for(|| ASKED.load(Ordering::SeqCst) > before, 60, 50).await {
       check(
         "a logout's quit Apple Event asks as a session end",
@@ -170,9 +183,18 @@ mod imp {
         "a refused logout keeps the app running",
         !laufey::should_shutdown(),
       );
+      // Not a "yes" the app doesn't keep: without this error the OS waits for
+      // the process to end, then says it failed to quit.
+      check(
+        &format!(
+          "a refused logout replies userCanceledErr at once: {reply:?} after \
+           {waited:?}"
+        ),
+        reply.as_deref() == Some("-128") && waited < Duration::from_secs(4),
+      );
     } else {
       na(&format!(
-        "a logout's quit Apple Event (never arrived; osascript ok: {sent})"
+        "a logout's quit Apple Event (never arrived; reply: {reply:?})"
       ));
     }
     tokio::time::sleep(Duration::from_millis(300)).await;

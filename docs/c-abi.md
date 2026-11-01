@@ -462,21 +462,26 @@ a runtime that tracks a held request checks it before reporting one.
 A refusal on a session end is a request the OS may not honour. On macOS it was
 tested with a real logout on macOS 26.6.2, through the dialog's Log Out button:
 
-| Activation policy        | Backend | Refused               | The logout                                     |
-| ------------------------ | ------- | --------------------- | ---------------------------------------------- |
-| Regular                  | WebView | after 300 ms, 8 s     | Stops: "interrupted logout"                    |
-| Regular                  | CEF     | after 300 ms          | Stops: "failed to quit", about 45 s later      |
-| Regular                  | CEF     | after 8 s             | Session still up when last checked, 20 s later |
-| Accessory (no Dock icon) | WebView | at once, after 300 ms | Goes on; the session ends                      |
-| Accessory (no Dock icon) | CEF     | after 300 ms          | Goes on; the session ends                      |
+| Activation policy        | Backend | The runtime                   | The logout                  |
+| ------------------------ | ------- | ----------------------------- | --------------------------- |
+| Regular                  | WebView | Refuses after 300 ms, 8 s     | Stops: "interrupted logout" |
+| Regular                  | CEF     | Refuses after 300 ms, 8 s     | Stops: "interrupted logout" |
+| Regular                  | CEF     | Allows after 300 ms           | Goes on; the session ends   |
+| Regular                  | CEF     | Never answers                 | Goes on at the deadline     |
+| Accessory (no Dock icon) | WebView | Refuses at once, after 300 ms | Goes on; the session ends   |
+| Accessory (no Dock icon) | CEF     | Refuses after 300 ms          | Goes on; the session ends   |
 
-macOS sends an accessory app the quit event and doesn't wait for its answer. Both
-alerts name the app and offer Try Again. Restart and shutdown weren't tested.
+A refusal replies `userCanceledErr` to the quit event when the runtime answers,
+and the alert comes up right away. It names the app, from the bundle's
+`CFBundleName`, and offers Cancel and Try Again, which asks the runtime again.
+macOS sends an accessory app the quit event and doesn't wait for its answer.
+Restart and shutdown weren't tested.
 
 On Windows the window answers `FALSE`; the checks send it the message, and a
-real logoff hasn't been tested. A critical Windows shutdown (`ENDSESSION_CRITICAL`) asks
-nobody, and `WM_ENDSESSION` runs the app's quit. On Windows the wait stays under
-the 5 s after which the OS shows the "preventing shutdown" screen.
+real logoff hasn't been tested. A critical Windows shutdown
+(`ENDSESSION_CRITICAL`) asks nobody, and `WM_ENDSESSION` runs the app's quit. On
+Windows the wait stays under the 5 s after which the OS shows the "preventing
+shutdown" screen.
 
 On a plain quit answer at once: `answer_quit_request(false)` and then, if the
 app decides later, call `quit()` (macOS keeps its menus and events from the user

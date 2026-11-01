@@ -3,6 +3,8 @@
 #import <Cocoa/Cocoa.h>
 
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cstdlib>
@@ -39,6 +41,24 @@ void LaufeyOpenExternalURL(const std::string& url) {
       [[NSWorkspace sharedWorkspace] openURL:nsurl];
     }
   }
+}
+
+// A quit Apple Event's reply saying no, what AppKit's NSTerminateCancel sends.
+static void SetQuitEventRefused(NSAppleEventDescriptor* reply) {
+  [reply setParamDescriptor:[NSAppleEventDescriptor
+                                descriptorWithInt32:userCanceledErr]
+                 forKeyword:keyErrorNumber];
+}
+
+// Sends the reply of a suspended quit Apple Event. Null when there is none.
+static void ResumeQuitEvent(NSAppleEventManagerSuspensionID suspended,
+                            bool allow) {
+  if (!suspended)
+    return;
+  NSAppleEventManager* events = [NSAppleEventManager sharedAppleEventManager];
+  if (!allow)
+    SetQuitEventRefused([events replyAppleEventForSuspensionID:suspended]);
+  [events resumeWithSuspensionID:suspended];
 }
 
 @interface LaufeyApplication : NSApplication <CefAppProtocol> {
@@ -103,17 +123,41 @@ void LaufeyOpenExternalURL(const std::string& url) {
   // the window's own close control is. The runtime is asked instead (API 52,
   // bounded); this override never returns to AppKit's termination, so there
   // is no applicationShouldTerminate: for it to come through.
+  //
+  // A quit Apple Event (the Dock, a logout) is why we may be here, and its
+  // sender waits on the reply: returning from the event's handler with no error
+  // tells it the app is quitting, and a logout then waits for a process that
+  // doesn't end until it gives up and says the app failed to quit. So the event
+  // stays suspended until the answer, as AppKit's own handler keeps it through
+  // NSTerminateLater, and a refusal replies userCanceledErr.
+  NSAppleEventManager* events = [NSAppleEventManager sharedAppleEventManager];
+  NSAppleEventDescriptor* event = events.currentAppleEvent;
+  const bool is_quit_event = event && event.eventClass == kCoreEventClass &&
+                             event.eventID == kAEQuitApplication;
   LaufeyHandler* handler = LaufeyHandler::GetInstance();
   if (!handler || handler->IsClosing())
     return;
+  auto suspended = std::make_shared<NSAppleEventManagerSuspensionID>(nullptr);
+  auto answer = std::make_shared<std::optional<bool>>();
   bool pending = false;
   if (laufey_common::AskQuitRequestMac(
-          [](bool allow) {
+          [suspended, answer](bool allow) {
+            *answer = allow;
+            ResumeQuitEvent(*suspended, allow);
             if (allow)
               LaufeyRequestQuit();
           },
-          &pending) ||
-      pending) {
+          &pending)) {
+    // A handler that spun the run loop may have its answer already.
+    if (is_quit_event && !answer->has_value())
+      *suspended = [events suspendCurrentAppleEvent];
+    else if (is_quit_event && !answer->value())
+      SetQuitEventRefused(events.currentReplyAppleEvent);
+    return;
+  }
+  if (pending) {
+    if (is_quit_event)
+      SetQuitEventRefused(events.currentReplyAppleEvent);
     return;
   }
   handler->CloseAllBrowsers(true);
