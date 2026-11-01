@@ -34,9 +34,9 @@ mod imp {
 
   use laufey::{QuitRequestKind, Window};
 
-  use crate::{check, wait_for};
   #[cfg(target_os = "macos")]
   use crate::na;
+  use crate::{check, wait_for};
 
   /// What the handler does: answer with this, or (-1) stay silent.
   static ANSWER: AtomicI32 = AtomicI32::new(0);
@@ -120,7 +120,10 @@ mod imp {
       SESSION_END.load(Ordering::SeqCst) == 0,
     );
     tokio::time::sleep(Duration::from_millis(800)).await;
-    check("a refusal keeps the app running", !laufey::should_shutdown());
+    check(
+      "a refusal keeps the app running",
+      !laufey::should_shutdown(),
+    );
     check(
       "a window still answers after the refusal",
       w.get_size().0 != 0,
@@ -279,7 +282,10 @@ mod imp {
         && SESSION_END.load(Ordering::SeqCst) == 1,
     );
     check("a refusal answers FALSE", r == 0);
-    check("a refusal keeps the app running", !laufey::should_shutdown());
+    check(
+      "a refusal keeps the app running",
+      !laufey::should_shutdown(),
+    );
 
     ANSWER.store(1, Ordering::SeqCst);
     let (r, took) = ask(hwnd, 0).await;

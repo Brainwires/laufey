@@ -132,6 +132,22 @@ void LaufeyOpenExternalURL(const std::string& url) {
   return NSTerminateNow;
 }
 
+// A quit Apple Event (the Dock, a logout) goes to terminate: from this handler,
+// so the event, and with it the reason a logout carries, is still the current
+// one there (AppKit's own handler reaches terminate: without it under CEF).
+- (void)applicationDidFinishLaunching:(NSNotification*)notification {
+  [[NSAppleEventManager sharedAppleEventManager]
+      setEventHandler:self
+          andSelector:@selector(handleQuitEvent:withReplyEvent:)
+        forEventClass:kCoreEventClass
+           andEventID:kAEQuitApplication];
+}
+
+- (void)handleQuitEvent:(NSAppleEventDescriptor*)event
+         withReplyEvent:(NSAppleEventDescriptor*)reply {
+  [NSApp terminate:nil];
+}
+
 - (BOOL)applicationSupportsSecureRestorableState:(NSApplication*)app {
   return NO;
 }

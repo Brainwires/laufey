@@ -46,13 +46,13 @@ mod os_view;
 mod overlay_checks;
 mod overlay_edge_checks;
 mod platform_checks;
+mod quit_request_checks;
 mod sandbox_checks;
 mod secret_checks;
 mod share_checks;
 mod stream_checks;
 mod system_checks;
 mod title_bar_checks;
-mod quit_request_checks;
 mod tray_role_checks;
 
 use std::collections::HashMap;
