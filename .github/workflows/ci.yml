@@ -1161,7 +1161,10 @@ jobs:
       # the backend, run here. No display needed.
       # macOS: laufey_secret_store_mac_test must find a usable login
       # keychain here, and checks `security find-generic-password -w` too.
+      # About 2 min on Linux, less elsewhere. A hung step otherwise holds the
+      # runner until the job's six-hour limit.
       - name: Unit tests (ctest)
+        timeout-minutes: 10
         shell: bash
         env:
           LAUFEY_SECRET_TEST_REQUIRE: ${{ runner.os == 'macOS' && '1' || '' }}
