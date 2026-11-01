@@ -8,6 +8,7 @@
 //! N/A without a layer-shell compositor, or on one that isn't KWin.
 
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use laufey::{Window, WindowOptions};
@@ -36,7 +37,10 @@ fn qdbus(args: &[&str]) -> Option<String> {
 /// Runs a KWin script that prints every window; the lines come back through
 /// the journal, KWin's stdout.
 fn kwin_windows() -> Option<Vec<String>> {
-  let marker = format!("laufey-e2e-{}", std::process::id());
+  // Its own marker per call: the journal still holds the earlier calls' lines.
+  static CALLS: AtomicU32 = AtomicU32::new(0);
+  let call = CALLS.fetch_add(1, Ordering::SeqCst);
+  let marker = format!("laufey-e2e-{}-{call}", std::process::id());
   let path = std::env::temp_dir().join(format!("{marker}.js"));
   std::fs::write(
     &path,
@@ -119,14 +123,18 @@ pub async fn run() {
     h,
     WindowOptions {
       overlay: true,
+      hidden: true,
       ..Default::default()
     },
   )
   .title(TITLE);
   let _ = wait_for(|| win.get_size().0 != 0, 100, 50).await;
-  win.navigate("data:text/html,<body style='background:red'>overlay-edge</body>");
   let (x, y) = (sx + sw - w - 16, sy + sh - h - 16);
+  win.navigate("laufey-e2e://app/titled/overlay-edge");
+  win.show();
+  tokio::time::sleep(Duration::from_millis(800)).await;
   win.set_position(x, y);
+  tokio::time::sleep(Duration::from_millis(1500)).await;
   check(
     "get_position answers the screen coordinates set",
     win.get_position() == (x, y),
@@ -176,7 +184,7 @@ pub async fn run() {
   // The top-left quadrant stays top-left, at the coordinates given.
   let (x2, y2) = (sx + 100, sy + 120);
   win.set_position(x2, y2);
-  tokio::time::sleep(Duration::from_millis(500)).await;
+  tokio::time::sleep(Duration::from_millis(1000)).await;
   if let Some(lines) = kwin_windows() {
     let s = lines
       .iter()
