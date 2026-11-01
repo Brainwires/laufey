@@ -249,6 +249,22 @@ async fn eval_string(win: &Window, script: &str) -> Option<String> {
   None
 }
 
+/// Polls the window's `location.origin` until it is `want` (or about `tries` ×
+/// 200 ms pass) and returns the last answer. A server having answered the
+/// request doesn't mean the document has committed: until then the initial
+/// empty document answers, with the origin `null`.
+async fn wait_origin(win: &Window, want: &str, tries: u32) -> Option<String> {
+  let mut last = None;
+  for _ in 0..tries {
+    last = eval_string(win, "String(location.origin)").await;
+    if last.as_deref() == Some(want) {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+  last
+}
+
 /// Answers the next save dialog within `tries` × 100 ms. False when none
 /// opened.
 async fn answer_dialog(accept: bool, path: Option<&Path>, tries: u32) -> bool {
@@ -409,7 +425,7 @@ pub async fn run() {
   win.navigate(&format!("{own}/"));
   let loaded =
     wait_for(|| hits.lock().unwrap().iter().any(|p| p == "/"), 100, 100).await;
-  let ready = eval_string(&win, "String(location.origin)").await;
+  let ready = wait_origin(&win, &own, 100).await;
   check(
     &format!("downloads: the window shows the app's page ({ready:?})"),
     loaded && ready.as_deref() == Some(own.as_str()),
@@ -639,14 +655,7 @@ async fn scheme_origin_checks(dir: &Path, can_accept: bool) {
   let win = Window::new(480, 320).title("native-e2e-downloads-scheme");
   win.show();
   win.navigate(&format!("{SCHEME_ORIGIN}/"));
-  let mut ready = None;
-  for _ in 0..50 {
-    ready = eval_string(&win, "String(location.origin)").await;
-    if ready.as_deref() == Some(SCHEME_ORIGIN) {
-      break;
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-  }
+  let ready = wait_origin(&win, SCHEME_ORIGIN, 50).await;
   check(
     &format!("downloads: a window shows the custom-scheme page ({ready:?})"),
     ready.as_deref() == Some(SCHEME_ORIGIN),
