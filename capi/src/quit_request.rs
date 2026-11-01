@@ -66,7 +66,8 @@ where
 }
 
 /// Answer the quit request in progress: `false` keeps the app running (and
-/// stops a logout). No effect when none is. Any thread.
+/// asks the OS to stop a logout, which it may not honour). No effect when none
+/// is. Any thread.
 pub fn answer_quit_request(allow: bool) {
   let api = api();
   if let Some(f) = api.answer_quit_request {
