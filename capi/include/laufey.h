@@ -1936,7 +1936,8 @@ struct laufey_backend_api {
   // LAUFEY_MAX_DROP_PATHS, a path that is not an existing absolute path, or a
   // backend without drag-out). FAILED also comes from the UI thread when the
   // drag can't start there (no left button held, another drag in progress, an
-  // unknown window). NULL callback: fire and forget.
+  // unknown window, on Wayland no pointer over the app's GTK window). NULL
+  // callback: fire and forget.
   // LAUFEY_WINDOW_CAP_FILE_DRAG_OUT says whether the backend can do it at all.
   void (*start_file_drag)(void* backend_data, uint32_t window_id,
                           const char* const* paths, size_t count,

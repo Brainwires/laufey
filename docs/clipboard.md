@@ -124,7 +124,8 @@ while it is in the background or the session is locked. So, on Wayland:
   GTK's Wayland clipboard, which works only while one of the app's windows has
   focus.
 - Elsewhere (another compositor without data-control) GTK's Wayland clipboard is
-  used: only while one of the app's windows has focus, and never under CEF.
+  used: only while one of the app's windows has focus, and never under CEF,
+  where `LAUFEY_CLIPBOARD_CAP_CHANGE_EVENTS` is not reported.
 
 `LAUFEY_CLIPBOARD=gtk` turns both off (GTK's default display only), and the X11
 session's XCB client too.

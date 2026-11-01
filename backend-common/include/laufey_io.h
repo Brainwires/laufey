@@ -345,7 +345,9 @@ void WinRunOnIoThreadAfter(unsigned ms, std::function<void()> task);
 #endif
 
 #ifdef __linux__
-uint32_t ClipboardCapabilitiesLinux();
+// gtk_has_windows: the host's windows are GTK's (WebKitGTK), not another
+// connection's (CEF).
+uint32_t ClipboardCapabilitiesLinux(bool gtk_has_windows);
 char* ClipboardReadHtmlLinux();
 bool ClipboardWriteHtmlLinux(const std::string& html, const char* text_or_null);
 uint8_t* ClipboardReadImageLinux(size_t* len_out);

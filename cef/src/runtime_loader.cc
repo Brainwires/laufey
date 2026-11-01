@@ -2785,7 +2785,7 @@ static uint32_t Backend_ClipboardCapabilities(void* /*data*/) {
   return laufey_common::ClipboardCapabilitiesWin();
 #else
   EnsureGtkReady();
-  return laufey_common::ClipboardCapabilitiesLinux();
+  return laufey_common::ClipboardCapabilitiesLinux(/*gtk_has_windows=*/false);
 #endif
 }
 

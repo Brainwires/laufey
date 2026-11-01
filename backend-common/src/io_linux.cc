@@ -357,6 +357,31 @@ bool LeftButtonDown(GdkDisplay* display) {
   return (mask & GDK_BUTTON1_MASK) != 0;
 }
 
+// Whether a Wayland drag has an origin. GTK starts one from the surface of this
+// connection under the seat's pointer and passes it to
+// wl_data_device.start_drag, where a null origin is an error libwayland can't
+// send: "error marshalling arguments for start_drag ... null value passed", and
+// the process ends (WebKitGTK: "Error 22 (Invalid argument) dispatching to
+// Wayland display"; CEF: an exit with status 0). There is no such surface on a
+// seat without a pointer or while the pointer is over another client. GDK can
+// also still name a window that is gone: a closed dialog the pointer was over
+// gets no leave event, and its surface is null.
+bool PointerOverOwnSurface(GdkDisplay* display) {
+#ifdef GDK_WINDOWING_WAYLAND
+  GdkSeat* seat = gdk_display_get_default_seat(display);
+  GdkDevice* pointer = seat ? gdk_seat_get_pointer(seat) : nullptr;
+  GdkWindow* under = pointer ? gdk_device_get_window_at_position(
+                                   pointer, nullptr, nullptr)
+                             : nullptr;
+  GdkWindow* toplevel = under ? gdk_window_get_toplevel(under) : nullptr;
+  return toplevel && !gdk_window_is_destroyed(toplevel) &&
+         GDK_IS_WAYLAND_WINDOW(toplevel) &&
+         gdk_wayland_window_get_wl_surface(toplevel);
+#else
+  return false;
+#endif
+}
+
 }  // namespace
 
 bool CanStartFileDragLinux() {
@@ -381,9 +406,12 @@ void StartFileDragLinux(std::function<void*()> source_widget,
     GtkWidget* source = widget ? widget : DragSourceWidget();
     g_object_ref(source);
     // Wayland reports no pointer state outside an event; the compositor
-    // refuses a drag without a held button there anyway.
+    // refuses a drag without a held button there anyway, once it has an origin.
+    // No source widget (CEF, whose windows are on Chromium's connection) has no
+    // window of GTK's to drag from there.
     if (!display || g_drag || (widget && !gtk_widget_get_realized(widget)) ||
-        (!IsWayland(display) && !LeftButtonDown(display))) {
+        (IsWayland(display) ? !widget || !PointerOverOwnSurface(display)
+                            : !LeftButtonDown(display))) {
       g_object_unref(source);
       owned->Finish(LAUFEY_DRAG_RESULT_FAILED);
       return;

@@ -940,7 +940,7 @@ class WebKitGTKBackend : public LaufeyBackend {
     return laufey_common::TestFileDialogRespondLinux(action, path);
   }
   uint32_t ClipboardCapabilities() override {
-    return laufey_common::ClipboardCapabilitiesLinux();
+    return laufey_common::ClipboardCapabilitiesLinux(/*gtk_has_windows=*/true);
   }
   char* ReadClipboardHtml() override {
     return laufey_common::ClipboardReadHtmlLinux();
