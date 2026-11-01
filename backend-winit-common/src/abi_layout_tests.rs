@@ -247,7 +247,8 @@ fn vtable_layout_matches_the_header() {
     speech_voices,
     get_background_throttling,
     set_quit_requested_handler,
-    answer_quit_request
+    answer_quit_request,
+    quit_request_pending
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

@@ -2654,6 +2654,10 @@ struct laufey_backend_api {
   // false: the quit doesn't happen (macOS cancels a logout; Windows's session
   // end stops). No effect when nothing is pending. Any thread.
   void (*answer_quit_request)(void* backend_data, bool allow);
+  // Whether a request is still waiting for its answer: false once it was
+  // answered or its deadline passed, so a runtime's own notion of "held" can't
+  // outlive the OS's wait. Any thread.
+  bool (*quit_request_pending)(void* backend_data);
 };
 
 #ifdef __cplusplus

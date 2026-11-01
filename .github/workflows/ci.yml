@@ -860,6 +860,15 @@ jobs:
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --tray-roles
 
+      # The OS asks the app to quit (API 52): macOS's terminate: and quit Apple
+      # Events, Windows's WM_QUERYENDSESSION, each bounded by its deadline.
+      # Ends the process.
+      - name: Quit requests (macOS, Windows)
+        if: runner.os != 'Linux' && matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --quit-request
+
       # Drag and drop, native file dialogs and the rich clipboard (API 39):
       # drops through the test hook, real OS dialogs driven by the test hook,
       # clipboard text / HTML / PNG / formats / change events. Every leg,

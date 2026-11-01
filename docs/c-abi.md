@@ -442,6 +442,7 @@ void (*set_quit_requested_handler)(void* backend_data,
                                    laufey_quit_requested_fn handler,
                                    void* user_data);
 void (*answer_quit_request)(void* backend_data, bool allow);
+bool (*quit_request_pending)(void* backend_data);
 ```
 
 The app-level hook: the OS is about to quit the app, and the runtime gets to say
@@ -454,6 +455,9 @@ deadline, when the quit goes ahead however the app behaves.
 | macOS   | `terminate:` (Cmd+Q, the `"quit"` role, the Dock's Quit, a quit Apple Event)  | `APP`         | 5 s      |
 | macOS   | The same, with a logout, restart or shutdown as the event's `kAEQuitReason`   | `SESSION_END` | 10 s     |
 | Windows | `WM_QUERYENDSESSION`, to a hidden top-level window (so a tray app is asked)   | `SESSION_END` | 4 s      |
+
+After the deadline an answer does nothing, and `quit_request_pending` is false: a
+runtime that tracks a held request checks it before reporting one.
 
 A refusal on a session end stops it: macOS cancels the logout; on Windows the
 window answers `FALSE`. A critical Windows shutdown (`ENDSESSION_CRITICAL`) asks

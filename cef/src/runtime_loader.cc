@@ -320,6 +320,10 @@ static void Backend_AnswerQuitRequest(void* /*data*/, bool allow) {
   laufey_common::AnswerQuitRequest(allow);
 }
 
+static bool Backend_QuitRequestPending(void* /*data*/) {
+  return laufey_common::QuitRequestPending();
+}
+
 // exit_app (API 46): quit() with an exit code. The host returns the code once
 // CefShutdown has written the profile (on Windows through
 // laufey_common::EndProcess), and RuntimeLoader::Shutdown doesn't wait for a
@@ -3445,6 +3449,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.exit_app = Backend_ExitApp;
   backend_api_.set_quit_requested_handler = Backend_SetQuitRequestedHandler;
   backend_api_.answer_quit_request = Backend_AnswerQuitRequest;
+  backend_api_.quit_request_pending = Backend_QuitRequestPending;
   backend_api_.title_bar_preferences = Backend_TitleBarPreferences;
   backend_api_.set_title_bar_preferences_changed_handler =
       Backend_SetTitleBarPreferencesChangedHandler;

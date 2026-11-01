@@ -74,6 +74,16 @@ pub fn answer_quit_request(allow: bool) {
   }
 }
 
+/// Whether a quit request is still waiting for its answer: `false` once it was
+/// answered or its deadline passed. Any thread.
+pub fn quit_request_pending() -> bool {
+  let api = api();
+  match api.quit_request_pending {
+    Some(f) => unsafe { f(api.backend_data) },
+    None => false,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

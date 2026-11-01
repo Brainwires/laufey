@@ -174,6 +174,10 @@ static void Backend_AnswerQuitRequest(void* /*data*/, bool allow) {
   laufey_common::AnswerQuitRequest(allow);
 }
 
+static bool Backend_QuitRequestPending(void* /*data*/) {
+  return laufey_common::QuitRequestPending();
+}
+
 // exit_app (API 46): quit() with an exit code. The host returns it once its
 // loop has ended and the web views are released (on Windows through
 // laufey_common::EndProcess), and Shutdown doesn't wait for a runtime thread
@@ -1568,6 +1572,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.exit_app = Backend_ExitApp;
   backend_api_.set_quit_requested_handler = Backend_SetQuitRequestedHandler;
   backend_api_.answer_quit_request = Backend_AnswerQuitRequest;
+  backend_api_.quit_request_pending = Backend_QuitRequestPending;
   // The navigation guard (API 48): every web-engine backend checks its
   // windows' top-level navigations (laufey_navigation_guard.h).
   // User activities: Handoff and Spotlight (API 49; macOS).

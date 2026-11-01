@@ -283,6 +283,10 @@ mod imp {
     );
     check("a refusal answers FALSE", r == 0);
     check(
+      "an answered request is no longer pending",
+      !laufey::quit_request_pending(),
+    );
+    check(
       "a refusal keeps the app running",
       !laufey::should_shutdown(),
     );
@@ -296,6 +300,10 @@ mod imp {
     let (r, took) = ask(hwnd, 0).await;
     eprintln!("[e2e] INFO no answer: TRUE after {took:?}");
     check("a runtime that never answers can't hold it: TRUE", r != 0);
+    check(
+      "an expired request is no longer pending, so a late answer has nothing to refuse",
+      !laufey::quit_request_pending(),
+    );
     check(
       "... after about the deadline, under Windows's 5 s",
       took >= Duration::from_millis(3500) && took < Duration::from_millis(4900),

@@ -994,6 +994,7 @@ pub struct LaufeyBackendApi {
     ),
   >,
   pub answer_quit_request: Option<unsafe extern "C" fn(*mut c_void, bool)>,
+  pub quit_request_pending: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
 }
 
 /// `laufey_rect_t` (API 50).
@@ -1948,6 +1949,7 @@ pub fn create_api_base() -> LaufeyBackendApi {
     // API 52: Winit gets no quit request from the OS.
     set_quit_requested_handler: None,
     answer_quit_request: None,
+    quit_request_pending: None,
   }
 }
 
