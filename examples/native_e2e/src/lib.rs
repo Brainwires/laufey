@@ -2358,6 +2358,8 @@ async fn window_api_checks() {
 
   // -- size constraints -----------------------------------------------------
   if caps.size_constraints() {
+    // The maximum fits the smallest runner display (macos-15: 1024x768, a
+    // work area 684 high, less the title bar), so the screen doesn't clamp it.
     let range = laufey::SizeConstraints {
       min_width: 400,
       min_height: 300,

@@ -258,6 +258,12 @@ pub async fn run() {
   let (lx, ly) = launch.get_position();
   let (lw, _) = launch.get_outer_size();
   second.set_position(lx + lw - 100, ly + 40);
+  // Only the first window is ordered in front of other apps. Where the system
+  // declines this app's activation (a macOS 15 runner), a later window stays
+  // behind the occluder, and a covered window rightly reads as hidden. These
+  // checks are about lacking focus, so keep it uncovered.
+  #[cfg(target_os = "macos")]
+  second.set_level(laufey::LAUFEY_WINDOW_LEVEL_FLOATING);
   if engine && page_answers(&second).await {
     launch.focus();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -282,6 +288,8 @@ pub async fn run() {
   } else if engine {
     check("the unfocused window's page answers scripts", false);
   }
+  #[cfg(target_os = "macos")]
+  second.set_level(laufey::LAUFEY_WINDOW_LEVEL_NORMAL);
 
   // 4. A non-activating panel (tray / menu-bar popover), never focused.
   let panel_title = "native-e2e-launch-panel";

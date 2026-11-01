@@ -1128,7 +1128,9 @@ an editor or a terminal is in front when an app is started from it. See
   window, left unfocused when the launch window is focused again: its page is
   visible and draws a frame within 2 s. An engine does not throttle a visible
   window for lacking focus (a fully covered one is occluded and rightly stops,
-  as in a browser).
+  as in a browser). On macOS it floats for these checks: a later window is not
+  ordered in front of other apps, so where the system declines the activation (a
+  macOS 15 runner) the occluder would cover it.
 - **A non-activating panel** (`no_activate`), never focused: its page is visible
   and draws a frame within 2 s, on every engine. (This used to be N/A on the
   WebKit engines as "WebKit runs no animation frames in a panel never focused".

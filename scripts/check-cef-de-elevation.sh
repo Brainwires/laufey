@@ -17,7 +17,7 @@
 # switch on the command line before CEF parses it: an elevated browser
 # process without it starts itself again with it (NeedsDeElevationRelaunch,
 # LaufeyRelaunchKeepingElevation in cef/src/main_windows.cc; checked at
-# 156.0.8078.48), so SWITCH_BEFORE_PARSE below is 1. This check fails on a
+# 156.0.8078.80), so SWITCH_BEFORE_PARSE below is 1. This check fails on a
 # Chromium 156+ pin when SWITCH_BEFORE_PARSE is 0 or the relaunch is gone from
 # cef/src/main_windows.cc.
 #
