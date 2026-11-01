@@ -266,18 +266,9 @@ mod imp {
     let _ = wait_for(|| w.get_size().0 != 0, 100, 50).await;
     install();
 
-    let mut hwnd = None;
-    let found = wait_for(
-      || {
-        hwnd = os::watcher();
-        hwnd.is_some()
-      },
-      100,
-      50,
-    )
-    .await;
+    let found = wait_for(|| os::watcher().is_some(), 100, 50).await;
     check("the hidden session-end window exists", found);
-    let Some(hwnd) = hwnd else {
+    let Some(hwnd) = os::watcher() else {
       crate::finish();
     };
 
