@@ -370,9 +370,9 @@ bool PointerOverOwnSurface(GdkDisplay* display) {
 #ifdef GDK_WINDOWING_WAYLAND
   GdkSeat* seat = gdk_display_get_default_seat(display);
   GdkDevice* pointer = seat ? gdk_seat_get_pointer(seat) : nullptr;
-  GdkWindow* under = pointer ? gdk_device_get_window_at_position(
-                                   pointer, nullptr, nullptr)
-                             : nullptr;
+  GdkWindow* under =
+      pointer ? gdk_device_get_window_at_position(pointer, nullptr, nullptr)
+              : nullptr;
   GdkWindow* toplevel = under ? gdk_window_get_toplevel(under) : nullptr;
   return toplevel && !gdk_window_is_destroyed(toplevel) &&
          GDK_IS_WAYLAND_WINDOW(toplevel) &&

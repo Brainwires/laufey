@@ -369,9 +369,8 @@ char* ClipboardReadHtmlLinux() {
     bool found = false;
     if (FreeRead({"text/html"}, &data, nullptr, &found)) {
       std::string html;
-      if (found &&
-          DecodeHtml(reinterpret_cast<const guchar*>(data.data()),
-                     static_cast<gint>(data.size()), &html))
+      if (found && DecodeHtml(reinterpret_cast<const guchar*>(data.data()),
+                              static_cast<gint>(data.size()), &html))
         result = MallocString(html.data(), html.size());
       return result;
     }
@@ -519,8 +518,8 @@ bool ClipboardWriteImageLinux(const uint8_t* png, size_t len) {
   {
     data_control::Entries entries;
     entries.push_back(
-        {"image/png", Shared(std::string(reinterpret_cast<const char*>(png),
-                                         len))});
+        {"image/png",
+         Shared(std::string(reinterpret_cast<const char*>(png), len))});
     if (FreeWrite(entries))
       return true;
   }
