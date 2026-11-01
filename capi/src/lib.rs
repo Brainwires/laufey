@@ -63,6 +63,9 @@ pub use user_activity::*;
 mod overlay;
 pub use overlay::*;
 
+mod quit_request;
+pub use quit_request::*;
+
 mod background;
 pub use background::*;
 
@@ -71,7 +74,7 @@ pub use background::*;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 51;
+pub const LAUFEY_API_VERSION: u32 = 52;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.

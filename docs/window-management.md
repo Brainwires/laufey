@@ -226,6 +226,13 @@ w.set_skip_taskbar(true);
   `POP_UP_MENU`, `SCREEN_SAVER`, mapped to the macOS window levels. Windows and
   Linux have one floating level (topmost / keep-above) for every level above
   `NORMAL`.
+- **Layer-shell placement** (`LAUFEY_OVERLAY_CAP_LAYER_EDGE_ANCHOR`, API 52):
+  `set_position` on a layer surface takes screen coordinates. It puts the surface
+  on the output at the window's centre and anchors it to that output's nearest
+  edges, with the margin from each. With exclusive zone 0 the compositor measures
+  a margin from the edge of the usable area, so a window placed 16 px from the
+  bottom of the output sits 16 px above a bottom panel, whatever the panel's size.
+  `get_position` answers the last position set.
 - **Layer shell** (`WindowOptions::overlay`, `LAUFEY_OVERLAY_CAP_LAYER_SHELL`):
   on a Wayland compositor with `zwlr_layer_shell_v1` (wlroots compositors, KDE
   Plasma, COSMIC) the WebKitGTK window becomes an overlay-layer surface through

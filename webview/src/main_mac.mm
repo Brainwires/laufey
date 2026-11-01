@@ -10,6 +10,7 @@
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_overlay.h"
+#include "laufey_quit_request.h"
 #include "laufey_window.h"
 
 #include <cstdlib>
@@ -110,8 +111,28 @@ void EnsureEditMenu(NSMenu* menubar) {
   }
 }
 
+// Cmd+Q, the quit role, the Dock's Quit, a quit Apple Event, a logout: the
+// runtime is asked (API 52), and AppKit waits for its answer, bounded.
+// quit() from the runtime never comes here (it stops the loop).
+- (NSApplicationTerminateReply)applicationShouldTerminate:
+    (NSApplication*)sender {
+  bool pending = false;
+  if (laufey_common::AskQuitRequestMac(
+          [](bool allow) {
+            [NSApp replyToApplicationShouldTerminate:allow ? YES : NO];
+          },
+          &pending)) {
+    return NSTerminateLater;
+  }
+  return pending ? NSTerminateCancel : NSTerminateNow;
+}
+
 - (void)applicationWillTerminate:(NSNotification*)notification {
   [self shutDownRuntime];
+  // AppKit calls exit(0) after this: exit_app's code has to win here when it
+  // settled a pending quit request.
+  if (laufey_common::ExitRequested())
+    exit(laufey_common::RequestedExitCode());
 }
 
 // Tells the runtime the app is ending and waits for its thread. Safe to call

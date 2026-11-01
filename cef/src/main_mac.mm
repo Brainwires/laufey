@@ -9,6 +9,7 @@
 #include <cstring>
 #include <unistd.h>
 
+#include "laufey_quit_request.h"
 #include "laufey_user_activity.h"
 #include "include/cef_application_mac.h"
 #include "include/wrapper/cef_helpers.h"
@@ -99,11 +100,23 @@ void LaufeyOpenExternalURL(const std::string& url) {
   // (so CanClose skips the close-requested negotiation) and skips the
   // beforeunload prompt. App-level quit (the "quit" menu role routes here)
   // is intentionally not interceptable by a window's on_close hook, only
-  // the window's own close control is.
+  // the window's own close control is. The runtime is asked instead (API 52,
+  // bounded); this override never returns to AppKit's termination, so there
+  // is no applicationShouldTerminate: for it to come through.
   LaufeyHandler* handler = LaufeyHandler::GetInstance();
-  if (handler && !handler->IsClosing()) {
-    handler->CloseAllBrowsers(true);
+  if (!handler || handler->IsClosing())
+    return;
+  bool pending = false;
+  if (laufey_common::AskQuitRequestMac(
+          [](bool allow) {
+            if (allow)
+              LaufeyRequestQuit();
+          },
+          &pending) ||
+      pending) {
+    return;
   }
+  handler->CloseAllBrowsers(true);
 }
 @end
 

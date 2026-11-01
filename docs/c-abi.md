@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `51`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `52`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -409,16 +409,16 @@ Concretely:
   force-closes with `CloseBrowser(true)`, which skips the beforeunload prompt
   (it does _not_ bypass `CanClose`/`DoClose`; the close-allowed marks are what
   skip the negotiation) — see `cef/src/main_mac.mm` and `CloseAllBrowsers` in
-  `cef/src/app.cc`. WebView never wires `applicationShouldTerminate:` to
-  `windowShouldClose:` at all, so it's already outside the handler's reach.
+  `cef/src/app.cc`. WebView's `applicationShouldTerminate:` asks the quit handler,
+  never `windowShouldClose:`, so it's outside this handler's reach too.
 - Windows and Linux: the `"quit"` menu role has no automatic OS-level binding on
   either platform — clicking it just invokes the runtime's own registered
   menu-click callback (`menu_linux.cc`; unhandled on Windows, where `"quit"`
   isn't special-cased at all), so it never touches the close path unless the
   runtime's own callback explicitly calls `close_window`.
 
-If a runtime wants "are you sure you want to quit?" behavior, it needs an
-app-level quit hook — which doesn't exist yet in this ABI — not
+If a runtime wants "are you sure you want to quit?" behavior, it needs the
+app-level quit hook, `set_quit_requested_handler` ("Quit requests" below), not
 `set_close_requested_handler`.
 
 `handler` fires synchronously on the backend's native UI thread (e.g. AppKit's
@@ -431,6 +431,44 @@ into their async runtime from that thread; e.g. the Rust `laufey` crate's
 `Window::on_close_requested` docs recommend capturing a `tokio::runtime::Handle`
 ahead of time rather than relying on a bare `tokio::spawn`, which requires an
 ambient runtime context this thread doesn't have.
+
+## Quit requests (API ≥ 52)
+
+```c
+#define LAUFEY_QUIT_REQUEST_APP 0
+#define LAUFEY_QUIT_REQUEST_SESSION_END 1
+typedef void (*laufey_quit_requested_fn)(int32_t kind, void* user_data);
+void (*set_quit_requested_handler)(void* backend_data,
+                                   laufey_quit_requested_fn handler,
+                                   void* user_data);
+void (*answer_quit_request)(void* backend_data, bool allow);
+```
+
+The app-level hook: the OS is about to quit the app, and the runtime gets to say
+whether it may. `handler` fires on the UI thread, and the OS waits for one of:
+`answer_quit_request(allow)`; `quit()` or `exit_app()`, which allow it; or the
+deadline, when the quit goes ahead however the app behaves.
+
+| OS      | What asks                                                                     | `kind`        | Deadline |
+| ------- | ----------------------------------------------------------------------------- | ------------- | -------- |
+| macOS   | `terminate:` (Cmd+Q, the `"quit"` role, the Dock's Quit, a quit Apple Event)  | `APP`         | 5 s      |
+| macOS   | The same, with a logout, restart or shutdown as the event's `kAEQuitReason`   | `SESSION_END` | 10 s     |
+| Windows | `WM_QUERYENDSESSION`, to a hidden top-level window (so a tray app is asked)   | `SESSION_END` | 4 s      |
+
+A refusal on a session end stops it: macOS cancels the logout; on Windows the
+window answers `FALSE`. A critical Windows shutdown (`ENDSESSION_CRITICAL`) asks
+nobody, and `WM_ENDSESSION` runs the app's quit. On Windows the wait stays under
+the 5 s after which the OS shows the "preventing shutdown" screen.
+
+On a plain quit answer at once: `answer_quit_request(false)` and then, if the app
+decides later, call `quit()` (macOS keeps its menus and events from the user
+while a request is unanswered). A session end is what to hold while the app asks
+its pages.
+
+`quit()` from the runtime never asks: it is the runtime's own decision. Nor does
+a Windows tray menu's `"quit"` role, which quits like `quit()` with no reason
+given. The handler never fires on Linux (a termination signal is its own path)
+or on the Winit backends. A runtime that registers no handler quits as before.
 
 ## UI-thread tasks (API ≥ 42)
 

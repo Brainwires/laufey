@@ -2,6 +2,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_quit_request.h"
 #include "laufey_io.h"
 #include "laufey_platform_features.h"
 #include "laufey_launch_args.h"
@@ -344,6 +345,7 @@ class WebView2Backend : public LaufeyBackend {
   void ExecuteJs(uint32_t window_id, const std::string& script,
                  laufey_js_result_fn callback, void* callback_data) override;
   void Quit() override;
+  void WatchSessionEnd() override;
   void SetWindowSize(uint32_t window_id, int width, int height) override;
   void GetWindowSize(uint32_t window_id, int* width, int* height) override;
   void GetWindowOuterSize(uint32_t window_id, int* width, int* height) override;
@@ -1845,8 +1847,19 @@ void WebView2Backend::ExecuteJs(uint32_t window_id, const std::string& script,
   }
 }
 
+void WebView2Backend::WatchSessionEnd() {
+  RunOnUiThreadSync([] {
+    laufey_common::InstallSessionEndWatcherWin([] {
+      if (g_win_backend)
+        g_win_backend->Quit();
+    });
+  });
+}
+
 void WebView2Backend::Quit() {
   laufey_common::MarkQuitting();
+  // quit() settles a session end the OS is waiting on: it may go ahead.
+  laufey_common::AnswerQuitRequest(true);
   // PostQuitMessage posts to the CALLING thread's queue; the loop to end is
   // the UI thread's.
   if (GetCurrentThreadId() != ui_thread_id_) {

@@ -65,7 +65,9 @@ void ApplyInputShape(void* gtk_window, void* gdk_window,
 // The enums of gtk-layer-shell.h, stable since 0.1.
 constexpr int kLayerOverlay = 3;      // GTK_LAYER_SHELL_LAYER_OVERLAY
 constexpr int kEdgeLeft = 0;          // GTK_LAYER_SHELL_EDGE_LEFT
+constexpr int kEdgeRight = 1;         // GTK_LAYER_SHELL_EDGE_RIGHT
 constexpr int kEdgeTop = 2;           // GTK_LAYER_SHELL_EDGE_TOP
+constexpr int kEdgeBottom = 3;        // GTK_LAYER_SHELL_EDGE_BOTTOM
 constexpr int kKeyboardNone = 0;      // GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
 constexpr int kKeyboardOnDemand = 2;  // ..._KEYBOARD_MODE_ON_DEMAND (0.6+)
 
@@ -81,6 +83,7 @@ struct LayerShellApi {
   void (*set_keyboard_interactivity)(GtkWindow*, gboolean) = nullptr;
   void (*set_exclusive_zone)(GtkWindow*, int) = nullptr;
   void (*set_namespace)(GtkWindow*, const char*) = nullptr;
+  void (*set_monitor)(GtkWindow*, GdkMonitor*) = nullptr;
 };
 
 const LayerShellApi& LayerShell() {
@@ -111,6 +114,8 @@ const LayerShellApi& LayerShell() {
         sym("gtk_layer_set_exclusive_zone"));
     a.set_namespace = reinterpret_cast<void (*)(GtkWindow*, const char*)>(
         sym("gtk_layer_set_namespace"));
+    a.set_monitor = reinterpret_cast<void (*)(GtkWindow*, GdkMonitor*)>(
+        sym("gtk_layer_set_monitor"));
     a.loaded = a.init_for_window && a.is_layer_window && a.set_layer &&
                a.set_anchor && a.set_margin && a.set_exclusive_zone;
     return a;
@@ -265,9 +270,57 @@ bool LayerShellIsLayerWindow(void* gtk_window) {
 bool LayerShellMove(void* gtk_window, int x, int y) {
   if (!LayerShellIsLayerWindow(gtk_window))
     return false;
+  const LayerShellApi& ls = LayerShell();
   GtkWindow* w = GTK_WINDOW(gtk_window);
-  LayerShell().set_margin(w, kEdgeLeft, x < 0 ? 0 : x);
-  LayerShell().set_margin(w, kEdgeTop, y < 0 ? 0 : y);
+  int width = 0, height = 0;
+  gtk_window_get_size(w, &width, &height);
+  GdkDisplay* display = gtk_widget_get_display(GTK_WIDGET(w));
+  GdkMonitor* monitor = display ? gdk_display_get_monitor_at_point(
+                                      display, x + width / 2, y + height / 2)
+                                : nullptr;
+  if (!monitor && display)
+    monitor = gdk_display_get_primary_monitor(display);
+  if (!monitor) {
+    // No output to measure from: the top-left of whichever the compositor
+    // picks, as before.
+    ls.set_anchor(w, kEdgeRight, FALSE);
+    ls.set_anchor(w, kEdgeBottom, FALSE);
+    ls.set_anchor(w, kEdgeLeft, TRUE);
+    ls.set_anchor(w, kEdgeTop, TRUE);
+    ls.set_margin(w, kEdgeLeft, x < 0 ? 0 : x);
+    ls.set_margin(w, kEdgeTop, y < 0 ? 0 : y);
+    return true;
+  }
+  GdkRectangle g;
+  gdk_monitor_get_geometry(monitor, &g);
+  LayerEdgeAnchor a =
+      ComputeLayerEdgeAnchor(g.x, g.y, g.width, g.height, x, y, width, height);
+  // gtk-layer-shell remaps the surface to change its output: only when it did.
+  if (ls.set_monitor &&
+      g_object_get_data(G_OBJECT(w), "laufey-layer-monitor") != monitor) {
+    ls.set_monitor(w, monitor);
+    g_object_set_data(G_OBJECT(w), "laufey-layer-monitor", monitor);
+  }
+  ls.set_anchor(w, a.right ? kEdgeLeft : kEdgeRight, FALSE);
+  ls.set_anchor(w, a.bottom ? kEdgeTop : kEdgeBottom, FALSE);
+  ls.set_anchor(w, a.right ? kEdgeRight : kEdgeLeft, TRUE);
+  ls.set_anchor(w, a.bottom ? kEdgeBottom : kEdgeTop, TRUE);
+  ls.set_margin(w, a.right ? kEdgeRight : kEdgeLeft, a.margin_x);
+  ls.set_margin(w, a.bottom ? kEdgeBottom : kEdgeTop, a.margin_y);
+  g_object_set_data(G_OBJECT(w), "laufey-layer-moved", GINT_TO_POINTER(1));
+  g_object_set_data(G_OBJECT(w), "laufey-layer-x", GINT_TO_POINTER(x));
+  g_object_set_data(G_OBJECT(w), "laufey-layer-y", GINT_TO_POINTER(y));
+  return true;
+}
+
+bool LayerShellPosition(void* gtk_window, int* x, int* y) {
+  if (!LayerShellIsLayerWindow(gtk_window))
+    return false;
+  GObject* w = G_OBJECT(gtk_window);
+  if (!g_object_get_data(w, "laufey-layer-moved"))
+    return false;
+  *x = GPOINTER_TO_INT(g_object_get_data(w, "laufey-layer-x"));
+  *y = GPOINTER_TO_INT(g_object_get_data(w, "laufey-layer-y"));
   return true;
 }
 

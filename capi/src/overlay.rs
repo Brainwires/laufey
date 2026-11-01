@@ -28,6 +28,7 @@ pub const LAUFEY_OVERLAY_CAP_TRANSPARENT: u32 = 1 << 7;
 pub const LAUFEY_OVERLAY_CAP_LAYER_SHELL: u32 = 1 << 8;
 pub const LAUFEY_OVERLAY_CAP_ACTIVATION_POLICY: u32 = 1 << 9;
 pub const LAUFEY_OVERLAY_CAP_NON_ACTIVATING: u32 = 1 << 10;
+pub const LAUFEY_OVERLAY_CAP_LAYER_EDGE_ANCHOR: u32 = 1 << 11;
 
 pub const LAUFEY_ACTIVATION_POLICY_REGULAR: i32 = 0;
 pub const LAUFEY_ACTIVATION_POLICY_ACCESSORY: i32 = 1;
@@ -106,6 +107,12 @@ impl OverlayCapabilities {
   /// An `overlay` window is a wlr-layer-shell surface.
   pub fn layer_shell(&self) -> bool {
     self.has(LAUFEY_OVERLAY_CAP_LAYER_SHELL)
+  }
+  /// [`Window::set_position`] on an `overlay` window takes screen
+  /// coordinates: it picks the output there and anchors to the nearest
+  /// edges, so the compositor keeps it clear of panels (API 52).
+  pub fn layer_edge_anchor(&self) -> bool {
+    self.has(LAUFEY_OVERLAY_CAP_LAYER_EDGE_ANCHOR)
   }
   /// [`set_activation_policy`] works (macOS).
   pub fn activation_policy(&self) -> bool {
@@ -589,6 +596,11 @@ mod tests {
     );
     assert!(caps.input_region() && caps.layer_shell());
     assert!(!caps.skip_taskbar());
+    assert!(!caps.layer_edge_anchor());
+    assert!(OverlayCapabilities::from_bits(
+      LAUFEY_OVERLAY_CAP_LAYER_EDGE_ANCHOR
+    )
+    .layer_edge_anchor());
   }
 
   #[test]

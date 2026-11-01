@@ -59,6 +59,7 @@ set(LAUFEY_COMMON_SRCS
   src/platform_features.cc
   src/title_bar.cc
   src/overlay.cc
+  src/quit_request.cc
 )
 
 if(WIN32)
@@ -90,6 +91,7 @@ if(APPLE)
     src/share_mac.mm
     src/user_activity_mac.mm
     src/overlay_mac.mm
+    src/quit_request_mac.mm
     src/speech_mac.mm
   )
 elseif(UNIX)
@@ -136,6 +138,7 @@ elseif(WIN32)
     src/login_item_win.cc
     src/title_bar_win.cc
     src/overlay_win.cc
+    src/quit_request_win.cc
     src/speech_win.cc
   )
 endif()
@@ -343,6 +346,10 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_overlay_test tests/overlay_test.cc)
   target_link_libraries(laufey_overlay_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_overlay_test COMMAND laufey_overlay_test)
+
+  add_executable(laufey_quit_request_test tests/quit_request_test.cc)
+  target_link_libraries(laufey_quit_request_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_quit_request_test COMMAND laufey_quit_request_test)
 
   # The share sheet's request parsing (API 49; no OS).
   add_executable(laufey_share_test tests/share_test.cc)

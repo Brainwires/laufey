@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 51;
+pub const LAUFEY_API_VERSION: u32 = 52;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -985,6 +985,15 @@ pub struct LaufeyBackendApi {
   // --- Background throttling (API >= 51)
   pub get_background_throttling:
     Option<unsafe extern "C" fn(*mut c_void, u32) -> i32>,
+  // --- Quit requests (API >= 52)
+  pub set_quit_requested_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(i32, *mut c_void)>,
+      *mut c_void,
+    ),
+  >,
+  pub answer_quit_request: Option<unsafe extern "C" fn(*mut c_void, bool)>,
 }
 
 /// `laufey_rect_t` (API 50).
@@ -1936,6 +1945,9 @@ pub fn create_api_base() -> LaufeyBackendApi {
     speech_voices: None,
     // API 51: Winit has no web page to throttle.
     get_background_throttling: None,
+    // API 52: Winit gets no quit request from the OS.
+    set_quit_requested_handler: None,
+    answer_quit_request: None,
   }
 }
 

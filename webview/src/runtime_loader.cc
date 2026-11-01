@@ -9,6 +9,7 @@
 #include "laufey_navigation_guard.h"
 #include "laufey_user_activity.h"
 #include "laufey_notifications.h"
+#include "laufey_quit_request.h"
 #include "laufey_platform_features.h"
 #include "laufey_title_bar.h"
 #if defined(__linux__) || defined(__APPLE__)
@@ -158,6 +159,19 @@ static void Backend_Quit(void* data) {
   if (backend) {
     backend->Quit();
   }
+}
+
+// Quit requests (API 52; laufey_quit_request.h).
+static void Backend_SetQuitRequestedHandler(void* data,
+                                            laufey_quit_requested_fn handler,
+                                            void* user_data) {
+  laufey_common::SetQuitRequestedHandler(handler, user_data);
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  if (backend && handler)
+    backend->WatchSessionEnd();
+}
+static void Backend_AnswerQuitRequest(void* /*data*/, bool allow) {
+  laufey_common::AnswerQuitRequest(allow);
 }
 
 // exit_app (API 46): quit() with an exit code. The host returns it once its
@@ -1552,6 +1566,8 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_platform_features_changed_handler =
       Backend_SetPlatformFeaturesChangedHandler;
   backend_api_.exit_app = Backend_ExitApp;
+  backend_api_.set_quit_requested_handler = Backend_SetQuitRequestedHandler;
+  backend_api_.answer_quit_request = Backend_AnswerQuitRequest;
   // The navigation guard (API 48): every web-engine backend checks its
   // windows' top-level navigations (laufey_navigation_guard.h).
   // User activities: Handoff and Spotlight (API 49; macOS).
