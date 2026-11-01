@@ -35,6 +35,8 @@ mod imp {
   use laufey::{QuitRequestKind, Window};
 
   use crate::{check, wait_for};
+  #[cfg(target_os = "macos")]
+  use crate::na;
 
   /// What the handler does: answer with this, or (-1) stay silent.
   static ANSWER: AtomicI32 = AtomicI32::new(0);
@@ -128,6 +130,48 @@ mod imp {
       "the next terminate: asks again",
       wait_for(|| ASKED.load(Ordering::SeqCst) == 2, 100, 50).await,
     );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A quit Apple Event saying the user is logging out, as loginwindow sends:
+    // a session end. Refused here, so it doesn't end the app.
+    let before = ASKED.load(Ordering::SeqCst);
+    let script = format!(
+      "ObjC.import('Foundation');
+       const target = $.NSAppleEventDescriptor
+         .descriptorWithProcessIdentifier({});
+       const ev = $.NSAppleEventDescriptor
+         .appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(
+           0x61657674, 0x71756974, target, -1, 0);
+       ev.setAttributeDescriptorForKeyword(
+         $.NSAppleEventDescriptor.descriptorWithEnumCode(0x6c6f676f),
+         0x7768793f);
+       ev.sendEventWithOptionsTimeoutError(0x1, 5, null);",
+      std::process::id()
+    );
+    let sent = tokio::task::spawn_blocking(move || {
+      std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    })
+    .await
+    .unwrap_or(false);
+    if wait_for(|| ASKED.load(Ordering::SeqCst) > before, 60, 50).await {
+      check(
+        "a logout's quit Apple Event asks as a session end",
+        SESSION_END.load(Ordering::SeqCst) == 1,
+      );
+      check(
+        "a refused logout keeps the app running",
+        !laufey::should_shutdown(),
+      );
+    } else {
+      na(&format!(
+        "a logout's quit Apple Event (never arrived; osascript ok: {sent})"
+      ));
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Silence: the deadline lets the quit go ahead. (`LAUFEY_E2E_QUIT_ALLOW=1`
