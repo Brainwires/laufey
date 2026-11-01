@@ -1133,7 +1133,16 @@ impl Window {
     options: WindowOptions,
   ) -> Self {
     let api = api();
-    let flags = options.to_flags();
+    // A layer surface takes its size when it maps, so one the app wants shown
+    // maps once it has its size.
+    let show_after_size =
+      options.overlay && !options.hidden && api.create_window_ex.is_some();
+    let flags = options.to_flags()
+      | if show_after_size {
+        crate::ffi::LAUFEY_WINDOW_FLAG_HIDDEN
+      } else {
+        0
+      };
     let id = if let (Some(f), true) = (api.create_window_ex, flags != 0) {
       unsafe { f(api.backend_data, flags) }
     } else if let Some(f) = api.create_window {
@@ -1144,6 +1153,9 @@ impl Window {
     let win = Window { id };
     if let Some(f) = api.set_window_size {
       unsafe { f(api.backend_data, id, width, height) };
+    }
+    if show_after_size {
+      win.show();
     }
     win
   }

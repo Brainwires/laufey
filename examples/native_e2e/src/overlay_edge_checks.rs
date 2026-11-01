@@ -152,6 +152,29 @@ pub async fn run() {
     tokio::time::sleep(Duration::from_millis(300)).await;
   }
 
+  // Created visible: on screen at the size asked for.
+  let visible = Window::new_with_options(
+    230,
+    230,
+    WindowOptions {
+      overlay: true,
+      ..Default::default()
+    },
+  )
+  .title(TITLE);
+  visible.navigate("laufey-e2e://app/titled/overlay-edge");
+  tokio::time::sleep(Duration::from_millis(1500)).await;
+  if let Some(lines) = kwin_windows() {
+    check(
+      "an overlay created visible is on screen at its size",
+      lines
+        .iter()
+        .any(|l| num(l, "w") == Some(230) && num(l, "h") == Some(230)),
+    );
+  }
+  visible.close();
+  tokio::time::sleep(Duration::from_millis(300)).await;
+
   let (w, h) = (260, 300);
   let win = Window::new_with_options(
     w,
