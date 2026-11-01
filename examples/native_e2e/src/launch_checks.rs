@@ -251,6 +251,10 @@ pub async fn run() {
   // Mostly to the right of the launch window, so that window coming back to
   // the front covers only part of it (a fully covered window is occluded,
   // and engines rightly stop drawing it).
+  // Small enough for both to fit a 1024 wide runner screen, or macOS hides the
+  // page of a window pushed off it.
+  launch.set_size(400, 300);
+  let _ = wait_for(|| launch.get_size().0 <= 404, 40, 50).await;
   let (lx, ly) = launch.get_position();
   let (lw, _) = launch.get_outer_size();
   second.set_position(lx + lw - 100, ly + 40);
