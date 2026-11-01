@@ -235,6 +235,36 @@ bool LayerShellAvailable() {
   return ok;
 }
 
+namespace {
+
+// A size set before the first map leaves GtkWindow's updates frozen until a
+// configure event says the compositor took it. gtk-layer-shell answers the
+// compositor's configure itself, so on KWin none comes when the size already
+// matches: no frame is ever drawn, the surface gets no buffer and stays off
+// screen. Say so once the map has run.
+gboolean ReportLayerSurfaceConfigured(gpointer data) {
+  GtkWidget* widget = GTK_WIDGET(data);
+  GdkWindow* window = gtk_widget_get_window(widget);
+  if (window && gtk_widget_get_mapped(widget)) {
+    GdkEvent* event = gdk_event_new(GDK_CONFIGURE);
+    event->configure.window = GDK_WINDOW(g_object_ref(window));
+    event->configure.send_event = TRUE;
+    event->configure.width = gdk_window_get_width(window);
+    event->configure.height = gdk_window_get_height(window);
+    gtk_main_do_event(event);
+    gdk_event_free(event);
+    gtk_widget_queue_draw(widget);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+void OnLayerSurfaceMapped(GtkWidget* widget, gpointer) {
+  g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, ReportLayerSurfaceConfigured,
+                  g_object_ref(widget), g_object_unref);
+}
+
+}  // namespace
+
 bool LayerShellInitOverlay(void* gtk_window, bool non_activating) {
   if (!gtk_window || !LayerShellAvailable())
     return false;
@@ -245,6 +275,7 @@ bool LayerShellInitOverlay(void* gtk_window, bool non_activating) {
   ls.init_for_window(w);
   if (!ls.is_layer_window(w))
     return false;
+  g_signal_connect_after(w, "map", G_CALLBACK(OnLayerSurfaceMapped), nullptr);
   ls.set_layer(w, kLayerOverlay);
   if (ls.set_namespace)
     ls.set_namespace(w, "laufey-overlay");
@@ -316,10 +347,17 @@ void PlaceLayerSurface(GtkWindow* w, int x, int y) {
   ls.set_margin(w, a.bottom ? kEdgeTop : kEdgeBottom, 0);
   ls.set_margin(w, a.right ? kEdgeRight : kEdgeLeft, a.margin_x);
   ls.set_margin(w, a.bottom ? kEdgeBottom : kEdgeTop, a.margin_y);
-  // A surface commits with its next frame: an idle page has none coming, so
-  // ask for one, or the new place would wait for the page to paint.
-  if (gtk_widget_get_mapped(GTK_WIDGET(w)))
+  // A surface commits with its next frame, and an idle page has none coming;
+  // a new one may also wait on a frame callback the compositor owes only once
+  // it repaints. The place is surface state: commit it now.
+  if (gtk_widget_get_mapped(GTK_WIDGET(w))) {
     gtk_widget_queue_draw(GTK_WIDGET(w));
+    GdkWindow* window = gtk_widget_get_window(GTK_WIDGET(w));
+    wl_surface* surface =
+        window ? gdk_wayland_window_get_wl_surface(window) : nullptr;
+    if (surface)
+      wl_surface_commit(surface);
+  }
   g_object_set_data(G_OBJECT(w), "laufey-layer-width", GINT_TO_POINTER(width));
   g_object_set_data(G_OBJECT(w), "laufey-layer-height",
                     GINT_TO_POINTER(height));

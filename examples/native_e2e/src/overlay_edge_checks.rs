@@ -117,6 +117,41 @@ pub async fn run() {
   );
   eprintln!("[e2e] INFO output {sx},{sy} {sw}x{sh}");
 
+  // These windows come and go; the app stays.
+  laufey::set_quit_on_last_window_closed(false);
+
+  // Hidden, then shown with no move: a frame comes anyway, or KWin never maps
+  // the surface. Both a page that loads before the show and one that doesn't.
+  for (size, wait) in [(210, 0), (220, 2000)] {
+    let first = Window::new_with_options(
+      size,
+      size,
+      WindowOptions {
+        overlay: true,
+        hidden: true,
+        ..Default::default()
+      },
+    )
+    .title(TITLE);
+    let _ = wait_for(|| first.get_size().0 != 0, 100, 50).await;
+    first.navigate("laufey-e2e://app/titled/overlay-edge");
+    tokio::time::sleep(Duration::from_millis(wait)).await;
+    first.show();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    if let Some(lines) = kwin_windows() {
+      check(
+        &format!(
+          "a hidden overlay shown after {wait} ms with no move is on screen"
+        ),
+        lines
+          .iter()
+          .any(|l| num(l, "w") == Some(size) && num(l, "h") == Some(size)),
+      );
+    }
+    first.close();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+  }
+
   let (w, h) = (260, 300);
   let win = Window::new_with_options(
     w,
