@@ -55,6 +55,11 @@ bool ShouldPassThrough(bool explicit_passthrough, const InputRegion& region,
 
 bool IsValidWindowLevel(int32_t level);
 
+// The LAUFEY_BACKGROUND_THROTTLING_* policy that create_window_ex `flags`
+// ask for (API 51): BACKGROUND_UNTHROTTLED wins over BACKGROUND_SUSPEND, and
+// neither is THROTTLE.
+int32_t BackgroundThrottlingFromFlags(uint32_t flags);
+
 // The policy named by the launch configuration's "activationPolicy"
 // ("regular", "accessory", "prohibited"), or -1 when it names none.
 int32_t ParseActivationPolicy(const std::string& value);

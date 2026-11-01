@@ -157,6 +157,29 @@ void TestParseMenu() {
   EXPECT(entries[0].destructive && !entries[1].destructive);
 }
 
+// A Windows tray menu's role items (W3: they were blank rows that did
+// nothing): quit is the app's quit, the portable roles report their name with
+// Linux's labels, macOS-only roles are left out, and a template label wins.
+void TestTrayRoles() {
+  using A = TrayRoleItem::Action;
+  TrayRoleItem quit = DescribeTrayRole("quit", "");
+  EXPECT(quit.action == A::kQuit);
+  EXPECT(quit.label == "Quit");
+  EXPECT(DescribeTrayRole("Quit", "").action == A::kQuit);
+  TrayRoleItem named = DescribeTrayRole("quit", "Quit Hangar");
+  EXPECT(named.action == A::kQuit && named.label == "Quit Hangar");
+  TrayRoleItem copy = DescribeTrayRole("copy", "");
+  EXPECT(copy.action == A::kReport && copy.label == "Copy");
+  TrayRoleItem all = DescribeTrayRole("selectAll", "");
+  EXPECT(all.action == A::kReport && all.label == "Select All");
+  EXPECT(DescribeTrayRole("about", "").label == "About");
+  for (const char* mac_only :
+       {"hide", "hideOthers", "unhide", "front", "zoom", "services", ""}) {
+    EXPECT(DescribeTrayRole(mac_only, "").action == A::kSkip);
+    EXPECT(DescribeTrayRole(mac_only, "Labelled").action == A::kSkip);
+  }
+}
+
 void TestKeyCodes() {
   Accelerator a;
   EXPECT(ParseAccelerator("Ctrl+K", false, &a, nullptr));
@@ -920,6 +943,7 @@ int main() {
     return true;
   });
   TestParseMenu();
+  TestTrayRoles();
   TestKeyCodes();
   TestContextMenuSession();
   TestValidate();

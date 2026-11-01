@@ -28,11 +28,13 @@
 //! it unchanged.
 
 mod auth_thread_checks;
+mod background_checks;
 mod body_echo;
 mod bridge_origin_checks;
 mod close_checks;
 mod download_checks;
 mod file_chooser_checks;
+mod focus_checks;
 mod io_checks;
 mod keychain_checks;
 mod launch_checks;
@@ -49,6 +51,7 @@ mod share_checks;
 mod stream_checks;
 mod system_checks;
 mod title_bar_checks;
+mod tray_role_checks;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -864,6 +867,12 @@ fn e2e_main() {
       lifetime_checks().await;
       return;
     }
+    // LAUFEY_E2E_ONLY=tray-roles: a Windows tray menu's role items; choosing
+    // its quit role ends the process, so it runs on its own.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("tray-roles") {
+      tray_role_checks::run().await;
+      return;
+    }
     // LAUFEY_E2E_ONLY=io: drag and drop, file dialogs and the rich clipboard
     // (API 39); runs on every backend, webview/linux included.
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("io") {
@@ -930,6 +939,16 @@ fn e2e_main() {
     // real window manager, where the rest of the battery assumes none).
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("window-api") {
       window_api_checks().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=background: only the background throttling checks
+    // (background_checks.rs), beside one window on screen as in the
+    // window-api battery; LAUFEY_E2E_BACKGROUND_REPEAT=N repeats them.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("background") {
+      let w = Window::new(520, 420).title("native-e2e-background");
+      w.show();
+      background_checks::run().await;
+      w.close();
       finish();
     }
     // LAUFEY_E2E_ONLY=sandbox: only the CEF sandbox checks
@@ -2259,6 +2278,10 @@ async fn window_api_checks() {
   }
   // Overlay windows, tray events, activation policy, speech (API 50).
   overlay_checks::run(&w, TITLE).await;
+  // Background throttling (API 51).
+  background_checks::run().await;
+  // Focus / blur follow the window's activation (WebView2).
+  focus_checks::run().await;
   // --hidpi: the rest of this battery then runs at that scale too.
   if let Some(scale) = std::env::var("LAUFEY_E2E_EXPECT_SCALE")
     .ok()

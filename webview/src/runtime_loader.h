@@ -500,6 +500,12 @@ class LaufeyBackend {
   virtual bool SetWindowLevel(uint32_t /*window_id*/, int32_t /*level*/) {
     return false;
   }
+  // Background throttling (API >= 51): the window's
+  // LAUFEY_BACKGROUND_THROTTLING_* policy from its creation flags. Default: a
+  // backend that doesn't choose (it throttles hidden pages its own way).
+  virtual int32_t GetBackgroundThrottling(uint32_t /*window_id*/) {
+    return -1;
+  }
   // Tray events (API >= 50).
   virtual void SetTrayEventHandler(uint32_t /*tray_id*/,
                                    laufey_tray_event_fn /*handler*/,

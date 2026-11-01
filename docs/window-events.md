@@ -16,6 +16,11 @@ let win = Window::new(800, 600)
   .load("index.html");
 ```
 
+`on_focused` follows the window's activation: `focused` is true when the window
+becomes the active one and false when another window or app takes over. The
+keyboard focus moving inside the window (on Windows, a click in the page gives
+it to WebView2's child window) is no blur.
+
 `on_close_requested` fires when the user clicks the window's own close control
 (title bar button, `Alt+F4`, a window manager's close action) — never for
 `Cmd+Q`, a "Quit" menu/tray item, or any other app-level termination.

@@ -68,6 +68,9 @@ struct MacWindowState {
   bool click_passthrough_forward = false;
 };
 
+static bool ApplyBackgroundThrottling(WKPreferences* preferences,
+                                      int32_t policy);
+
 class WKWebViewBackend : public LaufeyBackend {
  public:
   WKWebViewBackend();
@@ -110,6 +113,7 @@ class WKWebViewBackend : public LaufeyBackend {
   bool SetVisibleOnAllWorkspaces(uint32_t window_id, bool visible,
                                  bool full_screen) override;
   bool SetWindowLevel(uint32_t window_id, int32_t level) override;
+  int32_t GetBackgroundThrottling(uint32_t window_id) override;
   void SetTrayEventHandler(uint32_t tray_id, laufey_tray_event_fn handler,
                            void* user_data) override {
     laufey_common::SetTrayEventHandlerMac(tray_id, handler, user_data);
@@ -419,6 +423,10 @@ class WKWebViewBackend : public LaufeyBackend {
 
   std::map<uint32_t, MacWindowState> windows_;
   std::mutex windows_mutex_;
+  // Each window's background policy (API 51), from its creation flags,
+  // recorded when create_window_ex is called: the window itself is created
+  // on the main queue later. Guarded by windows_mutex_.
+  std::map<uint32_t, int32_t> background_throttling_;
 
   // Set once the first WKWebViewConfiguration has been built, i.e. the
   // registered-scheme set has been read; a later RegisterSchemeHandler warns.
@@ -1592,6 +1600,7 @@ MacWindowState* WKWebViewBackend::GetWindow(uint32_t window_id) {
 }
 
 void WKWebViewBackend::RemoveWindowState(uint32_t window_id) {
+  background_throttling_.erase(window_id);
   auto it = windows_.find(window_id);
   if (it == windows_.end())
     return;
@@ -1850,6 +1859,11 @@ void WKWebViewBackend::CreateWindow(uint32_t window_id, int width, int height) {
 
 void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                                       uint32_t flags) {
+  {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    background_throttling_[window_id] =
+        laufey_common::BackgroundThrottlingFromFlags(flags);
+  }
   dispatch_async(dispatch_get_main_queue(), ^{
     @autoreleasepool {
       InstallGlobalMonitors();
@@ -1953,6 +1967,17 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       // default on macOS lets a page open windows at will), so the
       // createWebView hook only sees requests a user action started.
       config.preferences.javaScriptCanOpenWindowsAutomatically = NO;
+      // A window that is not on screen (created hidden, hidden, minimized,
+      // covered) keeps running its page, throttled unless its flags say
+      // otherwise (API 51). WKWebView's own default on macOS 14+ is Suspend,
+      // which froze the page of a window created hidden about a second after
+      // it loaded: its timers, the runtime's events and its sockets stopped
+      // until the window showed. WebKit reads the policy when it sets the
+      // page up (a change on a live page has no effect), hence a creation
+      // flag.
+      ApplyBackgroundThrottling(
+          config.preferences,
+          laufey_common::BackgroundThrottlingFromFlags(flags));
       [config.userContentController addScriptMessageHandler:handler
                                                        name:@"laufey"];
 
@@ -2840,6 +2865,43 @@ bool WKWebViewBackend::SetWindowLevel(uint32_t window_id, int32_t level) {
     }
   });
   return true;
+}
+
+// WKPreferences for a LAUFEY_BACKGROUND_THROTTLING_* policy, before the web
+// view is created: inactiveSchedulingPolicy (macOS 14+; WebKit never suspends
+// a page before), and for NONE also WebKit's hidden-page DOM timer throttling
+// off, so the page's timers keep their rate while it is not on screen
+// (Electron's backgroundThrottling: false). That switch is WebKit SPI
+// (WKPreferencesPrivate), asked for by selector: where it is gone, NONE
+// still never freezes the page but its timers run at most once a second.
+static bool ApplyBackgroundThrottling(WKPreferences* preferences,
+                                      int32_t policy) {
+  if (@available(macOS 14.0, *)) {
+    WKInactiveSchedulingPolicy native = WKInactiveSchedulingPolicyThrottle;
+    if (policy == LAUFEY_BACKGROUND_THROTTLING_NONE)
+      native = WKInactiveSchedulingPolicyNone;
+    else if (policy == LAUFEY_BACKGROUND_THROTTLING_SUSPEND)
+      native = WKInactiveSchedulingPolicySuspend;
+    preferences.inactiveSchedulingPolicy = native;
+    if (policy == LAUFEY_BACKGROUND_THROTTLING_NONE) {
+      SEL timers =
+          NSSelectorFromString(@"_setHiddenPageDOMTimerThrottlingEnabled:");
+      if ([preferences respondsToSelector:timers])
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(preferences, timers, NO);
+    }
+    return true;
+  }
+  return false;
+}
+
+int32_t WKWebViewBackend::GetBackgroundThrottling(uint32_t window_id) {
+  if (@available(macOS 14.0, *)) {
+  } else {
+    return -1;
+  }
+  std::lock_guard<std::mutex> lock(windows_mutex_);
+  auto it = background_throttling_.find(window_id);
+  return it != background_throttling_.end() ? it->second : -1;
 }
 
 void WKWebViewBackend::SetClickPassthroughForward(uint32_t window_id,

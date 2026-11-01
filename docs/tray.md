@@ -21,6 +21,14 @@ let tray = TrayIcon::new()
 let bounds = tray.get_bounds(); // Option<(x, y, width, height)>
 ```
 
+A role item in a tray menu is drawn with its own label ("Quit", "Copy", …) when
+the template gives none. On macOS and Windows the quit role quits the app (the
+backend's quit, as `quit()`; `terminate:` on macOS), without a close request to
+any window and without reaching the menu's click handler. On Linux every role,
+quit included, is reported to the click handler by its name. On Windows the
+other portable roles are reported by name too, and the roles only macOS has
+(`hide`, `front`, `services`, …) are left out of the menu.
+
 When you provide both a light and a dark icon, the backend watches the system
 appearance and swaps between them live: it observes
 `AppleInterfaceThemeChangedNotification` on macOS, the `WM_SETTINGCHANGE`

@@ -63,12 +63,15 @@ pub use user_activity::*;
 mod overlay;
 pub use overlay::*;
 
+mod background;
+pub use background::*;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 50;
+pub const LAUFEY_API_VERSION: u32 = 51;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -78,6 +81,8 @@ pub const LAUFEY_WINDOW_FLAG_TRANSPARENT_TITLEBAR: u32 = 1 << 2;
 pub const LAUFEY_WINDOW_FLAG_HIDDEN: u32 = 1 << 3;
 pub const LAUFEY_WINDOW_FLAG_TRANSPARENT: u32 = 1 << 4;
 pub const LAUFEY_WINDOW_FLAG_OVERLAY: u32 = 1 << 5;
+pub const LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED: u32 = 1 << 6;
+pub const LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND: u32 = 1 << 7;
 
 pub const LAUFEY_WINDOW_HANDLE_UNKNOWN: i32 = 0;
 pub const LAUFEY_WINDOW_HANDLE_APPKIT: i32 = 1;
@@ -1061,6 +1066,9 @@ pub struct WindowOptions {
   /// overlay layer where the Wayland compositor has one (see
   /// [`OverlayCapabilities::layer_shell`]); an ordinary window elsewhere.
   pub overlay: bool,
+  /// What the page does while the window is not on screen (API 51; see
+  /// [`Window::background_throttling`]). Throttled by default.
+  pub background_throttling: BackgroundThrottling,
 }
 
 impl WindowOptions {
@@ -1084,6 +1092,7 @@ impl WindowOptions {
     if self.overlay {
       flags |= LAUFEY_WINDOW_FLAG_OVERLAY;
     }
+    flags |= self.background_throttling.to_flags();
     flags
   }
 }
