@@ -2362,7 +2362,7 @@ async fn window_api_checks() {
       min_width: 400,
       min_height: 300,
       max_width: 900,
-      max_height: 700,
+      max_height: 600,
     };
     w.set_size_constraints(range);
     check(
@@ -2371,7 +2371,7 @@ async fn window_api_checks() {
     );
     check(
       "get_min_size / get_max_size",
-      w.get_min_size() == (400, 300) && w.get_max_size() == (900, 700),
+      w.get_min_size() == (400, 300) && w.get_max_size() == (900, 600),
     );
     w.set_size(120, 90);
     let clamped_up = wait_for(
@@ -2393,7 +2393,7 @@ async fn window_api_checks() {
     let clamped_down = wait_for(
       || {
         let (sw, sh) = w.get_size();
-        (sw - 900).abs() <= 4 && (sh - 700).abs() <= 4
+        (sw - 900).abs() <= 4 && (sh - 600).abs() <= 4
       },
       60,
       50,
@@ -2404,7 +2404,7 @@ async fn window_api_checks() {
       &format!("set_size above the maximum is clamped to it (got {sw}x{sh})"),
       clamped_down,
     );
-    check_page_size("the maximum size is the page area", &w, (900, 700)).await;
+    check_page_size("the maximum size is the page area", &w, (900, 600)).await;
     // A window outside a new range is resized into it.
     w.set_size(800, 600);
     let _ = wait_for(|| (w.get_size().0 - 800).abs() <= 4, 40, 50).await;
