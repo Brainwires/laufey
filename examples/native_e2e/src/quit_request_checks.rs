@@ -106,7 +106,7 @@ mod imp {
     install();
 
     let quit_from_ui = || {
-      let _ = laufey::spawn_on_ui_thread(os::terminate_soon);
+      drop(laufey::spawn_on_ui_thread(os::terminate_soon));
     };
 
     // A refusal keeps it running, and a later terminate: asks again.
@@ -320,9 +320,9 @@ mod imp {
       "WM_ENDSESSION(FALSE) (another app refused) leaves the app up",
       !laufey::should_shutdown(),
     );
-    let _ = tokio::task::spawn_blocking(move || {
+    drop(tokio::task::spawn_blocking(move || {
       os::send(hwnd, os::WM_ENDSESSION, 1, 0);
-    });
+    }));
     check(
       "WM_ENDSESSION(TRUE) quits the app",
       wait_for(laufey::should_shutdown, 200, 50).await,
