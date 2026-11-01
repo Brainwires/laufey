@@ -264,7 +264,7 @@ jobs:
       fail-fast: false
       matrix:
         # Linux x64 only unless the run is full (see the top of the file).
-        os: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '["ubuntu-22.04","macos-14","windows-latest"]' || '["ubuntu-22.04"]') }}
+        os: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '["ubuntu-22.04","macos-15","windows-latest"]' || '["ubuntu-22.04"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -476,7 +476,7 @@ jobs:
         # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
         # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-14"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -558,7 +558,7 @@ jobs:
         # and the request-body round trip run there). arm64: WebView2 on
         # Windows on Arm, CEF on Linux arm64.
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"os":"macos-14","backend":"winit"},{"os":"macos-14","backend":"webview"},{"os":"macos-14","backend":"cef"},{"os":"windows-latest","backend":"winit"},{"os":"windows-latest","backend":"webview"},{"os":"windows-latest","backend":"cef"},{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true},{"os":"windows-11-arm","backend":"webview"},{"os":"ubuntu-22.04-arm","backend":"cef"}]' || '[{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"os":"macos-15","backend":"winit"},{"os":"macos-15","backend":"webview"},{"os":"macos-15","backend":"cef"},{"os":"windows-latest","backend":"winit"},{"os":"windows-latest","backend":"webview"},{"os":"windows-latest","backend":"cef"},{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true},{"os":"windows-11-arm","backend":"webview"},{"os":"ubuntu-22.04-arm","backend":"cef"}]' || '[{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -1098,7 +1098,7 @@ jobs:
         # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
         # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-14"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1348,7 +1348,7 @@ jobs:
         # CEF-on-Windows-ARM64 needs the windowsarm64 dist + arch-matched MSVC
         # setup and is tracked as a separate follow-up (issue #42).
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-14"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
