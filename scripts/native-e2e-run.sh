@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--tray-roles|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--tray-roles|--quit-request|--overlay-edge|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -33,6 +33,13 @@
 # --tray-roles (Windows) runs only the tray menu role checks
 # (tray_role_checks.rs): the rows Windows draws for role items, then a click
 # on the quit role, which ends the app (so it can't share the main run).
+# --quit-request (macOS, Windows) runs only the API 52 quit-request checks
+# (quit_request_checks.rs): a terminate: or WM_QUERYENDSESSION asks the app,
+# bounded; the last step ends the app.
+# --overlay-edge runs only the API 52 layer-surface placement checks
+# (overlay_edge_checks.rs) in the session it is started in (a Wayland
+# compositor with layer-shell; N/A elsewhere): the surface, as KWin reports it,
+# clears the panels at the bottom-right of the output.
 # --window-api runs only the API 38 window checks (state, constraints,
 # screens, title bar, backdrops). On Linux it runs a window manager (openbox)
 # under Xvfb, so maximize / minimize / fullscreen must really apply: the
@@ -134,6 +141,12 @@ if [ "$mode" = "--lifetime" ]; then
 fi
 if [ "$mode" = "--tray-roles" ]; then
   export LAUFEY_E2E_ONLY=tray-roles
+fi
+if [ "$mode" = "--quit-request" ]; then
+  export LAUFEY_E2E_ONLY=quit-request
+fi
+if [ "$mode" = "--overlay-edge" ]; then
+  export LAUFEY_E2E_ONLY=overlay-edge
 fi
 if [ "$mode" = "--bridge-origin" ]; then
   export LAUFEY_E2E_ONLY=bridge-origin

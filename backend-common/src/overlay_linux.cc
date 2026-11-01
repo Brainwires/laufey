@@ -65,7 +65,9 @@ void ApplyInputShape(void* gtk_window, void* gdk_window,
 // The enums of gtk-layer-shell.h, stable since 0.1.
 constexpr int kLayerOverlay = 3;      // GTK_LAYER_SHELL_LAYER_OVERLAY
 constexpr int kEdgeLeft = 0;          // GTK_LAYER_SHELL_EDGE_LEFT
+constexpr int kEdgeRight = 1;         // GTK_LAYER_SHELL_EDGE_RIGHT
 constexpr int kEdgeTop = 2;           // GTK_LAYER_SHELL_EDGE_TOP
+constexpr int kEdgeBottom = 3;        // GTK_LAYER_SHELL_EDGE_BOTTOM
 constexpr int kKeyboardNone = 0;      // GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
 constexpr int kKeyboardOnDemand = 2;  // ..._KEYBOARD_MODE_ON_DEMAND (0.6+)
 
@@ -81,6 +83,7 @@ struct LayerShellApi {
   void (*set_keyboard_interactivity)(GtkWindow*, gboolean) = nullptr;
   void (*set_exclusive_zone)(GtkWindow*, int) = nullptr;
   void (*set_namespace)(GtkWindow*, const char*) = nullptr;
+  void (*set_monitor)(GtkWindow*, GdkMonitor*) = nullptr;
 };
 
 const LayerShellApi& LayerShell() {
@@ -111,6 +114,8 @@ const LayerShellApi& LayerShell() {
         sym("gtk_layer_set_exclusive_zone"));
     a.set_namespace = reinterpret_cast<void (*)(GtkWindow*, const char*)>(
         sym("gtk_layer_set_namespace"));
+    a.set_monitor = reinterpret_cast<void (*)(GtkWindow*, GdkMonitor*)>(
+        sym("gtk_layer_set_monitor"));
     a.loaded = a.init_for_window && a.is_layer_window && a.set_layer &&
                a.set_anchor && a.set_margin && a.set_exclusive_zone;
     return a;
@@ -230,6 +235,36 @@ bool LayerShellAvailable() {
   return ok;
 }
 
+namespace {
+
+// A size set before the first map leaves GtkWindow's updates frozen until a
+// configure event says the compositor took it. gtk-layer-shell answers the
+// compositor's configure itself, so on KWin none comes when the size already
+// matches: no frame is ever drawn, the surface gets no buffer and stays off
+// screen. Say so once the map has run.
+gboolean ReportLayerSurfaceConfigured(gpointer data) {
+  GtkWidget* widget = GTK_WIDGET(data);
+  GdkWindow* window = gtk_widget_get_window(widget);
+  if (window && gtk_widget_get_mapped(widget)) {
+    GdkEvent* event = gdk_event_new(GDK_CONFIGURE);
+    event->configure.window = GDK_WINDOW(g_object_ref(window));
+    event->configure.send_event = TRUE;
+    event->configure.width = gdk_window_get_width(window);
+    event->configure.height = gdk_window_get_height(window);
+    gtk_main_do_event(event);
+    gdk_event_free(event);
+    gtk_widget_queue_draw(widget);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+void OnLayerSurfaceMapped(GtkWidget* widget, gpointer) {
+  g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, ReportLayerSurfaceConfigured,
+                  g_object_ref(widget), g_object_unref);
+}
+
+}  // namespace
+
 bool LayerShellInitOverlay(void* gtk_window, bool non_activating) {
   if (!gtk_window || !LayerShellAvailable())
     return false;
@@ -240,6 +275,7 @@ bool LayerShellInitOverlay(void* gtk_window, bool non_activating) {
   ls.init_for_window(w);
   if (!ls.is_layer_window(w))
     return false;
+  g_signal_connect_after(w, "map", G_CALLBACK(OnLayerSurfaceMapped), nullptr);
   ls.set_layer(w, kLayerOverlay);
   if (ls.set_namespace)
     ls.set_namespace(w, "laufey-overlay");
@@ -262,12 +298,112 @@ bool LayerShellIsLayerWindow(void* gtk_window) {
   return LayerShell().is_layer_window(GTK_WINDOW(gtk_window));
 }
 
+namespace {
+
+// The size the window is being given: gtk_window_get_size lags a resize by a
+// configure round trip, and the default size is what LinuxResizeWindow set.
+void LayerSurfaceSize(GtkWindow* w, int* width, int* height) {
+  gtk_window_get_default_size(w, width, height);
+  if (*width <= 0 || *height <= 0)
+    gtk_window_get_size(w, width, height);
+}
+
+void PlaceLayerSurface(GtkWindow* w, int x, int y) {
+  const LayerShellApi& ls = LayerShell();
+  int width = 0, height = 0;
+  LayerSurfaceSize(w, &width, &height);
+  GdkDisplay* display = gtk_widget_get_display(GTK_WIDGET(w));
+  GdkMonitor* monitor = display ? gdk_display_get_monitor_at_point(
+                                      display, x + width / 2, y + height / 2)
+                                : nullptr;
+  if (!monitor && display)
+    monitor = gdk_display_get_primary_monitor(display);
+  if (!monitor) {
+    // No output to measure from: the top-left of whichever the compositor
+    // picks, as before.
+    ls.set_anchor(w, kEdgeRight, FALSE);
+    ls.set_anchor(w, kEdgeBottom, FALSE);
+    ls.set_anchor(w, kEdgeLeft, TRUE);
+    ls.set_anchor(w, kEdgeTop, TRUE);
+    ls.set_margin(w, kEdgeLeft, x < 0 ? 0 : x);
+    ls.set_margin(w, kEdgeTop, y < 0 ? 0 : y);
+    return;
+  }
+  GdkRectangle g;
+  gdk_monitor_get_geometry(monitor, &g);
+  LayerEdgeAnchor a =
+      ComputeLayerEdgeAnchor(g.x, g.y, g.width, g.height, x, y, width, height);
+  // gtk-layer-shell remaps the surface to change its output: only when it did.
+  if (ls.set_monitor &&
+      g_object_get_data(G_OBJECT(w), "laufey-layer-monitor") != monitor) {
+    ls.set_monitor(w, monitor);
+    g_object_set_data(G_OBJECT(w), "laufey-layer-monitor", monitor);
+  }
+  ls.set_anchor(w, a.right ? kEdgeLeft : kEdgeRight, FALSE);
+  ls.set_anchor(w, a.bottom ? kEdgeTop : kEdgeBottom, FALSE);
+  ls.set_anchor(w, a.right ? kEdgeRight : kEdgeLeft, TRUE);
+  ls.set_anchor(w, a.bottom ? kEdgeBottom : kEdgeTop, TRUE);
+  ls.set_margin(w, a.right ? kEdgeLeft : kEdgeRight, 0);
+  ls.set_margin(w, a.bottom ? kEdgeTop : kEdgeBottom, 0);
+  ls.set_margin(w, a.right ? kEdgeRight : kEdgeLeft, a.margin_x);
+  ls.set_margin(w, a.bottom ? kEdgeBottom : kEdgeTop, a.margin_y);
+  // A surface commits with its next frame, and an idle page has none coming;
+  // a new one may also wait on a frame callback the compositor owes only once
+  // it repaints. The place is surface state: commit it now.
+  if (gtk_widget_get_mapped(GTK_WIDGET(w))) {
+    gtk_widget_queue_draw(GTK_WIDGET(w));
+    GdkWindow* window = gtk_widget_get_window(GTK_WIDGET(w));
+    wl_surface* surface =
+        window ? gdk_wayland_window_get_wl_surface(window) : nullptr;
+    if (surface)
+      wl_surface_commit(surface);
+  }
+  g_object_set_data(G_OBJECT(w), "laufey-layer-width", GINT_TO_POINTER(width));
+  g_object_set_data(G_OBJECT(w), "laufey-layer-height",
+                    GINT_TO_POINTER(height));
+}
+
+// A resize after the move: a margin from the far edge was computed for the old
+// size, so the top-left corner the app asked for would drift. Place it again.
+void OnLayerSurfaceAllocated(GtkWidget* widget, GdkRectangle*, gpointer) {
+  GtkWindow* w = GTK_WINDOW(widget);
+  GObject* o = G_OBJECT(w);
+  int width = 0, height = 0;
+  LayerSurfaceSize(w, &width, &height);
+  if (GPOINTER_TO_INT(g_object_get_data(o, "laufey-layer-width")) == width &&
+      GPOINTER_TO_INT(g_object_get_data(o, "laufey-layer-height")) == height) {
+    return;
+  }
+  PlaceLayerSurface(w, GPOINTER_TO_INT(g_object_get_data(o, "laufey-layer-x")),
+                    GPOINTER_TO_INT(g_object_get_data(o, "laufey-layer-y")));
+}
+
+}  // namespace
+
 bool LayerShellMove(void* gtk_window, int x, int y) {
   if (!LayerShellIsLayerWindow(gtk_window))
     return false;
   GtkWindow* w = GTK_WINDOW(gtk_window);
-  LayerShell().set_margin(w, kEdgeLeft, x < 0 ? 0 : x);
-  LayerShell().set_margin(w, kEdgeTop, y < 0 ? 0 : y);
+  GObject* o = G_OBJECT(w);
+  g_object_set_data(o, "laufey-layer-x", GINT_TO_POINTER(x));
+  g_object_set_data(o, "laufey-layer-y", GINT_TO_POINTER(y));
+  if (!g_object_get_data(o, "laufey-layer-moved")) {
+    g_object_set_data(o, "laufey-layer-moved", GINT_TO_POINTER(1));
+    g_signal_connect_after(w, "size-allocate",
+                           G_CALLBACK(OnLayerSurfaceAllocated), nullptr);
+  }
+  PlaceLayerSurface(w, x, y);
+  return true;
+}
+
+bool LayerShellPosition(void* gtk_window, int* x, int* y) {
+  if (!LayerShellIsLayerWindow(gtk_window))
+    return false;
+  GObject* w = G_OBJECT(gtk_window);
+  if (!g_object_get_data(w, "laufey-layer-moved"))
+    return false;
+  *x = GPOINTER_TO_INT(g_object_get_data(w, "laufey-layer-x"));
+  *y = GPOINTER_TO_INT(g_object_get_data(w, "laufey-layer-y"));
   return true;
 }
 

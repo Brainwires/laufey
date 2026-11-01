@@ -3,12 +3,15 @@
 #import <Cocoa/Cocoa.h>
 
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
 
+#include "laufey_quit_request.h"
 #include "laufey_user_activity.h"
 #include "include/cef_application_mac.h"
 #include "include/wrapper/cef_helpers.h"
@@ -38,6 +41,24 @@ void LaufeyOpenExternalURL(const std::string& url) {
       [[NSWorkspace sharedWorkspace] openURL:nsurl];
     }
   }
+}
+
+// A quit Apple Event's reply saying no, what AppKit's NSTerminateCancel sends.
+static void SetQuitEventRefused(NSAppleEventDescriptor* reply) {
+  [reply setParamDescriptor:[NSAppleEventDescriptor
+                                descriptorWithInt32:userCanceledErr]
+                 forKeyword:keyErrorNumber];
+}
+
+// Sends the reply of a suspended quit Apple Event. Null when there is none.
+static void ResumeQuitEvent(NSAppleEventManagerSuspensionID suspended,
+                            bool allow) {
+  if (!suspended)
+    return;
+  NSAppleEventManager* events = [NSAppleEventManager sharedAppleEventManager];
+  if (!allow)
+    SetQuitEventRefused([events replyAppleEventForSuspensionID:suspended]);
+  [events resumeWithSuspensionID:suspended];
 }
 
 @interface LaufeyApplication : NSApplication <CefAppProtocol> {
@@ -99,11 +120,47 @@ void LaufeyOpenExternalURL(const std::string& url) {
   // (so CanClose skips the close-requested negotiation) and skips the
   // beforeunload prompt. App-level quit (the "quit" menu role routes here)
   // is intentionally not interceptable by a window's on_close hook, only
-  // the window's own close control is.
+  // the window's own close control is. The runtime is asked instead (API 52,
+  // bounded); this override never returns to AppKit's termination, so there
+  // is no applicationShouldTerminate: for it to come through.
+  //
+  // A quit Apple Event (the Dock, a logout) is why we may be here, and its
+  // sender waits on the reply: returning from the event's handler with no error
+  // tells it the app is quitting, and a logout then waits for a process that
+  // doesn't end until it gives up and says the app failed to quit. So the event
+  // stays suspended until the answer, as AppKit's own handler keeps it through
+  // NSTerminateLater, and a refusal replies userCanceledErr.
+  NSAppleEventManager* events = [NSAppleEventManager sharedAppleEventManager];
+  NSAppleEventDescriptor* event = events.currentAppleEvent;
+  const bool is_quit_event = event && event.eventClass == kCoreEventClass &&
+                             event.eventID == kAEQuitApplication;
   LaufeyHandler* handler = LaufeyHandler::GetInstance();
-  if (handler && !handler->IsClosing()) {
-    handler->CloseAllBrowsers(true);
+  if (!handler || handler->IsClosing())
+    return;
+  auto suspended = std::make_shared<NSAppleEventManagerSuspensionID>(nullptr);
+  auto answer = std::make_shared<std::optional<bool>>();
+  bool pending = false;
+  if (laufey_common::AskQuitRequestMac(
+          [suspended, answer](bool allow) {
+            *answer = allow;
+            ResumeQuitEvent(*suspended, allow);
+            if (allow)
+              LaufeyRequestQuit();
+          },
+          &pending)) {
+    // A handler that spun the run loop may have its answer already.
+    if (is_quit_event && !answer->has_value())
+      *suspended = [events suspendCurrentAppleEvent];
+    else if (is_quit_event && !answer->value())
+      SetQuitEventRefused(events.currentReplyAppleEvent);
+    return;
   }
+  if (pending) {
+    if (is_quit_event)
+      SetQuitEventRefused(events.currentReplyAppleEvent);
+    return;
+  }
+  handler->CloseAllBrowsers(true);
 }
 @end
 
@@ -117,6 +174,22 @@ void LaufeyOpenExternalURL(const std::string& url) {
 - (NSApplicationTerminateReply)applicationShouldTerminate:
     (NSApplication*)sender {
   return NSTerminateNow;
+}
+
+// A quit Apple Event (the Dock, a logout) goes to terminate: from this handler,
+// so the event, and with it the reason a logout carries, is still the current
+// one there (AppKit's own handler reaches terminate: without it under CEF).
+- (void)applicationDidFinishLaunching:(NSNotification*)notification {
+  [[NSAppleEventManager sharedAppleEventManager]
+      setEventHandler:self
+          andSelector:@selector(handleQuitEvent:withReplyEvent:)
+        forEventClass:kCoreEventClass
+           andEventID:kAEQuitApplication];
+}
+
+- (void)handleQuitEvent:(NSAppleEventDescriptor*)event
+         withReplyEvent:(NSAppleEventDescriptor*)reply {
+  [NSApp terminate:nil];
 }
 
 - (BOOL)applicationSupportsSecureRestorableState:(NSApplication*)app {

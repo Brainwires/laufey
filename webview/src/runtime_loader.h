@@ -523,6 +523,8 @@ class LaufeyBackend {
 
   // Global operations
   virtual void Quit() = 0;
+  // Windows: starts receiving WM_QUERYENDSESSION (API 52). Any thread.
+  virtual void WatchSessionEnd() {}
   // Queues `task(data)` on the UI thread; false if it could not be queued
   // (it will never run).
   virtual bool PostUiTask(void (*task)(void*), void* data) = 0;

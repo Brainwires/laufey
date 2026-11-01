@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 51
+#define LAUFEY_API_VERSION 52
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -519,6 +519,12 @@ typedef void (*laufey_display_changed_fn)(void* user_data);
 // platform_features again for the new answer.
 typedef void (*laufey_platform_features_changed_fn)(void* user_data);
 
+// Why the OS asks the app to quit (set_quit_requested_handler, API >= 52).
+#define LAUFEY_QUIT_REQUEST_APP 0  // the user quit the app (Cmd+Q, the Dock)
+#define LAUFEY_QUIT_REQUEST_SESSION_END \
+  1  // the user's session is ending (logout, restart, shutdown)
+typedef void (*laufey_quit_requested_fn)(int32_t kind, void* user_data);
+
 // Callback fired when what title_bar_preferences reports changed (API 47):
 // the user moved the window buttons, picked another double-click action,
 // colour scheme or accent colour. Fires on a watcher thread (Linux,
@@ -576,6 +582,10 @@ typedef struct laufey_rect {
   (1u << 10)  // LAUFEY_WINDOW_FLAG_NO_ACTIVATE makes a non-activating panel
               // (Linux Wayland: only with LAUFEY_WINDOW_FLAG_OVERLAY, a
               // layer surface; reported only where layer-shell is)
+#define LAUFEY_OVERLAY_CAP_LAYER_EDGE_ANCHOR \
+  (1u << 11)  // set_window_position on a layer surface takes screen
+              // coordinates: it picks the output there and anchors to the
+              // nearest edges, so the compositor keeps it clear of panels
 
 // Activation policies (macOS NSApplicationActivationPolicy):
 //   REGULAR    a Dock icon and a menu bar (the default)
@@ -2626,6 +2636,29 @@ struct laufey_backend_api {
   // freezing it and take no flag (-1); before macOS 14 WebKit never
   // suspends a page (-1). Any thread.
   int32_t (*get_background_throttling)(void* backend_data, uint32_t window_id);
+
+  // --- Quit requests (API >= 52) -------------------------------------------
+  //
+  // The OS asks the app to quit: on macOS (WebView, CEF) terminate: from
+  // Cmd+Q, a quit role, the Dock or a quit Apple Event, and a logout, restart
+  // or shutdown; on Windows (WebView, CEF) WM_QUERYENDSESSION. `handler` fires
+  // on the UI thread. One handler per process; NULL clears it and lets a
+  // request in progress go ahead. With no handler the app quits as before.
+  //
+  // The OS is held until answer_quit_request, quit() or exit_app (which all
+  // count as allowing it), but never past a deadline, when the quit goes
+  // ahead: see docs/c-abi.md ("Quit requests"). Never fires on Linux or Winit;
+  // a Windows tray menu's quit role does not ask (it quits at once).
+  void (*set_quit_requested_handler)(void* backend_data,
+                                     laufey_quit_requested_fn handler,
+                                     void* user_data);
+  // false: the quit doesn't happen (macOS cancels a logout; Windows's session
+  // end stops). No effect when nothing is pending. Any thread.
+  void (*answer_quit_request)(void* backend_data, bool allow);
+  // Whether a request is still waiting for its answer: false once it was
+  // answered or its deadline passed, so a runtime's own notion of "held" can't
+  // outlive the OS's wait. Any thread.
+  bool (*quit_request_pending)(void* backend_data);
 };
 
 #ifdef __cplusplus

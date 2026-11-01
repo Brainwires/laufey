@@ -170,6 +170,19 @@ bool WinSetWindowLevel(void* hwnd, int32_t level);
 void WinMakeWindowTransparent(void* hwnd);
 #endif
 
+// Where a layer surface goes (API 52): the edges nearest its centre, and the
+// margins from them, for `x`, `y` in screen coordinates on the output whose
+// geometry is `output`. Margins never go below 0.
+struct LayerEdgeAnchor {
+  bool right = false;   // else left
+  bool bottom = false;  // else top
+  int margin_x = 0;
+  int margin_y = 0;
+};
+LayerEdgeAnchor ComputeLayerEdgeAnchor(int output_x, int output_y,
+                                       int output_width, int output_height,
+                                       int x, int y, int width, int height);
+
 #if defined(__linux__)
 // --- Linux (overlay_linux.cc). UI thread. ----------------------------------
 // Each call takes the top-level as a GtkWindow* (`gtk_window`, the WebView
@@ -212,9 +225,15 @@ bool LayerShellAvailable();
 bool LayerShellInitOverlay(void* gtk_window, bool non_activating);
 // Whether the GtkWindow* is a layer surface.
 bool LayerShellIsLayerWindow(void* gtk_window);
-// Moves a layer surface (its margins from the top-left anchor). False if
-// the window is not one.
+// Moves a layer surface to screen coordinates: onto the output there,
+// anchored to the nearest edges (ComputeLayerEdgeAnchor), so with exclusive
+// zone 0 the compositor measures the margins from the edge of the usable area
+// and the window stays clear of that edge's panels. False if the window is not
+// one.
 bool LayerShellMove(void* gtk_window, int x, int y);
+// The screen coordinates of the last LayerShellMove. False if the window is
+// not a layer surface or was never moved.
+bool LayerShellPosition(void* gtk_window, int* x, int* y);
 #endif
 
 }  // namespace laufey_common

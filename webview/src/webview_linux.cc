@@ -2236,7 +2236,7 @@ void WebKitGTKBackend::GetWindowPosition(uint32_t window_id, int* x, int* y) {
   gtk_invoke_sync([&] {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
-    if (state) {
+    if (state && !laufey_common::LayerShellPosition(state->window, &wx, &wy)) {
       gtk_window_get_position(GTK_WINDOW(state->window), &wx, &wy);
     }
   });
@@ -2738,8 +2738,9 @@ uint32_t WebKitGTKBackend::OverlayCapabilities() {
       // no-ops (KWin and Mutter focus a NO_ACTIVATE toplevel when it maps):
       // only a layer surface (LAUFEY_WINDOW_FLAG_OVERLAY, keyboard none) is
       // non-activating, so the capability goes with layer-shell.
-      caps |=
-          LAUFEY_OVERLAY_CAP_LAYER_SHELL | LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
+      caps |= LAUFEY_OVERLAY_CAP_LAYER_SHELL |
+              LAUFEY_OVERLAY_CAP_LAYER_EDGE_ANCHOR |
+              LAUFEY_OVERLAY_CAP_NON_ACTIVATING;
     }
   });
   return caps;

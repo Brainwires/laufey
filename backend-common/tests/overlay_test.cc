@@ -34,6 +34,43 @@ static void Record(void* user_data, uint32_t id, int32_t status,
       {id, status, message ? message : "(null)"});
 }
 
+// The layer-surface placement (API 52) on a 1920x1080 output.
+static void TestLayerEdgeAnchor() {
+  // The bottom-right corner, 16 px in: right and bottom, margins of 16, which
+  // the compositor measures from the edge of the usable area, clear of a panel.
+  LayerEdgeAnchor a =
+      ComputeLayerEdgeAnchor(0, 0, 1920, 1080, 1644, 764, 260, 300);
+  EXPECT(a.right && a.bottom);
+  EXPECT(a.margin_x == 16 && a.margin_y == 16);
+
+  // The top-left quadrant: as before, left and top.
+  a = ComputeLayerEdgeAnchor(0, 0, 1920, 1080, 40, 30, 260, 300);
+  EXPECT(!a.right && !a.bottom);
+  EXPECT(a.margin_x == 40 && a.margin_y == 30);
+
+  // Each axis on its own: top right, bottom left.
+  a = ComputeLayerEdgeAnchor(0, 0, 1920, 1080, 1600, 10, 260, 300);
+  EXPECT(a.right && !a.bottom && a.margin_x == 60 && a.margin_y == 10);
+  a = ComputeLayerEdgeAnchor(0, 0, 1920, 1080, 10, 700, 260, 300);
+  EXPECT(!a.right && a.bottom && a.margin_x == 10 && a.margin_y == 80);
+
+  // Centred exactly: the far edge.
+  a = ComputeLayerEdgeAnchor(0, 0, 1920, 1080, 830, 390, 260, 300);
+  EXPECT(a.right && a.bottom && a.margin_x == 830 && a.margin_y == 390);
+
+  // A second output: margins are that output's own, coordinates are screen's.
+  a = ComputeLayerEdgeAnchor(1920, 200, 1280, 720, 2900, 600, 260, 300);
+  EXPECT(a.right && a.bottom && a.margin_x == 40 && a.margin_y == 20);
+  a = ComputeLayerEdgeAnchor(1920, 200, 1280, 720, 1950, 230, 260, 300);
+  EXPECT(!a.right && !a.bottom && a.margin_x == 30 && a.margin_y == 30);
+
+  // Off the output: margins never go negative.
+  a = ComputeLayerEdgeAnchor(0, 0, 1920, 1080, -50, -50, 260, 300);
+  EXPECT(!a.right && !a.bottom && a.margin_x == 0 && a.margin_y == 0);
+  a = ComputeLayerEdgeAnchor(0, 0, 1920, 1080, 1800, 900, 260, 300);
+  EXPECT(a.right && a.bottom && a.margin_x == 0 && a.margin_y == 0);
+}
+
 static void TestInputRegion() {
   // NULL rects: no region, every point takes input.
   InputRegion none = MakeInputRegion(nullptr, 0);
@@ -184,6 +221,7 @@ static void TestSpeechTracker() {
 
 int main() {
   TestInputRegion();
+  TestLayerEdgeAnchor();
   TestLevelsAndPolicy();
   TestSpeechRequest();
   TestSpeechTracker();

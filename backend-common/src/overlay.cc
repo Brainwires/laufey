@@ -257,4 +257,20 @@ char* SpeechVoicesJson() {
   return out;
 }
 
+LayerEdgeAnchor ComputeLayerEdgeAnchor(int output_x, int output_y,
+                                       int output_width, int output_height,
+                                       int x, int y, int width, int height) {
+  LayerEdgeAnchor a;
+  // Twice the coordinates, so an odd size's centre stays exact.
+  a.right = 2 * (x - output_x) + width >= output_width;
+  a.bottom = 2 * (y - output_y) + height >= output_height;
+  a.margin_x = a.right ? output_x + output_width - (x + width) : x - output_x;
+  a.margin_y = a.bottom ? output_y + output_height - (y + height) : y - output_y;
+  if (a.margin_x < 0)
+    a.margin_x = 0;
+  if (a.margin_y < 0)
+    a.margin_y = 0;
+  return a;
+}
+
 }  // namespace laufey_common

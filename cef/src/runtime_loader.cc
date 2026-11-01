@@ -2,6 +2,7 @@
 
 #include "runtime_loader.h"
 
+#include "laufey_quit_request.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
@@ -266,6 +267,17 @@ static void Backend_ExecuteJs(void* data, uint32_t window_id,
 // live browsers would leave CEF to shut down under them; and on macOS the
 // loop is [NSApp run], which CefQuitMessageLoop does not stop.
 static void Backend_Quit(void* data) {
+#if defined(__APPLE__) || defined(_WIN32)
+  // quit() settles a request the OS is waiting on: it may go ahead. Before
+  // MarkQuitting, and on macOS that answer's reply is what comes back here.
+  bool settled = laufey_common::AnswerQuitRequest(true);
+#if defined(__APPLE__)
+  if (settled)
+    return;
+#else
+  (void)settled;
+#endif
+#endif
   laufey_common::MarkQuitting();
 #if defined(__linux__)
   // A GTK modal (an alert, a script dialog) is a nested loop on TID_UI that
@@ -288,6 +300,28 @@ static void Backend_Quit(void* data) {
                   browser->GetHost()->CloseBrowser(true);
                 }
               }));
+}
+
+// Quit requests (API 52; laufey_quit_request.h).
+static void Backend_SetQuitRequestedHandler(void* /*data*/,
+                                            laufey_quit_requested_fn handler,
+                                            void* user_data) {
+  laufey_common::SetQuitRequestedHandler(handler, user_data);
+#if defined(_WIN32)
+  if (handler) {
+    CefPostTask(TID_UI, base::BindOnce([]() {
+                  laufey_common::InstallSessionEndWatcherWin(LaufeyRequestQuit);
+                }));
+  }
+#endif
+}
+
+static void Backend_AnswerQuitRequest(void* /*data*/, bool allow) {
+  laufey_common::AnswerQuitRequest(allow);
+}
+
+static bool Backend_QuitRequestPending(void* /*data*/) {
+  return laufey_common::QuitRequestPending();
 }
 
 // exit_app (API 46): quit() with an exit code. The host returns the code once
@@ -3413,6 +3447,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_platform_features_changed_handler =
       Backend_SetPlatformFeaturesChangedHandler;
   backend_api_.exit_app = Backend_ExitApp;
+  backend_api_.set_quit_requested_handler = Backend_SetQuitRequestedHandler;
+  backend_api_.answer_quit_request = Backend_AnswerQuitRequest;
+  backend_api_.quit_request_pending = Backend_QuitRequestPending;
   backend_api_.title_bar_preferences = Backend_TitleBarPreferences;
   backend_api_.set_title_bar_preferences_changed_handler =
       Backend_SetTitleBarPreferencesChangedHandler;

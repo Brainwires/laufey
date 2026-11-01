@@ -9,6 +9,7 @@
 
 #import <objc/message.h>
 #include "laufey_backend_common.h"
+#include "laufey_quit_request.h"
 #include "laufey_io.h"
 #include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
@@ -2546,6 +2547,10 @@ void WKWebViewBackend::FlushWebStorage() {
 
 void WKWebViewBackend::Quit() {
   laufey_common::MarkQuitting();
+  // AppKit is waiting on applicationShouldTerminate:'s answer: going ahead
+  // ends the app through applicationWillTerminate:.
+  if (laufey_common::AnswerQuitRequest(true))
+    return;
   dispatch_async(dispatch_get_main_queue(), ^{
     [NSApp stop:nil];
     NSEvent* event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined

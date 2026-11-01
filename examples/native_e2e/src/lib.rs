@@ -44,7 +44,9 @@ mod navigation_checks;
 mod network_quiet_checks;
 mod os_view;
 mod overlay_checks;
+mod overlay_edge_checks;
 mod platform_checks;
+mod quit_request_checks;
 mod sandbox_checks;
 mod secret_checks;
 mod share_checks;
@@ -866,6 +868,18 @@ fn e2e_main() {
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("lifetime") {
       lifetime_checks().await;
       return;
+    }
+    // LAUFEY_E2E_ONLY=quit-request: the OS asks the app to quit (API 52); its
+    // last step ends the process, so it runs on its own.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("quit-request") {
+      quit_request_checks::run().await;
+      return;
+    }
+    // LAUFEY_E2E_ONLY=overlay-edge: where a layer surface lands, measured by
+    // the compositor (API 52); needs a real Wayland session.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("overlay-edge") {
+      overlay_edge_checks::run().await;
+      finish();
     }
     // LAUFEY_E2E_ONLY=tray-roles: a Windows tray menu's role items; choosing
     // its quit role ends the process, so it runs on its own.
