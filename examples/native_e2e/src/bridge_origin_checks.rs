@@ -111,16 +111,18 @@ pub async fn run() {
 
   // The other origin: no namespace, and a call posted to the engine's own
   // message channel (the page knows the bridge's message format) is refused.
-  // The window starts on an empty document: ask once its page has committed.
+  // Ask once its page has committed. Until then the window may not exist yet
+  // (the answer is empty) or be on its empty document (the origin is null).
+  let deadline = std::time::Instant::now() + Duration::from_secs(40);
   let mut ns = None;
-  for _ in 0..50 {
+  while std::time::Instant::now() < deadline {
     ns = eval(
       &no_win,
       "String(location.origin) + ' ' + typeof window.Laufey",
     )
     .await
     .and_then(|v| v.as_string().map(str::to_string));
-    if ns.as_deref().is_none_or(|n| n.starts_with(NO_ORIGIN)) {
+    if ns.as_deref().is_some_and(|n| n.starts_with(NO_ORIGIN)) {
       break;
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
