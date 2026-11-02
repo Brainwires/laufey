@@ -10,6 +10,8 @@ jobs:
   loop:
     runs-on: macos-15
     timeout-minutes: 75
+    env:
+      LAUFEY_DIAG: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -38,6 +40,7 @@ jobs:
               echo "iter $i PASS $(grep -c 'evaljs' run.log) evals"; grep '^DIAG-T' run.log | tail -1 || true
             else
               fails=$((fails+1))
+              grep -q 'FAIL bridge-origin' run.log || { cut -c1-300 run.log | tail -20; echo "harness error"; exit 1; }
               echo "::group::iter $i FAIL"; cut -c1-400 run.log; echo "::endgroup::"
               if [ "$fails" -le 3 ]; then
                 /usr/bin/log show --last 3m --info --debug --style compact --predicate 'subsystem == "com.apple.WebKit" OR process CONTAINS "laufey_webview"' 2>/dev/null | cut -c1-300 > "webkit-$i.log" || true
