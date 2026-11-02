@@ -42,6 +42,18 @@ when launching the host — `--laufey-custom-schemes=myapp` or
 `LAUFEY_CUSTOM_SCHEMES=myapp` (`cef/src/custom_schemes.h`). See
 [Custom URL schemes](custom-schemes.md).
 
+Windows created hidden: a window created with `hidden: true`
+(`LAUFEY_WINDOW_FLAG_HIDDEN`) stays off screen until the app calls `show()` (or
+`focus()`), on every OS, as on the WebView backends. Its browser and page load
+while it is hidden, and the page load is reported (`on_page_load`), so an app
+can reveal the window once its page has loaded and its empty first frame is
+never seen. The first `show()` of such a window is the reveal a visible creation
+does: on macOS it also brings the window in front of the active app's
+([The first window at launch](window-management.md#the-first-window-at-launch)),
+unless it is a non-activating panel. CEF used to show every window at creation
+on macOS and Windows whatever its flags (Linux honoured the flag first). Winit
+windows still show at creation.
+
 ### No network requests of its own
 
 The CEF host sends no request the app didn't ask for: every request in a laufey

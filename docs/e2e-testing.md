@@ -1148,8 +1148,10 @@ an editor or a terminal is in front when an app is started from it. See
   was lost with that document when the app's page committed. The checks now wait
   for the app's own document.)
 - **A window created hidden** stays hidden through both reveals (the WebView
-  backends and CEF on Linux; CEF elsewhere and Winit have no hidden-on-create
-  and report N/A).
+  backends and CEF; Winit has no hidden-on-create and reports N/A). The launch
+  window, created hidden too, is not visible after its page load is reported and
+  before its `show()`, and is after it (CEF on macOS and Windows showed both at
+  creation).
 
 Winit has no page and reports N/A for the page checks.
 

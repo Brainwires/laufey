@@ -68,6 +68,39 @@ std::queue<uint32_t> g_pending_laufey_ids;
 
 namespace {
 LaufeyHandler* g_handler = nullptr;
+
+// Windows created hidden and not shown since, each mapped to whether it is a
+// non-activating panel. UI thread only.
+std::map<uint32_t, bool> g_unrevealed_hidden_windows;
+
+// A window's first show: Chromium's show, then on macOS the launch reveal.
+void RevealCefWindow(CefRefPtr<CefWindow> window, bool no_activate) {
+  window->Show();
+#if defined(__APPLE__)
+  // Chromium's show activates the app, which macOS 14+ may decline for an
+  // app started from a terminal or a background agent; the first window
+  // must still come in front of the active app's, or Chromium reads it as
+  // occluded and the page as hidden (no requestAnimationFrame).
+  CefWindowHandle handle = window->GetWindowHandle();
+  if (!no_activate && handle) {
+    if (void* nswindow = NSWindowForCefHandle(handle))
+      laufey_common::MacRevealWindowAtLaunch(nswindow);
+  }
+#else
+  (void)no_activate;
+#endif
+}
+}  // namespace
+
+void LaufeyShowCefWindow(CefRefPtr<CefWindow> window, uint32_t laufey_id) {
+  auto it = g_unrevealed_hidden_windows.find(laufey_id);
+  if (it == g_unrevealed_hidden_windows.end()) {
+    window->Show();
+    return;
+  }
+  bool no_activate = it->second;
+  g_unrevealed_hidden_windows.erase(it);
+  RevealCefWindow(window, no_activate);
 }
 
 // LaufeyWindowDelegate implementation
@@ -112,26 +145,17 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
 #endif
   }
 
-#if defined(__linux__)
-  // A window created hidden stays hidden until show(). The capi creates every
-  // Linux window hidden, sizes it, then shows it: a Wayland window's first
-  // size is the one it maps at, and a size set after it maps races the
-  // compositor's first configure.
-  if ((flags_ & LAUFEY_WINDOW_FLAG_HIDDEN) == 0)
-    window->Show();
-#else
-  window->Show();
-#endif
-#if defined(__APPLE__)
-  // Chromium's show activates the app, which macOS 14+ may decline for an
-  // app started from a terminal or a background agent; the first window
-  // must still come in front of the active app's, or Chromium reads it as
-  // occluded and the page as hidden (no requestAnimationFrame).
-  if (!no_activate && handle) {
-    if (void* nswindow = NSWindowForCefHandle(handle))
-      laufey_common::MacRevealWindowAtLaunch(nswindow);
+  // A window created hidden stays hidden until show() (LaufeyShowCefWindow),
+  // as on the WebView backends: the embedder reveals it, typically once its
+  // page has loaded, so its empty first frame is never seen. On Linux the
+  // capi also creates a window the app wants shown hidden, sizes it, then
+  // shows it: a Wayland window's first size is the one it maps at, and a size
+  // set after it maps races the compositor's first configure.
+  if ((flags_ & LAUFEY_WINDOW_FLAG_HIDDEN) == 0) {
+    RevealCefWindow(window, no_activate);
+  } else if (laufey_id_ > 0) {
+    g_unrevealed_hidden_windows[laufey_id_] = no_activate;
   }
-#endif
   InstallNativeMouseMonitor();
   if (laufey_id_ > 0)
     CefScheduleWindowStateRecheck(laufey_id_);
@@ -249,6 +273,7 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
 #endif
   }
   if (laufey_id_ > 0) {
+    g_unrevealed_hidden_windows.erase(laufey_id_);
     RuntimeLoader::GetInstance()->UnregisterBrowser(laufey_id_);
     laufey_common::ForgetWindow(laufey_id_);
 #if defined(_WIN32) || defined(__linux__)

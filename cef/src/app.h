@@ -113,6 +113,13 @@ void LaufeyOpenExternalURL(const std::string& url);
 // Both happen on the UI thread so no synchronization needed.
 extern std::queue<uint32_t> g_pending_laufey_ids;
 
+// Shows a laufey window (show(), focus()). A window created hidden
+// (LAUFEY_WINDOW_FLAG_HIDDEN) is not shown at creation, so its first show is
+// the reveal a visible creation would have done: on macOS it also brings the
+// window in front of the active app, unless it is a non-activating panel.
+// UI thread only.
+void LaufeyShowCefWindow(CefRefPtr<CefWindow> window, uint32_t laufey_id);
+
 class LaufeyWindowDelegate : public CefWindowDelegate {
  public:
   LaufeyWindowDelegate(CefRefPtr<CefBrowserView> browser_view,

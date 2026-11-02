@@ -983,17 +983,17 @@ static void Backend_Show(void* data, uint32_t window_id) {
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
     CefPostTask(TID_UI, base::BindOnce(
-                            [](CefRefPtr<CefBrowser> b) {
+                            [](CefRefPtr<CefBrowser> b, uint32_t wid) {
                               auto browser_view =
                                   CefBrowserView::GetForBrowser(b);
                               if (browser_view) {
                                 auto window = browser_view->GetWindow();
                                 if (window) {
-                                  window->Show();
+                                  LaufeyShowCefWindow(window, wid);
                                 }
                               }
                             },
-                            browser));
+                            browser, window_id));
   }
 }
 
@@ -1021,18 +1021,18 @@ static void Backend_Focus(void* data, uint32_t window_id) {
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
     CefPostTask(TID_UI, base::BindOnce(
-                            [](CefRefPtr<CefBrowser> b) {
+                            [](CefRefPtr<CefBrowser> b, uint32_t wid) {
                               auto browser_view =
                                   CefBrowserView::GetForBrowser(b);
                               if (browser_view) {
                                 auto window = browser_view->GetWindow();
                                 if (window) {
-                                  window->Show();
+                                  LaufeyShowCefWindow(window, wid);
                                   window->Activate();
                                 }
                               }
                             },
-                            browser));
+                            browser, window_id));
   }
 }
 
