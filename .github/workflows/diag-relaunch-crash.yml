@@ -39,7 +39,10 @@ jobs:
         shell: bash
         env:
           LAUFEY_E2E_STRESS_SCHEME: lsstress
+          LAUFEY_DIAG_FILE: ${{ runner.temp }}/pump-diag.txt
+          DIAG_MINUTES: 25
         run: |
+          # Round 3: the pump's activity after the loop ends (main_mac.mm DIAG).
           # Round 2: every core kept busy at the default QoS (the failing run
           # took 654 s for 200 launches, against ~450 s usually) and two
           # independent chains at once.
@@ -59,6 +62,12 @@ jobs:
           chain 2 & p2=$!
           wait "$p1" "$p2" || true
           kill $loaders || true
+          echo "== pump after the loop ended (launches with a line / lines by kind):"
+          awk '{print $1}' "$LAUFEY_DIAG_FILE" | sort -u | wc -l
+          awk '{print $2, $3, $4}' "$LAUFEY_DIAG_FILE" | sort | uniq -c
+          echo "== launches with a tick at phase >= 5 (in or after CefShutdown):"
+          awk '$3 == "tick" && substr($2, 7) + 0 >= 5 {print $1}' "$LAUFEY_DIAG_FILE" | sort -u | wc -l
+          cp "$LAUFEY_DIAG_FILE" pump-diag.txt || true
           echo "== totals:"
           cat round-*.log | grep -E '^\[stress-e2e\] [0-9]+ launches' |
             awk '{n+=$2; lost+=$7; other+=$14; hung+=$17} END {print "launches", n, "lost", lost, "other", other, "hung", hung}'
@@ -96,3 +105,4 @@ jobs:
           path: |
             crash/
             round-*.log
+            pump-diag.txt
