@@ -17,7 +17,9 @@
 # LAUFEY_E2E_STRESS_ARGS adds switches to every launch (e.g.
 # --enable-logging=stderr with LAUFEY_CEF_LOG_SEVERITY=info). On a failure
 # the launch's log and, on CEF, the localStorage database's LevelDB info logs
-# are printed.
+# are printed, and on macOS a launch that died by a signal also gets the crash
+# report ReportCrash wrote for it (scripts/print-crash-report.py; the report
+# itself stays in ~/Library/Logs/DiagnosticReports for the job to upload).
 #
 # Build first: `cargo build --release -p storage_e2e_runtime` and the backend.
 set -euo pipefail
@@ -92,6 +94,23 @@ show_ldb() { # <label>
   done
 }
 
+# macOS: the crash report of the process <pid>, which died by a signal.
+# ReportCrash writes it a few seconds after the process has gone.
+show_crash_report() { # <pid>
+  local pid="$1" f
+  for _ in $(seq 1 15); do
+    f="$(grep -l -E "\"pid\" ?: ?$pid[,}]" ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null |
+      head -1 || true)"
+    [ -z "$f" ] || break
+    sleep 2
+  done
+  if [ -z "$f" ]; then
+    echo "    no crash report for pid $pid"
+    return 0
+  fi
+  python3 "$(dirname "$0")/print-crash-report.py" "$f" | sed 's/^/    /' | head -150
+}
+
 lost=0
 other=0
 hangs=0
@@ -162,6 +181,9 @@ for ((i = 1; i <= launches; i++)); do
     echo "[stress-e2e] FAIL #$i: the launch (exit $rc, report '${report}')"
   fi
   sed 's/^/    | /' "$log" | grep -v '^    | \[e2e\] PASS' | tail -60
+  if [ "$platform" = macos ] && [ "$rc" -gt 128 ]; then
+    show_crash_report "$pid"
+  fi
   if [ -d "$scratch/ldb-before" ]; then
     d_saved="$(ldb_dir)"
     echo "    the database before this launch:"
