@@ -482,6 +482,23 @@ failed. Nothing an app relies on runs in that code: the profile is on disk after
 `scripts/exit-e2e-run.sh` checks each path (see
 [e2e-testing.md](e2e-testing.md)).
 
+On macOS a quit could also crash inside `CefShutdown` (`SIGSEGV`, about 1 quit
+in 5,600 on macOS x64, none seen on arm64), after the profile was written.
+Chromium deletes a closed window's `Browser` in a task it posts when the
+window's close completes; when the loop had stopped before that task ran, the
+`Browser` was deleted inside `CefShutdown` instead (`BrowserManagerService`'s
+shutdown, under `ProfileManager`'s teardown), and there Chromium 156 reads freed
+memory in `~TabDragServiceImpl`. The wait for the renderers above pumps CEF only
+while a renderer still runs, so it did not always run that task. Before
+`CefShutdown` the macOS and Windows hosts now pump CEF until the app's windows
+have been destroyed (at most 2 s) and a few times more (Windows runs the same
+Chromium code, though the crash was only seen on macOS). The macOS host also
+stops its message-pump timer and drops the pump ticks it queues on the main
+queue when the loop ends, and once `CefShutdown` has returned and its helpers
+have ended it ends the process with `_exit`, as Windows does, instead of
+returning from `main` through static destructors, `atexit` callbacks and the CEF
+framework's unload.
+
 CEF's `localStorage` lives in a LevelDB database that Chromium's storage service
 writes, and `CefShutdown` kills that service without waiting for a write in
 flight (Chromium waits only for the network service, which keeps cookies). Two

@@ -151,15 +151,23 @@ bool ExitRequested();
 // The code exit_app asked for, else 0.
 int RequestedExitCode();
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
 // Ends this process with `code` after flushing the host's stdout and stderr,
-// through TerminateProcess: no DLL_PROCESS_DETACH, static destructor or
-// atexit callback runs. ExitProcess runs them all after it has ended the
-// other threads, and one of them can wait for good on a COM call into an
-// apartment whose thread is already gone (Windows.Media.dll's exit-time
-// cleanup in a CEF browser process; see docs/backends.md, "How a Windows app
-// ends"). Call it only once everything that must persist has been written:
-// after CefShutdown, or after the WebView2 controllers are released.
+// without running a static destructor or atexit callback.
+//
+// Windows: through TerminateProcess, so no DLL_PROCESS_DETACH runs either.
+// ExitProcess runs them all after it has ended the other threads, and one of
+// them can wait for good on a COM call into an apartment whose thread is
+// already gone (Windows.Media.dll's exit-time cleanup in a CEF browser
+// process; see docs/backends.md, "How an app ends").
+//
+// macOS (the CEF host): through _exit. exit() runs the static destructors and
+// atexit callbacks of the host and of the CEF framework while threads CEF
+// leaves behind after CefShutdown may still run.
+//
+// Call it only once everything that must persist has been written: after
+// CefShutdown (and the wait for its helpers), or after the WebView2
+// controllers are released.
 [[noreturn]] void EndProcess(int code);
 #endif
 
