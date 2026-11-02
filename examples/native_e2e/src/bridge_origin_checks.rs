@@ -111,12 +111,20 @@ pub async fn run() {
 
   // The other origin: no namespace, and a call posted to the engine's own
   // message channel (the page knows the bridge's message format) is refused.
-  let ns = eval(
-    &no_win,
-    "String(location.origin) + ' ' + typeof window.Laufey",
-  )
-  .await
-  .and_then(|v| v.as_string().map(str::to_string));
+  // The window starts on an empty document: ask once its page has committed.
+  let mut ns = None;
+  for _ in 0..50 {
+    ns = eval(
+      &no_win,
+      "String(location.origin) + ' ' + typeof window.Laufey",
+    )
+    .await
+    .and_then(|v| v.as_string().map(str::to_string));
+    if ns.as_deref().is_none_or(|n| n.starts_with(NO_ORIGIN)) {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
   check(
     &format!("bridge-origin: another origin's document gets no bridge namespace ({ns:?})"),
     ns.as_deref() == Some(format!("{NO_ORIGIN} undefined").as_str()),
