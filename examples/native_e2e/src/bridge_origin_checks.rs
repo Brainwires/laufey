@@ -126,18 +126,19 @@ pub async fn run() {
     let probe = r#"
 for p in $(pgrep -f com.apple.WebKit.WebContent); do
   echo "--- WebContent $p"; ps -o pid,stat,%cpu,time,etime,wchan -p $p
-  sudo -n sample $p 1 -mayDie 2>&1 | grep -v '^$' | head -120 | cut -c1-170
-  echo "--- log $p"; /usr/bin/log show --last 5m --info --debug --style compact --predicate "processIdentifier == $p" 2>/dev/null | head -80 | cut -c1-260
+  sudo -n sample $p 1 -mayDie 2>&1 | grep -v '^$' | grep -E "flock|Call graph|main-thread" | cut -c1-170
+  echo "--- log $p"; /usr/bin/log show --last 5m --info --debug --style compact --predicate "processIdentifier == $p" 2>/dev/null | grep -iE "metal|fscache" | head -30 | cut -c1-260
 done
+echo "--- lsof"; sudo -n lsof -nP 2>/dev/null | grep -E 'com.apple.metal|functions\.|fscache|FSCache' | cut -c1-220
 for s in com.apple.WebKit.Networking; do for p in $(pgrep -f $s); do echo "--- $s $p"; sudo -n sample $p 1 -mayDie 2>&1 | grep -v '^$' | sed -n 20,70p | cut -c1-170; done; done
 "#;
     let out = std::process::Command::new("sh").arg("-c").arg(probe).output();
     if let Ok(o) = out { eprintln!("DIAG-PS\n{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)); }
-    let third = window(&format!("{OK_ORIGIN}/third"), &ok_reports);
-    let r = eval(&third, s).await; diag("a third window, opened after the stall", r);
-    no_win.navigate(&format!("{NO_ORIGIN}/"));
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let r = eval(&no_win, s).await; diag("no_win after loading again", r);
+    ok_win.close();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let out = std::process::Command::new("sh").arg("-c").arg("sudo -n lsof -nP 2>/dev/null | grep -E 'com.apple.metal|functions\\.|fscache|FSCache' | cut -c1-220").output();
+    if let Ok(o) = out { eprintln!("DIAG-LSOF after close\n{}", String::from_utf8_lossy(&o.stdout)); }
+    let r = eval(&no_win, s).await; diag("no_win after the other window closed", r);
     no_win.set_position(0, 0);
     tokio::time::sleep(Duration::from_secs(2)).await;
     no_win.focus();
