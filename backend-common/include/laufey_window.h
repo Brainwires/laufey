@@ -163,8 +163,7 @@ int RequestedExitCode();
 //
 // macOS (the CEF host): through _exit. exit() runs the static destructors and
 // atexit callbacks of the host and of the CEF framework while threads CEF
-// leaves behind after CefShutdown may still run (about 1 launch in 5,600 on
-// macOS x64 ended with a SIGSEGV after its profile was written).
+// leaves behind after CefShutdown may still run.
 //
 // Call it only once everything that must persist has been written: after
 // CefShutdown (and the wait for its helpers), or after the WebView2

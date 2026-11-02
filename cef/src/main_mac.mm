@@ -625,6 +625,13 @@ int main(int argc, char* argv[]) {
       laufey_common::LaufeyWaitForRenderersBeforeShutdown(
           []() { CefDoMessageLoopWork(); });
 
+    // The closed windows' Browsers are deleted by tasks the stopped loop may
+    // not have run yet; one left for CefShutdown to delete crashed it (a
+    // read of freed memory in ~TabDragServiceImpl under ProfileManager's
+    // teardown, about 1 quit in 5,600 on macOS x64). The renderer wait above
+    // pumps only while a renderer runs, so it may not have pumped at all.
+    LaufeyDrainClosedWindowsBeforeShutdown([]() { CefDoMessageLoopWork(); });
+
     RuntimeLoader::GetInstance()->Shutdown();
 
     CefShutdown();
@@ -639,9 +646,7 @@ int main(int argc, char* argv[]) {
     // 46), else 0, instead of returning from main: that would release
     // `app` and drain this pool after CefShutdown, unload the CEF framework
     // (library_loader) and run exit()'s static destructors and atexit
-    // callbacks while threads CEF leaves behind may still run. About 1
-    // launch in 5,600 on macOS x64 ended with a SIGSEGV after its profile
-    // was written, at the end of the quit.
+    // callbacks while threads CEF leaves behind may still run.
     laufey_common::EndProcess(laufey_common::RequestedExitCode());
   }
 }
