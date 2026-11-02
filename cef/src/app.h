@@ -296,6 +296,14 @@ class LaufeyHandler : public CefClient,
   void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                    TransitionType transition_type) override;
 
+  // A window's main frame finished loading a document: the page load event
+  // (set_page_load_handler, API 27), which a window created hidden is
+  // revealed from. Not for the about:blank every browser starts on, which is
+  // no content to reveal (WebKitGTK and WebView2 start with no load at all).
+  // A navigation that fails shows Chromium's error page, whose load counts.
+  void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                 int httpStatusCode) override;
+
   // The navigation guard (API 48, laufey_navigation_guard.h): a main-frame
   // navigation of a laufey window (and each of its server redirects) to an
   // origin the window may not load is cancelled, and an http(s) destination

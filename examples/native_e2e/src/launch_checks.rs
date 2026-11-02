@@ -15,9 +15,9 @@
 //! The battery opens, in this order:
 //!   1. a window created hidden and never shown: launching must not reveal it;
 //!   2. the launch window, created hidden and shown once its page has loaded
-//!      (the reveal Deno Desktop uses): visible, and a frame is drawn within
-//!      `FRAME_BUDGET`; the page's `outerWidth` / `outerHeight` are the
-//!      window's frame, not 0;
+//!      (the reveal Deno Desktop uses): its page load is reported, it is
+//!      visible, and a frame is drawn within `FRAME_BUDGET`; the page's
+//!      `outerWidth` / `outerHeight` are the window's frame, not 0;
 //!   3. a second ordinary window, left unfocused when the launch window is
 //!      focused again: visible, and frames are not throttled for lacking
 //!      focus;
@@ -190,8 +190,14 @@ pub async fn run() {
   })
   .load(&page(launch_title));
   if engine {
-    // Engine-less backends never load a page; reveal at once there.
-    let _ = wait_for(|| loaded.load(Ordering::SeqCst), 200, 50).await;
+    // Engine-less backends never load a page; reveal at once there. A
+    // backend with an engine must report the load: it is what reveals a
+    // window created hidden (CEF reported none, and showed every window at
+    // creation instead until Linux honoured the hidden flag).
+    check(
+      "the launch window's page load is reported (on_page_load)",
+      wait_for(|| loaded.load(Ordering::SeqCst), 200, 50).await,
+    );
   }
   launch.show();
   check(

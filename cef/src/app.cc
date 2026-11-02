@@ -398,6 +398,16 @@ void LaufeyHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
                           std::to_string(released) + " held bodies released)");
 }
 
+void LaufeyHandler::OnLoadEnd(CefRefPtr<CefBrowser> browser,
+                              CefRefPtr<CefFrame> frame, int httpStatusCode) {
+  (void)httpStatusCode;
+  if (!frame->IsMain() || frame->GetURL().ToString() == "about:blank")
+    return;
+  RuntimeLoader* loader = RuntimeLoader::GetInstance();
+  if (uint32_t id = loader->GetLaufeyIdForBrowser(browser))
+    loader->DispatchPageLoadEvent(id);
+}
+
 void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   // A body still held for a commit that won't come.
   laufey_common::CommitGates().ReleaseBrowser(browser->GetIdentifier());

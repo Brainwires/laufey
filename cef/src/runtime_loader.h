@@ -381,6 +381,28 @@ class RuntimeLoader {
     return true;
   }
 
+  // Page load-finished (API >= 27): a window's main frame finished loading a
+  // document (LaufeyHandler::OnLoadEnd). The embedder reveals a window it
+  // created hidden from here, so the first frame it shows has content.
+  void SetPageLoadHandler(laufey_page_load_fn handler, void* user_data) {
+    std::lock_guard<std::mutex> lock(page_load_mutex_);
+    page_load_handler_ = handler;
+    page_load_user_data_ = user_data;
+  }
+
+  void DispatchPageLoadEvent(uint32_t window_id) {
+    // Copied out and called without the mutex, as for close requests.
+    laufey_page_load_fn handler;
+    void* user_data;
+    {
+      std::lock_guard<std::mutex> lock(page_load_mutex_);
+      handler = page_load_handler_;
+      user_data = page_load_user_data_;
+    }
+    if (handler)
+      handler(user_data, window_id);
+  }
+
   // --- Custom URL scheme handler (API >= 26) ---
   // Store the runtime's scheme request handler and install the CEF scheme
   // handler factory (on the UI thread) for `scheme` the first time that
@@ -512,6 +534,10 @@ class RuntimeLoader {
   laufey_close_requested_fn close_requested_handler_ = nullptr;
   void* close_requested_user_data_ = nullptr;
   std::mutex close_requested_mutex_;
+
+  laufey_page_load_fn page_load_handler_ = nullptr;
+  void* page_load_user_data_ = nullptr;
+  std::mutex page_load_mutex_;
 
   void (*js_call_notify_fn_)(void*) = nullptr;
   void* js_call_notify_data_ = nullptr;
