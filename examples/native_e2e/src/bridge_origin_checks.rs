@@ -37,7 +37,7 @@ setInterval(() => {
 pub fn serve(req: SchemeRequest) -> Option<SchemeRequest> {
   let path = req.url.split(['?', '#']).next().unwrap_or("").to_string();
   let path = path.trim_end_matches('/');
-  if path == OK_ORIGIN || path == NO_ORIGIN {
+  if path.ends_with("/third") || path == OK_ORIGIN || path == NO_ORIGIN {
     respond(req, 200, "text/html; charset=utf-8", PAGE_HTML.as_bytes());
     return None;
   }
@@ -123,8 +123,21 @@ pub async fn run() {
     eprintln!("DIAG-PROBE ok page reports: {n0} then {}", ok_reports.lock().unwrap().len());
     let s = "document.visibilityState + ' ' + document.readyState + ' ' + location.href";
     let r = eval(&ok_win, s).await; diag("ok_win answers", r);
-    let out = std::process::Command::new("sh").arg("-c").arg("ps axo pid,ppid,stat,%cpu,etime,comm | grep -i 'webkit\\|laufey' | cut -c1-140; sample $PPID 1 -mayDie 2>&1 | head -60 | cut -c1-140").output();
-    if let Ok(o) = out { eprintln!("DIAG-PS\n{}", String::from_utf8_lossy(&o.stdout)); }
+    let probe = r#"
+for p in $(pgrep -f com.apple.WebKit.WebContent); do
+  echo "--- WebContent $p"; ps -o pid,stat,%cpu,time,etime,wchan -p $p
+  sudo -n sample $p 1 -mayDie 2>&1 | grep -v '^$' | head -120 | cut -c1-170
+  echo "--- log $p"; /usr/bin/log show --last 5m --info --debug --style compact --predicate "processIdentifier == $p" 2>/dev/null | head -80 | cut -c1-260
+done
+for s in com.apple.WebKit.Networking; do for p in $(pgrep -f $s); do echo "--- $s $p"; sudo -n sample $p 1 -mayDie 2>&1 | grep -v '^$' | sed -n 20,70p | cut -c1-170; done; done
+"#;
+    let out = std::process::Command::new("sh").arg("-c").arg(probe).output();
+    if let Ok(o) = out { eprintln!("DIAG-PS\n{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)); }
+    let third = window(&format!("{OK_ORIGIN}/third"), &ok_reports);
+    let r = eval(&third, s).await; diag("a third window, opened after the stall", r);
+    no_win.navigate(&format!("{NO_ORIGIN}/"));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let r = eval(&no_win, s).await; diag("no_win after loading again", r);
     no_win.set_position(0, 0);
     tokio::time::sleep(Duration::from_secs(2)).await;
     no_win.focus();
