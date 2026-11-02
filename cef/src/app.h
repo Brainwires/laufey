@@ -514,8 +514,8 @@ int LaufeyLiveWindowCount();
 // it posts when the window's close completes; one the stopped loop never ran
 // is deleted inside CefShutdown instead (BrowserManagerService::Shutdown,
 // under ProfileManager's teardown), where Chromium 156 reads freed memory in
-// ~TabDragServiceImpl (SIGSEGV, about 1 quit in 5,600 on macOS x64). UI
-// thread.
+// ~TabDragServiceImpl (SIGSEGV, about 1 quit in 5,600 on macOS x64). The
+// macOS and Windows hosts call it. UI thread.
 void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump);
 
 // The app's own quit() (runtime_loader.cc): every window is closed and the
