@@ -112,7 +112,16 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
 #endif
   }
 
+#if defined(__linux__)
+  // A window created hidden stays hidden until show(). The capi creates every
+  // Linux window hidden, sizes it, then shows it: a Wayland window's first
+  // size is the one it maps at, and a size set after it maps races the
+  // compositor's first configure.
+  if ((flags_ & LAUFEY_WINDOW_FLAG_HIDDEN) == 0)
+    window->Show();
+#else
   window->Show();
+#endif
 #if defined(__APPLE__)
   // Chromium's show activates the app, which macOS 14+ may decline for an
   // app started from a terminal or a background agent; the first window

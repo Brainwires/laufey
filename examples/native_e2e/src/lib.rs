@@ -35,6 +35,7 @@ mod close_checks;
 mod download_checks;
 mod file_chooser_checks;
 mod focus_checks;
+mod initial_size_checks;
 mod io_checks;
 mod keychain_checks;
 mod launch_checks;
@@ -879,6 +880,12 @@ fn e2e_main() {
     // the compositor (API 52); needs a real Wayland session.
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("overlay-edge") {
       overlay_edge_checks::run().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=initial-size: a window's first mapped size, from the
+    // compositor (sway); needs a real Wayland session.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("initial-size") {
+      initial_size_checks::run().await;
       finish();
     }
     // LAUFEY_E2E_ONLY=tray-roles: a Windows tray menu's role items; choosing

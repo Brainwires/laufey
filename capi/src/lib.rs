@@ -1120,6 +1120,54 @@ struct PdfSlot {
   done: Condvar,
 }
 
+/// Whether a window the app wants shown is created hidden, sized, then shown,
+/// so that it is first shown at its size. A layer surface takes its size when
+/// it maps, everywhere. On Linux every window does: a Wayland window's first
+/// size is the one it has when it is shown, and the backends create a window
+/// at a default size (the C ABI's create calls take none), so a size set
+/// after a visible creation raced the compositor's first configure, which
+/// could keep the default. Elsewhere a visible creation stays as it was: the
+/// backends' show is not their creation's reveal there (macOS and Windows
+/// activate differently on each).
+fn shows_after_size(api: &LaufeyBackendApi, options: WindowOptions) -> bool {
+  !options.hidden
+    && api.create_window_ex.is_some()
+    && api.show.is_some()
+    && (options.overlay || cfg!(target_os = "linux"))
+}
+
+/// [`Window::new_with_options`]'s body, against a given backend API.
+fn create_window_with(
+  api: &LaufeyBackendApi,
+  width: i32,
+  height: i32,
+  options: WindowOptions,
+) -> u32 {
+  let show_after_size = shows_after_size(api, options);
+  let flags = options.to_flags()
+    | if show_after_size {
+      crate::ffi::LAUFEY_WINDOW_FLAG_HIDDEN
+    } else {
+      0
+    };
+  let id = if let (Some(f), true) = (api.create_window_ex, flags != 0) {
+    unsafe { f(api.backend_data, flags) }
+  } else if let Some(f) = api.create_window {
+    unsafe { f(api.backend_data) }
+  } else {
+    0
+  };
+  if let Some(f) = api.set_window_size {
+    unsafe { f(api.backend_data, id, width, height) };
+  }
+  if show_after_size {
+    if let Some(f) = api.show {
+      unsafe { f(api.backend_data, id) };
+    }
+  }
+  id
+}
+
 impl Window {
   pub fn new(width: i32, height: i32) -> Self {
     Self::new_with_options(width, height, WindowOptions::default())
@@ -1132,32 +1180,9 @@ impl Window {
     height: i32,
     options: WindowOptions,
   ) -> Self {
-    let api = api();
-    // A layer surface takes its size when it maps, so one the app wants shown
-    // maps once it has its size.
-    let show_after_size =
-      options.overlay && !options.hidden && api.create_window_ex.is_some();
-    let flags = options.to_flags()
-      | if show_after_size {
-        crate::ffi::LAUFEY_WINDOW_FLAG_HIDDEN
-      } else {
-        0
-      };
-    let id = if let (Some(f), true) = (api.create_window_ex, flags != 0) {
-      unsafe { f(api.backend_data, flags) }
-    } else if let Some(f) = api.create_window {
-      unsafe { f(api.backend_data) }
-    } else {
-      0
-    };
-    let win = Window { id };
-    if let Some(f) = api.set_window_size {
-      unsafe { f(api.backend_data, id, width, height) };
+    Window {
+      id: create_window_with(api(), width, height, options),
     }
-    if show_after_size {
-      win.show();
-    }
-    win
   }
 
   /// Wrap an existing window by its ID (does not create a new OS window).
@@ -4453,6 +4478,139 @@ mod tests {
       }
       .to_flags(),
       LAUFEY_WINDOW_FLAG_FRAMELESS | LAUFEY_WINDOW_FLAG_TRANSPARENT
+    );
+  }
+
+  // --- Window creation: the size comes before the first show ---
+
+  static CREATE_CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+  unsafe extern "C" fn fake_create_window(_backend_data: *mut c_void) -> u32 {
+    CREATE_CALLS.lock().unwrap().push("create".into());
+    7
+  }
+
+  unsafe extern "C" fn fake_create_window_ex(
+    _backend_data: *mut c_void,
+    flags: u32,
+  ) -> u32 {
+    CREATE_CALLS
+      .lock()
+      .unwrap()
+      .push(format!("create_ex {flags:#x}"));
+    7
+  }
+
+  unsafe extern "C" fn fake_set_window_size(
+    _backend_data: *mut c_void,
+    window_id: u32,
+    width: c_int,
+    height: c_int,
+  ) {
+    CREATE_CALLS
+      .lock()
+      .unwrap()
+      .push(format!("size {window_id} {width}x{height}"));
+  }
+
+  unsafe extern "C" fn fake_show(_backend_data: *mut c_void, window_id: u32) {
+    CREATE_CALLS
+      .lock()
+      .unwrap()
+      .push(format!("show {window_id}"));
+  }
+
+  fn creation_calls(options: WindowOptions) -> Vec<String> {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    fake.create_window = Some(fake_create_window);
+    fake.create_window_ex = Some(fake_create_window_ex);
+    fake.set_window_size = Some(fake_set_window_size);
+    fake.show = Some(fake_show);
+    CREATE_CALLS.lock().unwrap().clear();
+    assert_eq!(create_window_with(&fake, 240, 160, options), 7);
+    std::mem::take(&mut *CREATE_CALLS.lock().unwrap())
+  }
+
+  // One test: the calls go through one static.
+  #[test]
+  fn a_window_is_sized_before_it_is_first_shown() {
+    let hidden = LAUFEY_WINDOW_FLAG_HIDDEN;
+    let panel = WindowOptions {
+      frameless: true,
+      no_activate: true,
+      ..Default::default()
+    };
+    let panel_flags = panel.to_flags();
+    if cfg!(target_os = "linux") {
+      // A Wayland window's first size is the one it has when it is shown: a
+      // size set after a visible creation races the first configure.
+      assert_eq!(
+        creation_calls(panel),
+        [
+          format!("create_ex {:#x}", panel_flags | hidden),
+          "size 7 240x160".into(),
+          "show 7".into(),
+        ]
+      );
+      assert_eq!(
+        creation_calls(WindowOptions::default()),
+        [
+          format!("create_ex {hidden:#x}"),
+          "size 7 240x160".into(),
+          "show 7".into(),
+        ]
+      );
+    } else {
+      assert_eq!(
+        creation_calls(panel),
+        [
+          format!("create_ex {panel_flags:#x}"),
+          "size 7 240x160".to_string(),
+        ]
+      );
+      assert_eq!(
+        creation_calls(WindowOptions::default()),
+        ["create".to_string(), "size 7 240x160".into()]
+      );
+    }
+    // An overlay maps once it has its size, everywhere.
+    let overlay = WindowOptions {
+      overlay: true,
+      ..Default::default()
+    };
+    assert_eq!(
+      creation_calls(overlay),
+      [
+        format!("create_ex {:#x}", overlay.to_flags() | hidden),
+        "size 7 240x160".into(),
+        "show 7".into(),
+      ]
+    );
+    // A window created hidden stays hidden.
+    let hidden_panel = WindowOptions {
+      hidden: true,
+      ..panel
+    };
+    assert_eq!(
+      creation_calls(hidden_panel),
+      [
+        format!("create_ex {:#x}", hidden_panel.to_flags()),
+        "size 7 240x160".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn a_backend_without_show_keeps_the_visible_creation() {
+    // Every API version with create_window_ex has show, but a fake (or a
+    // partial backend) without it must not leave the window hidden.
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    fake.create_window_ex = Some(fake_create_window_ex);
+    assert!(!shows_after_size(&fake, WindowOptions::default()));
+    fake.show = Some(fake_show);
+    assert_eq!(
+      shows_after_size(&fake, WindowOptions::default()),
+      cfg!(target_os = "linux")
     );
   }
 

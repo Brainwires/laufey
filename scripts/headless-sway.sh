@@ -3,8 +3,10 @@
 #
 # Runs a command against a private headless sway (a wlroots compositor with
 # no outputs or input devices, no Xwayland), with WAYLAND_DISPLAY pointing at
-# it and DISPLAY unset, and stops sway afterwards. Exits with the command's
-# status. For tests that need a real compositor with ext-data-control-v1
+# it, SWAYSOCK at its IPC socket (for swaymsg) and DISPLAY unset, and stops
+# sway afterwards. Exits with the command's status. HEADLESS_SWAY_FLOATING=1
+# floats every window, so a window keeps the size it asks for (a tiled one
+# takes its tile's). For tests that need a real compositor with ext-data-control-v1
 # (sway 1.11+, wlroots 0.19+), in CI or locally:
 #
 #   scripts/headless-sway.sh build/laufey_clipboard_wayland_test
@@ -24,6 +26,10 @@ fi
 export XDG_RUNTIME_DIR
 dir="$(mktemp -d)"
 printf 'xwayland disable\n' >"$dir/config"
+if [ -n "${HEADLESS_SWAY_FLOATING:-}" ]; then
+  printf 'for_window [shell="xdg_shell"] floating enable\ndefault_floating_border none\n' \
+    >>"$dir/config"
+fi
 socket=""
 
 env -u DISPLAY -u WAYLAND_DISPLAY \
@@ -56,8 +62,15 @@ if [ -z "$socket" ] || [ ! -S "$XDG_RUNTIME_DIR/$socket" ]; then
   exit 2
 fi
 
+# Its IPC socket is sway-ipc.<uid>.<pid>.sock in XDG_RUNTIME_DIR.
+ipc="$XDG_RUNTIME_DIR/sway-ipc.$(id -u).$sway_pid.sock"
+for _ in $(seq 1 50); do
+  [ -S "$ipc" ] && break
+  sleep 0.1
+done
+
 set +e
-env -u DISPLAY WAYLAND_DISPLAY="$socket" "$@"
+env -u DISPLAY WAYLAND_DISPLAY="$socket" SWAYSOCK="$ipc" "$@"
 status=$?
 set -e
 exit "$status"

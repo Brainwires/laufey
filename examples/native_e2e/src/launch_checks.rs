@@ -321,9 +321,10 @@ pub async fn run() {
     check("the panel's page answers scripts", false);
   }
 
-  // Back to 1, after both reveals: still hidden. Only the WebView backends
-  // implement hidden-on-create; CEF and Winit windows show at creation.
-  if backend != "webview" {
+  // Back to 1, after both reveals: still hidden. The WebView backends and
+  // CEF on Linux implement hidden-on-create; CEF elsewhere and Winit windows
+  // show at creation.
+  if backend != "webview" && !(backend == "cef" && cfg!(target_os = "linux")) {
     na(&format!(
       "a hidden window stays hidden at launch ({backend} has no \
        hidden-on-create)"

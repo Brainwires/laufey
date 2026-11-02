@@ -10,6 +10,8 @@ crate-type = ["cdylib"]
 [dependencies]
 laufey = { path = "../../capi" }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }
+# initial_size_checks.rs: sway's window events and tree.
+serde_json = "1"
 
 # title_bar_checks.rs: a stand-in xdg-desktop-portal Settings interface on the
 # run's private session bus (Linux).
