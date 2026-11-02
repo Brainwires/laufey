@@ -171,6 +171,15 @@ pub async fn run() {
   )
   .title(hidden_title)
   .load(&page(hidden_title));
+  // The launch window opens once this page is live, not beside it. On a
+  // virtual GPU (a macOS runner) two web processes starting together can
+  // both open Metal's on-disk shader cache, and now and then the loser
+  // blocks in flock() until the winner exits: docs/e2e-testing.md. Both
+  // windows are still created before the launch reveal.
+  #[cfg(target_os = "macos")]
+  if engine {
+    let _ = page_answers(&hidden).await;
+  }
 
   // 2. The launch window, revealed once its page has loaded.
   let launch_title = "native-e2e-launch";
