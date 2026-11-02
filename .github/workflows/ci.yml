@@ -503,7 +503,8 @@ jobs:
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: choco install make --version=4.4.1 -y --no-progress
+        shell: bash
+        run: scripts/ci-install-windows-tools.sh
 
       - run: make winit
 
@@ -622,9 +623,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          # Pinned versions (the community packages carry their downloads' checksums).
-          choco install make --version=4.4.1 -y --no-progress
-          choco install ninja --version=1.13.2 -y --no-progress
+          # Pinned versions, each checked against its SHA-256.
+          scripts/ci-install-windows-tools.sh
           if [ "${{ matrix.backend }}" = "webview" ]; then
             # The WebView2 SDK at a pinned version, checked against its
             # SHA-256 before use (nuget.org's flat container; the .nupkg is a zip).
@@ -1129,9 +1129,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          # Pinned versions (the community packages carry their downloads' checksums).
-          choco install make --version=4.4.1 -y --no-progress
-          choco install ninja --version=1.13.2 -y --no-progress
+          # Pinned versions, each checked against its SHA-256.
+          scripts/ci-install-windows-tools.sh
           # The WebView2 SDK at a pinned version, checked against its
           # SHA-256 before use (nuget.org's flat container; the .nupkg is a zip).
           WV2_VERSION=1.0.4258.31
@@ -1382,9 +1381,8 @@ jobs:
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: |
-          choco install make --version=4.4.1 -y --no-progress
-          choco install ninja --version=1.13.2 -y --no-progress
+        shell: bash
+        run: scripts/ci-install-windows-tools.sh
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: runner.os == 'Windows'
