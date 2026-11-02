@@ -114,13 +114,14 @@ show_crash_report() { # <pid>
 lost=0
 other=0
 hangs=0
+slow=0
 prev="-"
 start_all=$SECONDS
 echo "== storage-stress-e2e: backend=$backend bin=$bin launches=$launches scheme=${scheme:-none}"
 for ((i = 1; i <= launches; i++)); do
   # A long run says how far it got, in case its job is cut short.
   if [ "$i" -gt 1 ] && [ $(((i - 1) % 250)) = 0 ]; then
-    echo "[stress-e2e] $((i - 1)) launches in $((SECONDS - start_all)) s: $lost lost, $other failed otherwise"
+    echo "[stress-e2e] $((i - 1)) launches in $((SECONDS - start_all)) s: $lost lost, $other failed otherwise, $slow slow commits"
   fi
   value="v$RANDOM$RANDOM-$i"
   log="$scratch/logs/$i.log"
@@ -159,6 +160,8 @@ for ((i = 1; i <= launches; i++)); do
   else
     wait "$pid" || rc=$?
   fi
+  # A document whose body waited a second or more for its commit (CEF).
+  ! grep -q '^laufey: the document .* ms for its commit' "$log" || slow=$((slow + 1))
   # The launch's one report line: what its page read before its write, and
   # what it read back after it.
   report="$(grep -m1 '^\[e2e\] previous localStorage=' "$log" || true)"
@@ -203,7 +206,8 @@ for ((i = 1; i <= launches; i++)); do
 done
 
 echo "[stress-e2e] $launches launches in $((SECONDS - start_all)) s: $lost didn't" \
-  "read the previous launch's value, $other failed otherwise, $hangs hung"
+  "read the previous launch's value, $other failed otherwise, $hangs hung" \
+  "($slow with a commit that took a second or more)"
 if [ "$lost" = 0 ] && [ "$other" = 0 ] && [ "$hangs" = 0 ]; then
   echo "[stress-e2e] OVERALL PASS"
 else

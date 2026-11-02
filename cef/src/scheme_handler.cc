@@ -167,6 +167,7 @@ void LaufeySchemeHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
         laufey_common::DocumentBodyNeedsCommitGate(frame_document_, status_,
                                                    mime_type)) {
       gate_closed_ = true;
+      gate_since_ = std::chrono::steady_clock::now();
       CefRefPtr<LaufeySchemeHandler> self(this);
       gate_id_ = laufey_common::CommitGates().Add(
           browser_id_, main_frame_, url_, [self] { self->OpenGate(); });
@@ -255,6 +256,21 @@ void LaufeySchemeHandler::OpenGate() {
     gate_closed_ = false;
     if (laufey_common::TimingEnabled())
       SchemeTiming(url_, "body released");
+    // A commit that took long, or never came: under load a commit can take
+    // seconds, and a body released before it leaves the page without
+    // localStorage (laufey_cef_commit_gate.h).
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - gate_since_)
+                            .count();
+    if (waited >= laufey_common::kCommitGateSlowMs) {
+      std::cerr << "laufey: the document " << url_ << " waited " << waited
+                << " ms for its commit"
+                << (waited >= laufey_common::kCommitGateMaxWaitMs
+                        ? " and went on without it; its localStorage may be "
+                          "lost"
+                        : "")
+                << std::endl;
+    }
     if (!read_callback_ || !pending_data_)
       return;  // the next Read takes the body
     if (failed_) {

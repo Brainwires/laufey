@@ -3,6 +3,7 @@
 #ifndef LAUFEY_SCHEME_HANDLER_H_
 #define LAUFEY_SCHEME_HANDLER_H_
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -107,6 +108,8 @@ class LaufeySchemeHandler : public CefResourceHandler,
   // a Read parks until OpenGate. `gate_id_` is its DocumentCommitGates entry.
   bool gate_closed_ = false;
   uint64_t gate_id_ = 0;
+  // When the body began to wait (a slow commit is reported on stderr).
+  std::chrono::steady_clock::time_point gate_since_;
   // LAUFEY_TIMING=1 (laufey_timing.h): what this request saw, under mutex_.
   int timing_reads_ = 0;
   int timing_writes_ = 0;

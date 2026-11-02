@@ -49,8 +49,13 @@ namespace laufey_common {
 
 // The longest a document's body is held for its commit. A navigation that
 // never commits (a download) or a commit CEF doesn't report goes on after
-// this.
-inline constexpr int kCommitGateMaxWaitMs = 1000;
+// this. It was 1 s, and on a loaded machine a commit can take longer: the
+// body then went on without it and the page lost its localStorage as before
+// (two apps relaunching side by side on a macOS x64 runner).
+inline constexpr int kCommitGateMaxWaitMs = 10000;
+
+// A hold at least this long is reported on stderr.
+inline constexpr int kCommitGateSlowMs = 1000;
 
 // Whether a response's body waits for its document's commit: the response to
 // a frame's navigation (`frame_document`), with a body that becomes a
