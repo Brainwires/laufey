@@ -325,7 +325,7 @@ static bool Backend_QuitRequestPending(void* /*data*/) {
 }
 
 // exit_app (API 46): quit() with an exit code. The host returns the code once
-// CefShutdown has written the profile (on Windows through
+// CefShutdown has written the profile (on Windows and macOS through
 // laufey_common::EndProcess), and RuntimeLoader::Shutdown doesn't wait for a
 // runtime thread that may be blocked for good in its exit().
 static void Backend_ExitApp(void* data, int exit_code) {

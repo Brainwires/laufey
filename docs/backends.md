@@ -482,6 +482,18 @@ failed. Nothing an app relies on runs in that code: the profile is on disk after
 `scripts/exit-e2e-run.sh` checks each path (see
 [e2e-testing.md](e2e-testing.md)).
 
+The macOS CEF host ends the same way, with `_exit` once `CefShutdown` has
+returned and its helpers (the storage service among them) have ended, instead of
+returning from `main`. Returning released the app's CEF objects and drained the
+autorelease pool after `CefShutdown`, unloaded the CEF framework and ran
+`exit()`'s static destructors and `atexit` callbacks while threads CEF leaves
+behind could still run; about 1 launch in 5,600 on macOS x64 ended with a
+`SIGSEGV` there, after its profile was written. Before shutting CEF down the
+host also stops its message-pump timer and drops the pump ticks it queues on the
+main queue, so nothing that spins the main run loop during or after
+`CefShutdown` runs `CefDoMessageLoopWork` into a browser process being torn
+down.
+
 CEF's `localStorage` lives in a LevelDB database that Chromium's storage service
 writes, and `CefShutdown` kills that service without waiting for a write in
 flight (Chromium waits only for the network service, which keeps cookies). Two

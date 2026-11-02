@@ -18,6 +18,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#elif defined(__APPLE__)
+#include <unistd.h>
+
+#include <cstdio>
+#include <iostream>
 #endif
 
 #include "laufey_single_instance.h"
@@ -371,6 +376,13 @@ void EndProcess(int code) {
   TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
   // Terminating the current process doesn't return; should it ever, the
   // CRT's fast exit still runs no atexit callback or destructor.
+  _exit(code);
+}
+#elif defined(__APPLE__)
+void EndProcess(int code) {
+  std::cout.flush();
+  std::cerr.flush();
+  fflush(nullptr);
   _exit(code);
 }
 #endif

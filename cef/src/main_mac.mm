@@ -252,6 +252,7 @@ static void ResumeQuitEvent(NSAppleEventManagerSuspensionID suspended,
 // NSRunLoop driven by [NSApp run], which DOES drain the main queue.
 @interface LaufeyPumpTarget : NSObject
 - (void)start;
+- (void)stop;
 - (void)tick;
 @end
 
@@ -277,6 +278,10 @@ static void ResumeQuitEvent(NSAppleEventManagerSuspensionID suspended,
                                  userInfo:nil
                                   repeats:YES];
   [[NSRunLoop mainRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
+}
+- (void)stop {
+  [_timer invalidate];
+  _timer = nil;
 }
 @end
 
@@ -586,6 +591,16 @@ int main(int argc, char* argv[]) {
     [g_pump start];  // begin the steady pump so the runtime starts
     [NSApp run];
 
+    // The loop is over: from here the host pumps CEF itself (the renderer
+    // wait below) and then shuts it down. The steady timer stays scheduled
+    // on the main run loop (in the common modes), and every
+    // OnScheduleMessagePumpWork queues a tick on the main queue, so anything
+    // that spins the main run loop from here on (CefShutdown included) would
+    // run CefDoMessageLoopWork inside CefShutdown, or after it, into a torn-
+    // down browser process. Stop both.
+    [g_pump stop];
+    g_pump = nil;
+
     // The loop is over: UI tasks still queued are answered "not run" and an
     // auth session in progress ends cancelled, so a runtime thread waiting on
     // either is released before Shutdown waits for it.
@@ -617,8 +632,16 @@ int main(int argc, char* argv[]) {
     // the process does, so a relaunch finds the profile free.
     if (persistent_profile)
       laufey_common::LaufeyWaitForHelpersAfterShutdown(cache_path);
-  }
 
-  // exit_app's code (API 46), else 0.
-  return laufey_common::RequestedExitCode();
+    // How a macOS app ends (docs/backends.md, "How an app ends"): CEF has
+    // shut down and its helpers have ended, so the profile, cookies and web
+    // storage are on disk. End the process here with exit_app's code (API
+    // 46), else 0, instead of returning from main: that would release
+    // `app` and drain this pool after CefShutdown, unload the CEF framework
+    // (library_loader) and run exit()'s static destructors and atexit
+    // callbacks while threads CEF leaves behind may still run. About 1
+    // launch in 5,600 on macOS x64 ended with a SIGSEGV after its profile
+    // was written, at the end of the quit.
+    laufey_common::EndProcess(laufey_common::RequestedExitCode());
+  }
 }
