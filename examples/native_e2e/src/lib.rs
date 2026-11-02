@@ -1825,7 +1825,14 @@ fn e2e_main() {
     // for on_page_load first (best effort -- engine-less backends never fire
     // it) and retry a transient error before judging; only a persistent error
     // is a real failure.
-    let _ = wait_for(|| page_loaded.load(Ordering::SeqCst), 50, 100).await;
+    //
+    // A backend with a web engine gets 45 s for that load: WebView2 answers
+    // "window not found" until its controller is ready, and on a loaded
+    // windows-latest runner the first environment has taken ~34 s to come up
+    // (run 41510522703), well past the 5 s the engine-less backends get.
+    let load_rounds = if scheme_supported { 450 } else { 50 };
+    let _ =
+      wait_for(|| page_loaded.load(Ordering::SeqCst), load_rounds, 100).await;
     let mut outcome: Option<Result<Vec<u8>, String>> = None;
     for attempt in 0..3u32 {
       if attempt > 0 {
