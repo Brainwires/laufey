@@ -10,8 +10,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
-#include <atomic>
-#include <fcntl.h>
 
 #include "laufey_quit_request.h"
 #include "laufey_user_activity.h"
@@ -246,30 +244,6 @@ static void ResumeQuitEvent(NSAppleEventManagerSuspensionID suspended,
 }
 @end
 
-
-// DIAG (TEMPORARY): what the pump does after the loop has ended.
-static std::atomic<int> g_diag_phase{0};
-static void DiagLog(const char* what) {
-  int phase = g_diag_phase.load();
-  if (phase == 0)
-    return;
-  const char* path = getenv("LAUFEY_DIAG_FILE");
-  if (!path)
-    return;
-  char line[160];
-  int n = snprintf(line, sizeof line, "%d phase=%d %s main=%d\n", getpid(),
-                   phase, what, pthread_main_np());
-  int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
-  if (fd >= 0) {
-    (void)!write(fd, line, n);
-    close(fd);
-  }
-}
-static void DiagPhase(int phase) {
-  g_diag_phase.store(phase);
-  DiagLog("enter");
-}
-
 // ── External message pump ────────────────────────────────────────────────
 // CEF's own CefRunMessageLoop() does not service libdispatch's main queue, so
 // dispatch_async(dispatch_get_main_queue(), …) work — NSStatusItem (tray)
@@ -289,7 +263,6 @@ static void DiagPhase(int phase) {
   if (_working)
     return;  // CefDoMessageLoopWork is not reentrant
   _working = YES;
-  DiagLog("tick");
   CefDoMessageLoopWork();
   _working = NO;
 }
@@ -310,7 +283,6 @@ static void DiagPhase(int phase) {
 static LaufeyPumpTarget* g_pump = nil;
 
 void LaufeyApp::OnScheduleMessagePumpWork(int64_t delay_ms) {
-  DiagLog("schedule");
   // Nudge an immediate pump for snappier response; the steady timer guarantees
   // progress regardless.
   dispatch_async(dispatch_get_main_queue(), ^{
@@ -613,8 +585,6 @@ int main(int argc, char* argv[]) {
     // CefRunMessageLoop(), [NSApp run] also drains the libdispatch main queue.
     [g_pump start];  // begin the steady pump so the runtime starts
     [NSApp run];
-    DiagPhase(1);
-    atexit([]() { DiagPhase(7); });
 
     // The loop is over: UI tasks still queued are answered "not run" and an
     // auth session in progress ends cancelled, so a runtime thread waiting on
@@ -628,7 +598,6 @@ int main(int argc, char* argv[]) {
     // CefShutdown for good. From here on no thread of the process stays at
     // background QoS (laufey_cef_keychain_interpose.h).
     LaufeyRaiseThreadsForShutdown();
-    DiagPhase(2);
 
     // The windows are closed, but their renderer processes are ended by
     // tasks Chromium posts on the UI thread, which the stopped loop no longer
@@ -641,12 +610,9 @@ int main(int argc, char* argv[]) {
       laufey_common::LaufeyWaitForRenderersBeforeShutdown(
           []() { CefDoMessageLoopWork(); });
 
-    DiagPhase(4);
     RuntimeLoader::GetInstance()->Shutdown();
-    DiagPhase(5);
 
     CefShutdown();
-    DiagPhase(6);
     // The helpers (the storage service committing localStorage) end before
     // the process does, so a relaunch finds the profile free.
     if (persistent_profile)
