@@ -61,17 +61,16 @@ fn expected_caps(backend: &str) -> Option<u32> {
 fn is_mouse_transparent(title: &str) -> Option<bool> {
   #[link(name = "user32")]
   extern "system" {
-    fn FindWindowW(
-      class: *const u16,
-      title: *const u16,
-    ) -> *mut std::ffi::c_void;
-    fn GetWindowLongW(hwnd: *mut std::ffi::c_void, index: i32) -> i32;
+    // Declared as focus_checks.rs and auth_thread_checks.rs declare it:
+    // one signature per extern name across the crate.
+    fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+    fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
   }
   const GWL_EXSTYLE: i32 = -20;
   const WS_EX_TRANSPARENT: i32 = 0x20;
   let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
   let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
-  if hwnd.is_null() {
+  if hwnd == 0 {
     return None;
   }
   Some(unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } & WS_EX_TRANSPARENT != 0)
