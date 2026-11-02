@@ -875,6 +875,7 @@ class MacSchemeExchange : public SchemeExchangeBase {
   std::string method =
       req.HTTPMethod ? std::string(req.HTTPMethod.UTF8String) : "GET";
   std::string url = req.URL.absoluteString.UTF8String;
+  if (getenv("LAUFEY_DIAG")) fprintf(stderr, "DIAG scheme-task win=%u %s\n", self.windowId, url.c_str());
   std::vector<std::pair<std::string, std::string>> headers;
   NSDictionary<NSString*, NSString*>* fields = req.allHTTPHeaderFields;
   for (NSString* key in fields) {
@@ -1356,6 +1357,7 @@ API_AVAILABLE(macos(11.3))
 // created with LAUFEY_WINDOW_FLAG_HIDDEN once it has real content to show.
 - (void)webView:(WKWebView*)webView
     didFinishNavigation:(WKNavigation*)navigation {
+  if (getenv("LAUFEY_DIAG")) fprintf(stderr, "DIAG did-finish %s\n", webView.URL.absoluteString.UTF8String ?: "(nil)");
   RuntimeLoader::GetInstance()->DispatchPageLoadEvent(self.windowId);
 }
 
@@ -2286,6 +2288,19 @@ void WKWebViewBackend::ExecuteJs(uint32_t window_id, const std::string& script,
           callback(nullptr, nullptr, callback_data);
         return;
       }
+      if (getenv("LAUFEY_DIAG")) {
+        NSWindow* dw = state->window;
+        NSRect df = dw.frame;
+        NSMutableString* order = [NSMutableString string];
+        for (NSWindow* o in NSApp.orderedWindows) [order appendFormat:@"%ld ", (long)o.windowNumber];
+        pid_t wpid = 0;
+        if ([state->webview respondsToSelector:NSSelectorFromString(@"_webProcessIdentifier")])
+          wpid = ((pid_t(*)(id, SEL))objc_msgSend)(state->webview, NSSelectorFromString(@"_webProcessIdentifier"));
+        fprintf(stderr, "DIAG evaljs win=%u num=%ld visible=%d occl=%lu key=%d active=%d loading=%d url=%s wpid=%d frame=%.0f,%.0f,%.0f,%.0f order=%s\n",
+                window_id, (long)dw.windowNumber, (int)dw.isVisible, (unsigned long)dw.occlusionState, (int)dw.isKeyWindow, (int)NSApp.isActive,
+                (int)state->webview.isLoading, state->webview.URL.absoluteString.UTF8String ?: "(nil)", (int)wpid,
+                df.origin.x, df.origin.y, df.size.width, df.size.height, order.UTF8String);
+      }
       if (!callback) {
         [state->webview
             evaluateJavaScript:[NSString
@@ -2296,6 +2311,7 @@ void WKWebViewBackend::ExecuteJs(uint32_t window_id, const std::string& script,
       [state->webview
           evaluateJavaScript:[NSString stringWithUTF8String:scriptCopy.c_str()]
            completionHandler:^(id result, NSError* error) {
+             if (getenv("LAUFEY_DIAG")) fprintf(stderr, "DIAG evaljs-done win=%u err=%s\n", window_id, error ? error.localizedDescription.UTF8String : "-");
              if (error) {
                std::string errMsg = [[error localizedDescription] UTF8String];
                auto errVal = laufey::Value::String(errMsg);

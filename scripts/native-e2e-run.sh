@@ -326,7 +326,8 @@ if [ "$mode" = "--bridge-origin" ]; then
   trap 'rm -f "$launch_file" "$colocated_rt"' EXIT
   # First without the runtime: a packaged app that ships none must exit at
   # once with status 3 and say why, not wait (a dialog, an empty window).
-  missing_log="$(mktemp "${TMPDIR:-/tmp}/native-e2e-missing.XXXXXX")"
+  missing_export LAUFEY_DIAG=1
+log="$(mktemp "${TMPDIR:-/tmp}/native-e2e-missing.XXXXXX")"
   missing_cmd=("$bin")
   if [ "$(uname -s)" = Linux ]; then
     missing_cmd=(xvfb-run -a "$bin")

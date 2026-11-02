@@ -1,0 +1,54 @@
+# TEMPORARY: measures and diagnoses the bridge-origin flake on macos-15.
+name: diag-bridge-origin
+on:
+  push:
+    branches: [fix/native-e2e-flakes]
+    paths: [.github/workflows/diag-bridge-origin.yml, .github/diag-trigger]
+permissions:
+  contents: read
+jobs:
+  loop:
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: native-e2e
+          key: macos-15-webview
+      - run: brew install llvm ninja
+      - run: cargo build --release -p native_e2e_runtime
+      - run: make webview
+      - name: Layer 0 (as in the job, to reproduce its state)
+        continue-on-error: true
+        timeout-minutes: 10
+        run: scripts/native-e2e-run.sh webview > layer0.log 2>&1 || { echo "layer0 failed"; grep 'FAIL ' layer0.log | head; }
+      - name: Loop bridge-origin
+        timeout-minutes: 40
+        run: |
+          fails=0; total=0
+          end=$(( $(date +%s) + 35*60 ))
+          for i in $(seq 1 ${DIAG_N:-60}); do
+            [ "$(date +%s)" -lt "$end" ] || break
+            total=$((total+1))
+            if scripts/native-e2e-run.sh webview --bridge-origin > run.log 2>&1 </dev/null; then
+              echo "iter $i PASS $(grep -c 'evaljs' run.log) evals"; grep '^DIAG-T' run.log | tail -1 || true
+            else
+              fails=$((fails+1))
+              echo "::group::iter $i FAIL"; cut -c1-400 run.log; echo "::endgroup::"
+              if [ "$fails" -le 3 ]; then
+                /usr/bin/log show --last 3m --info --debug --style compact --predicate 'subsystem == "com.apple.WebKit" OR process CONTAINS "laufey_webview"' 2>/dev/null | cut -c1-300 > "webkit-$i.log" || true
+              fi
+            fi
+          done
+          echo "RESULT $fails failed of $total"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: diag
+          path: |
+            webkit-*.log
+            layer0.log

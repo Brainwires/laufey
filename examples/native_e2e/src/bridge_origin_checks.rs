@@ -116,6 +116,24 @@ pub async fn run() {
     &format!("bridge-origin: another origin's document gets no bridge namespace ({ns:?})"),
     ns.as_deref() == Some(format!("{NO_ORIGIN} undefined").as_str()),
   );
+  if ns.is_none() {
+    let diag = |tag: &str, v: Option<Value>| eprintln!("DIAG-PROBE {tag}: {:?}", v.and_then(|v| v.as_string().map(str::to_string)));
+    let n0 = ok_reports.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    eprintln!("DIAG-PROBE ok page reports: {n0} then {}", ok_reports.lock().unwrap().len());
+    let s = "document.visibilityState + ' ' + document.readyState + ' ' + location.href";
+    let r = eval(&ok_win, s).await; diag("ok_win answers", r);
+    let out = std::process::Command::new("sh").arg("-c").arg("ps axo pid,ppid,stat,%cpu,etime,comm | grep -i 'webkit\\|laufey' | cut -c1-140; sample $PPID 1 -mayDie 2>&1 | head -60 | cut -c1-140").output();
+    if let Ok(o) = out { eprintln!("DIAG-PS\n{}", String::from_utf8_lossy(&o.stdout)); }
+    no_win.set_position(0, 0);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    no_win.focus();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let r = eval(&no_win, s).await; diag("no_win after moving and focus", r);
+    no_win.set_level(laufey::LAUFEY_WINDOW_LEVEL_FLOATING);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let r = eval(&no_win, s).await; diag("no_win floating", r);
+  }
   let forge = r#"(function () {
   var m = {callId: 7, method: 'originReport', args: ['forged', 'forged']};
   try { window.webkit.messageHandlers.laufey.postMessage(m); } catch (e) {}
