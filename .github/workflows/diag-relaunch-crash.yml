@@ -40,14 +40,26 @@ jobs:
         env:
           LAUFEY_E2E_STRESS_SCHEME: lsstress
         run: |
+          # Round 2: every core kept busy at the default QoS (the failing run
+          # took 654 s for 200 launches, against ~450 s usually) and two
+          # independent chains at once.
+          loaders=""
+          for _ in $(seq 1 "$(sysctl -n hw.ncpu)"); do nice -n 5 yes > /dev/null & loaders+=" $!"; done
           end=$(( $(date +%s) + ${DIAG_MINUTES:-44}*60 ))
-          rounds=0
-          while [ "$(date +%s)" -lt "$end" ]; do
-            rounds=$((rounds+1))
-            scripts/storage-stress-e2e-run.sh cef 100 </dev/null > "round-$rounds.log" 2>&1 || true
-            grep -E '^\[stress-e2e\] (FAIL|[0-9]+ launches)' "round-$rounds.log" | cut -c1-300 || true
-          done
-          echo "== totals over $rounds rounds:"
+          chain() {
+            local c=$1 rounds=0
+            mkdir -p "$RUNNER_TEMP/c$c"
+            while [ "$(date +%s)" -lt "$end" ]; do
+              rounds=$((rounds+1))
+              TMPDIR="$RUNNER_TEMP/c$c" scripts/storage-stress-e2e-run.sh cef 100 </dev/null > "round-$c-$rounds.log" 2>&1 || true
+              grep -E '^\[stress-e2e\] (FAIL|[0-9]+ launches)' "round-$c-$rounds.log" | sed "s/^/c$c /" | cut -c1-300 || true
+            done
+          }
+          chain 1 & p1=$!
+          chain 2 & p2=$!
+          wait "$p1" "$p2" || true
+          kill $loaders || true
+          echo "== totals:"
           cat round-*.log | grep -E '^\[stress-e2e\] [0-9]+ launches' |
             awk '{n+=$2; lost+=$7; other+=$14; hung+=$17} END {print "launches", n, "lost", lost, "other", other, "hung", hung}'
           echo "segfaults: $(cat round-*.log | grep -c 'Segmentation fault' || true)"
