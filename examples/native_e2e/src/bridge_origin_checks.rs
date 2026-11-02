@@ -37,7 +37,7 @@ setInterval(() => {
 pub fn serve(req: SchemeRequest) -> Option<SchemeRequest> {
   let path = req.url.split(['?', '#']).next().unwrap_or("").to_string();
   let path = path.trim_end_matches('/');
-  if path.ends_with("/third") || path == OK_ORIGIN || path == NO_ORIGIN {
+  if path == OK_ORIGIN || path == NO_ORIGIN {
     respond(req, 200, "text/html; charset=utf-8", PAGE_HTML.as_bytes());
     return None;
   }
@@ -86,7 +86,6 @@ pub async fn run() {
   let ok_reports: Reports = Arc::new(Mutex::new(Vec::new()));
   let no_reports: Reports = Arc::new(Mutex::new(Vec::new()));
   let ok_win = window(&format!("{OK_ORIGIN}/"), &ok_reports);
-  let no_win = window(&format!("{NO_ORIGIN}/"), &no_reports);
 
   let arrived =
     wait_for(|| !ok_reports.lock().unwrap().is_empty(), 150, 100).await;
@@ -104,6 +103,12 @@ pub async fn run() {
     );
   }
 
+  // Opened once the first page is live, not beside it. On a virtual GPU
+  // (a macOS runner) two web processes starting together can both open Metal's
+  // on-disk shader cache, and now and then the loser blocks in flock() until
+  // the winner exits, so its page never loads: docs/e2e-testing.md.
+  let no_win = window(&format!("{NO_ORIGIN}/"), &no_reports);
+
   // The other origin: no namespace, and a call posted to the engine's own
   // message channel (the page knows the bridge's message format) is refused.
   let ns = eval(
@@ -116,38 +121,6 @@ pub async fn run() {
     &format!("bridge-origin: another origin's document gets no bridge namespace ({ns:?})"),
     ns.as_deref() == Some(format!("{NO_ORIGIN} undefined").as_str()),
   );
-  if ns.is_none() {
-    let diag = |tag: &str, v: Option<Value>| eprintln!("DIAG-PROBE {tag}: {:?}", v.and_then(|v| v.as_string().map(str::to_string)));
-    let n0 = ok_reports.lock().unwrap().len();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    eprintln!("DIAG-PROBE ok page reports: {n0} then {}", ok_reports.lock().unwrap().len());
-    let s = "document.visibilityState + ' ' + document.readyState + ' ' + location.href";
-    let r = eval(&ok_win, s).await; diag("ok_win answers", r);
-    let probe = r#"
-for p in $(pgrep -f com.apple.WebKit.WebContent); do
-  echo "--- WebContent $p"; ps -o pid,stat,%cpu,time,etime,wchan -p $p
-  sudo -n sample $p 1 -mayDie 2>&1 | grep -v '^$' | grep -E "flock|Call graph|main-thread" | cut -c1-170
-  echo "--- log $p"; /usr/bin/log show --last 5m --info --debug --style compact --predicate "processIdentifier == $p" 2>/dev/null | grep -iE "metal|fscache" | head -30 | cut -c1-260
-done
-echo "--- lsof"; sudo -n lsof -nP 2>/dev/null | grep -E 'com.apple.metal|functions\.|fscache|FSCache' | cut -c1-220
-for s in com.apple.WebKit.Networking; do for p in $(pgrep -f $s); do echo "--- $s $p"; sudo -n sample $p 1 -mayDie 2>&1 | grep -v '^$' | sed -n 20,70p | cut -c1-170; done; done
-"#;
-    let out = std::process::Command::new("sh").arg("-c").arg(probe).output();
-    if let Ok(o) = out { eprintln!("DIAG-PS\n{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)); }
-    ok_win.close();
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let out = std::process::Command::new("sh").arg("-c").arg("sudo -n lsof -nP 2>/dev/null | grep -E 'com.apple.metal|functions\\.|fscache|FSCache' | cut -c1-220").output();
-    if let Ok(o) = out { eprintln!("DIAG-LSOF after close\n{}", String::from_utf8_lossy(&o.stdout)); }
-    let r = eval(&no_win, s).await; diag("no_win after the other window closed", r);
-    no_win.set_position(0, 0);
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    no_win.focus();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let r = eval(&no_win, s).await; diag("no_win after moving and focus", r);
-    no_win.set_level(laufey::LAUFEY_WINDOW_LEVEL_FLOATING);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let r = eval(&no_win, s).await; diag("no_win floating", r);
-  }
   let forge = r#"(function () {
   var m = {callId: 7, method: 'originReport', args: ['forged', 'forged']};
   try { window.webkit.messageHandlers.laufey.postMessage(m); } catch (e) {}

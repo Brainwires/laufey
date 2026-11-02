@@ -33,7 +33,7 @@ jobs:
         run: |
           fails=0; total=0
           end=$(( $(date +%s) + 35*60 ))
-          for i in $(seq 1 200); do
+          for i in $(seq 1 230); do
             [ "$(date +%s)" -lt "$end" ] || break
             total=$((total+1))
             if scripts/native-e2e-run.sh webview --bridge-origin > run.log 2>&1 </dev/null; then
@@ -42,7 +42,7 @@ jobs:
               fails=$((fails+1))
               grep -q 'FAIL bridge-origin' run.log || { cut -c1-300 run.log | tail -20; echo "harness error"; exit 1; }
               echo "::group::iter $i FAIL"; cut -c1-400 run.log; echo "::endgroup::"
-              if grep -q DIAG-PS run.log; then echo "STACKS at $i"; break; fi
+              
               if [ "$fails" -le 3 ]; then
                 /usr/bin/log show --last 3m --info --debug --style compact --predicate 'subsystem == "com.apple.WebKit" OR process CONTAINS "laufey_webview"' 2>/dev/null | cut -c1-300 > "webkit-$i.log" || true
               fi
