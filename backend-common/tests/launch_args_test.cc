@@ -54,7 +54,7 @@ static void TestRuntimeOption() {
 
 static void TestUrlArguments() {
   EXPECT(IsUrlArgument("acme://open/doc"));
-  EXPECT(IsUrlArgument("t3code:bare"));
+  EXPECT(IsUrlArgument("myapp:bare"));
   EXPECT(IsUrlArgument("a+b.c-d://x"));
   EXPECT(IsUrlArgument("HTTPS://example.com"));
   // A drive letter, a file URL, a path, a flag: not deep links.
@@ -292,8 +292,8 @@ static void TestMissingPackagedRuntime() {
   EXPECT(IsMissingPackagedRuntime(c));
   c.path = "/app/my.so";
   EXPECT(!IsMissingPackagedRuntime(c));
-  c = ChooseRuntimePath({"--runtime", "/arg.so"}, "/env.so", {"/app/my.so"},
-                        {}, true, Files({"/arg.so", "/env.so"}));
+  c = ChooseRuntimePath({"--runtime", "/arg.so"}, "/env.so", {"/app/my.so"}, {},
+                        true, Files({"/arg.so", "/env.so"}));
   EXPECT(IsMissingPackagedRuntime(c));
   c = ChooseRuntimePath({}, "/env.so", {"/app/my.so"}, {}, false, Files({}));
   EXPECT(!IsMissingPackagedRuntime(c));

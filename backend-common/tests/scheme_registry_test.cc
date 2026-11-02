@@ -40,7 +40,7 @@ using laufey_common::SchemeRegistry;
 
 static void TestSchemeNameGrammar() {
   EXPECT(IsValidSchemeName("app"));
-  EXPECT(IsValidSchemeName("t3code"));
+  EXPECT(IsValidSchemeName("myapp"));
   EXPECT(IsValidSchemeName("my-app.v2+x"));
   EXPECT(IsValidSchemeName("A"));
   EXPECT(IsValidSchemeName("MyApp"));
@@ -56,11 +56,28 @@ static void TestSchemeNameGrammar() {
 
   // Schemes the engines already give a meaning to can't be taken over, in
   // any case; they still follow the grammar (OriginScheme reads them).
-  for (const char* reserved :
-       {"http", "https", "file", "ws", "wss", "data", "blob", "javascript",
-        "about", "ftp", "filesystem", "chrome", "chrome-extension",
-        "chrome-untrusted", "devtools", "view-source", "HTTPS", "JavaScript",
-        "File", "Data", "BLOB", "View-Source"}) {
+  for (const char* reserved : {"http",
+                               "https",
+                               "file",
+                               "ws",
+                               "wss",
+                               "data",
+                               "blob",
+                               "javascript",
+                               "about",
+                               "ftp",
+                               "filesystem",
+                               "chrome",
+                               "chrome-extension",
+                               "chrome-untrusted",
+                               "devtools",
+                               "view-source",
+                               "HTTPS",
+                               "JavaScript",
+                               "File",
+                               "Data",
+                               "BLOB",
+                               "View-Source"}) {
     EXPECT(IsSchemeNameGrammar(reserved));
     EXPECT(IsReservedSchemeName(reserved));
     EXPECT(!IsValidSchemeName(reserved));
@@ -75,7 +92,7 @@ static void TestSchemeNameGrammar() {
 
   EXPECT(NormalizeSchemeName("MyApp") == "myapp");
   EXPECT(NormalizeSchemeName("app") == "app");
-  EXPECT(NormalizeSchemeName("T3-Code.X+Y") == "t3-code.x+y");
+  EXPECT(NormalizeSchemeName("My-App.X+Y") == "my-app.x+y");
 }
 
 static void TestRegistryDefaults() {
@@ -83,7 +100,7 @@ static void TestRegistryDefaults() {
   EXPECT(registry.size() == 1);
   EXPECT(registry.Contains("app"));
   EXPECT(registry.Contains("APP"));
-  EXPECT(!registry.Contains("t3code"));
+  EXPECT(!registry.Contains("myapp"));
   std::vector<std::string> snapshot = registry.Snapshot();
   EXPECT(snapshot.size() == 1);
   EXPECT(snapshot[0] == "app");
@@ -99,11 +116,11 @@ static void TestRegistryAdd() {
 
   // A new scheme reports true once, then false (already present), and is
   // stored lowercase regardless of how it was spelled.
-  EXPECT(registry.Add("t3code"));
-  EXPECT(!registry.Add("t3code"));
-  EXPECT(!registry.Add("T3Code"));
-  EXPECT(registry.Contains("t3code"));
-  EXPECT(registry.Contains("T3CODE"));
+  EXPECT(registry.Add("myapp"));
+  EXPECT(!registry.Add("myapp"));
+  EXPECT(!registry.Add("MyApp"));
+  EXPECT(registry.Contains("myapp"));
+  EXPECT(registry.Contains("MYAPP"));
 
   // Invalid names are rejected without being stored.
   EXPECT(!registry.Add(""));
@@ -121,7 +138,7 @@ static void TestRegistryAdd() {
   std::vector<std::string> snapshot = registry.Snapshot();
   EXPECT(snapshot.size() == 4);
   EXPECT(snapshot[0] == "app");
-  EXPECT(snapshot[1] == "t3code");
+  EXPECT(snapshot[1] == "myapp");
   EXPECT(snapshot[2] == "zeta");
   EXPECT(snapshot[3] == "alpha");
   EXPECT(registry.size() == 4);
@@ -172,14 +189,14 @@ static void TestParseSchemeList() {
   EXPECT(empty.empty());
   EXPECT(rejected.empty());
 
-  std::vector<std::string> one = ParseSchemeList("t3code", &rejected);
-  EXPECT(one.size() == 1 && one[0] == "t3code");
+  std::vector<std::string> one = ParseSchemeList("myapp", &rejected);
+  EXPECT(one.size() == 1 && one[0] == "myapp");
 
   // Whitespace, case, duplicates and empty entries.
   std::vector<std::string> many =
-      ParseSchemeList(" T3Code , other,,t3code, third ", &rejected);
+      ParseSchemeList(" MyApp , other,,myapp, third ", &rejected);
   EXPECT(many.size() == 3);
-  EXPECT(many[0] == "t3code");
+  EXPECT(many[0] == "myapp");
   EXPECT(many[1] == "other");
   EXPECT(many[2] == "third");
   EXPECT(rejected.empty());
@@ -315,26 +332,26 @@ static void TestLocalNetworkPrompt() {
   const uint32_t kLna = 1u << 25, kLocal = 1u << 26, kLoopback = 1u << 27;
   const uint32_t kMask = kLna | kLocal | kLoopback;
   const uint32_t kCamera = 1u << 2, kNotifications = 1u << 15;
-  const std::vector<std::string> declared = MergeSchemeLists({"t3code"});
+  const std::vector<std::string> declared = MergeSchemeLists({"myapp"});
   using D = LocalNetworkPromptDecision;
 
   // The embedder's own origins get local network access.
-  EXPECT(DecideLocalNetworkPrompt("t3code://app", kLoopback, kMask,
-                                  declared) == D::kAccept);
-  EXPECT(DecideLocalNetworkPrompt("t3code://app/", kLna, kMask, declared) ==
+  EXPECT(DecideLocalNetworkPrompt("myapp://app", kLoopback, kMask, declared) ==
          D::kAccept);
-  EXPECT(DecideLocalNetworkPrompt("T3Code://app", kLocal | kLoopback, kMask,
+  EXPECT(DecideLocalNetworkPrompt("myapp://app/", kLna, kMask, declared) ==
+         D::kAccept);
+  EXPECT(DecideLocalNetworkPrompt("MyApp://app", kLocal | kLoopback, kMask,
                                   declared) == D::kAccept);
   EXPECT(DecideLocalNetworkPrompt("app://localhost", kLoopback, kMask,
                                   declared) == D::kAccept);
-  EXPECT(IsLocalNetworkTrustedOrigin("t3code://other-host", declared));
+  EXPECT(IsLocalNetworkTrustedOrigin("myapp://other-host", declared));
 
   // Everyone else is denied: remote and loopback http(s), file, data, an
   // opaque origin, a scheme that wasn't declared at launch.
   for (const char* origin :
        {"https://example.com", "http://example.com", "http://127.0.0.1:8080",
         "http://localhost:3000", "file:///tmp/x.html", "null", "",
-        "data:text/html,x", "other://app", "t3codex://app"}) {
+        "data:text/html,x", "other://app", "myappx://app"}) {
     EXPECT(!IsLocalNetworkTrustedOrigin(origin, declared));
     EXPECT(DecideLocalNetworkPrompt(origin, kLoopback, kMask, declared) ==
            D::kDeny);
@@ -342,20 +359,20 @@ static void TestLocalNetworkPrompt() {
 
   // A prompt that bundles another permission is never granted through this
   // path, not even for the app's origin.
-  EXPECT(DecideLocalNetworkPrompt("t3code://app", kLoopback | kCamera, kMask,
+  EXPECT(DecideLocalNetworkPrompt("myapp://app", kLoopback | kCamera, kMask,
                                   declared) == D::kDeny);
 
   // Prompts without a local network bit keep the default handling,
   // whatever the origin.
-  EXPECT(DecideLocalNetworkPrompt("t3code://app", kNotifications, kMask,
+  EXPECT(DecideLocalNetworkPrompt("myapp://app", kNotifications, kMask,
                                   declared) == D::kDefault);
   EXPECT(DecideLocalNetworkPrompt("https://example.com", kCamera, kMask,
                                   declared) == D::kDefault);
-  EXPECT(DecideLocalNetworkPrompt("t3code://app", 0, kMask, declared) ==
+  EXPECT(DecideLocalNetworkPrompt("myapp://app", 0, kMask, declared) ==
          D::kDefault);
 
   // With only "app" declared, a custom scheme is not trusted.
-  EXPECT(DecideLocalNetworkPrompt("t3code://app", kLoopback, kMask,
+  EXPECT(DecideLocalNetworkPrompt("myapp://app", kLoopback, kMask,
                                   MergeSchemeLists({})) == D::kDeny);
 }
 
