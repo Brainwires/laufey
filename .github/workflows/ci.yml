@@ -1110,6 +1110,16 @@ jobs:
           { ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null || echo "no crash report" >&2; } |
             head -3 |
             while read -r f; do python3 scripts/print-crash-report.py "$f"; done
+          # The whole reports, to symbolize against CEF's release symbols
+          # (cef-builds' *_release_symbols archive) after the run.
+          mkdir -p "$RUNNER_TEMP/crash-reports"
+          cp ~/Library/Logs/DiagnosticReports/*.ips "$RUNNER_TEMP/crash-reports/" 2>/dev/null || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() && runner.os == 'macOS'
+        with:
+          name: crash-reports-native-e2e-${{ matrix.backend }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/crash-reports/
+          if-no-files-found: ignore
 
   build-webview:
     name: webview / ${{ matrix.target }}
@@ -1429,6 +1439,22 @@ jobs:
         run: |
           cargo build --release -p storage_e2e_runtime
           scripts/storage-stress-e2e-run.sh cef 200
+      # A launch that died by a signal has its report printed by the stress
+      # script; keep the whole reports to symbolize against CEF's release
+      # symbols after the run.
+      - name: Collect crash reports (macOS)
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/crash-reports"
+          cp ~/Library/Logs/DiagnosticReports/*.ips "$RUNNER_TEMP/crash-reports/" 2>/dev/null || true
+          ls "$RUNNER_TEMP/crash-reports"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() && runner.os == 'macOS'
+        with:
+          name: crash-reports-cef-${{ matrix.target }}
+          path: ${{ runner.temp }}/crash-reports/
+          if-no-files-found: ignore
 
       # The host runs a headless launch (`run <script>`: a forked worker, the
       # full-app updater's helper) to its end, past the bounded wait a
