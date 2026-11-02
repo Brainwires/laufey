@@ -234,12 +234,12 @@ ends.
 
 The second window opens once the first page is live. On a macOS 15 runner, where
 Core Animation's precompiled pipelines are off for the virtual GPU, two web
-processes starting in the same moment open Metal's on-disk shader cache together,
-and in about 2% of runs one blocks in `flock()` for as long as the other lives.
-Its main thread never comes back from the first layer commit, so its page never
-requests its document or answers a script; closing the other window frees it at
-once. The system's `sample` and `lsof` show this, and no laufey code is on either
-stack.
+processes starting in the same moment open Metal's on-disk shader cache
+together, and in about 2% of runs one blocks in `flock()` for as long as the
+other lives. Its main thread never comes back from the first layer commit, so
+its page never requests its document or answers a script; closing the other
+window frees it at once. The system's `sample` and `lsof` show this, and no
+laufey code is on either stack.
 
 Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
 and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body

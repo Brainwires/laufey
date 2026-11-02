@@ -13,6 +13,9 @@ MAKE_VERSION=4.4.1
 NINJA_VERSION=1.13.2
 
 tools="${LAUFEY_TOOLS_DIR:-${RUNNER_TEMP:?}/laufey-tools}"
+if command -v cygpath >/dev/null; then
+  tools="$(cygpath -u "$tools")"
+fi
 mkdir -p "$tools"
 
 # fetch <dest> <url> <sha256>: true once <dest> holds exactly those bytes.
@@ -24,7 +27,8 @@ fetch() {
     return 1
   fi
   local got
-  got="$(sha256sum "$1" | cut -d' ' -f1)"
+  # From stdin: sha256sum escapes the hash of a path holding a backslash.
+  got="$(sha256sum <"$1" | cut -d' ' -f1)"
   if [ "$got" != "$3" ]; then
     echo "SHA-256 mismatch for $2: got $got, expected $3" >&2
     rm -f "$1"
