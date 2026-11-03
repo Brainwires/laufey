@@ -186,12 +186,12 @@ transports). The sheet is attached to the NSWindow of `window_id` (the key /
 main / first visible window for `0`). All of it runs on the main thread.
 
 The first request after the machine starts is slower, whatever the backend:
-macOS launches its AuthenticationServices agent on demand, which took about
-0.5 s on Apple silicon and up to 2 s on Intel on fresh CI machines. Once the
-agent runs, a request the OS refuses at once (an unsigned host's `invalid_rp`)
-answers in a few milliseconds on WebView and CEF alike. So a comparison of two
-backends must warm the agent first, or the backend that runs first pays for the
-agent's launch. Give the first ceremony a generous timeout.
+macOS launches its AuthenticationServices agent on demand, which took about 0.5
+s on Apple silicon and up to 2 s on Intel on fresh CI machines. Once the agent
+runs, a request the OS refuses at once (an unsigned host's `invalid_rp`) answers
+in a few milliseconds on WebView and CEF alike. So a comparison of two backends
+must warm the agent first, or the backend that runs first pays for the agent's
+launch. Give the first ceremony a generous timeout.
 
 **The OS builds `clientDataJSON` itself** from the RP ID, with origin
 `https://<rpId>`; the server sees the same as from Safari on that domain.
