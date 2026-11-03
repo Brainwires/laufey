@@ -112,6 +112,17 @@ struct WinWindowState {
   ComPtr<ICoreWebView2Controller> controller;
   ComPtr<ICoreWebView2> webview;
   bool webview_ready = false;
+  // The web view will never be ready: its environment or controller failed,
+  // or kWebViewReadyTimeoutMs passed since the window was created.
+  bool webview_failed = false;
+  // Calls that need the web view (print_to_pdf, execute_js, open_devtools)
+  // made before it was ready. Each runs once with a null error when it is
+  // ready, or with an error when it never will be (kWebViewNotReady) or the
+  // window closes ("window not found"). UI thread, under windows_mutex_.
+  std::vector<std::function<void(const char* error)>> ready_waiters;
+  // The thread timer that ends the wait (SetTimer with no window); 0 once
+  // the web view is ready or has failed.
+  UINT_PTR ready_timer = 0;
   std::wstring pending_url;
   std::wstring pending_title;
   // LAUFEY_BACKDROP_* behind the page (API 38); not NONE means the client
@@ -136,6 +147,18 @@ struct WinWindowState {
 
 // Custom window message for UI tasks
 #define WM_UI_TASK (WM_USER + 1)
+
+// How long a window's web view may take to become ready, from the window's
+// creation, before calls waiting for it are answered with kWebViewNotReady.
+// WebView2 creates its environment and controller asynchronously; on a busy
+// machine the first environment has taken over 30 s. Shorter than the capi
+// layer's 60 s print_to_pdf watchdog, so a PDF asked for at creation gets
+// this error rather than the watchdog's timeout.
+constexpr UINT kWebViewReadyTimeoutMs = 45000;
+// The error a call that needs the web view answers when it never became
+// ready (distinct from "window not found", which means no such window).
+constexpr char kWebViewNotReady[] =
+    "web view not ready (its WebView2 controller was not created)";
 
 struct UiTaskData {
   void (*task)(void*);
@@ -324,6 +347,8 @@ void ClearWebView2EnvironmentOverrides() {
 
 class WebView2Backend;
 static WebView2Backend* g_win_backend = nullptr;
+// Web view readiness timers (SetTimer ids) → window id. UI thread only.
+static std::map<UINT_PTR, uint32_t> g_ready_timers;
 
 class WebView2Backend : public LaufeyBackend {
  public:
@@ -670,6 +695,24 @@ class WebView2Backend : public LaufeyBackend {
 
  private:
   WinWindowState* GetWindow(uint32_t window_id);
+  // Whether `state`'s web view can be used now. When it is still being
+  // created, `then` is queued to run once it is ready (null error) or never
+  // will be (an error), and false is returned with `*error` null: the caller
+  // returns and answers from `then`. When it never will be, false with
+  // `*error` set. UI thread, windows_mutex_ held.
+  bool WebViewReadyOrQueue(WinWindowState* state,
+                           std::function<void(const char* error)> then,
+                           const char** error);
+  // Ends `window_id`'s wait for its web view: marks it ready (error null) or
+  // failed, stops the timer and runs the queued calls with `error`. UI
+  // thread; takes windows_mutex_ and runs the calls after releasing it.
+  void SettleWebViewWaiters(uint32_t window_id, const char* error);
+  // Removes a closing window's queued calls, to be run with "window not
+  // found" once its state is gone. UI thread, windows_mutex_ held.
+  static std::vector<std::function<void(const char*)>> TakeWaiters(
+      WinWindowState* state);
+  static void CALLBACK OnWebViewReadyTimeout(HWND hwnd, UINT msg,
+                                             UINT_PTR timer, DWORD time);
   void InitializeWebViewForWindow(uint32_t window_id, HWND hwnd);
   // The custom schemes to register on a WebView2 environment. Every
   // environment this process creates shares one user data folder, and
@@ -1097,7 +1140,10 @@ bool WebView2Backend::RunOnUiThreadSync(std::function<void()> task) {
 
 WebView2Backend::~WebView2Backend() {
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  std::vector<std::function<void(const char*)>> waiters;
   for (auto& [wid, state] : windows_) {
+    for (auto& waiter : TakeWaiters(&state))
+      waiters.push_back(std::move(waiter));
     if (state.controller)
       state.controller->Close();
     {
@@ -1107,23 +1153,102 @@ WebView2Backend::~WebView2Backend() {
   }
   windows_.clear();
   g_win_backend = nullptr;
+  // Each queued call is answered exactly once, teardown included.
+  for (auto& waiter : waiters)
+    waiter("window not found");
 }
 
 void WebView2Backend::ForgetDestroyedWindow(uint32_t window_id) {
-  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
-  auto* state = GetWindow(window_id);
-  if (!state)
-    return;
-  // WM_DESTROY reaches the parent before its children are destroyed: the
-  // controller can still close cleanly here.
-  if (state->controller)
-    state->controller->Close();
-  windows_.erase(window_id);
+  std::vector<std::function<void(const char*)>> waiters;
+  {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state)
+      return;
+    waiters = TakeWaiters(state);
+    // WM_DESTROY reaches the parent before its children are destroyed: the
+    // controller can still close cleanly here.
+    if (state->controller)
+      state->controller->Close();
+    windows_.erase(window_id);
+  }
+  for (auto& waiter : waiters)
+    waiter("window not found");
 }
 
 WinWindowState* WebView2Backend::GetWindow(uint32_t window_id) {
   auto it = windows_.find(window_id);
   return it != windows_.end() ? &it->second : nullptr;
+}
+
+bool WebView2Backend::WebViewReadyOrQueue(
+    WinWindowState* state, std::function<void(const char* error)> then,
+    const char** error) {
+  *error = nullptr;
+  if (state->webview_ready && state->webview)
+    return true;
+  if (state->webview_failed) {
+    *error = kWebViewNotReady;
+    return false;
+  }
+  state->ready_waiters.push_back(std::move(then));
+  return false;
+}
+
+std::vector<std::function<void(const char*)>> WebView2Backend::TakeWaiters(
+    WinWindowState* state) {
+  if (state->ready_timer) {
+    KillTimer(nullptr, state->ready_timer);
+    g_ready_timers.erase(state->ready_timer);
+    state->ready_timer = 0;
+  }
+  std::vector<std::function<void(const char*)>> waiters;
+  waiters.swap(state->ready_waiters);
+  return waiters;
+}
+
+void WebView2Backend::SettleWebViewWaiters(uint32_t window_id,
+                                           const char* error) {
+  std::vector<std::function<void(const char*)>> waiters;
+  {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state)
+      return;
+    // A web view that turns up after the deadline still serves later calls.
+    state->webview_failed = error != nullptr;
+    waiters = TakeWaiters(state);
+  }
+  // A waiter that the web view is ready for re-enters its call, which finds
+  // it ready (windows_mutex_ is recursive, should a caller still hold it).
+  for (auto& waiter : waiters)
+    waiter(error);
+}
+
+void CALLBACK WebView2Backend::OnWebViewReadyTimeout(HWND /*hwnd*/,
+                                                     UINT /*msg*/,
+                                                     UINT_PTR timer,
+                                                     DWORD /*time*/) {
+  KillTimer(nullptr, timer);
+  auto it = g_ready_timers.find(timer);
+  if (it == g_ready_timers.end())
+    return;
+  uint32_t window_id = it->second;
+  g_ready_timers.erase(it);
+  if (!g_win_backend)
+    return;
+  {
+    std::lock_guard<std::recursive_mutex> lock(g_win_backend->windows_mutex_);
+    auto* state = g_win_backend->GetWindow(window_id);
+    if (!state || state->webview_ready)
+      return;
+    state->ready_timer = 0;
+  }
+  std::cerr << "laufey: window " << window_id << "'s web view was not ready "
+            << kWebViewReadyTimeoutMs / 1000
+            << " s after the window was created; calls waiting for it fail"
+            << std::endl;
+  g_win_backend->SettleWebViewWaiters(window_id, kWebViewNotReady);
 }
 
 void WebView2Backend::CreateWindow(uint32_t window_id, int width, int height) {
@@ -1224,6 +1349,20 @@ void WebView2Backend::InitializeWebViewForWindow(uint32_t window_id,
   // registered) first. If registering them makes environment creation fail,
   // CreateEnvironmentForWindow retries without them so the window still opens
   // for ordinary http(s)/TCP navigations.
+  {
+    // Calls made before the web view is ready wait for it, for
+    // kWebViewReadyTimeoutMs from here at most.
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (state && !state->ready_timer) {
+      UINT_PTR timer = SetTimer(nullptr, 0, kWebViewReadyTimeoutMs,
+                                &WebView2Backend::OnWebViewReadyTimeout);
+      if (timer) {
+        state->ready_timer = timer;
+        g_ready_timers[timer] = window_id;
+      }
+    }
+  }
   CreateEnvironmentForWindow(window_id, hwnd, SchemesForEnvironment());
 }
 
@@ -1291,6 +1430,7 @@ void WebView2Backend::CreateEnvironmentForWindow(
               }
               std::cerr << "Failed to create WebView2 environment (hr=0x"
                         << std::hex << result << std::dec << ")" << std::endl;
+              SettleWebViewWaiters(window_id, kWebViewNotReady);
               return result;
             }
             OnEnvironmentReady(window_id, hwnd, env, schemes);
@@ -1301,6 +1441,7 @@ void WebView2Backend::CreateEnvironmentForWindow(
     std::cerr << "CreateCoreWebView2EnvironmentWithOptions failed to start "
                  "(hr=0x"
               << std::hex << hr << std::dec << ")" << std::endl;
+    SettleWebViewWaiters(window_id, kWebViewNotReady);
   }
 }
 
@@ -1314,6 +1455,7 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
               HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
             if (FAILED(result) || !controller) {
               std::cerr << "Failed to create WebView2 controller" << std::endl;
+              SettleWebViewWaiters(window_id, kWebViewNotReady);
               return result;
             }
 
@@ -1729,6 +1871,9 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
               state->pending_title.clear();
             }
 
+            // The calls made while the web view was being created.
+            SettleWebViewWaiters(window_id,
+                                 state->webview ? nullptr : kWebViewNotReady);
             return S_OK;
           })
           .Get());
@@ -1739,19 +1884,25 @@ void WebView2Backend::CloseWindow(uint32_t window_id) {
     RunOnUiThread([this, window_id] { CloseWindow(window_id); });
     return;
   }
-  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
-  auto* state = GetWindow(window_id);
-  if (state) {
-    if (state->controller) {
-      state->controller->Close();
-      state->controller.Reset();
+  std::vector<std::function<void(const char*)>> waiters;
+  {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (state) {
+      waiters = TakeWaiters(state);
+      if (state->controller) {
+        state->controller->Close();
+        state->controller.Reset();
+      }
+      // Deliberately not erased from g_hwnd_to_laufey_id here: WM_DESTROY
+      // (sent synchronously by DestroyWindow) owns unregistration and the
+      // last-window quit check, for this path and the WM_CLOSE path alike.
+      DestroyWindow(state->hwnd);
+      windows_.erase(window_id);
     }
-    // Deliberately not erased from g_hwnd_to_laufey_id here: WM_DESTROY
-    // (sent synchronously by DestroyWindow) owns unregistration and the
-    // last-window quit check, for this path and the WM_CLOSE path alike.
-    DestroyWindow(state->hwnd);
-    windows_.erase(window_id);
   }
+  for (auto& waiter : waiters)
+    waiter("window not found");
 }
 
 void WebView2Backend::Navigate(uint32_t window_id, const std::string& url) {
@@ -1808,9 +1959,32 @@ void WebView2Backend::ExecuteJs(uint32_t window_id, const std::string& script,
   std::wstring wscript = Utf8ToWide(script);
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
-  if (!state || !state->webview_ready || !state->webview) {
+  if (!state) {
     if (callback)
       callback(nullptr, nullptr, callback_data);
+    return;
+  }
+  // A window whose web view is still being created runs the script once it
+  // is ready, as the other backends (whose engine exists with the window) do.
+  const char* not_ready = nullptr;
+  if (!WebViewReadyOrQueue(
+          state,
+          [this, window_id, script, callback,
+           callback_data](const char* error) {
+            if (!error) {
+              ExecuteJs(window_id, script, callback, callback_data);
+            } else if (callback) {
+              auto err_val = laufey::Value::String(error);
+              laufey_value err(err_val);
+              callback(nullptr, &err, callback_data);
+            }
+          },
+          &not_ready)) {
+    if (not_ready && callback) {
+      auto err_val = laufey::Value::String(not_ready);
+      laufey_value err(err_val);
+      callback(nullptr, &err, callback_data);
+    }
     return;
   }
   if (!callback) {
@@ -2875,7 +3049,17 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
   }
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
-  if (!state || !state->webview)
+  if (!state)
+    return;
+  // Asked for before the web view is ready: opened once it is.
+  const char* not_ready = nullptr;
+  if (!WebViewReadyOrQueue(
+          state,
+          [this, window_id](const char* error) {
+            if (!error)
+              OpenDevTools(window_id);
+          },
+          &not_ready))
     return;
   DWORD pid = static_cast<DWORD>(state->browser_pid);
   std::vector<HWND> before = DevToolsWindowsOf(pid);
@@ -3010,8 +3194,25 @@ void WebView2Backend::PrintToPdf(uint32_t window_id,
   {
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
-    if (!state || !state->webview_ready || !state->webview) {
+    if (!state) {
       callback(nullptr, 0, "window not found", callback_data);
+      return;
+    }
+    // A window whose web view is still being created (WebView2 makes its
+    // environment and controller asynchronously) renders once it is ready,
+    // or answers kWebViewNotReady if it never becomes ready.
+    const char* not_ready = nullptr;
+    if (!WebViewReadyOrQueue(
+            state,
+            [this, window_id, callback, callback_data](const char* error) {
+              if (error)
+                callback(nullptr, 0, error, callback_data);
+              else
+                PrintToPdf(window_id, callback, callback_data);
+            },
+            &not_ready)) {
+      if (not_ready)
+        callback(nullptr, 0, not_ready, callback_data);
       return;
     }
     webview = state->webview;

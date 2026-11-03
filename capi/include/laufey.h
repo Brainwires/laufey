@@ -1082,6 +1082,10 @@ struct laufey_backend_api {
 
   void (*navigate)(void* backend_data, uint32_t window_id, const char* url);
   void (*set_title)(void* backend_data, uint32_t window_id, const char* title);
+  // Run `script` in the window's page. Callable as soon as the window exists:
+  // a backend whose web engine is still starting (WebView2) runs the script
+  // once it is ready, or answers the "web view not ready ..." error (as
+  // print_to_pdf does) if it never becomes ready.
   void (*execute_js)(void* backend_data, uint32_t window_id, const char* script,
                      laufey_js_result_fn callback, void* callback_data);
   // End the event loop: the backend's run loop returns and the process shuts
@@ -1597,8 +1601,12 @@ struct laufey_backend_api {
   // callback fires on the UI thread once it completes, and the backend MUST
   // invoke it exactly once on every path, including internal scheduling
   // failures. Backends that cannot produce a PDF invoke the callback with an
-  // "unsupported" error rather than crashing. NULL on backends older than API
-  // version 32; callers must null-check.
+  // "unsupported" error rather than crashing. A window whose web engine is
+  // still starting (WebView2 creates its controller asynchronously) is
+  // rendered once the engine is ready; if it never becomes ready (WebView2:
+  // within 45 s of the window's creation) the error is "web view not ready
+  // ..." — "window not found" means only that no such window exists. NULL on
+  // backends older than API version 32; callers must null-check.
   void (*print_to_pdf)(void* backend_data, uint32_t window_id,
                        laufey_pdf_result_fn callback, void* callback_data);
 
