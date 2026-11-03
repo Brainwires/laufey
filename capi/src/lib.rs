@@ -1164,6 +1164,11 @@ fn create_window_with(
   } else {
     0
   };
+  // 0 is the backend's refusal (CEF refuses a window once the app is
+  // quitting): there is no window to size or show, and 0 is the result.
+  if id == 0 {
+    return 0;
+  }
   if let Some(f) = api.set_window_size {
     unsafe { f(api.backend_data, id, width, height) };
   }
@@ -4611,6 +4616,69 @@ mod tests {
         "size 7 240x160".to_string(),
       ]
     );
+  }
+
+  static REFUSED_CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+  unsafe extern "C" fn refusing_create_window(
+    _backend_data: *mut c_void,
+  ) -> u32 {
+    REFUSED_CALLS.lock().unwrap().push("create".into());
+    0
+  }
+
+  unsafe extern "C" fn refusing_create_window_ex(
+    _backend_data: *mut c_void,
+    flags: u32,
+  ) -> u32 {
+    REFUSED_CALLS
+      .lock()
+      .unwrap()
+      .push(format!("create_ex {flags:#x}"));
+    0
+  }
+
+  unsafe extern "C" fn refused_set_window_size(
+    _backend_data: *mut c_void,
+    window_id: u32,
+    _width: c_int,
+    _height: c_int,
+  ) {
+    REFUSED_CALLS
+      .lock()
+      .unwrap()
+      .push(format!("size {window_id}"));
+  }
+
+  unsafe extern "C" fn refused_show(
+    _backend_data: *mut c_void,
+    window_id: u32,
+  ) {
+    REFUSED_CALLS
+      .lock()
+      .unwrap()
+      .push(format!("show {window_id}"));
+  }
+
+  // One test: the calls go through one static.
+  #[test]
+  fn a_refused_creation_is_neither_sized_nor_shown() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    fake.create_window = Some(refusing_create_window);
+    fake.create_window_ex = Some(refusing_create_window_ex);
+    fake.set_window_size = Some(refused_set_window_size);
+    fake.show = Some(refused_show);
+    let overlay = WindowOptions {
+      overlay: true,
+      ..Default::default()
+    };
+    for options in [WindowOptions::default(), overlay] {
+      REFUSED_CALLS.lock().unwrap().clear();
+      assert_eq!(create_window_with(&fake, 240, 160, options), 0);
+      let calls = std::mem::take(&mut *REFUSED_CALLS.lock().unwrap());
+      assert_eq!(calls.len(), 1, "{calls:?}");
+      assert!(calls[0].starts_with("create"), "{calls:?}");
+    }
   }
 
   #[test]
