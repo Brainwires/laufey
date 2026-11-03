@@ -258,8 +258,10 @@ mod tests {
   use super::*;
   use std::sync::Mutex as StdMutex;
 
-  static CALLS: StdMutex<Vec<(u32, c_int, f64, f64, Option<Vec<String>>)>> =
-    StdMutex::new(Vec::new());
+  /// (window id, phase, x, y, paths) as the callback received them.
+  type Call = (u32, c_int, f64, f64, Option<Vec<String>>);
+
+  static CALLS: StdMutex<Vec<Call>> = StdMutex::new(Vec::new());
 
   unsafe extern "C" fn record(
     _ud: *mut c_void,

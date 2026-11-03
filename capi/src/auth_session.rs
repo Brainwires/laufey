@@ -351,7 +351,9 @@ mod tests {
     fake.auth_session_cancel = Some(fake_cancel);
     let before = CANCEL_CALLS.load(std::sync::atomic::Ordering::SeqCst);
     assert!(!auth_session_cancel_with(&fake));
-    fake.backend_data = 1 as *mut c_void;
+    // Any non-null pointer means "running"; point it at a live local.
+    let mut running = 0u8;
+    fake.backend_data = (&raw mut running).cast::<c_void>();
     assert!(auth_session_cancel_with(&fake));
     assert_eq!(
       CANCEL_CALLS.load(std::sync::atomic::Ordering::SeqCst) - before,
