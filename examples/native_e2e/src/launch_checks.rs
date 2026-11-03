@@ -15,9 +15,10 @@
 //! The battery opens, in this order:
 //!   1. a window created hidden and never shown: launching must not reveal it;
 //!   2. the launch window, created hidden and shown once its page has loaded
-//!      (the reveal Deno Desktop uses): its page load is reported, it is
-//!      visible, and a frame is drawn within `FRAME_BUDGET`; the page's
-//!      `outerWidth` / `outerHeight` are the window's frame, not 0;
+//!      (the reveal Deno Desktop uses): its page load is reported, it is not
+//!      visible before that show and is after it, and a frame is drawn within
+//!      `FRAME_BUDGET`; the page's `outerWidth` / `outerHeight` are the
+//!      window's frame, not 0;
 //!   3. a second ordinary window, left unfocused when the launch window is
 //!      focused again: visible, and frames are not throttled for lacking
 //!      focus;
@@ -155,9 +156,16 @@ fn page(title: &str) -> String {
   format!("laufey-e2e://app/titled/{title}")
 }
 
+/// Whether `backend` keeps a window created hidden off screen until it is
+/// shown. The WebView backends and CEF do; Winit windows show at creation.
+fn hides_on_create(backend: &str) -> bool {
+  backend == "webview" || backend == "cef"
+}
+
 pub async fn run() {
   let engine = laufey::scheme_handlers_supported();
   let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  let hides = hides_on_create(&backend);
 
   // 1. Created hidden, never shown.
   let hidden_title = "native-e2e-launch-hidden";
@@ -171,6 +179,15 @@ pub async fn run() {
   )
   .title(hidden_title)
   .load(&page(hidden_title));
+  // The launch window opens once this page is live, not beside it. On a
+  // virtual GPU (a macOS runner) two web processes starting together can
+  // both open Metal's on-disk shader cache, and now and then the loser
+  // blocks in flock() until the winner exits: docs/e2e-testing.md. Both
+  // windows are still created before the launch reveal.
+  #[cfg(target_os = "macos")]
+  if engine {
+    let _ = page_answers(&hidden).await;
+  }
 
   // 2. The launch window, revealed once its page has loaded.
   let launch_title = "native-e2e-launch";
@@ -193,11 +210,24 @@ pub async fn run() {
     // Engine-less backends never load a page; reveal at once there. A
     // backend with an engine must report the load: it is what reveals a
     // window created hidden (CEF reported none, and showed every window at
-    // creation instead until Linux honoured the hidden flag).
+    // creation instead until it honoured the hidden flag).
     check(
       "the launch window's page load is reported (on_page_load)",
       wait_for(|| loaded.load(Ordering::SeqCst), 200, 50).await,
     );
+  }
+  // Created hidden, its page loaded: still not on screen until show() (CEF
+  // on macOS and Windows showed it at creation).
+  if hides {
+    check(
+      "the launch window, created hidden, is not visible before show",
+      !launch.get_visible(),
+    );
+  } else {
+    na(&format!(
+      "the launch window is hidden before show ({backend} has no \
+       hidden-on-create)"
+    ));
   }
   launch.show();
   check(
@@ -328,9 +358,8 @@ pub async fn run() {
   }
 
   // Back to 1, after both reveals: still hidden. The WebView backends and
-  // CEF on Linux implement hidden-on-create; CEF elsewhere and Winit windows
-  // show at creation.
-  if backend != "webview" && !(backend == "cef" && cfg!(target_os = "linux")) {
+  // CEF implement hidden-on-create; Winit windows show at creation.
+  if !hides {
     na(&format!(
       "a hidden window stays hidden at launch ({backend} has no \
        hidden-on-create)"

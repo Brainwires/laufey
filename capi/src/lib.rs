@@ -69,6 +69,13 @@ pub use quit_request::*;
 mod background;
 pub use background::*;
 
+// build.rs's target decisions, tested here (a build script has no tests).
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+#[cfg(test)]
+mod build_support_tests;
+
 /// Version of this laufey crate. Used by downstream consumers (e.g. the Deno CLI)
 /// to locate matching prebuilt backend binaries in GitHub releases
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).

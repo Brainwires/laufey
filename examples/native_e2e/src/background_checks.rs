@@ -90,7 +90,7 @@ enum Ran {
   Replaced,
 }
 
-/// One round: hidden windows for `policies`, created together, their pages'
+/// One round: hidden windows for `policies`, open together, their pages'
 /// 100 ms interval counted from 4 s after it started to 1 s before the
 /// question (`idle` s after the start). `None` for a page that never loaded.
 async fn round(
@@ -98,8 +98,18 @@ async fn round(
   policies: &[BackgroundThrottling],
   idle: u64,
 ) -> Option<Vec<Ran>> {
-  let windows: Vec<Window> =
-    policies.iter().map(|p| hidden_window(*p)).collect();
+  // Opened one at a time, each once the one before has its page. On a
+  // virtual GPU (a macOS runner) two web processes starting together can both
+  // open Metal's on-disk shader cache, and now and then the loser blocks in
+  // flock() until the winner exits: docs/e2e-testing.md. The timers are
+  // started only once all of them are open.
+  let mut windows: Vec<Window> = Vec::new();
+  for p in policies {
+    if let Some(prev) = windows.last() {
+      let _ = page_loaded(prev).await;
+    }
+    windows.push(hidden_window(*p));
+  }
   for (w, policy) in windows.iter().zip(policies) {
     check(
       &format!("{label}: a window created with {policy:?} reads it back"),

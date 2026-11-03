@@ -187,6 +187,37 @@ async fn page_number(win: &Window, expr: &str) -> Option<f64> {
   None
 }
 
+/// Waits up to `secs` for `win`'s web process to answer a script, whatever
+/// document it is on. Windows opened together are opened one at a time on
+/// macOS: on a virtual GPU (a macOS runner) two web processes starting
+/// together can both open Metal's on-disk shader cache, and now and then the
+/// loser blocks in flock() until the winner exits, answering nothing
+/// (docs/e2e-testing.md).
+#[cfg(target_os = "macos")]
+async fn answers_script(win: &Window, secs: u64) -> bool {
+  let deadline =
+    std::time::Instant::now() + std::time::Duration::from_secs(secs);
+  while std::time::Instant::now() < deadline {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    win.execute_js(
+      "'live'",
+      Some(move |r: Result<Value, Value>| {
+        let _ = tx.send(r);
+      }),
+    );
+    // Not just any answer: a window that doesn't exist yet answers empty.
+    if let Ok(Ok(Ok(Value::String(s)))) =
+      tokio::time::timeout(std::time::Duration::from_secs(1), rx).await
+    {
+      if s == "live" {
+        return true;
+      }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+  }
+  false
+}
+
 /// The page fills the size set_size asked for: `get_size` is the content
 /// (page) area on every backend, in CSS pixels.
 async fn check_page_size(name: &str, win: &Window, want: (i32, i32)) {
@@ -1105,6 +1136,14 @@ fn e2e_main() {
       odd.is_none(),
     );
 
+    // On macOS each of the next windows opens once the one before it answers
+    // scripts (answers_script: the shader-cache stall). Their checks read the
+    // OS window, created at once either way.
+    #[cfg(target_os = "macos")]
+    if scheme_supported {
+      let _ = wait_for(|| page_loaded.load(Ordering::SeqCst), 100, 100).await;
+      let _ = answers_script(&win, 10).await;
+    }
     let decorated = Window::new(400, 300).title("native-e2e-chrome");
     decorated.set_position(240, 160);
     check_inner_vs_frame(
@@ -1113,6 +1152,11 @@ fn e2e_main() {
       decorated.get_inner_position(),
       expect_title_bar_offset(),
     );
+
+    #[cfg(target_os = "macos")]
+    if scheme_supported {
+      let _ = answers_script(&decorated, 10).await;
+    }
 
     let frameless = Window::new_with_options(
       200,
@@ -1216,6 +1260,11 @@ fn e2e_main() {
       frameless.get_outer_size(),
       false,
     );
+
+    #[cfg(target_os = "macos")]
+    if scheme_supported {
+      let _ = answers_script(&frameless, 10).await;
+    }
 
     // ---- test_inject_input ----------------------------------------------
     let last_key = Arc::new(Mutex::new(None::<KeyboardEvent>));
