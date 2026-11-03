@@ -35,6 +35,8 @@
 //! before it ends, so what was written just before is what must survive:
 //!
 //!   quit            close the window, then `laufey::quit()`.
+//!   quit-open       `laufey::quit()` with the window still open, at once, as
+//!                   an app's `desktop.quit()` does.
 //!   close           close the window only: the last window closing ends the
 //!                   app.
 //!   exit:<code>     `laufey::exit(code)` (API 46), then block this thread
@@ -58,6 +60,10 @@
 //! `scripts/exit-e2e-run.sh` relaunches with each of the first four and
 //! checks the exit code and that the next launch reads the value back.
 //!
+//! Before it ends the launch prints `[e2e] ending with <mode> at <ms>`, the
+//! wall clock in milliseconds since the Unix epoch, from which the driver
+//! measures how long the process took to end.
+//!
 //! `LAUFEY_E2E_STORAGE_SCHEME=<name>` serves the page over that custom scheme
 //! (`<name>://app/`, registered with `register_scheme_handler`) instead of
 //! loopback HTTP, and also requires it to be a secure context. Used for CEF,
@@ -73,7 +79,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use laufey::{SchemeRequest, Value, Window};
 use tokio::sync::oneshot;
@@ -699,9 +705,17 @@ async fn end(win: &Window, mode: &str) {
       .strip_prefix(prefix)
       .and_then(|c| c.parse::<i32>().ok())
   };
-  eprintln!("[e2e] ending with {mode}");
+  let at = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_millis())
+    .unwrap_or(0);
+  eprintln!("[e2e] ending with {mode} at {at}");
   let _ = std::io::stderr().flush();
-  if mode == "close" {
+  if mode == "quit-open" {
+    // As an app's desktop.quit(): the window is still open, and the backend
+    // closes it on the way out.
+    laufey::quit();
+  } else if mode == "close" {
     // The last window closing ends the app (quit on last window closed is
     // on by default).
     win.close();

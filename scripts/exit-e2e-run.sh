@@ -18,6 +18,10 @@
 #                 engine still runs (how a runtime ended before API 46). Only
 #                 when named: it is not expected to keep what was written.
 #
+# With CEF on macOS and Linux it then also quits LAUFEY_E2E_QUICK_QUITS times (default 30) with
+# the window still open, relaunching at once, and on macOS fails a quit whose
+# process took longer than LAUFEY_E2E_QUIT_BUDGET_MS (default 3000) to end.
+#
 # A launch that hasn't ended LAUFEY_E2E_EXIT_TIMEOUT seconds (default 60)
 # after it started is a hang. The run stops at the first one: on Windows such
 # a process may not be killable, and it keeps its profile locked.
@@ -284,6 +288,91 @@ if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
     else
       fail "loaded quit: the next launch didn't read $value back"
       sed 's/^/    | /' "$scratch/logs/loaded-read.log" | tail -30
+    fi
+  fi
+fi
+
+# CEF: quick quits with the window still open, as an app's desktop.quit()
+# does, relaunched at once (the previous launch's helpers may still be going):
+# each process must be gone within LAUFEY_E2E_QUIT_BUDGET_MS (default 3000)
+# of the app asking to quit, on macOS, and each launch must read back what the
+# one before it stored. A macOS quit used to take 8 s now and then, and every
+# one over 5 s when the host waited out its helpers. The host's own line for a
+# slow shutdown names the step that took the time (laufey_shutdown_phases.h);
+# it is printed with each launch over the budget. On Linux the times are
+# printed only (the page is served over a custom scheme, as the stress does,
+# which doesn't run on Windows).
+now_ms() { perl -MTime::HiRes=time -e 'printf("%d\n", time() * 1000)'; }
+if [ "$backend" = cef ] && [ "$hung" = 0 ] && [ "$platform" != windows ]; then
+  quick_n="${LAUFEY_E2E_QUICK_QUITS:-30}"
+  budget_ms="${LAUFEY_E2E_QUIT_BUDGET_MS:-3000}"
+  qdir="$(data_dir quick)"
+  qprev="-"
+  qtimes=()
+  qslow=0
+  qmax=0
+  for ((q = 1; q <= quick_n; q++)); do
+    qvalue="v$RANDOM${RANDOM}q$q"
+    qlog="$scratch/logs/quick-$q.log"
+    qcmd=(env -u LAUFEY_APP_ID -u LAUFEY_E2E_STORAGE_EXPECT -u LAUFEY_E2E_STORAGE_HOLD_MS
+      LAUFEY_DATA_DIR="$qdir" LAUFEY_E2E_STORAGE_PORT="$port" LAUFEY_TIMING=1
+      LAUFEY_CUSTOM_SCHEMES=lsquit LAUFEY_E2E_STORAGE_SCHEME=lsquit
+      LAUFEY_E2E_STORAGE_MODE=write LAUFEY_E2E_STORAGE_VALUE="$qvalue"
+      LAUFEY_E2E_STORAGE_PREV="$qprev" LAUFEY_E2E_STORAGE_EXIT=quit-open)
+    if [ "$platform" = linux ]; then
+      qcmd+=(xvfb-run -a dbus-run-session -- "$bin")
+    else
+      qcmd+=("$bin")
+    fi
+    "${qcmd[@]}" >"$qlog" 2>&1 &
+    qpid=$!
+    qdeadline=$(($(now_ms) + timeout_s * 1000))
+    while kill -0 "$qpid" 2>/dev/null && [ "$(now_ms)" -lt "$qdeadline" ]; do
+      sleep 0.05
+    done
+    qend="$(now_ms)"
+    rc=0
+    if kill -0 "$qpid" 2>/dev/null; then
+      kill -9 "$qpid" 2>/dev/null || true
+      wait "$qpid" 2>/dev/null || true
+      hung=1
+      fail "quick quit #$q: the process didn't end within ${timeout_s}s"
+      sed 's/^/    | /' "$qlog" | tail -40
+      break
+    fi
+    wait "$qpid" || rc=$?
+    qat="$(sed -n 's/^\[e2e\] ending with quit-open at \([0-9][0-9]*\)$/\1/p' "$qlog" | head -1)"
+    report="$(grep -m1 '^\[e2e\] previous localStorage=' "$qlog" || true)"
+    got="$(printf '%s' "$report" | sed -n 's/^\[e2e\] previous localStorage="\([^"]*\)".*/\1/p')"
+    back="$(printf '%s' "$report" | sed -n 's/.* back="\([^"]*\)".*/\1/p')"
+    want="$qprev"
+    [ "$want" != "-" ] || want="null"
+    if [ -z "$qat" ] || [ "$rc" != 0 ] || [ "$got" != "$want" ] || [ "$back" != "$qvalue" ]; then
+      fail "quick quit #$q: exit $rc, read \"$got\" (want \"$want\"), back \"$back\""
+      sed 's/^/    | /' "$qlog" | grep -v '^    | \[e2e\] PASS' | tail -40
+      [ "$back" != "$qvalue" ] || qprev="$qvalue"
+      continue
+    fi
+    qprev="$qvalue"
+    qms=$((qend - qat))
+    qtimes+=("$qms")
+    [ "$qms" -le "$qmax" ] || qmax="$qms"
+    if [ "$qms" -gt "$budget_ms" ]; then
+      qslow=$((qslow + 1))
+      if [ "$platform" = macos ]; then
+        fail "quick quit #$q: the process was gone ${qms} ms after the quit (budget ${budget_ms} ms)"
+      else
+        echo "[exit-e2e] quick quit #$q: the process was gone ${qms} ms after the quit"
+      fi
+      grep -E '^laufey: |^laufey-timing .* shutdown ' "$qlog" | sed 's/^/    | /' || true
+    fi
+  done
+  if [ "${#qtimes[@]}" -gt 0 ]; then
+    qsorted="$(printf '%s\n' "${qtimes[@]}" | sort -n | tr '\n' ' ')"
+    qmed="$(printf '%s\n' "${qtimes[@]}" | sort -n | sed -n "$(((${#qtimes[@]} + 1) / 2))p")"
+    echo "[exit-e2e] quick quits: ${#qtimes[@]} timed, median ${qmed} ms, longest ${qmax} ms, $qslow over ${budget_ms} ms: $qsorted"
+    if [ "$platform" = macos ] && [ "$qslow" = 0 ] && [ "${#qtimes[@]}" = "$quick_n" ]; then
+      pass "quick quits: every process was gone within ${budget_ms} ms of its quit (longest ${qmax} ms)"
     fi
   fi
 fi

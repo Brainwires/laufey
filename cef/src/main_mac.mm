@@ -29,6 +29,7 @@
 #include "laufey_cef_keychain.h"
 #include "laufey_cef_keychain_interpose.h"
 #include "laufey_cef_profile_lock.h"
+#include "laufey_shutdown_phases.h"
 #include "laufey_navigation_guard.h"
 
 void LaufeyOpenExternalURL(const std::string& url) {
@@ -160,6 +161,7 @@ static void ResumeQuitEvent(NSAppleEventManagerSuspensionID suspended,
       SetQuitEventRefused(events.currentReplyAppleEvent);
     return;
   }
+  laufey_common::NoteQuitRequested();
   handler->CloseAllBrowsers(true);
 }
 @end
@@ -590,6 +592,11 @@ int main(int argc, char* argv[]) {
     // CefRunMessageLoop(), [NSApp run] also drains the libdispatch main queue.
     [g_pump start];  // begin the steady pump so the runtime starts
     [NSApp run];
+    // How long each step below takes, from the app asking to quit; a slow
+    // shutdown says which step it was (laufey_shutdown_phases.h).
+    laufey_common::ShutdownPhases phases =
+        laufey_common::ShutdownPhases::FromQuitRequest();
+    phases.Mark("loop");
 
     // The loop is over: from here the host pumps CEF itself (the renderer
     // wait below) and then shuts it down. The steady timer stays scheduled
@@ -627,6 +634,7 @@ int main(int argc, char* argv[]) {
     if (persistent_profile)
       laufey_common::LaufeyWaitForRenderersBeforeShutdown(
           []() { CefDoMessageLoopWork(); });
+    phases.Mark("renderers");
 
     // The closed windows' Browsers are deleted by tasks the stopped loop may
     // not have run yet; one left for CefShutdown to delete crashed it (a
@@ -634,14 +642,21 @@ int main(int argc, char* argv[]) {
     // teardown, about 1 quit in 5,600 on macOS x64). The renderer wait above
     // pumps only while a renderer runs, so it may not have pumped at all.
     LaufeyDrainClosedWindowsBeforeShutdown([]() { CefDoMessageLoopWork(); });
+    phases.Mark("drain");
 
     RuntimeLoader::GetInstance()->Shutdown();
+    phases.Mark("runtime");
 
     CefShutdown();
+    phases.Mark("CefShutdown");
     // The helpers (the storage service committing localStorage) end before
     // the process does, so a relaunch finds the profile free.
     if (persistent_profile)
       laufey_common::LaufeyWaitForHelpersAfterShutdown(cache_path);
+    phases.Mark("helpers");
+    std::string slow = phases.SlowLine();
+    if (!slow.empty())
+      std::cerr << slow << std::endl;
 
     // How a macOS app ends (docs/backends.md, "How an app ends"): CEF has
     // shut down and its helpers have ended, so the profile, cookies and web

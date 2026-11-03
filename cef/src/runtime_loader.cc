@@ -24,6 +24,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_shutdown_phases.h"
 #include "laufey_single_instance.h"
 #include "laufey_sync_call.h"
 #include "laufey_system.h"
@@ -279,6 +280,7 @@ static void Backend_Quit(void* data) {
 #endif
 #endif
   laufey_common::MarkQuitting();
+  laufey_common::NoteQuitRequested();
 #if defined(__linux__)
   // A GTK modal (an alert, a script dialog) is a nested loop on TID_UI that
   // would hold the end of the loop until someone dismissed it: end it, as a

@@ -377,6 +377,13 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_cef_window_drain_test COMMAND laufey_cef_window_drain_test)
 
+  # A host's shutdown steps and the line a slow one prints.
+  add_executable(laufey_shutdown_phases_test tests/shutdown_phases_test.cc)
+  target_link_libraries(laufey_shutdown_phases_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_shutdown_phases_test COMMAND laufey_shutdown_phases_test)
+
   # CEF's profile LevelDB LOCK probe and the helper-process wait.
   add_executable(laufey_cef_profile_lock_test tests/cef_profile_lock_test.cc)
   target_link_libraries(laufey_cef_profile_lock_test PRIVATE
