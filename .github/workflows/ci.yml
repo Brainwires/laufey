@@ -1466,7 +1466,9 @@ jobs:
           LAUFEY_E2E_STRESS_SCHEME: lsstress
         run: |
           cargo build --release -p storage_e2e_runtime
-          scripts/storage-stress-e2e-run.sh cef ${{ inputs.storage_stress_launches || 200 }}
+          # A fixed count: storage_stress_launches sizes the dispatch-only
+          # stress shards below, whose steps have their own timeout.
+          scripts/storage-stress-e2e-run.sh cef 200
       # A launch that died by a signal has its report printed by the stress
       # script; keep the whole reports to symbolize against CEF's release
       # symbols after the run.
@@ -1550,7 +1552,9 @@ jobs:
       - run: cargo build --release -p storage_e2e_runtime
 
       - name: Storage — localStorage over quick relaunches (stress)
-        timeout-minutes: ${{ inputs.storage_stress_timeout }}
+        # A number: the input arrives as a string, which timeout-minutes
+        # rejects (the step then ran with no timeout).
+        timeout-minutes: ${{ fromJSON(inputs.storage_stress_timeout || 30) }}
         shell: bash
         env:
           LAUFEY_E2E_STRESS_SCHEME: lsstress
