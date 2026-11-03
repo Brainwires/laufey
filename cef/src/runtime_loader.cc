@@ -399,7 +399,19 @@ static void Backend_SetWindowSize(void* data, uint32_t window_id, int width,
                                 CefSetPageSize(browser_view, w, h);
                             },
                             browser, width, height));
+    return;
   }
+  // No Browser registered yet (a slow start): size the window itself. The
+  // task runs after the one that created it, and before a show() asked after
+  // this call, so a window created hidden is first shown at this size.
+  if (window_id == 0)
+    return;
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](uint32_t wid, int w, int h) {
+                            if (auto view = LaufeyBrowserViewForId(wid))
+                              CefSetPageSize(view, w, h);
+                          },
+                          window_id, width, height));
 }
 
 static void Backend_GetWindowSize(void* data, uint32_t window_id, int* width,
@@ -994,7 +1006,21 @@ static void Backend_Show(void* data, uint32_t window_id) {
                               }
                             },
                             browser, window_id));
+    return;
   }
+  // No Browser registered yet (a slow start): show the window itself, so a
+  // window the app asked to see (on Linux created hidden, sized, then shown)
+  // is not left hidden for good.
+  if (window_id == 0)
+    return;
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](uint32_t wid) {
+                            auto view = LaufeyBrowserViewForId(wid);
+                            auto window = view ? view->GetWindow() : nullptr;
+                            if (window)
+                              LaufeyShowCefWindow(window, wid);
+                          },
+                          window_id));
 }
 
 static void Backend_Hide(void* data, uint32_t window_id) {
@@ -2468,6 +2494,12 @@ static void Backend_PrintToPdf(void* data, uint32_t window_id,
 // --- InitializeBackendApi ---
 
 static uint32_t Backend_CreateWindowImpl(void* data, uint32_t flags) {
+  // Once the app is quitting or the loop is ending, a new window would
+  // outlive the loop: nothing would close it, and CefShutdown would run with
+  // its Browser alive (LaufeyDrainClosedWindowsBeforeShutdown). Refuse it:
+  // 0 is no window.
+  if (laufey_common::NewWindowsRefused())
+    return 0;
   auto* loader = RuntimeLoader::GetInstance();
   uint32_t window_id = loader->AllocateWindowId();
 
@@ -2475,8 +2507,12 @@ static uint32_t Backend_CreateWindowImpl(void* data, uint32_t flags) {
       TID_UI, base::BindOnce(
                   [](uint32_t wid, uint32_t window_flags) {
                     auto* handler = LaufeyHandler::GetInstance();
-                    if (!handler)
+                    // The loop may have begun to end since the task was
+                    // posted (the shutdown drain runs it too).
+                    if (!handler || laufey_common::NewWindowsRefused()) {
+                      RuntimeLoader::GetInstance()->AbandonWindowCreation(wid);
                       return;
+                    }
 
                     // Push laufey_id before creating the browser so
                     // OnAfterCreated can pop it. Both run on the UI
@@ -2505,11 +2541,23 @@ static uint32_t Backend_CreateWindowImpl(void* data, uint32_t flags) {
   // slow machine takes several seconds per browser (over 5 s, the old bound,
   // on a Windows CI runner, which dropped the window's first navigation).
   // (Nothing to wait for when CEF is no longer taking UI tasks.)
+  // A creation the UI thread refused, or one it will never run, is no window.
+  if (!posted)
+    return 0;
   constexpr int kBrowserCreateTimeoutMs = 30000;
-  if (posted && !loader->WaitForBrowser(window_id, kBrowserCreateTimeoutMs)) {
-    std::cerr << "laufey: the browser for window " << window_id
-              << " was not created within " << kBrowserCreateTimeoutMs / 1000
-              << " s; calls on the window are ignored until it is" << std::endl;
+  switch (loader->WaitForBrowser(window_id, kBrowserCreateTimeoutMs)) {
+    case RuntimeLoader::BrowserWait::kReady:
+      break;
+    case RuntimeLoader::BrowserWait::kAbandoned:
+      return 0;
+    case RuntimeLoader::BrowserWait::kTimedOut:
+      // show() and set_window_size() still reach the window
+      // (LaufeyBrowserViewForId); calls that need the Browser wait for it.
+      std::cerr << "laufey: the browser for window " << window_id
+                << " was not created within " << kBrowserCreateTimeoutMs / 1000
+                << " s; calls that need it are ignored until it is"
+                << std::endl;
+      break;
   }
 
   return window_id;

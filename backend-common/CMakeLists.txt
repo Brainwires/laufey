@@ -369,6 +369,14 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_cef_commit_gate_test COMMAND laufey_cef_commit_gate_test)
 
+  # CEF: the live-window table, the drain before CefShutdown and the creation
+  # gate the loop's end closes.
+  add_executable(laufey_cef_window_drain_test tests/cef_window_drain_test.cc)
+  target_link_libraries(laufey_cef_window_drain_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_cef_window_drain_test COMMAND laufey_cef_window_drain_test)
+
   # CEF's profile LevelDB LOCK probe and the helper-process wait.
   add_executable(laufey_cef_profile_lock_test tests/cef_profile_lock_test.cc)
   target_link_libraries(laufey_cef_profile_lock_test PRIVATE

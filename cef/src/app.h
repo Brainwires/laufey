@@ -525,6 +525,12 @@ void LaufeyQuitMainLoop();
 // thread.
 int LaufeyLiveWindowCount();
 
+// The browser view of the live window with laufey id `laufey_id` (null for
+// none). Unlike RuntimeLoader::GetBrowserForWindow it has the window from
+// OnWindowCreated on, before its Browser is registered (OnAfterCreated), so a
+// show or size the app asks for meanwhile still reaches it. UI thread.
+CefRefPtr<CefBrowserView> LaufeyBrowserViewForId(uint32_t laufey_id);
+
 // Before CefShutdown, once the loop has ended: runs CEF's UI-thread tasks
 // (`pump`) until the app's windows have been destroyed (at most 2 s), and
 // then a few more times. Chromium deletes a closed window's Browser in a task
@@ -532,7 +538,11 @@ int LaufeyLiveWindowCount();
 // is deleted inside CefShutdown instead (BrowserManagerService::Shutdown,
 // under ProfileManager's teardown), where Chromium 156 reads freed memory in
 // ~TabDragServiceImpl (SIGSEGV, about 1 quit in 5,600 on macOS x64). The
-// macOS and Windows hosts call it. UI thread.
+// macOS, Windows and Linux hosts call it. It first refuses new windows
+// (laufey_common::MarkUiLoopEnding) and asks any window still open to close,
+// and asks again when the 2 s run out: app code still running on the runtime
+// thread may have opened one after the loop ended, or a creation may have
+// been in flight (laufey_cef_window_drain.h). UI thread.
 void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump);
 
 // The app's own quit() (runtime_loader.cc): every window is closed and the

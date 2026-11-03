@@ -58,6 +58,7 @@ void* g_display_user_data = nullptr;
 
 std::atomic<bool> g_quit_on_last_window{true};
 std::atomic<bool> g_quitting{false};
+std::atomic<bool> g_ui_loop_ending{false};
 std::atomic<bool> g_exit_requested{false};
 std::atomic<int> g_exit_code{0};
 
@@ -349,6 +350,14 @@ bool IsQuitting() {
 
 bool ShouldEndLoopAfterLastWindow() {
   return IsQuitting() || QuitOnLastWindowClosed();
+}
+
+void MarkUiLoopEnding() {
+  g_ui_loop_ending.store(true);
+}
+
+bool NewWindowsRefused() {
+  return IsQuitting() || g_ui_loop_ending.load();
 }
 
 void MarkExitRequested(int code) {

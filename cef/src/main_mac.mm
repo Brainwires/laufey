@@ -605,6 +605,9 @@ int main(int argc, char* argv[]) {
     // auth session in progress ends cancelled, so a runtime thread waiting on
     // either is released before Shutdown waits for it.
     laufey_common::UiLoopEnded();
+    // No window opens from here on: the pumps below would create it, and it
+    // would outlive the loop (Backend_CreateWindowImpl).
+    laufey_common::MarkUiLoopEnding();
     LaufeyClearSecondInstanceHooks();
 
     // CefShutdown waits, with no timeout, for thread-pool tasks that may sit

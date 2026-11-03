@@ -532,7 +532,9 @@ On Linux a window the app creates visible is created hidden, given its size,
 then shown, so it first appears at that size (the C ABI's create calls carry no
 size, and a Wayland window's first size is the one it has when it maps). It
 looks the same to the app: the window is visible when `Window::new_with_options`
-returns.
+returns. On CEF the size and the show reach the window even when its browser is
+slow to start and creation stopped waiting for it, so such a window is not left
+hidden.
 
 ## Keeping a tray app alive; quitting (API ≥ 38)
 

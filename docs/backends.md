@@ -522,14 +522,18 @@ window's close completes; when the loop had stopped before that task ran, the
 shutdown, under `ProfileManager`'s teardown), and there Chromium 156 reads freed
 memory in `~TabDragServiceImpl`. The wait for the renderers above pumps CEF only
 while a renderer still runs, so it did not always run that task. Before
-`CefShutdown` the macOS and Windows hosts now pump CEF until the app's windows
-have been destroyed (at most 2 s) and a few times more (Windows runs the same
-Chromium code, though the crash was only seen on macOS). The macOS host also
-stops its message-pump timer and drops the pump ticks it queues on the main
-queue when the loop ends, and once `CefShutdown` has returned and its helpers
-have ended it ends the process with `_exit`, as Windows does, instead of
-returning from `main` through static destructors, `atexit` callbacks and the CEF
-framework's unload.
+`CefShutdown` every CEF host now pumps CEF until the app's windows have been
+destroyed (at most 2 s) and a few times more (Windows and Linux run the same
+Chromium code, though the crash was only seen on macOS). App code still runs on
+the runtime thread meanwhile, so once the loop is ending (or the app has called
+`quit()`) a new window is refused (the create call returns window id 0), and a
+window still open when the pumping starts (one whose creation was already under
+way) is closed, as `quit()` closes windows; one still there after the 2 s is
+asked again. The macOS host also stops its message-pump timer and drops the pump
+ticks it queues on the main queue when the loop ends, and once `CefShutdown` has
+returned and its helpers have ended it ends the process with `_exit`, as Windows
+does, instead of returning from `main` through static destructors, `atexit`
+callbacks and the CEF framework's unload.
 
 CEF's `localStorage` lives in a LevelDB database that Chromium's storage service
 writes, and `CefShutdown` kills that service without waiting for a write in

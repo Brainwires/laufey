@@ -62,12 +62,30 @@ class RuntimeLoader {
     browser_ready_cv_.notify_all();
   }
 
-  // Block until the browser for window_id has been registered (with timeout).
-  bool WaitForBrowser(uint32_t window_id, int timeout_ms = 5000) {
+  // A window creation the UI thread refused (the loop is ending): its waiter
+  // in WaitForBrowser is released at once.
+  void AbandonWindowCreation(uint32_t window_id) {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    abandoned_window_ids_.insert(window_id);
+    browser_ready_cv_.notify_all();
+  }
+
+  enum class BrowserWait { kReady, kAbandoned, kTimedOut };
+
+  // Block until the browser for window_id has been registered or its
+  // creation was abandoned (with timeout).
+  BrowserWait WaitForBrowser(uint32_t window_id, int timeout_ms = 5000) {
     std::unique_lock<std::mutex> lock(windows_mutex_);
-    return browser_ready_cv_.wait_for(
-        lock, std::chrono::milliseconds(timeout_ms),
-        [&]() { return browsers_.find(window_id) != browsers_.end(); });
+    browser_ready_cv_.wait_for(
+        lock, std::chrono::milliseconds(timeout_ms), [&]() {
+          return browsers_.count(window_id) > 0 ||
+                 abandoned_window_ids_.count(window_id) > 0;
+        });
+    if (browsers_.count(window_id) > 0)
+      return BrowserWait::kReady;
+    if (abandoned_window_ids_.erase(window_id) > 0)
+      return BrowserWait::kAbandoned;
+    return BrowserWait::kTimedOut;
   }
 
   void UnregisterBrowser(uint32_t window_id) {
@@ -478,6 +496,8 @@ class RuntimeLoader {
   // Windows being closed programmatically; CanClose skips the
   // close-requested negotiation for them (see MarkCloseAllowed).
   std::set<uint32_t> close_allowed_;
+  // Creations refused on the UI thread, until their waiter has seen it.
+  std::set<uint32_t> abandoned_window_ids_;
   std::map<int, uint32_t>
       browser_id_to_laufey_id_;  // CefBrowser::GetIdentifier() -> laufey_id
   // Bridge calls in flight, by the id the runtime sees.

@@ -221,9 +221,13 @@ static void TestLifetime() {
   EXPECT(ShouldEndLoopAfterLastWindow());
   SetQuitOnLastWindowClosed(false);
   EXPECT(!ShouldEndLoopAfterLastWindow());
+  // Keep-alive off alone doesn't refuse a new window.
+  EXPECT(!NewWindowsRefused());
   // quit() ends the loop whatever keep-alive says.
   MarkQuitting();
   EXPECT(IsQuitting());
+  // And no window opens once the app is quitting.
+  EXPECT(NewWindowsRefused());
   EXPECT(ShouldEndLoopAfterLastWindow());
   SetQuitOnLastWindowClosed(true);
 }

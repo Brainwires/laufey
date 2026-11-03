@@ -6,6 +6,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_cef_commit_gate.h"
+#include "laufey_cef_window_drain.h"
 #include "laufey_timing.h"
 #include "laufey_cef_network_quiet.h"
 #include "laufey_io.h"
@@ -93,9 +94,38 @@ void RevealCefWindow(CefRefPtr<CefWindow> window, bool no_activate) {
 #endif
 }
 
-// LaufeyLiveWindowCount: OnWindowCreated adds one, OnWindowDestroyed takes it
-// back. UI thread only.
-int g_live_windows = 0;
+// The app's windows: OnWindowCreated adds one, OnWindowDestroyed takes it
+// back (LaufeyLiveWindowCount, LaufeyBrowserViewForId, the shutdown drain).
+// UI thread only.
+struct LiveCefWindow {
+  CefRefPtr<CefWindow> window;
+  CefRefPtr<CefBrowserView> browser_view;
+};
+laufey_common::LiveWindowTable<LiveCefWindow> g_live_windows;
+
+// Asks each live window to close, with no close-requested negotiation (as
+// quit() does): its Browser when it has one, else the window itself (a
+// creation the loop's end overtook). With `even_closing` false a window whose
+// close is under way is left to finish. Returns how many it asked.
+int CloseLiveWindowsForShutdown(bool even_closing) {
+  auto* loader = RuntimeLoader::GetInstance();
+  int asked = 0;
+  for (const auto& entry : g_live_windows.All()) {
+    const LiveCefWindow& live = entry.second;
+    if (!even_closing && live.window->IsClosed())
+      continue;
+    if (entry.first > 0)
+      loader->MarkCloseAllowed(entry.first);
+    CefRefPtr<CefBrowser> browser =
+        live.browser_view ? live.browser_view->GetBrowser() : nullptr;
+    if (browser)
+      browser->GetHost()->CloseBrowser(true);
+    else
+      live.window->Close();
+    ++asked;
+  }
+  return asked;
+}
 }  // namespace
 
 void LaufeyShowCefWindow(CefRefPtr<CefWindow> window, uint32_t laufey_id) {
@@ -110,32 +140,46 @@ void LaufeyShowCefWindow(CefRefPtr<CefWindow> window, uint32_t laufey_id) {
 }
 
 int LaufeyLiveWindowCount() {
-  return g_live_windows;
+  return g_live_windows.size();
+}
+
+CefRefPtr<CefBrowserView> LaufeyBrowserViewForId(uint32_t laufey_id) {
+  LiveCefWindow live;
+  if (!g_live_windows.Find(laufey_id, &live))
+    return nullptr;
+  return live.browser_view;
 }
 
 void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump) {
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (g_live_windows > 0 && std::chrono::steady_clock::now() < deadline) {
-    pump();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  // No window opens from here on (Backend_CreateWindowImpl).
+  laufey_common::MarkUiLoopEnding();
+  laufey_common::WindowDrainHooks hooks;
+  hooks.live_windows = [] { return g_live_windows.size(); };
+  hooks.pump = pump;
+  hooks.close_live_windows = CloseLiveWindowsForShutdown;
+  laufey_common::WindowDrainResult result =
+      laufey_common::DrainWindowsBeforeShutdown(hooks);
+  if (result.closed_at_start > 0) {
+    std::cerr << "laufey: closed " << result.closed_at_start
+              << " window(s) still open when the loop ended" << std::endl;
   }
-  if (g_live_windows > 0) {
-    std::cerr << "laufey: " << g_live_windows
-              << " window(s) still not destroyed 2 s after the loop ended"
+  if (result.closed_at_deadline > 0) {
+    std::cerr << "laufey: " << result.closed_at_deadline
+              << " window(s) still not destroyed 2 s after the loop ended; "
+                 "closed them again"
               << std::endl;
   }
-  // The Browser's deletion is posted when its window's close completes: let
-  // the tasks queued by then (and any they queue) run.
-  for (int i = 0; i < 5; ++i) {
-    pump();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (result.left > 0) {
+    std::cerr << "laufey: " << result.left
+              << " window(s) still not destroyed before CefShutdown"
+              << std::endl;
   }
 }
 
 // LaufeyWindowDelegate implementation
 
 void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
-  ++g_live_windows;
+  g_live_windows.Add(this, laufey_id_, LiveCefWindow{window, browser_view_});
   window->AddChildView(browser_view_);
 
   // Register native window for event routing. Non-activating panels
@@ -267,7 +311,7 @@ bool LaufeyWindowDelegate::GetLinuxWindowProperties(
 #endif
 
 void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
-  --g_live_windows;
+  g_live_windows.Remove(this);
   // Unregister native window
   CefWindowHandle handle = window->GetWindowHandle();
   if (handle) {
@@ -492,6 +536,9 @@ void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 }
 
 void LaufeyQuitMainLoop() {
+  // A window opened from here on would outlive the loop
+  // (Backend_CreateWindowImpl refuses it).
+  laufey_common::MarkUiLoopEnding();
 #if defined(__APPLE__)
   // macOS runs [NSApp run] (external_message_pump); stop that instead.
   LaufeyQuitMainLoopMac();

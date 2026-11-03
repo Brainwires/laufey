@@ -141,6 +141,13 @@ bool IsQuitting();
 // or keep-alive off. (macOS backends also keep an Accessory-policy app
 // alive; see ShouldQuitAfterLastWindowMac.)
 bool ShouldEndLoopAfterLastWindow();
+// Set when the host's loop is ending (CEF's LaufeyQuitMainLoop) or has ended
+// (UiLoopEnded).
+void MarkUiLoopEnding();
+// Whether a new window must be refused: the app is quitting or the loop is
+// ending. A window opened then would outlive the loop, and on CEF reach
+// CefShutdown still open (laufey_cef_window_drain.h).
+bool NewWindowsRefused();
 // Set by exit_app (API 46), with MarkQuitting: the app asked to end with
 // `code`. The host makes it the process's exit code once the loop has ended
 // and the engine has shut down, and doesn't wait for the runtime thread,

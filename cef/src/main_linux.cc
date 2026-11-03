@@ -1203,8 +1203,20 @@ int main(int argc, char* argv[]) {
   // auth session in progress ends cancelled, so a runtime thread waiting on
   // either is released before Shutdown waits for it.
   laufey_common::UiLoopEnded();
+  // No window opens from here on: one would outlive the loop
+  // (Backend_CreateWindowImpl).
+  laufey_common::MarkUiLoopEnding();
 
   LaufeyClearSecondInstanceHooks();
+
+  // The closed windows' Browsers are deleted by tasks the ended loop may not
+  // have run yet, and one left for CefShutdown to delete reads freed memory
+  // there (~TabDragServiceImpl under ProfileManager's teardown; seen on macOS,
+  // the same Chromium code runs here). It also closes a window opened while
+  // the loop was ending. (The renderers, unlike on macOS and Windows, have
+  // already ended when the loop returns here: laufey_cef_profile_lock.h.)
+  LaufeyDrainClosedWindowsBeforeShutdown([]() { CefDoMessageLoopWork(); });
+
   RuntimeLoader::GetInstance()->Shutdown();
 
   CefShutdown();
