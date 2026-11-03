@@ -4365,7 +4365,7 @@ pub fn handle_common_event<B: BackendAccess>(
             {
               if let Ok(wh) = window.window_handle() {
                 if let RawWindowHandle::Win32(handle) = wh.as_raw() {
-                  let hwnd = handle.hwnd.get() as isize;
+                  let hwnd = handle.hwnd.get();
                   unsafe {
                     let _ = menu.init_for_hwnd(hwnd);
                   }
@@ -4425,7 +4425,7 @@ pub fn handle_common_event<B: BackendAccess>(
               use muda::ContextMenu;
               if let Ok(wh) = window.window_handle() {
                 if let RawWindowHandle::Win32(handle) = wh.as_raw() {
-                  let hwnd = handle.hwnd.get() as isize;
+                  let hwnd = handle.hwnd.get();
                   let _ = unsafe {
                     menu.show_context_menu_for_hwnd(hwnd, Some(position))
                   };

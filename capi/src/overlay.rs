@@ -609,7 +609,7 @@ mod tests {
       tray_id: 3,
       kind: LAUFEY_TRAY_EVENT_RIGHT_CLICK,
       button: ffi::LAUFEY_MOUSE_BUTTON_RIGHT as i32,
-      modifiers: ffi::LAUFEY_MOD_ALT as u32,
+      modifiers: ffi::LAUFEY_MOD_ALT,
       x: 10,
       y: 20,
       has_position: true,
