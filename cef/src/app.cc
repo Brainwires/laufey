@@ -26,9 +26,11 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef __linux__
@@ -90,6 +92,10 @@ void RevealCefWindow(CefRefPtr<CefWindow> window, bool no_activate) {
   (void)no_activate;
 #endif
 }
+
+// LaufeyLiveWindowCount: OnWindowCreated adds one, OnWindowDestroyed takes it
+// back. UI thread only.
+int g_live_windows = 0;
 }  // namespace
 
 void LaufeyShowCefWindow(CefRefPtr<CefWindow> window, uint32_t laufey_id) {
@@ -103,9 +109,33 @@ void LaufeyShowCefWindow(CefRefPtr<CefWindow> window, uint32_t laufey_id) {
   RevealCefWindow(window, no_activate);
 }
 
+int LaufeyLiveWindowCount() {
+  return g_live_windows;
+}
+
+void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (g_live_windows > 0 && std::chrono::steady_clock::now() < deadline) {
+    pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (g_live_windows > 0) {
+    std::cerr << "laufey: " << g_live_windows
+              << " window(s) still not destroyed 2 s after the loop ended"
+              << std::endl;
+  }
+  // The Browser's deletion is posted when its window's close completes: let
+  // the tasks queued by then (and any they queue) run.
+  for (int i = 0; i < 5; ++i) {
+    pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
 // LaufeyWindowDelegate implementation
 
 void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
+  ++g_live_windows;
   window->AddChildView(browser_view_);
 
   // Register native window for event routing. Non-activating panels
@@ -237,6 +267,7 @@ bool LaufeyWindowDelegate::GetLinuxWindowProperties(
 #endif
 
 void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
+  --g_live_windows;
   // Unregister native window
   CefWindowHandle handle = window->GetWindowHandle();
   if (handle) {

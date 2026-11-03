@@ -647,6 +647,13 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
     laufey_common::LaufeyWaitForRenderersBeforeShutdown(
         []() { CefDoMessageLoopWork(); });
 
+  // The closed windows' Browsers are deleted by tasks the ended loop may not
+  // have run yet, and one left for CefShutdown to delete reads freed memory
+  // there (~TabDragServiceImpl under ProfileManager's teardown; seen on macOS,
+  // the same Chromium code runs here). The renderer wait above pumps only
+  // while a renderer runs, so it may not have pumped at all.
+  LaufeyDrainClosedWindowsBeforeShutdown([]() { CefDoMessageLoopWork(); });
+
   RuntimeLoader::GetInstance()->Shutdown();
 
   CefShutdown();

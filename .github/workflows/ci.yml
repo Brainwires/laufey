@@ -20,6 +20,24 @@ on:
         description: Run the full matrix (macOS, Windows, Linux arm64); false runs Linux x64 only
         type: boolean
         default: true
+      storage_stress_launches:
+        description: Launches in each chain of the CEF localStorage stress on macOS x64
+        type: number
+        default: 200
+      storage_stress_shards:
+        description: >-
+          Shard ids of the dispatch-only CEF localStorage stress on macOS x64, a
+          JSON array (e.g. [1,2,3,4], one macos-15-intel job each); empty skips it
+        type: string
+        default: ""
+      storage_stress_chains:
+        description: Chains of launches each stress shard runs side by side (own data dir each)
+        type: number
+        default: 1
+      storage_stress_timeout:
+        description: Minutes each stress shard's launches may take
+        type: number
+        default: 30
 
 # A newer push to the same branch or pull request supersedes its run. Never
 # cancelled: a tag's run (it publishes the release), a run on `main`, and a
@@ -548,7 +566,9 @@ jobs:
   #                     building a muda menu with no GTK init.
   #   - webview / linux: WebKitGTK/Xlib isn't thread-safe under the worker-thread
   #                      runtime (xcb_xlib_threads_sequence_lost); only the
-  #                      custom-scheme request-body round trip runs there.
+  #                      custom-scheme request-body round trip runs there,
+  #                      with the passkey and print_to_pdf checks riding
+  #                      along (--scheme-body), plus the dedicated modes.
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -1446,7 +1466,7 @@ jobs:
           LAUFEY_E2E_STRESS_SCHEME: lsstress
         run: |
           cargo build --release -p storage_e2e_runtime
-          scripts/storage-stress-e2e-run.sh cef 200
+          scripts/storage-stress-e2e-run.sh cef ${{ inputs.storage_stress_launches || 200 }}
       # A launch that died by a signal has its report printed by the stress
       # script; keep the whole reports to symbolize against CEF's release
       # symbols after the run.
@@ -1490,6 +1510,83 @@ jobs:
           path: |
             laufey-cef-${{ matrix.target }}.tar.gz
             laufey-cef-${{ matrix.target }}.zip
+
+  # Dispatch-only: the localStorage stress of build-cef's macOS x64 leg, at a
+  # count no push runs, to measure a rare shutdown failure (a quit that ended
+  # with a signal about 1 launch in 5,600). Each shard builds the host and runs
+  # `storage_stress_chains` chains of `storage_stress_launches` launches side
+  # by side, each with its own data dir. E.g. 4 x 2 x 1300 launches:
+  #   gh workflow run ci.yml --ref <branch> -f full=false \
+  #     -f storage_stress_shards='[1,2,3,4]' -f storage_stress_chains=2 \
+  #     -f storage_stress_launches=1300 -f storage_stress_timeout=200
+  storage-stress-cef-macos-x64:
+    name: storage stress / cef / x86_64-apple-darwin (${{ matrix.shard }})
+    if: github.event_name == 'workflow_dispatch' && inputs.storage_stress_shards != ''
+    runs-on: macos-15-intel
+    strategy:
+      fail-fast: false
+      # GitHub runs at most 5 macOS jobs at once for this account.
+      max-parallel: 4
+      matrix:
+        shard: ${{ fromJSON(inputs.storage_stress_shards || '[0]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies (macOS)
+        run: brew install llvm ninja
+
+      - name: Cache CEF
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor/cef
+          key: cef-macos-15-intel-${{ runner.arch }}-${{ hashFiles('Makefile') }}
+
+      - run: make cef
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.99.1
+
+      - run: cargo build --release -p storage_e2e_runtime
+
+      - name: Storage — localStorage over quick relaunches (stress)
+        timeout-minutes: ${{ inputs.storage_stress_timeout }}
+        shell: bash
+        env:
+          LAUFEY_E2E_STRESS_SCHEME: lsstress
+          CHAINS: ${{ inputs.storage_stress_chains }}
+          LAUNCHES: ${{ inputs.storage_stress_launches }}
+        run: |
+          # Each chain's lines stream into the log as they come, prefixed with
+          # its number (also kept in chain<n>/stress.log for the artifact).
+          for c in $(seq 1 "$CHAINS"); do
+            mkdir -p "$RUNNER_TEMP/chain$c/tmp"
+            (rc=0
+              TMPDIR="$RUNNER_TEMP/chain$c/tmp" scripts/storage-stress-e2e-run.sh cef "$LAUNCHES" 2>&1 </dev/null || rc=$?
+              echo "[stress-e2e] chain exit $rc") |
+              tee "$RUNNER_TEMP/chain$c/stress.log" | sed -l "s/^/[chain $c] /" &
+          done
+          wait
+          passed=$(cat "$RUNNER_TEMP"/chain*/stress.log | grep -c '^\[stress-e2e\] OVERALL PASS' || true)
+          echo "$passed of $CHAINS chains passed"
+          [ "$passed" = "$CHAINS" ]
+
+      - name: Collect crash reports (macOS)
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/crash-reports"
+          cp ~/Library/Logs/DiagnosticReports/*.ips "$RUNNER_TEMP/crash-reports/" 2>/dev/null || true
+          ls "$RUNNER_TEMP/crash-reports"
+          for c in $(seq 1 "${{ inputs.storage_stress_chains }}"); do
+            [ ! -f "$RUNNER_TEMP/chain$c/stress.log" ] || cp "$RUNNER_TEMP/chain$c/stress.log" "$RUNNER_TEMP/crash-reports/stress-chain$c.log"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: crash-reports-storage-stress-cef-x86_64-apple-darwin-${{ matrix.shard }}
+          path: ${{ runner.temp }}/crash-reports/
+          if-no-files-found: ignore
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

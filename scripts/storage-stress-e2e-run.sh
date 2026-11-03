@@ -118,6 +118,10 @@ prev="-"
 start_all=$SECONDS
 echo "== storage-stress-e2e: backend=$backend bin=$bin launches=$launches scheme=${scheme:-none}"
 for ((i = 1; i <= launches; i++)); do
+  # A long run says how far it got, in case its job is cut short.
+  if [ "$i" -gt 1 ] && [ $(((i - 1) % 250)) = 0 ]; then
+    echo "[stress-e2e] $((i - 1)) launches in $((SECONDS - start_all)) s: $lost lost, $other failed otherwise"
+  fi
   value="v$RANDOM$RANDOM-$i"
   log="$scratch/logs/$i.log"
   # Keep the previous launch's database info logs: the next open rotates them.

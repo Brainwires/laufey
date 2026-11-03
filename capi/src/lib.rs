@@ -1562,6 +1562,12 @@ impl Window {
   /// cannot produce a PDF (or that are older than API version 32) invoke the
   /// callback with an `Err` describing the unsupported operation.
   ///
+  /// It can be called as soon as the window exists: a backend whose web
+  /// engine is still starting (WebView2) renders once the engine is ready,
+  /// and answers `Err("web view not ready ...")` if it never becomes ready
+  /// (WebView2: within 45 s of the window's creation). `Err("window not
+  /// found")` means no such window.
+  ///
   /// On success the callback fires on the UI thread once rendering completes.
   /// The single early-validation error — an unsupported backend — is instead
   /// delivered synchronously on the calling thread, before any rendering is
