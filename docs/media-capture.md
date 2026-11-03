@@ -50,18 +50,31 @@ launch file and the handler again.
 
 ## The engines
 
-| Backend   | Hook                                                          | Asking frame                                             |
-| --------- | ------------------------------------------------------------- | -------------------------------------------------------- |
-| WKWebView | `requestMediaCapturePermissionForOrigin` (macOS 12 and later) | the frame's security origin, and the web view's URL      |
-| CEF       | `CefPermissionHandler::OnRequestMediaAccessPermission`        | the requesting origin and its frame, and the main frame  |
-| WebView2  | `PermissionRequested` (`Microphone`, `Camera`), one per kind  | the event's URI, and the web view's source               |
-| WebKitGTK | `permission-request` (`WebKitUserMediaPermissionRequest`)     | not reported: the top-level document's origin is checked |
+| Backend   | Hook                                                          | Asking frame                                                |
+| --------- | ------------------------------------------------------------- | ----------------------------------------------------------- |
+| WKWebView | `requestMediaCapturePermissionForOrigin` (macOS 12 and later) | the frame's security origin, and the web view's URL         |
+| CEF       | `CefPermissionHandler::OnRequestMediaAccessPermission`        | the requesting origin and its frame, and the main frame     |
+| WebView2  | `PermissionRequested` (`Microphone`, `Camera`), one per kind  | the frame's own committed origin, and the web view's source |
+| WebKitGTK | `permission-request` (`WebKitUserMediaPermissionRequest`)     | not reported: the top-level document's origin is checked    |
 
 A request's document is replaced at WKWebView's `didCommitNavigation`, CEF's
 `OnLoadStart` for the main frame, WebView2's `ContentLoading` and WebKitGTK's
 `load-changed` (`WEBKIT_LOAD_COMMITTED`), none of which fire for a same-document
 navigation. The answer-time check reads the web view's URL (WKWebView,
 WebKitGTK), its `Source` (WebView2) or the main frame's URL (CEF).
+
+Chromium names the top-level document's origin for a sub-frame the device is
+delegated to (`<iframe allow="microphone">`), so neither CEF nor WebView2 takes
+the origin the engine reports on its own. CEF checks it against the asking
+frame's URL. WebView2's frames have no URL and its web view event doesn't say
+which frame asks, so every sub-frame's request is caught at the frame
+(`FrameCreated`, `ICoreWebView2Frame3`'s `PermissionRequested`, handled there)
+and decided with the origin of the document the frame last committed, from the
+frame's own `NavigationStarting` and `ContentLoading`. A frame that hasn't
+committed a document it saw start (its initial `about:blank`, a `srcdoc` frame),
+or that has a child frame (WebView2 raises a descendant's request on the
+ancestor it knows), is refused; so is every request in a window with a frame
+whose requests can't be caught at the frame (an older runtime).
 
 CEF never shows Chrome's own prompt, and WebView2's decisions are not saved in
 the profile. WebKitGTK does not say which frame asks, so there a sub-frame

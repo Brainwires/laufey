@@ -105,6 +105,59 @@ inline bool MediaCaptureGrantStands(bool allow,
          request_top_origin == current_top_origin;
 }
 
+// A sub-frame's document origin, for an engine whose permission event names
+// the frame but neither its document nor its real origin (WebView2: a
+// delegated request, `<iframe allow="microphone">`, carries the top-level
+// document's origin, and an ICoreWebView2Frame has no URL). The backend feeds
+// it the frame's own navigations; a request from the frame is decided with
+// RequestingOrigin(). Unknown is refused (kOpaqueOrigin):
+//   - before the frame commits a document whose start it saw (its initial
+//     about:blank, a srcdoc frame), and after a navigation that never commits
+//     (a 204 leaves the old document in place);
+//   - once the frame has had a child frame: the engine raises a descendant's
+//     request on the ancestor it knows, so the asking document can't be told.
+// Not thread-safe: the backend's UI thread only. Pure otherwise.
+class SubFrameOrigin {
+ public:
+  // A navigation started, or was redirected (same `navigation_id`), to a URL
+  // of `origin` (serialized).
+  void NavigationStarting(uint64_t navigation_id, const std::string& origin) {
+    for (auto& [id, o] : starting_) {
+      if (id == navigation_id) {
+        o = origin;
+        return;
+      }
+    }
+    starting_.push_back({navigation_id, origin});
+  }
+
+  // Navigation `navigation_id` committed: its document is the frame's now.
+  // One the frame never saw start leaves the origin unknown.
+  void Committed(uint64_t navigation_id) {
+    committed_ = kOpaqueOrigin;
+    for (auto& [id, o] : starting_) {
+      if (id == navigation_id)
+        committed_ = o;
+    }
+    starting_.clear();
+  }
+
+  // The frame created a child frame (or the engine can't say whether it did).
+  void ChildFrameCreated() {
+    has_child_ = true;
+  }
+
+  std::string RequestingOrigin() const {
+    return has_child_ || committed_.empty() ? std::string(kOpaqueOrigin)
+                                            : committed_;
+  }
+
+ private:
+  std::vector<std::pair<uint64_t, std::string>> starting_;
+  std::string committed_;
+  bool has_child_ = false;
+};
+
 // Steps 1-3 above for one request: `top_origin` is the window's top-level
 // document's serialized origin, `requesting_origin` the asking document's,
 // `kinds` LAUFEY_MEDIA_CAPTURE_* bits (plus kMediaCaptureOther for anything

@@ -1482,10 +1482,14 @@ bool LaufeyHandler::OnRequestMediaAccessPermission(
                              CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE))
     kinds |= laufey_common::kMediaCaptureOther;
   // The asking document: the origin Chromium names, which must be its
-  // frame's. The top-level document's from the main frame.
+  // frame's. Chromium names the embedding (top-level) origin for a sub-frame
+  // the device is delegated to (`<iframe allow="microphone">`), so the frame's
+  // own URL is what tells a cross-origin sub-frame apart; with no frame to
+  // check, the request is refused. The top-level document's from the main
+  // frame.
   std::string requesting =
       laufey_common::OriginOfUrl(requesting_origin.ToString());
-  if (frame && frame->IsValid() &&
+  if (!frame || !frame->IsValid() ||
       laufey_common::OriginOfUrl(frame->GetURL().ToString()) != requesting)
     requesting = laufey_common::kOpaqueOrigin;
   std::string top = laufey_common::kOpaqueOrigin;

@@ -282,6 +282,48 @@ int main() {
     EXPECT(!MediaCaptureGrantStands(false, a, a));
   }
 
+  // --- A sub-frame's origin, from its own navigations (WebView2) ------------
+  {
+    const std::string a = "https://a.example";
+    const std::string b = "https://b.example";
+    SubFrameOrigin f;
+    // Nothing committed yet (the initial about:blank): unknown.
+    EXPECT(f.RequestingOrigin() == kOpaqueOrigin);
+    f.NavigationStarting(1, b);
+    EXPECT(f.RequestingOrigin() == kOpaqueOrigin);
+    // A redirect to the top-level document's origin: the commit is a's.
+    f.NavigationStarting(1, a);
+    f.Committed(1);
+    EXPECT(f.RequestingOrigin() == a);
+    // A navigation to another origin that never commits (a 204) leaves a's
+    // document, still a's; one that commits is b's.
+    f.NavigationStarting(2, b);
+    EXPECT(f.RequestingOrigin() == a);
+    f.NavigationStarting(3, b);
+    f.Committed(3);
+    EXPECT(f.RequestingOrigin() == b);
+    // Starting a's URL and not committing it never makes the frame a's.
+    f.NavigationStarting(4, a);
+    EXPECT(f.RequestingOrigin() == b);
+    // A commit the frame never saw start: unknown.
+    f.Committed(5);
+    EXPECT(f.RequestingOrigin() == kOpaqueOrigin);
+    // Once the frame has a child frame, its requests can't be told apart.
+    SubFrameOrigin g;
+    g.NavigationStarting(1, a);
+    g.Committed(1);
+    EXPECT(g.RequestingOrigin() == a);
+    g.ChildFrameCreated();
+    EXPECT(g.RequestingOrigin() == kOpaqueOrigin);
+    g.NavigationStarting(2, a);
+    g.Committed(2);
+    EXPECT(g.RequestingOrigin() == kOpaqueOrigin);
+    // Decided as any request: a's frame in a's window is asked about, b's
+    // refused.
+    EXPECT(DecideMediaCapture(MediaCapturePolicy{}, a, f.RequestingOrigin(),
+                              kMic, true) == kDeny);
+  }
+
   std::printf("media_capture_test: ok\n");
   return 0;
 }

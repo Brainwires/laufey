@@ -1653,84 +1653,198 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                 nullptr);
 
             // getUserMedia (API 53, laufey_media_capture.h). WebView2 raises
-            // one PermissionRequested per kind, for the main frame and its
-            // sub-frames alike, naming the asking document: one whose origin
-            // isn't the top-level document's is refused. The answer is never
+            // one PermissionRequested per kind. Its Uri is no proof of who
+            // asks: a sub-frame the top-level document delegates a device to
+            // (`<iframe allow="microphone">`) is reported with the top-level
+            // document's origin. So every sub-frame's request is caught at
+            // the frame (FrameCreated, ICoreWebView2Frame3's
+            // PermissionRequested, handled there so the web view's event
+            // never sees it) and decided with the frame's own committed
+            // origin (SubFrameOrigin); a frame whose requests can't be caught
+            // makes the window refuse every request. The answer is never
             // saved in the profile, so every request meets the policy. Other
             // permissions keep WebView2's default handling.
+            //
+            // `requesting`: the asking document's origin, or empty for the
+            // event's Uri (the main frame). Returns whether it was a
+            // microphone / camera request (then decided).
+            auto media_unguarded = std::make_shared<bool>(false);
+            auto decide_media =
+                [this, wid](ICoreWebView2PermissionRequestedEventArgs* args,
+                            std::string requesting) -> bool {
+              COREWEBVIEW2_PERMISSION_KIND kind;
+              if (FAILED(args->get_PermissionKind(&kind)))
+                return false;
+              uint32_t kinds = 0;
+              if (kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
+                kinds = LAUFEY_MEDIA_CAPTURE_MICROPHONE;
+              else if (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA)
+                kinds = LAUFEY_MEDIA_CAPTURE_CAMERA;
+              else
+                return false;
+              ComPtr<ICoreWebView2PermissionRequestedEventArgs3> args3;
+              if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args3))))
+                args3->put_SavesInProfile(FALSE);
+              // Refused unless decided otherwise below.
+              args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
+              ComPtr<ICoreWebView2> view;
+              {
+                std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+                if (auto* s = GetWindow(wid))
+                  view = s->webview;
+              }
+              if (requesting.empty()) {
+                requesting = laufey_common::kOpaqueOrigin;
+                LPWSTR uriRaw = nullptr;
+                if (SUCCEEDED(args->get_Uri(&uriRaw)) && uriRaw)
+                  requesting = laufey_common::OriginOfUrl(
+                      laufey_common::WideToUtf8(uriRaw));
+                if (uriRaw)
+                  CoTaskMemFree(uriRaw);
+              }
+              std::string top = laufey_common::kOpaqueOrigin;
+              LPWSTR topRaw = nullptr;
+              if (view && SUCCEEDED(view->get_Source(&topRaw)) && topRaw)
+                top = laufey_common::OriginOfUrl(
+                    laufey_common::WideToUtf8(topRaw));
+              if (topRaw)
+                CoTaskMemFree(topRaw);
+              ComPtr<ICoreWebView2Deferral> deferral;
+              if (FAILED(args->GetDeferral(&deferral)))
+                deferral.Reset();
+              ComPtr<ICoreWebView2PermissionRequestedEventArgs> held(args);
+              laufey_common::MediaCaptureRequests::Instance().Request(
+                  wid, top, requesting, kinds,
+                  [this, held, deferral, view, top](bool allow) {
+                    // On the UI thread; inline when already there. A grant
+                    // stands only while the web view's top-level document is
+                    // still of the origin the request was made for.
+                    RunOnUiThread([held, deferral, view, top, allow] {
+                      std::string current = laufey_common::kOpaqueOrigin;
+                      LPWSTR nowRaw = nullptr;
+                      if (allow && view &&
+                          SUCCEEDED(view->get_Source(&nowRaw)) && nowRaw)
+                        current = laufey_common::OriginOfUrl(
+                            laufey_common::WideToUtf8(nowRaw));
+                      if (nowRaw)
+                        CoTaskMemFree(nowRaw);
+                      bool grant = laufey_common::MediaCaptureGrantStands(
+                          allow, top, current);
+                      held->put_State(grant
+                                          ? COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                                          : COREWEBVIEW2_PERMISSION_STATE_DENY);
+                      if (deferral)
+                        deferral->Complete();
+                    });
+                  });
+              return true;
+            };
             state->webview->add_PermissionRequested(
                 Callback<ICoreWebView2PermissionRequestedEventHandler>(
-                    [this, wid](ICoreWebView2* sender,
-                                ICoreWebView2PermissionRequestedEventArgs* args)
+                    [decide_media, media_unguarded](
+                        ICoreWebView2*,
+                        ICoreWebView2PermissionRequestedEventArgs* args)
                         -> HRESULT {
-                      COREWEBVIEW2_PERMISSION_KIND kind;
-                      if (FAILED(args->get_PermissionKind(&kind)))
-                        return S_OK;
-                      uint32_t kinds = 0;
-                      if (kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
-                        kinds = LAUFEY_MEDIA_CAPTURE_MICROPHONE;
-                      else if (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA)
-                        kinds = LAUFEY_MEDIA_CAPTURE_CAMERA;
-                      else
-                        return S_OK;
-                      ComPtr<ICoreWebView2PermissionRequestedEventArgs3> args3;
-                      if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args3))))
-                        args3->put_SavesInProfile(FALSE);
-                      // Refused unless decided otherwise below.
-                      args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
-                      LPWSTR uriRaw = nullptr;
-                      LPWSTR topRaw = nullptr;
-                      std::string requesting = laufey_common::kOpaqueOrigin;
-                      std::string top = laufey_common::kOpaqueOrigin;
-                      if (SUCCEEDED(args->get_Uri(&uriRaw)) && uriRaw)
-                        requesting = laufey_common::OriginOfUrl(
-                            laufey_common::WideToUtf8(uriRaw));
-                      if (sender && SUCCEEDED(sender->get_Source(&topRaw)) &&
-                          topRaw)
-                        top = laufey_common::OriginOfUrl(
-                            laufey_common::WideToUtf8(topRaw));
-                      if (uriRaw)
-                        CoTaskMemFree(uriRaw);
-                      if (topRaw)
-                        CoTaskMemFree(topRaw);
-                      ComPtr<ICoreWebView2Deferral> deferral;
-                      if (FAILED(args->GetDeferral(&deferral)))
-                        deferral.Reset();
-                      ComPtr<ICoreWebView2PermissionRequestedEventArgs> held(
-                          args);
-                      ComPtr<ICoreWebView2> view(sender);
-                      laufey_common::MediaCaptureRequests::Instance().Request(
-                          wid, top, requesting, kinds,
-                          [this, held, deferral, view, top](bool allow) {
-                            // On the UI thread; inline when already there. A
-                            // grant stands only while the web view's
-                            // top-level document is still of the origin the
-                            // request was made for.
-                            RunOnUiThread([held, deferral, view, top, allow] {
-                              std::string current =
-                                  laufey_common::kOpaqueOrigin;
-                              LPWSTR nowRaw = nullptr;
-                              if (allow && view &&
-                                  SUCCEEDED(view->get_Source(&nowRaw)) &&
-                                  nowRaw)
-                                current = laufey_common::OriginOfUrl(
-                                    laufey_common::WideToUtf8(nowRaw));
-                              if (nowRaw)
-                                CoTaskMemFree(nowRaw);
-                              bool grant =
-                                  laufey_common::MediaCaptureGrantStands(
-                                      allow, top, current);
-                              held->put_State(
-                                  grant ? COREWEBVIEW2_PERMISSION_STATE_ALLOW
-                                        : COREWEBVIEW2_PERMISSION_STATE_DENY);
-                              if (deferral)
-                                deferral->Complete();
-                            });
-                          });
+                      // A sub-frame no frame-level handler catches could be
+                      // behind any request: refuse them all.
+                      decide_media(
+                          args, *media_unguarded
+                                    ? std::string(laufey_common::kOpaqueOrigin)
+                                    : std::string());
                       return S_OK;
                     })
                     .Get(),
                 nullptr);
+            // Every frame: its own navigations give its origin; a child frame
+            // makes its requests unattributable (WebView2 raises a
+            // descendant's request on it); its microphone / camera requests
+            // are decided and handled at the frame.
+            auto guard_frame = [decide_media, media_unguarded](
+                                   ComPtr<ICoreWebView2Frame> frame) {
+              ComPtr<ICoreWebView2Frame3> frame3;
+              if (!frame || FAILED(frame.As(&frame3))) {
+                *media_unguarded = true;
+                return;
+              }
+              auto origin = std::make_shared<laufey_common::SubFrameOrigin>();
+              frame3->add_NavigationStarting(
+                  Callback<ICoreWebView2FrameNavigationStartingEventHandler>(
+                      [origin](ICoreWebView2Frame*,
+                               ICoreWebView2NavigationStartingEventArgs* args)
+                          -> HRESULT {
+                        UINT64 nav = 0;
+                        args->get_NavigationId(&nav);
+                        LPWSTR uriRaw = nullptr;
+                        std::string o = laufey_common::kOpaqueOrigin;
+                        if (SUCCEEDED(args->get_Uri(&uriRaw)) && uriRaw)
+                          o = laufey_common::OriginOfUrl(
+                              laufey_common::WideToUtf8(uriRaw));
+                        if (uriRaw)
+                          CoTaskMemFree(uriRaw);
+                        origin->NavigationStarting(nav, o);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+              frame3->add_ContentLoading(
+                  Callback<ICoreWebView2FrameContentLoadingEventHandler>(
+                      [origin](ICoreWebView2Frame*,
+                               ICoreWebView2ContentLoadingEventArgs* args)
+                          -> HRESULT {
+                        UINT64 nav = 0;
+                        args->get_NavigationId(&nav);
+                        origin->Committed(nav);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+              ComPtr<ICoreWebView2Frame7> frame7;
+              if (SUCCEEDED(frame.As(&frame7))) {
+                frame7->add_FrameCreated(
+                    Callback<ICoreWebView2FrameChildFrameCreatedEventHandler>(
+                        [origin](
+                            ICoreWebView2Frame*,
+                            ICoreWebView2FrameCreatedEventArgs*) -> HRESULT {
+                          origin->ChildFrameCreated();
+                          return S_OK;
+                        })
+                        .Get(),
+                    nullptr);
+              } else {
+                // No way to see its child frames.
+                origin->ChildFrameCreated();
+              }
+              frame3->add_PermissionRequested(
+                  Callback<ICoreWebView2FramePermissionRequestedEventHandler>(
+                      [decide_media, origin](
+                          ICoreWebView2Frame*,
+                          ICoreWebView2PermissionRequestedEventArgs2* args)
+                          -> HRESULT {
+                        if (decide_media(args, origin->RequestingOrigin()))
+                          args->put_Handled(TRUE);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+            };
+            ComPtr<ICoreWebView2_4> media_webview4;
+            if (SUCCEEDED(state->webview.As(&media_webview4))) {
+              media_webview4->add_FrameCreated(
+                  Callback<ICoreWebView2FrameCreatedEventHandler>(
+                      [guard_frame](
+                          ICoreWebView2*,
+                          ICoreWebView2FrameCreatedEventArgs* args) -> HRESULT {
+                        ComPtr<ICoreWebView2Frame> frame;
+                        if (FAILED(args->get_Frame(&frame)))
+                          frame.Reset();
+                        guard_frame(frame);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+            } else {
+              *media_unguarded = true;
+            }
             // The main frame committed another document (ContentLoading isn't
             // raised for a same-document navigation): a microphone / camera
             // request the old document waits on is refused, so a late answer
