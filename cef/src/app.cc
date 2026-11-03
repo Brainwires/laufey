@@ -352,6 +352,8 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
     g_unrevealed_hidden_windows.erase(laufey_id_);
     RuntimeLoader::GetInstance()->UnregisterBrowser(laufey_id_);
     laufey_common::ForgetWindow(laufey_id_);
+    // A microphone / camera request it waits on is refused.
+    laufey_common::MediaCaptureRequests::Instance().ForgetWindow(laufey_id_);
 #if defined(_WIN32) || defined(__linux__)
     laufey_cef_menu::ForgetWindow(laufey_id_);
 #endif
@@ -493,6 +495,15 @@ void LaufeyHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
   const std::string url = frame->GetURL().ToString();
   int released = laufey_common::CommitGates().Committed(
       browser->GetIdentifier(), frame->IsMain(), url);
+  // The main frame committed another document (CEF doesn't call this for a
+  // same-document navigation): a microphone / camera request the old document
+  // waits on is refused, so a late answer never reaches the new one
+  // (laufey_media_capture.h).
+  if (frame->IsMain()) {
+    if (uint32_t wid =
+            RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser))
+      laufey_common::MediaCaptureRequests::Instance().ForgetDocument(wid);
+  }
   if (laufey_common::TimingEnabled())
     laufey_common::Timing(std::string("load start ") +
                           (frame->IsMain() ? "main " : "sub ") + url + " (" +
@@ -1488,16 +1499,28 @@ bool LaufeyHandler::OnRequestMediaAccessPermission(
     top = laufey_common::kOpaqueOrigin;
   const uint32_t granted = requested_permissions;
   laufey_common::MediaCaptureRequests::Instance().Request(
-      wid, top, requesting, kinds, [callback, granted](bool allow) {
+      wid, top, requesting, kinds,
+      [callback, granted, browser, top](bool allow) {
+        // On TID_UI. A grant stands only while the browser's top-level
+        // document is still of the origin the request was made for.
         CefPostTask(TID_UI, base::BindOnce(
                                 [](CefRefPtr<CefMediaAccessCallback> cb,
+                                   CefRefPtr<CefBrowser> b, std::string origin,
                                    uint32_t mask, bool ok) {
-                                  if (ok)
+                                  std::string current =
+                                      laufey_common::kOpaqueOrigin;
+                                  CefRefPtr<CefFrame> main =
+                                      ok && b ? b->GetMainFrame() : nullptr;
+                                  if (main && main->IsValid())
+                                    current = laufey_common::OriginOfUrl(
+                                        main->GetURL().ToString());
+                                  if (laufey_common::MediaCaptureGrantStands(
+                                          ok, origin, current))
                                     cb->Continue(mask);
                                   else
                                     cb->Cancel();
                                 },
-                                callback, granted, allow));
+                                callback, browser, top, granted, allow));
       });
   return true;
 }

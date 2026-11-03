@@ -38,10 +38,15 @@ laufey::on_media_capture_request(|req: MediaCaptureRequest| {
 The handler fires on the UI thread, and `answer_media_capture` may be called
 from any thread, later (after asking the user, for example). Until then the
 page's `getUserMedia` promise stays pending, as it would behind a browser's
-prompt. A request is refused when its window is closed or when
+prompt. A request is refused when its window is closed, when the window's
+top-level document is replaced (its main frame commits a navigation to another
+document; a fragment or `pushState` navigation keeps it), or when
 `clear_media_capture_handler` removes the handler; an answer after that returns
-`false`. Nothing is remembered between requests: each one meets the launch file
-and the handler again.
+`false`, so a late answer never grants the devices to whatever page the window
+shows by then. When a yes is delivered, the backend checks once more that the
+window's top-level document is still of the origin the request was made for, and
+refuses it otherwise. Nothing is remembered between requests: each one meets the
+launch file and the handler again.
 
 ## The engines
 
@@ -51,6 +56,12 @@ and the handler again.
 | CEF       | `CefPermissionHandler::OnRequestMediaAccessPermission`        | the requesting origin and its frame, and the main frame  |
 | WebView2  | `PermissionRequested` (`Microphone`, `Camera`), one per kind  | the event's URI, and the web view's source               |
 | WebKitGTK | `permission-request` (`WebKitUserMediaPermissionRequest`)     | not reported: the top-level document's origin is checked |
+
+A request's document is replaced at WKWebView's `didCommitNavigation`, CEF's
+`OnLoadStart` for the main frame, WebView2's `ContentLoading` and WebKitGTK's
+`load-changed` (`WEBKIT_LOAD_COMMITTED`), none of which fire for a same-document
+navigation. The answer-time check reads the web view's URL (WKWebView,
+WebKitGTK), its `Source` (WebView2) or the main frame's URL (CEF).
 
 CEF never shows Chrome's own prompt, and WebView2's decisions are not saved in
 the profile. WebKitGTK does not say which frame asks, so there a sub-frame

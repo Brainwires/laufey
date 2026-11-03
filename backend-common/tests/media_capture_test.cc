@@ -223,6 +223,65 @@ int main() {
     EXPECT(nested);
   }
 
+  // --- A window's top-level document is replaced ----------------------------
+  {
+    MediaCaptureRequests requests;
+    const MediaCapturePolicy p = PolicyOf(R"({})");
+    std::vector<std::pair<int, bool>> replies;
+    auto reply_for = [&](int tag) {
+      return [&replies, tag](bool allow) { replies.push_back({tag, allow}); };
+    };
+    AskedLog().clear();
+    requests.SetHandler(RecordAsk, &AskedLog());
+    EXPECT(requests.Request(p, 20, "https://a.example", "https://a.example",
+                            kMic, reply_for(1)) == kAsk);
+    EXPECT(requests.Request(p, 20, "https://a.example", "https://a.example",
+                            kCam, reply_for(2)) == kAsk);
+    EXPECT(requests.Request(p, 21, "https://a.example", "https://a.example",
+                            kMic, reply_for(3)) == kAsk);
+    EXPECT(AskedLog().size() == 3);
+
+    // Window 20's main frame commits another document: what it waits on is
+    // refused at once, and a late yes reaches nothing (the new page included).
+    requests.ForgetDocument(20);
+    EXPECT(replies.size() == 2 && replies[0] == std::make_pair(1, false) &&
+           replies[1] == std::make_pair(2, false));
+    EXPECT(!requests.Answer(AskedLog()[0].request_id, true));
+    EXPECT(!requests.Answer(AskedLog()[1].request_id, true));
+    EXPECT(replies.size() == 2);
+    // Another window's request still waits, and its answer still lands.
+    EXPECT(requests.PendingCount() == 1);
+    EXPECT(requests.Answer(AskedLog()[2].request_id, true));
+    EXPECT(replies.size() == 3 && replies[2] == std::make_pair(3, true));
+
+    // The new document's own requests are decided as usual.
+    EXPECT(requests.Request(p, 20, "https://b.example", "https://b.example",
+                            kMic, reply_for(4)) == kAsk);
+    EXPECT(requests.Answer(AskedLog().back().request_id, true));
+    EXPECT(replies.size() == 4 && replies[3] == std::make_pair(4, true));
+    // A window with nothing waiting: nothing happens.
+    requests.ForgetDocument(20);
+    requests.ForgetDocument(99);
+    EXPECT(replies.size() == 4 && requests.PendingCount() == 0);
+    requests.SetHandler(nullptr, nullptr);
+  }
+
+  // --- At answer time: the window's top-level origin is re-checked ----------
+  {
+    const std::string a = "https://a.example";
+    EXPECT(MediaCaptureGrantStands(true, a, a));
+    // The top-level document moved to another origin, or to an opaque one.
+    EXPECT(!MediaCaptureGrantStands(true, a, "https://b.example"));
+    EXPECT(!MediaCaptureGrantStands(true, a, kOpaqueOrigin));
+    EXPECT(!MediaCaptureGrantStands(true, a, ""));
+    EXPECT(!MediaCaptureGrantStands(true, a, "https://a.example:8443"));
+    // A request made for no origin never stands.
+    EXPECT(!MediaCaptureGrantStands(true, kOpaqueOrigin, kOpaqueOrigin));
+    EXPECT(!MediaCaptureGrantStands(true, "", ""));
+    // A refusal stays one.
+    EXPECT(!MediaCaptureGrantStands(false, a, a));
+  }
+
   std::printf("media_capture_test: ok\n");
   return 0;
 }

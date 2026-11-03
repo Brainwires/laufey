@@ -1033,15 +1033,25 @@ static void LaufeyOpenInBrowser(NSURL* url) {
                            ? ((LaufeyWebView*)webView).laufeyWindowId
                            : 0;
   void (^handler)(WKPermissionDecision) = [decisionHandler copy];
+  __weak WKWebView* weakView = webView;
+  // On the main thread: a grant stands only while the web view's top-level
+  // document is still of the origin the request was made for.
+  void (^decide)(bool) = ^(bool allow) {
+    WKWebView* view = weakView;
+    NSString* now = view ? view.URL.absoluteString : nil;
+    std::string current = now ? laufey_common::OriginOfUrl(now.UTF8String ?: "")
+                              : std::string(laufey_common::kOpaqueOrigin);
+    handler(laufey_common::MediaCaptureGrantStands(allow, top, current)
+                ? WKPermissionDecisionGrant
+                : WKPermissionDecisionDeny);
+  };
   laufey_common::MediaCaptureRequests::Instance().Request(
-      window_id, top, requesting, kinds, [handler](bool allow) {
-        WKPermissionDecision decision =
-            allow ? WKPermissionDecisionGrant : WKPermissionDecisionDeny;
+      window_id, top, requesting, kinds, [decide](bool allow) {
         if ([NSThread isMainThread]) {
-          handler(decision);
+          decide(allow);
         } else {
           dispatch_async(dispatch_get_main_queue(), ^{
-            handler(decision);
+            decide(allow);
           });
         }
       });
@@ -1402,6 +1412,15 @@ API_AVAILABLE(macos(11.3))
   decisionHandler(WKNavigationActionPolicyCancel);
   if (decision == laufey_common::NavigationDecision::kOpenInBrowser)
     LaufeyOpenInBrowser(url);
+}
+
+// The main frame committed a navigation to another document (WebKit doesn't
+// call this for a same-document one): a microphone / camera request the old
+// document waits on is refused, so a late answer never reaches the new one
+// (laufey_media_capture.h).
+- (void)webView:(WKWebView*)webView
+    didCommitNavigation:(WKNavigation*)navigation {
+  laufey_common::MediaCaptureRequests::Instance().ForgetDocument(self.windowId);
 }
 
 // Fired when a main-frame navigation finishes loading. Used to reveal a window

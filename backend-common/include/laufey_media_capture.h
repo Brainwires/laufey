@@ -18,9 +18,14 @@
 //      through answer_media_capture; with no handler, refused.
 //
 // A request that is asked waits until the runtime answers, its window closes
-// (close_window: refused), or the handler is cleared (refused). The backend's
-// reply runs exactly once, on whichever thread decides; a backend whose engine
-// must be answered on its UI thread posts the answer there itself.
+// (close_window: refused), its window's top-level document is replaced (the
+// main frame commits a navigation to another document: refused, so a late
+// answer never reaches whatever page is there now; ForgetDocument), or the
+// handler is cleared (refused). The backend's reply runs exactly once, on
+// whichever thread decides; a backend whose engine must be answered on its UI
+// thread posts the answer there itself, and there re-checks that the window's
+// top-level document is still of the origin the request was made for
+// (MediaCaptureGrantStands): a grant that no longer is becomes a refusal.
 //
 // Origins are compared in their HTML serialization (laufey_bridge_origin.h).
 // Header-only.
@@ -86,6 +91,19 @@ inline bool Contains(const std::vector<std::string>& list,
 }
 
 }  // namespace media_capture_internal
+
+// At answer time, on the backend's UI thread: whether `allow` still holds for
+// a request made while the window's top-level document was of
+// `request_top_origin`, now that it is of `current_top_origin` (both
+// serialized). A grant for a window whose top-level document has since moved
+// to another origin (or to none) is a refusal. Pure.
+inline bool MediaCaptureGrantStands(bool allow,
+                                    const std::string& request_top_origin,
+                                    const std::string& current_top_origin) {
+  return allow && !request_top_origin.empty() &&
+         request_top_origin != kOpaqueOrigin &&
+         request_top_origin == current_top_origin;
+}
 
 // Steps 1-3 above for one request: `top_origin` is the window's top-level
 // document's serialized origin, `requesting_origin` the asking document's,
@@ -204,6 +222,34 @@ class MediaCaptureRequests {
 
   // Refuses every request window `window_id` is waiting on (it closed).
   void ForgetWindow(uint32_t window_id) {
+    RefuseWindow(window_id);
+  }
+
+  // Refuses every request window `window_id` is waiting on because its
+  // top-level document was replaced: the backend calls it when the window's
+  // main frame commits a navigation to another document (not for a
+  // same-document one: a fragment, pushState). Requests the new document
+  // makes afterwards are decided as usual. Any thread.
+  void ForgetDocument(uint32_t window_id) {
+    RefuseWindow(window_id);
+  }
+
+  size_t PendingCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_.size();
+  }
+
+  MediaCaptureRequests() = default;
+  MediaCaptureRequests(const MediaCaptureRequests&) = delete;
+  MediaCaptureRequests& operator=(const MediaCaptureRequests&) = delete;
+
+ private:
+  struct Pending {
+    uint32_t window_id = 0;
+    Reply reply;
+  };
+
+  void RefuseWindow(uint32_t window_id) {
     std::vector<Reply> refused;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -221,21 +267,6 @@ class MediaCaptureRequests {
         reply(false);
     }
   }
-
-  size_t PendingCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return pending_.size();
-  }
-
-  MediaCaptureRequests() = default;
-  MediaCaptureRequests(const MediaCaptureRequests&) = delete;
-  MediaCaptureRequests& operator=(const MediaCaptureRequests&) = delete;
-
- private:
-  struct Pending {
-    uint32_t window_id = 0;
-    Reply reply;
-  };
 
   mutable std::mutex mutex_;
   laufey_media_capture_fn handler_ = nullptr;

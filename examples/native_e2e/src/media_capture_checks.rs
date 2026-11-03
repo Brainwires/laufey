@@ -17,6 +17,8 @@
 //! - With a handler, a request the file doesn't grant is asked with its
 //!   origin and kinds, and the answer reaches the page (allowed: captures;
 //!   refused: NotAllowedError). The granted origin still isn't asked.
+//! - A request the handler holds is refused once its window navigates to
+//!   another document: a late yes reports `false`.
 //! - An answer for a request that isn't waiting reports `false`.
 //!
 //! An allowed request still meets the OS's consent: on macOS (TCC) an
@@ -40,7 +42,7 @@ const FRAME_ORIGIN: &str = "app://e2e-media-frame";
 
 /// Captures what `steps` names ("audio", "video", "both") one after another
 /// and reports each result through the bridge (as `<tag><step>`): "ok", or
-/// "err:<name>". A
+/// "err:<name>". A `?ping` page reports `<tag>ping` "ok" as soon as it runs. A
 /// `?frame` page also embeds FRAME_ORIGIN's capturing page, which posts its
 /// result to its parent.
 const PAGE_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8">
@@ -81,6 +83,7 @@ if (window.top !== window) {
     f.src = params.get('frame');
     document.body.appendChild(f);
   }
+  if (params.has('ping')) report('ping', 'ok');
   (async () => {
     for (const step of (params.get('steps') || '').split(',').filter(Boolean))
       report(step, await capture(step));
@@ -267,6 +270,42 @@ pub async fn run() {
     );
   }
   ok_again.close();
+
+  // --- A request whose document is gone -----------------------------------
+  // The handler holds the request; the window then navigates to another
+  // origin. Once the new page runs, the old request is refused: a late yes
+  // reaches nothing.
+  let held: Arc<Mutex<Vec<MediaCaptureRequest>>> =
+    Arc::new(Mutex::new(Vec::new()));
+  let h = held.clone();
+  laufey::on_media_capture_request(move |req| h.lock().unwrap().push(req));
+  let hold_win =
+    window(&format!("{ASK_ORIGIN}/?tag=held-&steps=audio"), &reports);
+  let hold_id = hold_win.id();
+  let held_req = || {
+    held
+      .lock()
+      .unwrap()
+      .iter()
+      .find(|r| r.window_id == hold_id && r.origin == ASK_ORIGIN)
+      .map(|r| r.id)
+  };
+  wait_for(|| held_req().is_some(), 300, 100).await;
+  match held_req() {
+    Some(id) => {
+      hold_win.navigate(&format!("{NO_ORIGIN}/?tag=after-&ping"));
+      let ping = result_of(&reports, NO_ORIGIN, "after-ping").await;
+      check(
+        &format!("media-capture: a request is refused once its window's top-level document is replaced ({ping})"),
+        ping == "ok" && !laufey::answer_media_capture(id, true),
+      );
+    }
+    None => check(
+      "media-capture: the handler holds a request (never asked)",
+      false,
+    ),
+  }
+  hold_win.close();
 
   // --- Answers for requests that aren't waiting ---------------------------
   tokio::time::sleep(Duration::from_millis(300)).await;

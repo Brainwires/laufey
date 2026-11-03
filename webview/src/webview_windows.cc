@@ -1698,18 +1698,49 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                         deferral.Reset();
                       ComPtr<ICoreWebView2PermissionRequestedEventArgs> held(
                           args);
+                      ComPtr<ICoreWebView2> view(sender);
                       laufey_common::MediaCaptureRequests::Instance().Request(
                           wid, top, requesting, kinds,
-                          [this, held, deferral](bool allow) {
-                            // On the UI thread; inline when already there.
-                            RunOnUiThread([held, deferral, allow] {
+                          [this, held, deferral, view, top](bool allow) {
+                            // On the UI thread; inline when already there. A
+                            // grant stands only while the web view's
+                            // top-level document is still of the origin the
+                            // request was made for.
+                            RunOnUiThread([held, deferral, view, top, allow] {
+                              std::string current =
+                                  laufey_common::kOpaqueOrigin;
+                              LPWSTR nowRaw = nullptr;
+                              if (allow && view &&
+                                  SUCCEEDED(view->get_Source(&nowRaw)) &&
+                                  nowRaw)
+                                current = laufey_common::OriginOfUrl(
+                                    laufey_common::WideToUtf8(nowRaw));
+                              if (nowRaw)
+                                CoTaskMemFree(nowRaw);
+                              bool grant =
+                                  laufey_common::MediaCaptureGrantStands(
+                                      allow, top, current);
                               held->put_State(
-                                  allow ? COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                                  grant ? COREWEBVIEW2_PERMISSION_STATE_ALLOW
                                         : COREWEBVIEW2_PERMISSION_STATE_DENY);
                               if (deferral)
                                 deferral->Complete();
                             });
                           });
+                      return S_OK;
+                    })
+                    .Get(),
+                nullptr);
+            // The main frame committed another document (ContentLoading isn't
+            // raised for a same-document navigation): a microphone / camera
+            // request the old document waits on is refused, so a late answer
+            // never reaches the new one.
+            state->webview->add_ContentLoading(
+                Callback<ICoreWebView2ContentLoadingEventHandler>(
+                    [wid](ICoreWebView2*,
+                          ICoreWebView2ContentLoadingEventArgs*) -> HRESULT {
+                      laufey_common::MediaCaptureRequests::Instance()
+                          .ForgetDocument(wid);
                       return S_OK;
                     })
                     .Get(),
