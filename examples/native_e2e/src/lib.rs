@@ -828,7 +828,11 @@ fn e2e_main() {
       // liblaufey_webauthn.so, else not_supported), so they
       // ride along where the full battery can't run.
       passkey_checks(body_win.as_ref().map(|w| w.id()).unwrap_or(0)).await;
-      let _ = &body_win;
+      // print_to_pdf too: its WebKitGTK checks are part of Layer 0, which
+      // this leg doesn't run. The round trip has already loaded the page.
+      if let Some(w) = &body_win {
+        print_checks(w, &AtomicBool::new(true)).await;
+      }
       finish();
     }
     // LAUFEY_E2E_ONLY=bridge-origin: the launch file's bridge pin (API 44);
@@ -1811,137 +1815,7 @@ fn e2e_main() {
     // loop). It belongs behind a backend test hook; tracked as a follow-up.
     na("menu/tray OS-structure check (Linux: D-Bus driver; macOS/Windows: pending backend hook)");
 
-    // ---- print_to_pdf smoke test (API >= 32) -----------------------------
-    // Render the loaded page to a PDF and assert real PDF bytes come back
-    // (`%PDF-` magic), exercising each backend's actual render path (WKWebView
-    // createPDFWithConfiguration, WebView2 PrintToPdfStream, WebKitGTK
-    // print-to-file, CEF DevTools Page.printToPDF). Winit has no web engine
-    // and reports "unsupported" through the callback -> N/A. A backend whose
-    // completion handler never fires shows up here as a FAIL on the delivery
-    // assertion.
-    //
-    // The render races page load: WKWebView's createPDFWithConfiguration
-    // fails with a generic NSError while the page is still loading, so wait
-    // for on_page_load first (best effort -- engine-less backends never fire
-    // it) and retry a transient error before judging; only a persistent error
-    // is a real failure.
-    //
-    // A backend with a web engine gets 45 s for that load: WebView2 answers
-    // "window not found" until its controller is ready, and on a loaded
-    // windows-latest runner the first environment has taken ~34 s to come up
-    // (run 41510522703), well past the 5 s the engine-less backends get.
-    let load_rounds = if scheme_supported { 450 } else { 50 };
-    let _ =
-      wait_for(|| page_loaded.load(Ordering::SeqCst), load_rounds, 100).await;
-    let mut outcome: Option<Result<Vec<u8>, String>> = None;
-    for attempt in 0..3u32 {
-      if attempt > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-      }
-      let pdf_result =
-        Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
-      let pr = pdf_result.clone();
-      win.print_to_pdf(None, move |r| *pr.lock().unwrap() = Some(r));
-      if !wait_for(|| pdf_result.lock().unwrap().is_some(), 150, 100).await {
-        continue; // nothing delivered this attempt; retry
-      }
-      let result = pdf_result.lock().unwrap().take().unwrap();
-      let transient = matches!(&result, Err(e) if !e.contains("not supported"));
-      outcome = Some(result);
-      if !transient {
-        break;
-      }
-    }
-    match outcome {
-      None => check("print_to_pdf delivers a result within 15s", false),
-      Some(Ok(bytes)) => check(
-        &format!("print_to_pdf returns real PDF bytes ({} bytes)", bytes.len()),
-        bytes.starts_with(b"%PDF-"),
-      ),
-      Some(Err(e)) if e.contains("not supported") => {
-        na("print_to_pdf (backend has no web engine / PDF support)")
-      }
-      Some(Err(e)) => {
-        check(&format!("print_to_pdf succeeds (got: {e})"), false)
-      }
-    }
-
-    // print_to_pdf on a window that was only just created. WebView2 creates
-    // its controller asynchronously and used to answer "window not found"
-    // until it was ready; it now renders once the controller is ready (or
-    // answers "web view not ready" after 45 s). No page is loaded, so the
-    // render doesn't race a navigation (WKWebView refuses a PDF mid-load).
-    // Every engine backend must recognise the window; WebView2, whose queue
-    // this covers, must also deliver the PDF.
-    if scheme_supported {
-      let fresh = Window::new(320, 240).title("native-e2e-pdf-at-creation");
-      let early =
-        Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
-      let er = early.clone();
-      fresh.print_to_pdf(None, move |r| *er.lock().unwrap() = Some(r));
-      let delivered =
-        wait_for(|| early.lock().unwrap().is_some(), 500, 100).await;
-      let result = early.lock().unwrap().take();
-      let summary = match &result {
-        Some(Ok(bytes)) => format!("{} bytes", bytes.len()),
-        Some(Err(e)) => format!("Err({e})"),
-        None => "nothing delivered".into(),
-      };
-      let is_webview2 = cfg!(target_os = "windows")
-        && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview");
-      if is_webview2 {
-        check(
-          &format!(
-            "print_to_pdf right after the window is created renders it \
-             ({summary})"
-          ),
-          matches!(&result, Some(Ok(b)) if b.starts_with(b"%PDF-")),
-        );
-      } else {
-        check(
-          &format!(
-            "print_to_pdf right after the window is created finds the window \
-             ({summary})"
-          ),
-          delivered
-            && !matches!(&result, Some(Err(e)) if e.contains("window not found")),
-        );
-      }
-      fresh.close();
-    } else {
-      na("print_to_pdf right after creation (backend has no web engine)");
-    }
-
-    // print_to_pdf for a window that doesn't exist refuses through the
-    // callback, and that callback may re-enter the backend: WebKitGTK runs it
-    // on the GTK thread, where get_size takes the same (non-recursive) window
-    // lock the not-found lookup takes. A refusal made under that lock
-    // deadlocks the UI thread here, and nothing is delivered.
-    if cfg!(target_os = "linux")
-      && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
-    {
-      let refusal =
-        Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
-      let rf = refusal.clone();
-      let live_id = win.id();
-      Window::from_id(u32::MAX - 1).print_to_pdf(None, move |r| {
-        let _ = Window::from_id(live_id).get_size();
-        *rf.lock().unwrap() = Some(r);
-      });
-      let delivered =
-        wait_for(|| refusal.lock().unwrap().is_some(), 50, 100).await;
-      let result = refusal.lock().unwrap().take();
-      check(
-        &format!(
-          "print_to_pdf on a missing window refuses through a callback that \
-           can re-enter the backend (got: {result:?})"
-        ),
-        delivered
-          && matches!(&result, Some(Err(e)) if e.contains("window not found")),
-      );
-    } else {
-      na("print_to_pdf missing-window re-entry (WebKitGTK only)");
-    }
+    print_checks(&win, &page_loaded).await;
 
     // ---- C. custom scheme is a real origin --------------------------------
     // The page at laufey-e2e://app/ (loaded above) reports back through the
@@ -3200,6 +3074,146 @@ mod exit_guard {
   pub fn arm() {}
 }
 
+/// print_to_pdf on `win` (whose page `page_loaded` reports), on a window
+/// just created, and on one that does not exist. Part of Layer 0; rides
+/// along in LAUFEY_E2E_ONLY=scheme-body where Layer 0 cannot run
+/// (WebKitGTK in CI), so its WebKitGTK-only checks run somewhere.
+async fn print_checks(win: &Window, page_loaded: &AtomicBool) {
+  let scheme_supported = laufey::scheme_handlers_supported();
+  // ---- print_to_pdf smoke test (API >= 32) -----------------------------
+  // Render the loaded page to a PDF and assert real PDF bytes come back
+  // (`%PDF-` magic), exercising each backend's actual render path (WKWebView
+  // createPDFWithConfiguration, WebView2 PrintToPdfStream, WebKitGTK
+  // print-to-file, CEF DevTools Page.printToPDF). Winit has no web engine
+  // and reports "unsupported" through the callback -> N/A. A backend whose
+  // completion handler never fires shows up here as a FAIL on the delivery
+  // assertion.
+  //
+  // The render races page load: WKWebView's createPDFWithConfiguration
+  // fails with a generic NSError while the page is still loading, so wait
+  // for on_page_load first (best effort -- engine-less backends never fire
+  // it) and retry a transient error before judging; only a persistent error
+  // is a real failure.
+  //
+  // A backend with a web engine gets 45 s for that load: WebView2 answers
+  // "window not found" until its controller is ready, and on a loaded
+  // windows-latest runner the first environment has taken ~34 s to come up
+  // (run 41510522703), well past the 5 s the engine-less backends get.
+  let load_rounds = if scheme_supported { 450 } else { 50 };
+  let _ =
+    wait_for(|| page_loaded.load(Ordering::SeqCst), load_rounds, 100).await;
+  let mut outcome: Option<Result<Vec<u8>, String>> = None;
+  for attempt in 0..3u32 {
+    if attempt > 0 {
+      tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    }
+    let pdf_result =
+      Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
+    let pr = pdf_result.clone();
+    win.print_to_pdf(None, move |r| *pr.lock().unwrap() = Some(r));
+    if !wait_for(|| pdf_result.lock().unwrap().is_some(), 150, 100).await {
+      continue; // nothing delivered this attempt; retry
+    }
+    let result = pdf_result.lock().unwrap().take().unwrap();
+    let transient = matches!(&result, Err(e) if !e.contains("not supported"));
+    outcome = Some(result);
+    if !transient {
+      break;
+    }
+  }
+  match outcome {
+    None => check("print_to_pdf delivers a result within 15s", false),
+    Some(Ok(bytes)) => check(
+      &format!(
+        "print_to_pdf returns real PDF bytes ({} bytes)",
+        bytes.len()
+      ),
+      bytes.starts_with(b"%PDF-"),
+    ),
+    Some(Err(e)) if e.contains("not supported") => {
+      na("print_to_pdf (backend has no web engine / PDF support)")
+    }
+    Some(Err(e)) => check(&format!("print_to_pdf succeeds (got: {e})"), false),
+  }
+
+  // print_to_pdf on a window that was only just created. WebView2 creates
+  // its controller asynchronously and used to answer "window not found"
+  // until it was ready; it now renders once the controller is ready (or
+  // answers "web view not ready" after 45 s). No page is loaded, so the
+  // render doesn't race a navigation (WKWebView refuses a PDF mid-load).
+  // Every engine backend must recognise the window; WebView2, whose queue
+  // this covers, must also deliver the PDF.
+  if scheme_supported {
+    let fresh = Window::new(320, 240).title("native-e2e-pdf-at-creation");
+    let early =
+      Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
+    let er = early.clone();
+    fresh.print_to_pdf(None, move |r| *er.lock().unwrap() = Some(r));
+    let delivered =
+      wait_for(|| early.lock().unwrap().is_some(), 500, 100).await;
+    let result = early.lock().unwrap().take();
+    let summary = match &result {
+      Some(Ok(bytes)) => format!("{} bytes", bytes.len()),
+      Some(Err(e)) => format!("Err({e})"),
+      None => "nothing delivered".into(),
+    };
+    let is_webview2 = cfg!(target_os = "windows")
+      && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview");
+    if is_webview2 {
+      check(
+        &format!(
+          "print_to_pdf right after the window is created renders it \
+           ({summary})"
+        ),
+        matches!(&result, Some(Ok(b)) if b.starts_with(b"%PDF-")),
+      );
+    } else {
+      check(
+        &format!(
+          "print_to_pdf right after the window is created finds the window \
+           ({summary})"
+        ),
+        delivered
+          && !matches!(&result, Some(Err(e)) if e.contains("window not found")),
+      );
+    }
+    fresh.close();
+  } else {
+    na("print_to_pdf right after creation (backend has no web engine)");
+  }
+
+  // print_to_pdf for a window that doesn't exist refuses through the
+  // callback, and that callback may re-enter the backend: WebKitGTK runs it
+  // on the GTK thread, where get_size takes the same (non-recursive) window
+  // lock the not-found lookup takes. A refusal made under that lock
+  // deadlocks the UI thread here, and nothing is delivered.
+  if cfg!(target_os = "linux")
+    && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview")
+  {
+    let refusal =
+      Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
+    let rf = refusal.clone();
+    let live_id = win.id();
+    Window::from_id(u32::MAX - 1).print_to_pdf(None, move |r| {
+      let _ = Window::from_id(live_id).get_size();
+      *rf.lock().unwrap() = Some(r);
+    });
+    let delivered =
+      wait_for(|| refusal.lock().unwrap().is_some(), 50, 100).await;
+    let result = refusal.lock().unwrap().take();
+    check(
+      &format!(
+        "print_to_pdf on a missing window refuses through a callback that \
+         can re-enter the backend (got: {result:?})"
+      ),
+      delivered
+        && matches!(&result, Some(Err(e)) if e.contains("window not found")),
+    );
+  } else {
+    na("print_to_pdf missing-window re-entry (WebKitGTK only)");
+  }
+}
+
 /// The `code` of an error envelope, or "ok" for a credential.
 fn passkey_code(envelope: &str) -> String {
   if envelope.starts_with(r#"{"ok":true,"#) {
@@ -3442,12 +3456,58 @@ async fn passkey_checks(window_id: u32) {
     }
     eprintln!("[e2e] INFO the held passkey slot freed after {later:?} ms");
   }
+  if cfg!(target_os = "macos") && freed {
+    passkey_refusal_latency_checks(window_id).await;
+  }
   // WebView2 runs the request and the close as UI-thread tasks in the order
   // they were asked for; CEF closes a browser asynchronously, so there the
   // close can overtake the request.
   if cfg!(target_os = "windows") && backend == "webview" && freed {
     passkey_early_cancel_checks().await;
   }
+}
+
+/// macOS: how long the OS takes to refuse a ceremony once its agent runs.
+/// An unsigned host is refused at once (`invalid_rp`), so a refusal measures
+/// the round trip: the request's hop to the main thread, performRequests,
+/// the delegate's answer and the hop back to the caller. The first request
+/// after a machine boots pays for macOS starting its AuthenticationServices
+/// agent (about 0.5 s on Apple silicon and up to 2 s on Intel, the same
+/// under every backend); the earlier requests above have started it, so
+/// here each answer must take well under that, as it does on both WebView
+/// and CEF (2 to 5 ms, outliers near 20 ms, on macos-15 and macos-15-intel).
+/// A host whose run loop held the delegate's answer back would be caught.
+async fn passkey_refusal_latency_checks(window_id: u32) {
+  const ROUNDS: usize = 8;
+  const BOUND: std::time::Duration = std::time::Duration::from_millis(250);
+  let mut times = Vec::with_capacity(ROUNDS);
+  let mut codes = Vec::with_capacity(ROUNDS);
+  for _ in 0..ROUNDS {
+    let started = std::time::Instant::now();
+    let env = passkey_answer(
+      "passkey refusal latency",
+      laufey::passkey_get(window_id, &passkey_get_options("example.com", 2000)),
+    )
+    .await;
+    times.push(started.elapsed());
+    codes.push(passkey_code(&env));
+  }
+  let mut sorted = times.clone();
+  sorted.sort();
+  let median = sorted[ROUNDS / 2];
+  let max = sorted[ROUNDS - 1];
+  check(
+    &format!(
+      "a warm macOS passkey refusal answers within {} ms (median {:.1} ms, \
+       max {:.1} ms, codes {codes:?})",
+      BOUND.as_millis(),
+      median.as_secs_f64() * 1000.0,
+      max.as_secs_f64() * 1000.0
+    ),
+    median < BOUND / 5
+      && max < BOUND
+      && codes.iter().all(|c| c == "invalid_rp"),
+  );
 }
 
 /// WebView2: a request whose window closes at once. The close cancels the OS
