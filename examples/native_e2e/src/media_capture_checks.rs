@@ -5,6 +5,9 @@
 //! which writes a laufey-launch.json granting both to `app://e2e-media-ok`
 //! and gives the engine stand-in devices (CEF and WebView2
 //! `--use-fake-device-for-media-stream`, WebKit's mock capture devices).
+//! Where the engine still has no device (the granted origin's capture ends in
+//! NotFoundError: an engine answers that before it asks anyone), every check
+//! that needs the request to reach the host is N/A.
 //!
 //! - The granted origin captures without the runtime being asked.
 //! - Another origin is refused while no handler is set (the default).
@@ -166,14 +169,25 @@ pub async fn run() {
     &format!("{OK_ORIGIN}/?steps=audio,video,both&frame={frame_src}"),
     &reports,
   );
+  let mut no_device = false;
   for step in ["audio", "video", "both"] {
     let r = result_of(&reports, OK_ORIGIN, step).await;
+    no_device = no_device || r == "err:NotFoundError";
     check_allowed(
       &format!(
         "media-capture: the granted origin captures {step} without asking"
       ),
       &r,
     );
+  }
+  if no_device {
+    na("media-capture: the refusal and handler checks (no capture device: the engine answers NotFoundError before it asks the host)");
+    ok_win.close();
+    check(
+      "media-capture: an answer for an unknown request reports false",
+      !laufey::answer_media_capture(u64::MAX, true),
+    );
+    return;
   }
   let r = result_of(&reports, OK_ORIGIN, "frame").await;
   if webkit_gtk() {

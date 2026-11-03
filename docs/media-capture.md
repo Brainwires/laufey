@@ -80,9 +80,9 @@ manage:
 `scripts/native-e2e-run.sh <backend> --media-capture` runs
 `examples/native_e2e/src/media_capture_checks.rs` under a launch file granting
 `app://e2e-media-ok`, with stand-in devices: Chromium's
-`--use-fake-device-for-media-stream` (CEF on its command line, WebView2 through
-`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`) and WebKit's mock capture devices
-(`LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1`, a test hook). On macOS an unsigned test
-host may be refused by TCC, so an allowed request that ends in `NotAllowedError`
-is reported N/A there. The decision logic is unit-tested in
+`--use-fake-device-for-media-stream` (CEF on its command line, WebView2 as a
+browser argument) and WebKit's mock capture devices, the latter two through the
+`LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1` test hook. On macOS an unsigned test host
+may be refused by TCC, so an allowed request that ends in `NotAllowedError` is
+reported N/A there. The decision logic is unit-tested in
 `backend-common/tests/media_capture_test.cc`.

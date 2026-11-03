@@ -245,10 +245,10 @@ class MediaCaptureRequests {
 };
 
 // Test hook: when LAUFEY_TEST_MOCK_CAPTURE_DEVICES is "1", a backend whose
-// engine has stand-in capture devices (WebKit's mock devices) turns them on,
-// so the e2e battery can capture on a machine without a microphone or
-// camera. CEF and WebView2 take Chromium's --use-fake-device-for-media-stream
-// on their command line / WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS instead.
+// engine has stand-in capture devices turns them on (WebKit's mock devices,
+// WebView2's --use-fake-device-for-media-stream browser argument), so the e2e
+// battery can capture on a machine without a microphone or camera. The CEF
+// host takes Chromium's switch on its command line instead.
 inline bool MockCaptureDevicesForTests() {
   const char* v = std::getenv("LAUFEY_TEST_MOCK_CAPTURE_DEVICES");
   return v && std::string(v) == "1";

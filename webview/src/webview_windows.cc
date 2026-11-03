@@ -1402,6 +1402,16 @@ void WebView2Backend::CreateEnvironmentForWindow(
     }
     options = opts;
   }
+  // Test hook (laufey_media_capture.h): Chromium's stand-in microphone and
+  // camera, so the e2e battery's getUserMedia reaches the permission request
+  // on a machine without devices (without one Chromium answers NotFoundError
+  // before it asks).
+  if (laufey_common::MockCaptureDevicesForTests()) {
+    if (!options)
+      options = Make<CoreWebView2EnvironmentOptions>();
+    options->put_AdditionalBrowserArguments(
+        L"--use-fake-device-for-media-stream");
+  }
 
   // Per-app user data folder (LAUFEY_DATA_DIR / LAUFEY_APP_ID). Without one,
   // pass nullptr to keep WebView2's default "<exe>.WebView2" next to the exe.

@@ -23,8 +23,8 @@
 # --media-capture runs only the API 53 microphone / camera checks
 # (media_capture_checks.rs) under a launch file it writes next to the backend
 # granting both to app://e2e-media-ok, with the engine's stand-in devices
-# (CEF --use-fake-device-for-media-stream, WebView2 the same through
-# WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, WebKit's mock capture devices).
+# (CEF --use-fake-device-for-media-stream; WebView2 the same and WebKit's mock
+# capture devices through the LAUFEY_TEST_MOCK_CAPTURE_DEVICES test hook).
 # --navigation runs only the API 48 navigation guard checks
 # (navigation_checks.rs) against a loopback server, with the open-external
 # capture on so nothing reaches a real browser.
@@ -154,10 +154,10 @@ if [ "$mode" = "--tray-roles" ]; then
 fi
 if [ "$mode" = "--media-capture" ]; then
   export LAUFEY_E2E_ONLY=media-capture
-  # Stand-in capture devices: WebKit's (the test hook), and Chromium's for
-  # WebView2 (the CEF host takes the switch on its command line below).
+  # Stand-in capture devices through the test hook: WebKit's mock devices,
+  # Chromium's fake devices for WebView2 (the CEF host takes the switch on its
+  # command line below).
   export LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1
-  export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--use-fake-device-for-media-stream
 fi
 if [ "$mode" = "--quit-request" ]; then
   export LAUFEY_E2E_ONLY=quit-request
