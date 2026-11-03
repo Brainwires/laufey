@@ -111,6 +111,26 @@ over a launch, the app page and an idle period (75 s in CI, past the component
 updater's first check), and the run fails on any host in the log other than
 loopback.
 
+### No code-signing clone (macOS)
+
+At every start Chrome clones its app bundle into
+`<user temp>/../X/<bundle id>.code_sign_clone/` (APFS `clonefile`, with the main
+executable hard-linked to the original), and a `code-sign-clone-cleanup` helper
+deletes the clone up to a second after the browser has quit. APFS names a
+hard-linked file by whichever link was looked up last, so a launch that starts
+while the previous launch's clone is being deleted can get the clone's path for
+its own executable: dyld then looks for `liblaufey_keychain_interpose.dylib`
+(`@rpath`, `@executable_path`) in the half-deleted clone and the launch dies
+before `main()` with `Library not loaded` (exit 134). The host adds
+`MacAppCodeSignClone` to `--disable-features` in the browser process
+(`CefHostDisabledFeatures` in
+`backend-common/include/laufey_cef_network_quiet.h`); an app that names it in
+`--enable-features` keeps the clone. The clone only protects a browser that
+keeps running after an updater has replaced its bundle in place, and laufey has
+no updater of its own ([Distribution](distribution.md#updates)). The macOS
+localStorage stress (`scripts/storage-stress-e2e-run.sh cef`) fails if any
+launch made a clone.
+
 ### The Chromium sandbox
 
 The CEF backend runs Chromium's renderer, GPU and utility processes in

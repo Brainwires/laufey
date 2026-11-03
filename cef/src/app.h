@@ -203,7 +203,9 @@ void LaufeyStripDeepLinkSwitches(CefRefPtr<CefCommandLine> command_line);
 // --disable-component-update unless it configures the component updater
 // (--component-updater). It also re-adds CEF's own default disabled
 // features (CefOwnDisabledFeatures), which a deep-link launch's strip drops
-// with the command line's --disable-features. Browser process only.
+// with the command line's --disable-features, and the features the host turns
+// off for its own correctness (CefHostDisabledFeatures: macOS's code-signing
+// clone of the app bundle). Browser process only.
 void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line);
 #if defined(__linux__)
 // Linux: copies the Hunspell dictionaries of the profile's spellcheck

@@ -21,6 +21,12 @@
 # report ReportCrash wrote for it (scripts/print-crash-report.py; the report
 # itself stays in ~/Library/Logs/DiagnosticReports for the job to upload).
 #
+# On macOS with CEF the run also fails if a launch made Chrome's code-signing
+# clone of the app bundle (<user temp>/../X/<bundle id>.code_sign_clone): the
+# host turns it off, since a launch that starts while the previous launch's
+# clone is being deleted can resolve its own executable into that clone and
+# die in dyld (laufey_cef_network_quiet.h, CefHostDisabledFeatures).
+#
 # Build first: `cargo build --release -p storage_e2e_runtime` and the backend.
 set -euo pipefail
 
@@ -110,6 +116,19 @@ show_crash_report() { # <pid>
   fi
   python3 "$(dirname "$0")/print-crash-report.py" "$f" | sed 's/^/    /' | head -150
 }
+
+# macOS, CEF: the directory Chrome's code-signing clones go in. Its mtime
+# moves whenever a clone is made or deleted in it.
+clone_root=""
+if [ "$platform" = macos ] && [ "$backend" = cef ]; then
+  bundle_id="$(plutil -extract CFBundleIdentifier raw \
+    "${bin%/Contents/MacOS/*}/Contents/Info.plist" 2>/dev/null || true)"
+  user_temp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
+  if [ -n "$bundle_id" ] && [ -n "$user_temp" ]; then
+    clone_root="$(dirname "$user_temp")/X/$bundle_id.code_sign_clone"
+  fi
+  touch "$scratch/clone-mark"
+fi
 
 lost=0
 other=0
@@ -202,9 +221,17 @@ for ((i = 1; i <= launches; i++)); do
   [ "$back" != "$value" ] || prev="$value"
 done
 
+cloned=0
+if [ -n "$clone_root" ] && [ -d "$clone_root" ] &&
+  [ "$clone_root" -nt "$scratch/clone-mark" ]; then
+  cloned=1
+  echo "[stress-e2e] FAIL: a launch made a code-signing clone of the app in $clone_root"
+  ls -la "$clone_root" | sed 's/^/    /'
+fi
+
 echo "[stress-e2e] $launches launches in $((SECONDS - start_all)) s: $lost didn't" \
   "read the previous launch's value, $other failed otherwise, $hangs hung"
-if [ "$lost" = 0 ] && [ "$other" = 0 ] && [ "$hangs" = 0 ]; then
+if [ "$lost" = 0 ] && [ "$other" = 0 ] && [ "$hangs" = 0 ] && [ "$cloned" = 0 ]; then
   echo "[stress-e2e] OVERALL PASS"
 else
   echo "[stress-e2e] OVERALL FAIL"

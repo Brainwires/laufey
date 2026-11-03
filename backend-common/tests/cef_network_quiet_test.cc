@@ -30,7 +30,8 @@ static const char kQuiet[] =
     "NetworkTimeServiceQuerying,AimEnabled,PreconnectToSearch";
 static const char kOwn[] =
     "GlicActorUi,AutofillActorMode,LensOverlay,KillOnInvalidNavigationHeaders";
-static const std::string kAll = std::string(kQuiet) + "," + kOwn;
+static const char kHost[] = "MacAppCodeSignClone";
+static const std::string kAll = std::string(kQuiet) + "," + kOwn + "," + kHost;
 
 static void TestFeatureListNames() {
   EXPECT(FeatureListNames("") == Names{});
@@ -46,6 +47,7 @@ static void TestMerge() {
   EXPECT(MergeQuietDisabledFeatures("", "") == kAll);
   EXPECT(CefQuietDisabledFeatures().size() == 3);
   EXPECT(CefOwnDisabledFeatures().size() == 4);
+  EXPECT(CefHostDisabledFeatures() == Names{"MacAppCodeSignClone"});
   // The app's own disabled features come first and are kept as written.
   EXPECT(MergeQuietDisabledFeatures("Foo<Trial", "") == "Foo<Trial," + kAll);
   EXPECT(MergeQuietDisabledFeatures("Foo,", "") == "Foo," + kAll);
@@ -53,15 +55,17 @@ static void TestMerge() {
   EXPECT(MergeQuietDisabledFeatures("AimEnabled", "") ==
          std::string("AimEnabled,NetworkTimeServiceQuerying,"
                      "PreconnectToSearch,") +
-             kOwn);
+             kOwn + "," + kHost);
   EXPECT(MergeQuietDisabledFeatures(kAll, "") == kAll);
   EXPECT(MergeQuietDisabledFeatures(kOwn, "") ==
-         std::string(kOwn) + "," + kQuiet);
+         std::string(kOwn) + "," + kQuiet + "," + kHost);
   // An app that enables one of them keeps it: the explicit choice wins.
   EXPECT(MergeQuietDisabledFeatures("", "PreconnectToSearch") ==
-         std::string("NetworkTimeServiceQuerying,AimEnabled,") + kOwn);
+         std::string("NetworkTimeServiceQuerying,AimEnabled,") + kOwn + "," +
+             kHost);
   EXPECT(MergeQuietDisabledFeatures("", "OverlayScrollbar,*AimEnabled<T") ==
-         std::string("NetworkTimeServiceQuerying,PreconnectToSearch,") + kOwn);
+         std::string("NetworkTimeServiceQuerying,PreconnectToSearch,") + kOwn +
+             "," + kHost);
   EXPECT(MergeQuietDisabledFeatures("X", kAll) == "X");
 }
 
@@ -93,7 +97,30 @@ static void TestDeepLinkKeepsCefDefaults() {
   // Nothing is lost when the switch survives either (an ordinary launch:
   // CEF's entries are already there and are not repeated).
   EXPECT(FeatureListNames(MergeQuietDisabledFeatures(kOwn, "")).size() ==
-         4 + CefQuietDisabledFeatures().size());
+         4 + CefQuietDisabledFeatures().size() +
+             CefHostDisabledFeatures().size());
+}
+
+static void TestNoCodeSignClone() {
+  // macOS: Chrome's code-signing clone of the app bundle hard-links the main
+  // executable, and APFS then names the executable by whichever link was
+  // looked up last. A launch that starts while the previous launch's
+  // code-sign-clone-cleanup helper walks that clone gets the clone's path
+  // from dyld and dies before main() loading
+  // @rpath/liblaufey_keychain_interpose.dylib from the half-deleted clone
+  // (laufey_cef_network_quiet.h, CefHostDisabledFeatures). The browser's
+  // --disable-features must turn the clone off on every launch: an ordinary
+  // one, one whose command line disables other features, and a deep-link
+  // launch whose strip dropped the switch.
+  for (const char* disable : {"", "Foo", kAll.c_str(), kOwn}) {
+    const Names names =
+        FeatureListNames(MergeQuietDisabledFeatures(disable, ""));
+    EXPECT(std::count(names.begin(), names.end(), "MacAppCodeSignClone") == 1);
+  }
+  // An app that asks for the clone (--enable-features) keeps it.
+  const Names kept =
+      FeatureListNames(MergeQuietDisabledFeatures("", "MacAppCodeSignClone"));
+  EXPECT(std::count(kept.begin(), kept.end(), "MacAppCodeSignClone") == 0);
 }
 
 static void TestGaiaUrl() {
@@ -150,6 +177,7 @@ int main() {
   TestFeatureListNames();
   TestMerge();
   TestDeepLinkKeepsCefDefaults();
+  TestNoCodeSignClone();
   TestGaiaUrl();
   TestLocalHunspellDictionaries();
   TestDictionariesToSeed();
