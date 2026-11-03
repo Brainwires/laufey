@@ -24,7 +24,9 @@
 # (media_capture_checks.rs) under a launch file it writes next to the backend
 # granting both to app://e2e-media-ok, with the engine's stand-in devices
 # (CEF --use-fake-device-for-media-stream; WebView2 the same and WebKit's mock
-# capture devices through the LAUFEY_TEST_MOCK_CAPTURE_DEVICES test hook).
+# capture devices through the LAUFEY_TEST_MOCK_CAPTURE_DEVICES test hook),
+# and the WebRTC loopback checks; LAUFEY_E2E_EXPECT_WEBRTC=1 requires them on
+# WebKitGTK too (a build with WebRTC; otherwise they are N/A there).
 # --navigation runs only the API 48 navigation guard checks
 # (navigation_checks.rs) against a loopback server, with the open-external
 # capture on so nothing reaches a real browser.

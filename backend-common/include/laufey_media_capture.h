@@ -328,6 +328,24 @@ class MediaCaptureRequests {
   std::map<uint64_t, Pending> pending_;
 };
 
+// WebKitGTK's WebRTC (RTCPeerConnection, which WebKitGTK leaves off): on only
+// in a process whose launch file has the "mediaCapture" key, an empty
+// `"mediaCapture": {}` included (an app whose handler decides every request
+// opts in with that). WebRTC is a network path the page's CSP doesn't govern,
+// so an app that never asks for the devices doesn't get it. It changes no
+// capture decision: an RTCPeerConnection gets the microphone or camera only
+// through getUserMedia, which is decided as above. The other engines have
+// WebRTC on in every window. Pure.
+inline bool WebRtcEnabledBy(const LaunchConfig& config) {
+  return config.has_media_capture;
+}
+
+// This process's answer, from its launch file (read once).
+inline bool ProcessEnablesWebRtc() {
+  static const bool enabled = WebRtcEnabledBy(ProcessLaunchConfig());
+  return enabled;
+}
+
 // Test hook: when LAUFEY_TEST_MOCK_CAPTURE_DEVICES is "1", a backend whose
 // engine has stand-in capture devices turns them on (WebKit's mock devices,
 // WebView2's --use-fake-device-for-media-stream browser argument), so the e2e

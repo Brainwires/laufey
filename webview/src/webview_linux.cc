@@ -731,6 +731,51 @@ static void DisableByteStreamFetchSource(WebKitSettings* settings) {
 #endif
 }
 
+// WebRTC (RTCPeerConnection; docs/media-capture.md#webrtc). WebKitGTK leaves
+// it off; laufey turns it on in a process whose launch file has
+// "mediaCapture" (laufey_common::ProcessEnablesWebRtc), the apps that use the
+// devices, and leaves it off elsewhere: it is a network path the page's CSP
+// doesn't govern. It grants nothing: a peer connection reaches the microphone
+// or camera only through getUserMedia, decided in on_permission_request. The
+// property is WebKitGTK 2.38's, so it is looked up rather than called (an
+// older WebKitGTK keeps working, without WebRTC), and it does nothing in a
+// WebKitGTK built without WebRTC (ENABLE_WEB_RTC, USE_GSTREAMER_WEBRTC), as
+// distributions build it. The host's own addresses stay out of ICE
+// candidates as WebKit keeps them out, which WebKit does by default: host
+// candidates are left out until the page has a capture grant
+// (ICECandidateFiltering) and named by mDNS (WebRTCMDNSICECandidates). Each
+// is set where the engine has it, so a changed default can't turn it off.
+static void SetFeatureIfPresent(WebKitSettings* settings, const char* id,
+                                gboolean enabled) {
+#if WEBKIT_CHECK_VERSION(2, 42, 0)
+  WebKitFeatureList* features = webkit_settings_get_all_features();
+  for (gsize i = 0; i < webkit_feature_list_get_length(features); ++i) {
+    WebKitFeature* feature = webkit_feature_list_get(features, i);
+    const char* fid = webkit_feature_get_identifier(feature);
+    if (fid && std::strcmp(fid, id) == 0) {
+      webkit_settings_set_feature_enabled(settings, feature, enabled);
+      break;
+    }
+  }
+  webkit_feature_list_unref(features);
+#else
+  (void)settings;
+  (void)id;
+  (void)enabled;
+#endif
+}
+
+static void EnableWebRtc(WebKitSettings* settings) {
+  if (!laufey_common::ProcessEnablesWebRtc())
+    return;
+  if (!g_object_class_find_property(G_OBJECT_GET_CLASS(settings),
+                                    "enable-webrtc"))
+    return;
+  g_object_set(settings, "enable-webrtc", TRUE, nullptr);
+  SetFeatureIfPresent(settings, "ICECandidateFiltering", TRUE);
+  SetFeatureIfPresent(settings, "WebRTCMDNSICECandidates", TRUE);
+}
+
 // Fired as a navigation progresses through its load states. We only care about
 // WEBKIT_LOAD_FINISHED, which signals the document and subresources have loaded
 // (and the web process has content to composite). The window_id is passed
@@ -2013,6 +2058,7 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     webkit_settings_set_enable_media_stream(wk_settings, TRUE);
     if (laufey_common::MockCaptureDevicesForTests())
       webkit_settings_set_enable_mock_capture_devices(wk_settings, TRUE);
+    EnableWebRtc(wk_settings);
 
     if (transparent) {
       // Let the page's own alpha show through the webview (any region the

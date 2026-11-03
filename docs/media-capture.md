@@ -83,6 +83,44 @@ reaches the devices only when the top-level document delegates them to it
 before it asks; on the other backends a sub-frame of another origin is refused
 even then. WebKitGTK's `enable-media-stream` setting is turned on so that
 `navigator.mediaDevices` exists; requests are still refused unless granted.
+WebKitGTK's WebRTC is described [below](#webrtc).
+
+## WebRTC
+
+A page sends what it captures to a peer with `RTCPeerConnection`. WKWebView, CEF
+and WebView2 have WebRTC in every window. WebKitGTK leaves it off, and laufey
+turns it on (WebKitGTK's `enable-webrtc` setting) only in an app whose launch
+file has the `mediaCapture` key, so an app that never uses the devices doesn't
+get a network path its pages' Content Security Policy doesn't govern. An app
+whose handler decides every request, granting nothing in the file, opts in with
+an empty key:
+
+```json
+{ "mediaCapture": {} }
+```
+
+WebRTC grants nothing of its own: a peer connection sends the microphone or
+camera only once `getUserMedia` has returned them, and that request is decided
+as above. A data-only connection needs no device.
+
+On WebKitGTK the setting only takes effect in a WebKitGTK built with WebRTC
+(`-DENABLE_WEB_RTC=ON -DUSE_GSTREAMER_WEBRTC=ON`, which also needs GStreamer's
+`webrtcbin` and libnice at run time). The distribution packages of
+`webkit2gtk-4.1` checked (Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13,
+Fedora 43, Arch Linux; WebKitGTK 2.50 to 2.54) are built without it: there
+`RTCPeerConnection` is undefined whatever the setting says. The setting is
+WebKitGTK 2.38's and is looked up at run time, so an older WebKitGTK still runs,
+without WebRTC.
+
+The host's own network addresses stay out of a page's ICE candidates the way
+each engine keeps them out: a host candidate's address is replaced by a random
+mDNS name (`<uuid>.local`), and WebKit also leaves host candidates out until the
+page has a capture grant (ICE candidate filtering). On WebKitGTK laufey sets
+WebKit's `ICECandidateFiltering` and `WebRTCMDNSICECandidates` features where
+the engine has them, so a changed engine default can't turn them off. A page
+whose `getUserMedia` was allowed may see the host's local addresses, as it would
+in a browser. No STUN or TURN server is configured: a page that names one in its
+`RTCPeerConnection` configuration learns the public address that server sees.
 
 ## The operating system's consent
 
@@ -108,5 +146,9 @@ manage:
 browser argument) and WebKit's mock capture devices, the latter two through the
 `LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1` test hook. On macOS an unsigned test host
 may be refused by TCC, so an allowed request that ends in `NotAllowedError` is
-reported N/A there. The decision logic is unit-tested in
-`backend-common/tests/media_capture_test.cc`.
+reported N/A there. The same run makes an `RTCPeerConnection` loopback in a page
+that captures nothing (it must create an offer, and no host candidate may name
+the host's address) and in the granted page with its microphone track (an audio
+offer and at least one candidate). On a WebKitGTK built without WebRTC these are
+N/A, unless `LAUFEY_E2E_EXPECT_WEBRTC=1` says the WebKitGTK has it. The decision
+logic is unit-tested in `backend-common/tests/media_capture_test.cc`.
