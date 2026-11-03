@@ -115,13 +115,15 @@ lost=0
 other=0
 hangs=0
 slow=0
+max_wait=0
+nocommit=0
 prev="-"
 start_all=$SECONDS
 echo "== storage-stress-e2e: backend=$backend bin=$bin launches=$launches scheme=${scheme:-none}"
 for ((i = 1; i <= launches; i++)); do
   # A long run says how far it got, in case its job is cut short.
   if [ "$i" -gt 1 ] && [ $(((i - 1) % 250)) = 0 ]; then
-    echo "[stress-e2e] $((i - 1)) launches in $((SECONDS - start_all)) s: $lost lost, $other failed otherwise, $slow slow commits"
+    echo "[stress-e2e] $((i - 1)) launches in $((SECONDS - start_all)) s: $lost lost, $other failed otherwise, $slow slow commits (longest ${max_wait} ms), $nocommit without their commit"
   fi
   value="v$RANDOM$RANDOM-$i"
   log="$scratch/logs/$i.log"
@@ -160,8 +162,20 @@ for ((i = 1; i <= launches; i++)); do
   else
     wait "$pid" || rc=$?
   fi
-  # A document whose body waited a second or more for its commit (CEF).
-  ! grep -q '^laufey: the document .* ms for its commit' "$log" || slow=$((slow + 1))
+  # A document whose body waited a second or more for its commit (CEF): each
+  # says how long, and one that went on without its commit fails the launch
+  # (its page may be left without localStorage, whatever it read this time).
+  slow_lines="$(grep '^laufey: the document .* ms for its commit' "$log" || true)"
+  if [ -n "$slow_lines" ]; then
+    slow=$((slow + 1))
+    while IFS= read -r line; do
+      echo "[stress-e2e] #$i: ${line#laufey: }"
+      ms="$(printf '%s' "$line" | sed -n 's/.* waited \([0-9][0-9]*\) ms for its commit.*/\1/p')"
+      [ -z "$ms" ] || [ "$ms" -le "$max_wait" ] || max_wait="$ms"
+    done <<<"$slow_lines"
+  fi
+  without_commit=0
+  ! grep -q 'went on without it' <<<"$slow_lines" || without_commit=1
   # The launch's one report line: what its page read before its write, and
   # what it read back after it.
   report="$(grep -m1 '^\[e2e\] previous localStorage=' "$log" || true)"
@@ -176,13 +190,19 @@ for ((i = 1; i <= launches; i++)); do
     break
   fi
   if [ -n "$report" ] && [ "$got" = "$want" ] && [ "$back" = "$value" ] &&
-    [ "$rc" = 0 ]; then
+    [ "$rc" = 0 ] && [ "$without_commit" = 0 ]; then
     prev="$value"
     continue
+  fi
+  if [ "$without_commit" = 1 ]; then
+    nocommit=$((nocommit + 1))
+    echo "[stress-e2e] FAIL #$i: a document's body went on without its commit (exit $rc)"
   fi
   if [ -n "$report" ] && [ "$got" != "$want" ]; then
     lost=$((lost + 1))
     echo "[stress-e2e] FAIL #$i: read \"$got\", want \"$want\" (exit $rc)"
+  elif [ -n "$report" ] && [ "$back" = "$value" ] && [ "$rc" = 0 ]; then
+    : # only the commit failed
   else
     other=$((other + 1))
     echo "[stress-e2e] FAIL #$i: the launch (exit $rc, report '${report}')"
@@ -207,8 +227,9 @@ done
 
 echo "[stress-e2e] $launches launches in $((SECONDS - start_all)) s: $lost didn't" \
   "read the previous launch's value, $other failed otherwise, $hangs hung" \
-  "($slow with a commit that took a second or more)"
-if [ "$lost" = 0 ] && [ "$other" = 0 ] && [ "$hangs" = 0 ]; then
+  "($slow with a commit that took a second or more, the longest ${max_wait} ms;" \
+  "$nocommit went on without their commit)"
+if [ "$lost" = 0 ] && [ "$other" = 0 ] && [ "$hangs" = 0 ] && [ "$nocommit" = 0 ]; then
   echo "[stress-e2e] OVERALL PASS"
 else
   echo "[stress-e2e] OVERALL FAIL"

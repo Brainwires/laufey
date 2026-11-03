@@ -155,6 +155,10 @@ s, and on a loaded machine a commit can take longer (two apps relaunching side
 by side on a macOS x64 CI runner): the page then lost its storage as without the
 hold.
 
+A response the browser downloads instead of showing it (a `Content-Disposition`
+of `attachment`, or of any type but `inline`) is never held: it doesn't commit a
+document, so its body would only wait out the 10 s.
+
 Without it a page that touches `localStorage` as it loads could be left without
 storage. The renderer opens a page's `localStorage` over a process-wide
 interface that isn't ordered with the frame's commit, and the browser checks the
