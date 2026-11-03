@@ -332,6 +332,16 @@ class LaufeyHandler : public CefClient,
       const CefString& requesting_origin, uint32_t requested_permissions,
       CefRefPtr<CefPermissionPromptCallback> callback) override;
 
+  // getUserMedia (API 53; laufey_media_capture.h): refused for a sub-frame
+  // of another origin and for screen capture, allowed for what the launch
+  // file's "mediaCapture" grants, else asked of the runtime's handler (or
+  // refused). Always handled, so Chrome's own prompt never shows; the
+  // callback runs exactly once, on TID_UI.
+  bool OnRequestMediaAccessPermission(
+      CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      const CefString& requesting_origin, uint32_t requested_permissions,
+      CefRefPtr<CefMediaAccessCallback> callback) override;
+
   // DevTools off (API 40, LAUFEY_INSPECTABLE=0): Chrome's DevTools commands
   // (F12, Ctrl/Cmd+Shift+I / J / C, the app menu) are swallowed and the
   // context menu loses its Inspect items. See LaufeyApplyInspectable* below.

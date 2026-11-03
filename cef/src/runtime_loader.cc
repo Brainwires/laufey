@@ -3,6 +3,7 @@
 #include "runtime_loader.h"
 
 #include "laufey_quit_request.h"
+#include "laufey_media_capture.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
@@ -300,6 +301,19 @@ static void Backend_Quit(void* data) {
                   browser->GetHost()->CloseBrowser(true);
                 }
               }));
+}
+
+// Microphone and camera requests (API 53; laufey_media_capture.h).
+static void Backend_SetMediaCaptureHandler(void* /*data*/,
+                                           laufey_media_capture_fn handler,
+                                           void* user_data) {
+  laufey_common::MediaCaptureRequests::Instance().SetHandler(handler,
+                                                             user_data);
+}
+static bool Backend_AnswerMediaCapture(void* /*data*/, uint64_t request_id,
+                                       bool allow) {
+  return laufey_common::MediaCaptureRequests::Instance().Answer(request_id,
+                                                                allow);
 }
 
 // Quit requests (API 52; laufey_quit_request.h).
@@ -2574,6 +2588,8 @@ static uint32_t Backend_CreateWindowEx(void* data, uint32_t flags) {
 static void Backend_CloseWindow(void* data, uint32_t window_id) {
   laufey_common::NavigationGuard::Instance().ForgetWindow(window_id);
   laufey_common::DownloadPolicy::Instance().ForgetWindow(window_id);
+  // A microphone / camera request the window still waits on is refused.
+  laufey_common::MediaCaptureRequests::Instance().ForgetWindow(window_id);
   auto* loader = RuntimeLoader::GetInstance();
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
@@ -3503,6 +3519,8 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.exit_app = Backend_ExitApp;
   backend_api_.set_quit_requested_handler = Backend_SetQuitRequestedHandler;
   backend_api_.answer_quit_request = Backend_AnswerQuitRequest;
+  backend_api_.set_media_capture_handler = Backend_SetMediaCaptureHandler;
+  backend_api_.answer_media_capture = Backend_AnswerMediaCapture;
   backend_api_.quit_request_pending = Backend_QuitRequestPending;
   backend_api_.title_bar_preferences = Backend_TitleBarPreferences;
   backend_api_.set_title_bar_preferences_changed_handler =

@@ -160,6 +160,58 @@ LaunchConfig LoadProcessLaunchConfig() {
   return config;
 }
 
+// "mediaCapture": { "microphone": [origins], "camera": [origins] }. Each
+// entry is an exact origin (no "*" or "<scheme>://*": a grant names the app's
+// own documents). An invalid entry or an unknown kind is reported and
+// skipped; the key still counts as present.
+void ParseMediaCapture(const JsonValue& value, LaunchConfig* config,
+                       std::vector<std::string>* warnings) {
+  config->has_media_capture = false;
+  config->media_capture_microphone.clear();
+  config->media_capture_camera.clear();
+  if (value.type != JsonValue::Type::kObject) {
+    Warn(warnings, std::string("\"mediaCapture\" must be an object, not ") +
+                       TypeName(value.type) + "; ignoring it");
+    return;
+  }
+  config->has_media_capture = true;
+  for (const auto& [kind, list] : value.object) {
+    std::vector<std::string>* out = nullptr;
+    if (kind == "microphone")
+      out = &config->media_capture_microphone;
+    else if (kind == "camera")
+      out = &config->media_capture_camera;
+    if (!out) {
+      Warn(warnings, "unknown \"mediaCapture\" kind \"" + kind +
+                         "\" (expected \"microphone\" or \"camera\"); "
+                         "ignoring it");
+      continue;
+    }
+    out->clear();
+    if (list.type != JsonValue::Type::kArray) {
+      Warn(warnings, "\"mediaCapture." + kind +
+                         "\" must be an array of origins, not " +
+                         TypeName(list.type) + "; ignoring it");
+      continue;
+    }
+    for (const JsonValue& item : list.array) {
+      if (!CheckString("mediaCapture." + kind + "[]", item, warnings))
+        continue;
+      std::string origin, scheme;
+      bool any = false;
+      if (!ParseBridgeOriginEntry(item.string, &origin, &scheme, &any) ||
+          any || !scheme.empty()) {
+        Warn(warnings, "\"mediaCapture." + kind + "\" entry \"" +
+                           item.string +
+                           "\" is not an origin (scheme://host[:port], no "
+                           "wildcards); ignoring it");
+        continue;
+      }
+      out->push_back(origin);
+    }
+  }
+}
+
 }  // namespace
 
 LaunchConfig ParseLaunchConfig(const std::string& text,
@@ -348,6 +400,8 @@ LaunchConfig ParseLaunchConfig(const std::string& text,
         }
         config.passkey_rp_ids.push_back(rp_id);
       }
+    } else if (key == "mediaCapture") {
+      ParseMediaCapture(value, &config, warnings);
     } else {
       Warn(warnings, "unknown key \"" + key + "\"; ignoring it");
     }

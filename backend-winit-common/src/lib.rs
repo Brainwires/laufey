@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 52;
+pub const LAUFEY_API_VERSION: u32 = 53;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -995,6 +995,16 @@ pub struct LaufeyBackendApi {
   >,
   pub answer_quit_request: Option<unsafe extern "C" fn(*mut c_void, bool)>,
   pub quit_request_pending: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+  // --- Media capture (API >= 53)
+  pub set_media_capture_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<unsafe extern "C" fn(u32, u64, *const c_char, u32, *mut c_void)>,
+      *mut c_void,
+    ),
+  >,
+  pub answer_media_capture:
+    Option<unsafe extern "C" fn(*mut c_void, u64, bool) -> bool>,
 }
 
 /// `laufey_rect_t` (API 50).
@@ -1950,6 +1960,9 @@ pub fn create_api_base() -> LaufeyBackendApi {
     set_quit_requested_handler: None,
     answer_quit_request: None,
     quit_request_pending: None,
+    // API 53: Winit has no web engine to capture media for.
+    set_media_capture_handler: None,
+    answer_media_capture: None,
   }
 }
 

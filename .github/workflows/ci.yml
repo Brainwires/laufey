@@ -183,6 +183,17 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/navigation_guard_test"
           "$RUNNER_TEMP/navigation_guard_test"
+      # Microphone and camera requests (API 53): the launch file's
+      # "mediaCapture" grant, who may capture, the requests waiting for the
+      # runtime (each answered once).
+      - name: backend-common media_capture_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/media_capture_test.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/media_capture_test"
+          "$RUNNER_TEMP/media_capture_test"
       # Page-triggered downloads: the file name the save dialog proposes, the
       # origins a window may download from, the prompt budget.
       - name: backend-common downloads_test
@@ -747,6 +758,16 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --bridge-origin
+
+      # API 53: microphone and camera requests. A launch file grants both to
+      # one origin; another origin and a cross-origin sub-frame are refused;
+      # the runtime's handler decides the rest. Stand-in devices (Chromium's
+      # fake devices, WebKit's mock devices).
+      - name: Media capture (launch file + handler)
+        if: matrix.backend != 'winit'
+        timeout-minutes: 10
+        shell: bash
+        run: scripts/native-e2e-run.sh ${{ matrix.backend }} --media-capture
 
       # API 48: the navigation guard. A top-level navigation to another
       # origin (script, redirect) never loads in the window and goes to the

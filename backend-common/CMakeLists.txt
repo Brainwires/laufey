@@ -336,6 +336,12 @@ if(LAUFEY_BUILD_TESTS)
   add_test(NAME laufey_navigation_guard_test
            COMMAND laufey_navigation_guard_test)
 
+  # Microphone and camera requests (API 53): the launch file's grant, who
+  # may capture, and the requests waiting for the runtime.
+  add_executable(laufey_media_capture_test tests/media_capture_test.cc)
+  target_link_libraries(laufey_media_capture_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_media_capture_test COMMAND laufey_media_capture_test)
+
   # Page-triggered downloads: the proposed file name, the origins and prompt
   # budget, the save-dialog request.
   add_executable(laufey_downloads_test tests/downloads_test.cc)

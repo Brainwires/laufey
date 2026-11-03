@@ -3,6 +3,7 @@
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
 #include "laufey_quit_request.h"
+#include "laufey_media_capture.h"
 #include "laufey_io.h"
 #include "laufey_platform_features.h"
 #include "laufey_launch_args.h"
@@ -984,6 +985,8 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
           g_win_backend->ForgetDestroyedWindow(wid);
         laufey_common::ForgetWindow(wid);
         laufey_wv2::CancelStreamsForWindow(wid);
+        // A microphone / camera request it waits on is refused.
+        laufey_common::MediaCaptureRequests::Instance().ForgetWindow(wid);
       }
       WinForgetNormalFrame(hwnd);
       win32_menu::ForgetWindow(hwnd);
@@ -1634,6 +1637,69 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                         }
                       }
                       args->put_Handled(TRUE);
+                      return S_OK;
+                    })
+                    .Get(),
+                nullptr);
+
+            // getUserMedia (API 53, laufey_media_capture.h). WebView2 raises
+            // one PermissionRequested per kind, for the main frame and its
+            // sub-frames alike, naming the asking document: one whose origin
+            // isn't the top-level document's is refused. The answer is never
+            // saved in the profile, so every request meets the policy. Other
+            // permissions keep WebView2's default handling.
+            state->webview->add_PermissionRequested(
+                Callback<ICoreWebView2PermissionRequestedEventHandler>(
+                    [this, wid](ICoreWebView2* sender,
+                                ICoreWebView2PermissionRequestedEventArgs* args)
+                        -> HRESULT {
+                      COREWEBVIEW2_PERMISSION_KIND kind;
+                      if (FAILED(args->get_PermissionKind(&kind)))
+                        return S_OK;
+                      uint32_t kinds = 0;
+                      if (kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
+                        kinds = LAUFEY_MEDIA_CAPTURE_MICROPHONE;
+                      else if (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA)
+                        kinds = LAUFEY_MEDIA_CAPTURE_CAMERA;
+                      else
+                        return S_OK;
+                      ComPtr<ICoreWebView2PermissionRequestedEventArgs3> args3;
+                      if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args3))))
+                        args3->put_SavesInProfile(FALSE);
+                      // Refused unless decided otherwise below.
+                      args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
+                      LPWSTR uriRaw = nullptr;
+                      LPWSTR topRaw = nullptr;
+                      std::string requesting = laufey_common::kOpaqueOrigin;
+                      std::string top = laufey_common::kOpaqueOrigin;
+                      if (SUCCEEDED(args->get_Uri(&uriRaw)) && uriRaw)
+                        requesting = laufey_common::OriginOfUrl(
+                            laufey_common::WideToUtf8(uriRaw));
+                      if (sender && SUCCEEDED(sender->get_Source(&topRaw)) &&
+                          topRaw)
+                        top = laufey_common::OriginOfUrl(
+                            laufey_common::WideToUtf8(topRaw));
+                      if (uriRaw)
+                        CoTaskMemFree(uriRaw);
+                      if (topRaw)
+                        CoTaskMemFree(topRaw);
+                      ComPtr<ICoreWebView2Deferral> deferral;
+                      if (FAILED(args->GetDeferral(&deferral)))
+                        deferral.Reset();
+                      ComPtr<ICoreWebView2PermissionRequestedEventArgs> held(
+                          args);
+                      laufey_common::MediaCaptureRequests::Instance().Request(
+                          wid, top, requesting, kinds,
+                          [this, held, deferral](bool allow) {
+                            // On the UI thread; inline when already there.
+                            RunOnUiThread([held, deferral, allow] {
+                              held->put_State(
+                                  allow ? COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                                        : COREWEBVIEW2_PERMISSION_STATE_DENY);
+                              if (deferral)
+                                deferral->Complete();
+                            });
+                          });
                       return S_OK;
                     })
                     .Get(),

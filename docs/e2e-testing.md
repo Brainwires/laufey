@@ -232,6 +232,19 @@ that origin must get the bridge with its origin on every call, and a window on
 the engine's channel itself refused. The script removes the file when the run
 ends.
 
+`--media-capture` (`media_capture_checks.rs`, API 53) writes a launch file
+granting the microphone and camera to `app://e2e-media-ok`, with the engine's
+stand-in devices (CEF `--use-fake-device-for-media-stream`, WebView2 the same
+through `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, WebKit's mock capture devices
+through `LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1`). The granted origin must capture
+without the runtime being asked; another origin must be refused while no handler
+is set; a cross-origin sub-frame the granted page delegates the devices to must
+be refused (N/A on WebKitGTK, which names no frame); with a handler, a request
+the file doesn't grant must be asked with its origin and kinds and get the
+handler's answer, and an answer for a request that isn't waiting must report
+`false`. On macOS an allowed request that ends in `NotAllowedError` is N/A (the
+OS's own consent refused the unsigned test host).
+
 The second window opens once the first page is live. On a macOS 15 runner, where
 Core Animation's precompiled pipelines are off for the virtual GPU, two web
 processes starting in the same moment open Metal's on-disk shader cache

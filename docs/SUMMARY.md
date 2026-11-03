@@ -27,6 +27,7 @@
 - [Launch at login](launch-at-login.md)
 - [DevTools](devtools.md)
 - [Permissions](permissions.md)
+- [Microphone and camera](media-capture.md)
 - [Platform features](platform-features.md)
 - [Title bars](title-bar.md)
 - [Secure store](secure-store.md)
