@@ -239,7 +239,11 @@ together, and in about 2% of runs one blocks in `flock()` for as long as the
 other lives. Its main thread never comes back from the first layer commit, so
 its page never requests its document or answers a script; closing the other
 window frees it at once. The system's `sample` and `lsof` show this, and no
-laufey code is on either stack.
+laufey code is on either stack. The other batteries open their windows the same
+way, one once the one before answers scripts: on macOS the main battery's first
+four windows and `--launch-visibility`'s hidden and launch windows (both still
+created before the reveal), and the background checks' hidden windows. This is a
+test measure; the library opens windows as asked.
 
 Request bodies travel the other way: a page at `app://e2e-body/` sends POST, PUT
 and PATCH requests (UTF-8 text, binary bytes including NUL and 0x80–0xFF, a body
