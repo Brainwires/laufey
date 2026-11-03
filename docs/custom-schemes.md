@@ -145,8 +145,19 @@ a page reach loopback servers already.
 On CEF the body of a frame's document served over a custom scheme (an HTML,
 XHTML, SVG or XML response with a 2xx status) reaches the renderer only once the
 browser process has taken in the document's commit (CEF's `OnLoadStart` for that
-frame and URL), at most 1 s after its head. The head goes at once, so the
-navigation commits as before; what waits is the page's first script.
+frame and URL), at most 10 s after its head. The head goes at once, so the
+navigation commits as before; what waits is the page's first script. A body that
+waited a second or more says so on stderr
+(`laufey: the document <url>
+waited <n> ms for its commit`), and one that went
+on without its commit adds that its `localStorage` may be lost. The bound was 1
+s, and on a loaded machine a commit can take longer (two apps relaunching side
+by side on a macOS x64 CI runner): the page then lost its storage as without the
+hold.
+
+A response the browser downloads instead of showing it (a `Content-Disposition`
+of `attachment`, or of any type but `inline`) is never held: it doesn't commit a
+document, so its body would only wait out the 10 s.
 
 Without it a page that touches `localStorage` as it loads could be left without
 storage. The renderer opens a page's `localStorage` over a process-wide

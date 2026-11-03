@@ -3,6 +3,7 @@
 #ifndef LAUFEY_SCHEME_HANDLER_H_
 #define LAUFEY_SCHEME_HANDLER_H_
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -11,6 +12,7 @@
 
 #include "include/cef_resource_handler.h"
 #include "include/cef_scheme.h"
+#include "laufey_cef_commit_gate.h"
 #include "laufey_scheme_cancel.h"
 
 // The built-in custom standard scheme laufey registers for in-process app
@@ -75,9 +77,9 @@ class LaufeySchemeHandler : public CefResourceHandler,
   intptr_t WriteResponse(const uint8_t* buf, size_t len) override;
   void FinishResponse() override;
 
-  // The document's commit was taken in (or the gate's deadline passed): the
-  // body may go to the renderer. Any thread.
-  void OpenGate();
+  // The document's commit was taken in, the gate's deadline passed or the
+  // browser went away (`how`): the body may go to the renderer. Any thread.
+  void OpenGate(laufey_common::GateRelease how);
 
  private:
   uint32_t window_id_;
@@ -107,6 +109,8 @@ class LaufeySchemeHandler : public CefResourceHandler,
   // a Read parks until OpenGate. `gate_id_` is its DocumentCommitGates entry.
   bool gate_closed_ = false;
   uint64_t gate_id_ = 0;
+  // When the body began to wait (a slow commit is reported on stderr).
+  std::chrono::steady_clock::time_point gate_since_;
   // LAUFEY_TIMING=1 (laufey_timing.h): what this request saw, under mutex_.
   int timing_reads_ = 0;
   int timing_writes_ = 0;

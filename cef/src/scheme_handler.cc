@@ -3,6 +3,8 @@
 #include "scheme_handler.h"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 
@@ -22,6 +24,18 @@ namespace {
 // LAUFEY_TIMING=1: one line about a request, by its URL.
 void SchemeTiming(const std::string& url, const std::string& what) {
   laufey_common::Timing("scheme " + url + " " + what);
+}
+
+// The deadline of a body held for its document's commit: on the IO thread,
+// releases gate `id` once it has been held kCommitGateMaxWaitMs, and looks
+// again later if the task ran early (laufey_cef_commit_gate.h).
+void CheckCommitGateDeadline(uint64_t id) {
+  std::chrono::milliseconds left = laufey_common::CommitGates().ReleaseIfDue(
+      id, std::chrono::steady_clock::now());
+  if (left.count() > 0) {
+    CefPostDelayedTask(TID_IO, base::BindOnce(&CheckCommitGateDeadline, id),
+                       left.count());
+  }
 }
 
 // Read/write lines per request beyond this are not logged (finish always is).
@@ -143,9 +157,16 @@ void LaufeySchemeHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
 
   CefResponse::HeaderMap header_map;
   std::string content_type;
+  std::string content_disposition;
   for (const auto& [name, value] : response_headers_) {
     if (name == "content-type") {
       content_type = value;
+    } else {
+      std::string lower = name;
+      std::transform(lower.begin(), lower.end(), lower.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      if (lower == "content-disposition")
+        content_disposition = value;
     }
     header_map.insert({name, value});
   }
@@ -164,18 +185,18 @@ void LaufeySchemeHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
     // the commit, so no script of it opens localStorage before the frame
     // has the document's storage key (laufey_cef_commit_gate.h).
     if (browser_id_ != 0 && gate_id_ == 0 &&
-        laufey_common::DocumentBodyNeedsCommitGate(frame_document_, status_,
-                                                   mime_type)) {
+        laufey_common::DocumentBodyNeedsCommitGate(
+            frame_document_, status_, mime_type, content_disposition)) {
       gate_closed_ = true;
+      gate_since_ = std::chrono::steady_clock::now();
       CefRefPtr<LaufeySchemeHandler> self(this);
       gate_id_ = laufey_common::CommitGates().Add(
-          browser_id_, main_frame_, url_, [self] { self->OpenGate(); });
-      CefPostDelayedTask(
-          TID_IO,
-          base::BindOnce(
-              [](uint64_t id) { laufey_common::CommitGates().ReleaseOne(id); },
-              gate_id_),
-          laufey_common::kCommitGateMaxWaitMs);
+          browser_id_, main_frame_, url_,
+          [self](laufey_common::GateRelease how) { self->OpenGate(how); },
+          gate_since_);
+      CefPostDelayedTask(TID_IO,
+                         base::BindOnce(&CheckCommitGateDeadline, gate_id_),
+                         laufey_common::kCommitGateMaxWaitMs);
       if (laufey_common::TimingEnabled())
         SchemeTiming(url_, "body held for the commit");
     }
@@ -245,7 +266,7 @@ bool LaufeySchemeHandler::Read(void* data_out, int bytes_to_read,
   return true;
 }
 
-void LaufeySchemeHandler::OpenGate() {
+void LaufeySchemeHandler::OpenGate(laufey_common::GateRelease how) {
   CefRefPtr<CefResourceReadCallback> to_continue;
   int to_report = 0;
   {
@@ -255,6 +276,22 @@ void LaufeySchemeHandler::OpenGate() {
     gate_closed_ = false;
     if (laufey_common::TimingEnabled())
       SchemeTiming(url_, "body released");
+    // A commit that took long, or never came: under load a commit can take
+    // seconds, and a body released before it leaves the page without
+    // localStorage (laufey_cef_commit_gate.h).
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - gate_since_)
+                            .count();
+    if (how != laufey_common::GateRelease::kBrowserClosed &&
+        waited >= laufey_common::kCommitGateSlowMs) {
+      std::cerr << "laufey: the document " << url_ << " waited " << waited
+                << " ms for its commit"
+                << (how == laufey_common::GateRelease::kDeadline
+                        ? " and went on without it; its localStorage may be "
+                          "lost"
+                        : "")
+                << std::endl;
+    }
     if (!read_callback_ || !pending_data_)
       return;  // the next Read takes the body
     if (failed_) {

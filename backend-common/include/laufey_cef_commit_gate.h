@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -49,18 +50,50 @@ namespace laufey_common {
 
 // The longest a document's body is held for its commit. A navigation that
 // never commits (a download) or a commit CEF doesn't report goes on after
-// this.
-inline constexpr int kCommitGateMaxWaitMs = 1000;
+// this. It was 1 s, and on a loaded machine a commit can take longer: the
+// body then went on without it and the page lost its localStorage as before
+// (two apps relaunching side by side on a macOS x64 runner).
+inline constexpr int kCommitGateMaxWaitMs = 10000;
+
+// A hold at least this long is reported on stderr.
+inline constexpr int kCommitGateSlowMs = 1000;
+
+// Whether a Content-Disposition value makes the browser download the response
+// instead of committing it as a document. Chromium (HttpContentDisposition)
+// takes a leading disposition type that is a token: "inline" renders, and
+// "attachment" or any other token downloads. A value that starts with a
+// parameter (`filename=...`) has no type and renders.
+inline bool ContentDispositionIsDownload(const std::string& value) {
+  std::string type = value.substr(0, value.find(';'));
+  const char* space = " \t";
+  size_t first = type.find_first_not_of(space);
+  if (first == std::string::npos)
+    return false;
+  type = type.substr(first, type.find_last_not_of(space) - first + 1);
+  // An HTTP token (RFC 9110): visible ASCII but separators.
+  const std::string separators = "()<>@,;:\\\"/[]?={}";
+  for (unsigned char c : type) {
+    if (c <= 0x20 || c >= 0x7f ||
+        separators.find(static_cast<char>(c)) != std::string::npos)
+      return false;
+  }
+  std::transform(type.begin(), type.end(), type.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return type != "inline";
+}
 
 // Whether a response's body waits for its document's commit: the response to
 // a frame's navigation (`frame_document`), with a body that becomes a
 // document that can run scripts. A redirect or an empty status has no such
 // body, and a MIME type the browser would sniff (none) needs body bytes
-// before it commits, so it never waits.
-inline bool DocumentBodyNeedsCommitGate(bool frame_document, int status,
-                                        const std::string& mime_type) {
+// before it commits, so it never waits. Neither does a response the browser
+// downloads (`content_disposition`, ContentDispositionIsDownload): it never
+// commits, so its body would only wait out the deadline.
+inline bool DocumentBodyNeedsCommitGate(
+    bool frame_document, int status, const std::string& mime_type,
+    const std::string& content_disposition = std::string()) {
   if (!frame_document || status < 200 || status > 299 || status == 204 ||
-      status == 205)
+      status == 205 || ContentDispositionIsDownload(content_disposition))
     return false;
   std::string mime = mime_type;
   std::transform(mime.begin(), mime.end(), mime.begin(),
@@ -76,20 +109,28 @@ inline std::string CommitGateUrlKey(const std::string& url) {
   return url.substr(0, url.find('#'));
 }
 
+// What released a held body.
+enum class GateRelease {
+  kCommitted,      // its document's commit
+  kDeadline,       // kCommitGateMaxWaitMs without a commit
+  kBrowserClosed,  // its browser went away
+};
+
 // The responses held for their documents' commits. Thread-safe; a release
-// runs outside the lock, at most once per gate.
+// runs outside the lock, at most once per gate, and is told what released it.
 class DocumentCommitGates {
  public:
-  using Release = std::function<void()>;
+  using Release = std::function<void(GateRelease)>;
+  using Clock = std::chrono::steady_clock;
 
   // Holds a response for `browser_id`'s main frame (or a sub-frame) loading
-  // `url`. Returns the gate's id (never 0).
+  // `url`, from `now`. Returns the gate's id (never 0).
   uint64_t Add(int browser_id, bool main_frame, const std::string& url,
-               Release release) {
+               Release release, Clock::time_point now = Clock::now()) {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t id = ++last_id_;
-    gates_[id] =
-        Gate{browser_id, main_frame, CommitGateUrlKey(url), std::move(release)};
+    gates_[id] = Gate{browser_id, main_frame, CommitGateUrlKey(url),
+                      std::move(release), now};
     return id;
   }
 
@@ -100,15 +141,32 @@ class DocumentCommitGates {
   // deadline. Returns how many it released.
   int Committed(int browser_id, bool main_frame, const std::string& url) {
     const std::string key = CommitGateUrlKey(url);
-    return ReleaseWhere([&](const Gate& g) {
+    return ReleaseWhere(GateRelease::kCommitted, [&](const Gate& g) {
       return g.browser_id == browser_id && g.main_frame == main_frame &&
              g.url_key == key;
     });
   }
 
-  // Releases one gate (its deadline passed). Returns whether it was held.
-  bool ReleaseOne(uint64_t id) {
-    return ReleaseWhere([](const Gate&) { return true; }, id) > 0;
+  // The deadline: releases gate `id` once it has been held `max_wait` by
+  // `now`. Returns how long it still has to wait (the caller checks again
+  // then), or zero when it was released now or isn't held any more.
+  std::chrono::milliseconds ReleaseIfDue(
+      uint64_t id, Clock::time_point now,
+      std::chrono::milliseconds max_wait =
+          std::chrono::milliseconds(kCommitGateMaxWaitMs)) {
+    std::chrono::milliseconds left(0);
+    ReleaseWhere(
+        GateRelease::kDeadline,
+        [&](const Gate& g) {
+          auto held = std::chrono::duration_cast<std::chrono::milliseconds>(
+              now - g.since);
+          if (held >= max_wait)
+            return true;
+          left = max_wait - held;
+          return false;
+        },
+        id);
+    return left;
   }
 
   // Drops a gate without running its release (the request was cancelled).
@@ -119,8 +177,9 @@ class DocumentCommitGates {
 
   // Releases every gate of a browser that is going away.
   int ReleaseBrowser(int browser_id) {
-    return ReleaseWhere(
-        [&](const Gate& g) { return g.browser_id == browser_id; });
+    return ReleaseWhere(GateRelease::kBrowserClosed, [&](const Gate& g) {
+      return g.browser_id == browser_id;
+    });
   }
 
   size_t HeldForTesting() {
@@ -134,10 +193,11 @@ class DocumentCommitGates {
     bool main_frame;
     std::string url_key;
     Release release;
+    Clock::time_point since;
   };
 
   template <typename Pred>
-  int ReleaseWhere(Pred pred, uint64_t only_id = 0) {
+  int ReleaseWhere(GateRelease how, Pred pred, uint64_t only_id = 0) {
     std::vector<Release> released;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -152,7 +212,7 @@ class DocumentCommitGates {
     }
     for (Release& r : released) {
       if (r)
-        r();
+        r(how);
     }
     return static_cast<int>(released.size());
   }
