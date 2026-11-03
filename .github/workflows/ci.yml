@@ -566,7 +566,9 @@ jobs:
   #                     building a muda menu with no GTK init.
   #   - webview / linux: WebKitGTK/Xlib isn't thread-safe under the worker-thread
   #                      runtime (xcb_xlib_threads_sequence_lost); only the
-  #                      custom-scheme request-body round trip runs there.
+  #                      custom-scheme request-body round trip runs there,
+  #                      with the passkey and print_to_pdf checks riding
+  #                      along (--scheme-body), plus the dedicated modes.
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
