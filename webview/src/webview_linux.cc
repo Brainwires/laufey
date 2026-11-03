@@ -3427,6 +3427,16 @@ void WebKitGTKBackend::PrintToPdfOn(uint32_t window_id,
     callback(nullptr, 0, "window not found", callback_data);
     return;
   }
+  // WebKitGTK crashes in webkit_print_operation_print on a web view that has
+  // never been asked to load anything (no URI: its web process hasn't
+  // started; seen with 2.50 on Ubuntu 22.04). Once a load has been asked
+  // for, even one still in flight, it prints (a blank page until the load
+  // commits), so only that state is refused.
+  if (!webkit_web_view_get_uri(webview)) {
+    callback(nullptr, 0, "nothing has been loaded in the window yet",
+             callback_data);
+    return;
+  }
 
   // Private (0600, unpredictable name) temp file for the print output;
   // close the fd right away -- the web process opens the file by path.

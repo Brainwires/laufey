@@ -3159,7 +3159,20 @@ async fn print_checks(win: &Window, page_loaded: &AtomicBool) {
     };
     let is_webview2 = cfg!(target_os = "windows")
       && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview");
-    if is_webview2 {
+    let is_webkitgtk = cfg!(target_os = "linux")
+      && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview");
+    if is_webkitgtk {
+      // Nothing has been asked to load in this window, and WebKitGTK crashes
+      // printing such a web view (the backend exited with SIGSEGV here), so
+      // it is refused through the callback instead.
+      check(
+        &format!(
+          "print_to_pdf on a window that never loaded anything is refused, \
+           not a crash ({summary})"
+        ),
+        matches!(&result, Some(Err(e)) if e.contains("nothing has been loaded")),
+      );
+    } else if is_webview2 {
       check(
         &format!(
           "print_to_pdf right after the window is created renders it \

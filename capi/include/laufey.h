@@ -1605,8 +1605,12 @@ struct laufey_backend_api {
   // still starting (WebView2 creates its controller asynchronously) is
   // rendered once the engine is ready; if it never becomes ready (WebView2:
   // within 45 s of the window's creation) the error is "web view not ready
-  // ..." — "window not found" means only that no such window exists. NULL on
-  // backends older than API version 32; callers must null-check.
+  // ..." — "window not found" means only that no such window exists.
+  // WebKitGTK refuses a window that has never been asked to load anything
+  // ("nothing has been loaded in the window yet"; WebKitGTK itself crashes
+  // printing one); once a load has been asked for, every engine renders, a
+  // blank page until it commits. NULL on backends older than API version 32;
+  // callers must null-check.
   void (*print_to_pdf)(void* backend_data, uint32_t window_id,
                        laufey_pdf_result_fn callback, void* callback_data);
 
