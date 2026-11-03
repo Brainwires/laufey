@@ -528,6 +528,12 @@ created `hidden` is never revealed by this, and a non-activating panel
 front within the app, as before. A window that is covered, minimized or on a
 locked screen is still throttled by the engine, as in a browser.
 
+On Linux a window the app creates visible is created hidden, given its size,
+then shown, so it first appears at that size (the C ABI's create calls carry no
+size, and a Wayland window's first size is the one it has when it maps). It
+looks the same to the app: the window is visible when `Window::new_with_options`
+returns.
+
 ## Keeping a tray app alive; quitting (API ≥ 38)
 
 By default the event loop ends when the last window closes. A tray / menu-bar

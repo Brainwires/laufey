@@ -1152,6 +1152,34 @@ an editor or a terminal is in front when an app is started from it. See
   was lost with that document when the app's page committed. The checks now wait
   for the app's own document.)
 - **A window created hidden** stays hidden through both reveals (the WebView
-  backends; CEF and Winit have no hidden-on-create and report N/A).
+  backends and CEF on Linux; CEF elsewhere and Winit have no hidden-on-create
+  and report N/A).
 
 Winit has no page and reports N/A for the page checks.
+
+## 22. A window's first size on Wayland
+
+`--initial-size` (`initial_size_checks.rs`) asks the compositor what size a
+window first maps at. It runs in the session it is started in, a headless sway
+whose windows float (a tiled window takes its tile's size):
+
+```sh
+HEADLESS_SWAY_FLOATING=1 LAUFEY_E2E_HOST_SESSION=1 \
+  scripts/headless-sway.sh dbus-run-session -- \
+  scripts/native-e2e-run.sh webview --initial-size
+```
+
+A frameless, non-activating panel (240x160) and a framed window (640x420) are
+created `LAUFEY_E2E_INITIAL_SIZE_ROUNDS` times each (3 by default). sway's `new`
+window event gives the size the surface first mapped at, which must be the size
+asked for (a framed window's surface may add a client-side title bar of up to 60
+px), and a moment later `get_size()` and sway's tree still agree. Without
+`$SWAYSOCK` the checks are N/A. CI runs it on the Linux webview and CEF legs
+with 5 rounds.
+
+It guards the order of a window's creation on Linux: created hidden, sized, then
+shown. A window created visible maps at the backend's default size (800x600),
+and the size set right after raced the compositor's first configure. On one
+loaded CPU under WebKitGTK, 24 of 60 panels and 6 of 60 framed windows mapped at
+800x600 and stayed there; CEF maps a window only once it has painted, and none
+of its 120 did.

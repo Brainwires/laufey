@@ -5,6 +5,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <functional>
 #include <list>
 #include <map>
 #include <set>
@@ -296,6 +297,14 @@ class LaufeyHandler : public CefClient,
   void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                    TransitionType transition_type) override;
 
+  // A window's main frame finished loading a document: the page load event
+  // (set_page_load_handler, API 27), which a window created hidden is
+  // revealed from. Not for the about:blank every browser starts on, which is
+  // no content to reveal (WebKitGTK and WebView2 start with no load at all).
+  // A navigation that fails shows Chromium's error page, whose load counts.
+  void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                 int httpStatusCode) override;
+
   // The navigation guard (API 48, laufey_navigation_guard.h): a main-frame
   // navigation of a laufey window (and each of its server redirects) to an
   // origin the window may not load is cancelled, and an http(s) destination
@@ -502,6 +511,20 @@ void LaufeyQuitMainLoopMac();
 // Ends the CEF backend's main loop on every platform (LaufeyQuitMainLoopMac on
 // macOS, CefQuitMessageLoop elsewhere). UI thread.
 void LaufeyQuitMainLoop();
+
+// The app's windows (LaufeyWindowDelegate) created and not yet destroyed. UI
+// thread.
+int LaufeyLiveWindowCount();
+
+// Before CefShutdown, once the loop has ended: runs CEF's UI-thread tasks
+// (`pump`) until the app's windows have been destroyed (at most 2 s), and
+// then a few more times. Chromium deletes a closed window's Browser in a task
+// it posts when the window's close completes; one the stopped loop never ran
+// is deleted inside CefShutdown instead (BrowserManagerService::Shutdown,
+// under ProfileManager's teardown), where Chromium 156 reads freed memory in
+// ~TabDragServiceImpl (SIGSEGV, about 1 quit in 5,600 on macOS x64). The
+// macOS and Windows hosts call it. UI thread.
+void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump);
 
 // The app's own quit() (runtime_loader.cc): every window is closed and the
 // loop ends, so the host goes on to the runtime's shutdown and CefShutdown.

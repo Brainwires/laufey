@@ -682,10 +682,9 @@ async fn os_checks() {
   // kind: each round can itself wait 5 s for a first child (wait_children),
   // so a bound on the rounds alone would let a missing kind take minutes.
   for kind in ["renderer", "gpu-process"] {
-    let mut found: Vec<(u32, Option<TokenFacts>)> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-      found = wait_children(kind)
+    let found: Vec<(u32, Option<TokenFacts>)> = loop {
+      let found: Vec<(u32, Option<TokenFacts>)> = wait_children(kind)
         .await
         .into_iter()
         .map(|c| (c.pid, token_facts(c.pid)))
@@ -695,10 +694,10 @@ async fn os_checks() {
           .iter()
           .all(|(_, t)| t.is_some_and(|t| is_sandboxed(&t) == want));
       if settled || std::time::Instant::now() >= deadline {
-        break;
+        break found;
       }
       tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
     check(
       &format!("sandbox: the backend has {kind} processes ({found:x?})"),
       !found.is_empty(),

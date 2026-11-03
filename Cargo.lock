@@ -2146,6 +2146,7 @@ name = "native_e2e_runtime"
 version = "0.1.0"
 dependencies = [
  "laufey",
+ "serde_json",
  "tokio",
  "zbus",
 ]

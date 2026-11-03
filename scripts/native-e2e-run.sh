@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--tray-roles|--quit-request|--overlay-edge|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--tray-roles|--quit-request|--overlay-edge|--initial-size|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -40,6 +40,11 @@
 # (overlay_edge_checks.rs) in the session it is started in (a Wayland
 # compositor with layer-shell; N/A elsewhere): the surface, as KWin reports it,
 # clears the panels at the bottom-right of the output.
+# --initial-size runs only the first-size checks (initial_size_checks.rs)
+# under a sway whose windows float (scripts/headless-sway.sh with
+# HEADLESS_SWAY_FLOATING=1): a frameless panel and a framed window are first
+# mapped at the size they were created with, as sway's window events report.
+# N/A without sway ($SWAYSOCK).
 # --window-api runs only the API 38 window checks (state, constraints,
 # screens, title bar, backdrops). On Linux it runs a window manager (openbox)
 # under Xvfb, so maximize / minimize / fullscreen must really apply: the
@@ -147,6 +152,9 @@ if [ "$mode" = "--quit-request" ]; then
 fi
 if [ "$mode" = "--overlay-edge" ]; then
   export LAUFEY_E2E_ONLY=overlay-edge
+fi
+if [ "$mode" = "--initial-size" ]; then
+  export LAUFEY_E2E_ONLY=initial-size
 fi
 if [ "$mode" = "--bridge-origin" ]; then
   export LAUFEY_E2E_ONLY=bridge-origin

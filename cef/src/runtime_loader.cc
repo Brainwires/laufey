@@ -325,7 +325,7 @@ static bool Backend_QuitRequestPending(void* /*data*/) {
 }
 
 // exit_app (API 46): quit() with an exit code. The host returns the code once
-// CefShutdown has written the profile (on Windows through
+// CefShutdown has written the profile (on Windows and macOS through
 // laufey_common::EndProcess), and RuntimeLoader::Shutdown doesn't wait for a
 // runtime thread that may be blocked for good in its exit().
 static void Backend_ExitApp(void* data, int exit_code) {
@@ -2563,6 +2563,12 @@ static void Backend_SetCloseRequestedHandler(void* data,
   loader->SetCloseRequestedHandler(handler, user_data);
 }
 
+static void Backend_SetPageLoadHandler(void* data, laufey_page_load_fn handler,
+                                       void* user_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  loader->SetPageLoadHandler(handler, user_data);
+}
+
 // Test hook (API >= 31): synthesize a close-requested event through the same
 // dispatch code a real OS close click runs (see CanClose in app.cc). Returns
 // true if a registered handler deferred the close; false means the close was
@@ -3512,6 +3518,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_resize_handler = Backend_SetResizeHandler;
   backend_api_.set_move_handler = Backend_SetMoveHandler;
   backend_api_.set_close_requested_handler = Backend_SetCloseRequestedHandler;
+  backend_api_.set_page_load_handler = Backend_SetPageLoadHandler;
   backend_api_.test_trigger_close_requested = Backend_TestTriggerCloseRequested;
   backend_api_.test_inject_input = Backend_TestInjectInput;
 

@@ -26,9 +26,11 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef __linux__
@@ -68,11 +70,38 @@ std::queue<uint32_t> g_pending_laufey_ids;
 
 namespace {
 LaufeyHandler* g_handler = nullptr;
+// LaufeyLiveWindowCount: OnWindowCreated adds one, OnWindowDestroyed takes it
+// back. UI thread only.
+int g_live_windows = 0;
+}  // namespace
+
+int LaufeyLiveWindowCount() {
+  return g_live_windows;
+}
+
+void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (g_live_windows > 0 && std::chrono::steady_clock::now() < deadline) {
+    pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (g_live_windows > 0) {
+    std::cerr << "laufey: " << g_live_windows
+              << " window(s) still not destroyed 2 s after the loop ended"
+              << std::endl;
+  }
+  // The Browser's deletion is posted when its window's close completes: let
+  // the tasks queued by then (and any they queue) run.
+  for (int i = 0; i < 5; ++i) {
+    pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
 }
 
 // LaufeyWindowDelegate implementation
 
 void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
+  ++g_live_windows;
   window->AddChildView(browser_view_);
 
   // Register native window for event routing. Non-activating panels
@@ -112,7 +141,16 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
 #endif
   }
 
+#if defined(__linux__)
+  // A window created hidden stays hidden until show(). The capi creates every
+  // Linux window hidden, sizes it, then shows it: a Wayland window's first
+  // size is the one it maps at, and a size set after it maps races the
+  // compositor's first configure.
+  if ((flags_ & LAUFEY_WINDOW_FLAG_HIDDEN) == 0)
+    window->Show();
+#else
   window->Show();
+#endif
 #if defined(__APPLE__)
   // Chromium's show activates the app, which macOS 14+ may decline for an
   // app started from a terminal or a background agent; the first window
@@ -204,6 +242,7 @@ bool LaufeyWindowDelegate::GetLinuxWindowProperties(
 #endif
 
 void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
+  --g_live_windows;
   // Unregister native window
   CefWindowHandle handle = window->GetWindowHandle();
   if (handle) {
@@ -387,6 +426,16 @@ void LaufeyHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
     laufey_common::Timing(std::string("load start ") +
                           (frame->IsMain() ? "main " : "sub ") + url + " (" +
                           std::to_string(released) + " held bodies released)");
+}
+
+void LaufeyHandler::OnLoadEnd(CefRefPtr<CefBrowser> browser,
+                              CefRefPtr<CefFrame> frame, int httpStatusCode) {
+  (void)httpStatusCode;
+  if (!frame->IsMain() || frame->GetURL().ToString() == "about:blank")
+    return;
+  RuntimeLoader* loader = RuntimeLoader::GetInstance();
+  if (uint32_t id = loader->GetLaufeyIdForBrowser(browser))
+    loader->DispatchPageLoadEvent(id);
 }
 
 void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
