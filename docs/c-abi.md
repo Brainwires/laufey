@@ -273,9 +273,14 @@ before it reaches either handler. Without a launch file, or with one that pins
 neither key, every origin may call, as before API 44.
 
 `execute_js` runs a script in a window and delivers its result/error through a
-`laufey_js_result_fn`. When the runtime services calls off the UI thread, the
-backend signals readiness via `set_js_call_notify` and the runtime drains the
-queue with `poll_js_calls`.
+`laufey_js_result_fn`. It, `print_to_pdf` and `open_devtools` may be called as
+soon as the window exists: WebView2 creates a window's web view asynchronously,
+and calls made before it is ready wait for it (45 s from the window's creation
+at most); past that, the ones with a callback answer the
+`"web view not ready ..."` error, distinct from `"window not found"` (no such
+window). When the runtime services calls off the UI thread, the backend signals
+readiness via `set_js_call_notify` and the runtime drains the queue with
+`poll_js_calls`.
 
 ## Custom URL scheme handler (API ≥ 26)
 

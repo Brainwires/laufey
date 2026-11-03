@@ -1866,6 +1866,52 @@ fn e2e_main() {
       }
     }
 
+    // print_to_pdf on a window that was only just created. WebView2 creates
+    // its controller asynchronously and used to answer "window not found"
+    // until it was ready; it now renders once the controller is ready (or
+    // answers "web view not ready" after 45 s). No page is loaded, so the
+    // render doesn't race a navigation (WKWebView refuses a PDF mid-load).
+    // Every engine backend must recognise the window; WebView2, whose queue
+    // this covers, must also deliver the PDF.
+    if scheme_supported {
+      let fresh = Window::new(320, 240).title("native-e2e-pdf-at-creation");
+      let early =
+        Arc::new(std::sync::Mutex::new(None::<Result<Vec<u8>, String>>));
+      let er = early.clone();
+      fresh.print_to_pdf(None, move |r| *er.lock().unwrap() = Some(r));
+      let delivered =
+        wait_for(|| early.lock().unwrap().is_some(), 500, 100).await;
+      let result = early.lock().unwrap().take();
+      let summary = match &result {
+        Some(Ok(bytes)) => format!("{} bytes", bytes.len()),
+        Some(Err(e)) => format!("Err({e})"),
+        None => "nothing delivered".into(),
+      };
+      let is_webview2 = cfg!(target_os = "windows")
+        && std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("webview");
+      if is_webview2 {
+        check(
+          &format!(
+            "print_to_pdf right after the window is created renders it \
+             ({summary})"
+          ),
+          matches!(&result, Some(Ok(b)) if b.starts_with(b"%PDF-")),
+        );
+      } else {
+        check(
+          &format!(
+            "print_to_pdf right after the window is created finds the window \
+             ({summary})"
+          ),
+          delivered
+            && !matches!(&result, Some(Err(e)) if e.contains("window not found")),
+        );
+      }
+      fresh.close();
+    } else {
+      na("print_to_pdf right after creation (backend has no web engine)");
+    }
+
     // print_to_pdf for a window that doesn't exist refuses through the
     // callback, and that callback may re-enter the backend: WebKitGTK runs it
     // on the GTK thread, where get_size takes the same (non-recursive) window
