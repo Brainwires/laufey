@@ -66,6 +66,29 @@ const std::vector<std::string>& CefQuietDisabledFeatures();
 // CEF adds nothing). Re-check the list at every CEF update.
 const std::vector<std::string>& CefOwnDisabledFeatures();
 
+// The Chromium features the CEF host disables for its own correctness rather
+// than for quiet, appended after CefOwnDisabledFeatures:
+//
+//   MacAppCodeSignClone  (macOS; chrome/browser/mac/code_sign_clone_manager.mm)
+//     Chrome clones its app bundle into
+//     <user temp>/../X/<bundle id>.code_sign_clone/code_sign_clone.XXXXXX
+//     with clonefile(2) at every browser start, the main executable as a
+//     hard link to the original, and a code-sign-clone-cleanup helper
+//     deletes the clone up to a second after the browser has gone. APFS
+//     names a hard-linked file by the link looked up last, for every holder
+//     of it (fcntl F_GETPATH): while a previous launch's cleanup walks its
+//     clone, the next launch's dyld, which takes the main executable's path
+//     from F_GETPATH, gets the clone's path, resolves @rpath
+//     (@executable_path) inside the half-deleted clone, and the launch dies
+//     before main() on "Library not loaded:
+//     @rpath/liblaufey_keychain_interpose.dylib" (exit 134). The clone only
+//     guards a browser that keeps running after an updater has replaced its
+//     bundle in place (laufey has no updater of its own, docs/
+//     distribution.md).
+//
+// Unknown feature names are ignored, so the list is the same everywhere.
+const std::vector<std::string>& CefHostDisabledFeatures();
+
 // The feature names in a --enable-features / --disable-features value: each
 // comma-separated entry without a leading "*" and without a "<Trial" or
 // ":param/value" suffix. Empty entries are skipped.
@@ -73,7 +96,8 @@ std::vector<std::string> FeatureListNames(const std::string& value);
 
 // The --disable-features value with the quiet defaults added: `disable` (the
 // value already on the command line, possibly empty) followed by each
-// default (CefQuietDisabledFeatures, then CefOwnDisabledFeatures) that is
+// default (CefQuietDisabledFeatures, CefOwnDisabledFeatures, then
+// CefHostDisabledFeatures) that is
 // neither already in it nor named in `enable`. A feature
 // the app's own command line enables stays enabled. Returns `disable`
 // unchanged when there is nothing to add.

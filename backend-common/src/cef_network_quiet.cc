@@ -31,6 +31,15 @@ const std::vector<std::string>& CefOwnDisabledFeatures() {
   return features;
 }
 
+const std::vector<std::string>& CefHostDisabledFeatures() {
+  // laufey_cef_network_quiet.h: a launch right after another one must not
+  // resolve its executable's path into the previous launch's dying clone.
+  static const std::vector<std::string> features = {
+      "MacAppCodeSignClone",
+  };
+  return features;
+}
+
 std::vector<std::string> FeatureListNames(const std::string& value) {
   std::vector<std::string> names;
   size_t start = 0;
@@ -63,7 +72,8 @@ std::string MergeQuietDisabledFeatures(const std::string& disable,
   };
   std::string merged = disable;
   for (const std::vector<std::string>* list :
-       {&CefQuietDisabledFeatures(), &CefOwnDisabledFeatures()}) {
+       {&CefQuietDisabledFeatures(), &CefOwnDisabledFeatures(),
+        &CefHostDisabledFeatures()}) {
     for (const std::string& feature : *list) {
       if (contains(disabled, feature) || contains(enabled, feature))
         continue;
