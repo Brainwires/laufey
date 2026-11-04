@@ -20,6 +20,9 @@
 //! - A request the handler holds is refused once its window navigates to
 //!   another document: a late yes reports `false`.
 //! - An answer for a request that isn't waiting reports `false`.
+//! - Screen capture (`getDisplayMedia`) is refused, even for the granted
+//!   origin, and no engine shows its own source picker for it (WebView2's
+//!   would leave the request waiting on the user: no result).
 //!
 //! An allowed request still meets the OS's consent: on macOS (TCC) an
 //! unsigned test host may be refused there, which the page can't tell from
@@ -40,7 +43,8 @@ const NO_ORIGIN: &str = "app://e2e-media-no";
 const ASK_ORIGIN: &str = "app://e2e-media-ask";
 const FRAME_ORIGIN: &str = "app://e2e-media-frame";
 
-/// Captures what `steps` names ("audio", "video", "both") one after another
+/// Captures what `steps` names ("audio", "video", "both", or "display" for
+/// getDisplayMedia) one after another
 /// and reports each result through the bridge (as `<tag><step>`): "ok", or
 /// "err:<name>". A `?ping` page reports `<tag>ping` "ok" as soon as it runs. A
 /// `?frame` page also embeds FRAME_ORIGIN's capturing page, which posts its
@@ -52,6 +56,13 @@ const constraints = {audio: {audio: true}, video: {video: true},
                      both: {audio: true, video: true}};
 async function capture(step) {
   try {
+    if (step === 'display') {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia)
+        return 'err:NoDisplayMedia';
+      const shown = await navigator.mediaDevices.getDisplayMedia({video: true});
+      shown.getTracks().forEach((t) => t.stop());
+      return 'ok';
+    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
       return 'err:NoMediaDevices';
     const stream = await navigator.mediaDevices.getUserMedia(constraints[step]);
@@ -165,6 +176,24 @@ pub async fn run() {
   // app must outlive its last window in between.
   laufey::set_quit_on_last_window_closed(false);
   let reports: Reports = Arc::new(Mutex::new(Vec::new()));
+
+  // --- Screen capture: never granted, never the engine's own picker -------
+  // Even the origin the launch file grants both devices to. An engine that
+  // shows a source picker leaves the request waiting (no result), which
+  // fails the check; one that refuses before asking (WebKit wants a user
+  // gesture) or has no getDisplayMedia refuses too.
+  let display_win = window(
+    &format!("{OK_ORIGIN}/?tag=display-&steps=display"),
+    &reports,
+  );
+  let r = result_of(&reports, OK_ORIGIN, "display-display").await;
+  check(
+    &format!(
+      "media-capture: screen capture is refused, even for the granted origin ({r})"
+    ),
+    r.starts_with("err:"),
+  );
+  display_win.close();
 
   // --- No handler: the launch file decides, everything else is refused ----
   let frame_src = format!("{FRAME_ORIGIN}/");
