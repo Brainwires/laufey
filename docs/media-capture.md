@@ -152,14 +152,15 @@ manage:
 
 `scripts/native-e2e-run.sh <backend> --media-capture` runs
 `examples/native_e2e/src/media_capture_checks.rs` under a launch file granting
-`app://e2e-media-ok`, with stand-in devices (the screen capture check needs none): Chromium's
-`--use-fake-device-for-media-stream` (CEF on its command line, WebView2 as a
-browser argument) and WebKit's mock capture devices, the latter two through the
-`LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1` test hook. On macOS an unsigned test host
-may be refused by TCC, so an allowed request that ends in `NotAllowedError` is
-reported N/A there. The same run makes an `RTCPeerConnection` loopback in a page
-that captures nothing (it must create an offer, and no host candidate may name
-the host's address) and in the granted page with its microphone track (an audio
-offer and at least one candidate). On a WebKitGTK built without WebRTC these are
-N/A, unless `LAUFEY_E2E_EXPECT_WEBRTC=1` says the WebKitGTK has it. The decision
-logic is unit-tested in `backend-common/tests/media_capture_test.cc`.
+`app://e2e-media-ok`, with stand-in devices (the screen capture check needs
+none): Chromium's `--use-fake-device-for-media-stream` (CEF on its command line,
+WebView2 as a browser argument) and WebKit's mock capture devices, the latter
+two through the `LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1` test hook. On macOS an
+unsigned test host may be refused by TCC, so an allowed request that ends in
+`NotAllowedError` is reported N/A there. The same run makes an
+`RTCPeerConnection` loopback in a page that captures nothing (it must create an
+offer, and no host candidate may name the host's address) and in the granted
+page with its microphone track (an audio offer and at least one candidate). On a
+WebKitGTK built without WebRTC these are N/A, unless
+`LAUFEY_E2E_EXPECT_WEBRTC=1` says the WebKitGTK has it. The decision logic is
+unit-tested in `backend-common/tests/media_capture_test.cc`.
