@@ -29,6 +29,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_window.h"
+#include "xvfb_test_util.h"
 
 using namespace laufey_common;
 
@@ -37,8 +38,7 @@ namespace {
 pid_t g_xvfb = -1;
 
 [[noreturn]] void Finish(int code) {
-  if (g_xvfb > 0)
-    kill(g_xvfb, SIGTERM);
+  laufey_test::StopXvfb(g_xvfb);
   std::fflush(stdout);
   std::_Exit(code);
 }
@@ -71,39 +71,6 @@ double SecondsSince(Clock::time_point t) {
   return std::chrono::duration<double>(Clock::now() - t).count();
 }
 
-// Starts a private Xvfb and points DISPLAY at it; its pid, or -1.
-pid_t StartXvfb() {
-  gchar* xvfb = g_find_program_in_path("Xvfb");
-  if (!xvfb)
-    return -1;
-  int fds[2];
-  EXPECT(pipe(fds) == 0);
-  pid_t pid = fork();
-  if (pid == 0) {
-    close(fds[0]);
-    int null = open("/dev/null", O_RDWR);
-    dup2(null, STDIN_FILENO);
-    dup2(null, STDOUT_FILENO);
-    dup2(null, STDERR_FILENO);
-    std::string fd = std::to_string(fds[1]);
-    execl(xvfb, xvfb, "-displayfd", fd.c_str(), "-nolisten", "tcp", "-screen",
-          "0", "800x600x24", static_cast<char*>(nullptr));
-    _exit(127);
-  }
-  g_free(xvfb);
-  close(fds[1]);
-  pollfd p = {fds[0], POLLIN, 0};
-  char buf[32] = {};
-  if (poll(&p, 1, 10000) != 1 || read(fds[0], buf, sizeof(buf) - 1) <= 0) {
-    kill(pid, SIGKILL);
-    return -1;
-  }
-  close(fds[0]);
-  std::string display = std::string(":") + strtok(buf, "\n");
-  setenv("DISPLAY", display.c_str(), 1);
-  return pid;
-}
-
 gboolean CancelNow(gpointer) {
   CancelGtkDialogsForQuit();
   return G_SOURCE_REMOVE;
@@ -121,7 +88,7 @@ gboolean ShowNestedConfirm(gpointer) {
 
 int main() {
   unsetenv("WAYLAND_DISPLAY");
-  g_xvfb = StartXvfb();
+  g_xvfb = laufey_test::StartXvfb("800x600x24");
   if (g_xvfb < 0) {
     std::printf("laufey_dialog_quit_test: Xvfb missing, skipped\n");
     return 77;

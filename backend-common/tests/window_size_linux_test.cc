@@ -26,6 +26,7 @@
 #include <string>
 
 #include "laufey_window.h"
+#include "xvfb_test_util.h"
 
 using namespace laufey_common;
 
@@ -34,8 +35,7 @@ namespace {
 pid_t g_xvfb = -1;
 
 [[noreturn]] void Finish(int code) {
-  if (g_xvfb > 0)
-    kill(g_xvfb, SIGTERM);
+  laufey_test::StopXvfb(g_xvfb);
   std::fflush(stdout);
   std::_Exit(code);
 }
@@ -48,39 +48,6 @@ pid_t g_xvfb = -1;
       Finish(1);                                                             \
     }                                                                        \
   } while (0)
-
-// Starts a private Xvfb and points DISPLAY at it; its pid, or -1.
-pid_t StartXvfb() {
-  gchar* xvfb = g_find_program_in_path("Xvfb");
-  if (!xvfb)
-    return -1;
-  int fds[2];
-  EXPECT(pipe(fds) == 0);
-  pid_t pid = fork();
-  if (pid == 0) {
-    close(fds[0]);
-    int null = open("/dev/null", O_RDWR);
-    dup2(null, STDIN_FILENO);
-    dup2(null, STDOUT_FILENO);
-    dup2(null, STDERR_FILENO);
-    std::string fd = std::to_string(fds[1]);
-    execl(xvfb, xvfb, "-displayfd", fd.c_str(), "-nolisten", "tcp", "-screen",
-          "0", "1280x1024x24", static_cast<char*>(nullptr));
-    _exit(127);
-  }
-  g_free(xvfb);
-  close(fds[1]);
-  pollfd p = {fds[0], POLLIN, 0};
-  char buf[32] = {};
-  if (poll(&p, 1, 10000) != 1 || read(fds[0], buf, sizeof(buf) - 1) <= 0) {
-    kill(pid, SIGKILL);
-    return -1;
-  }
-  close(fds[0]);
-  std::string display = std::string(":") + strtok(buf, "\n");
-  setenv("DISPLAY", display.c_str(), 1);
-  return pid;
-}
 
 // Runs the loop until the window's allocation is width x height (the X
 // server has applied the configure), or 3 s pass; the last size seen.
@@ -168,7 +135,7 @@ void TestGtkModulesForDisplay() {
 
 int main() {
   TestGtkModulesForDisplay();
-  g_xvfb = StartXvfb();
+  g_xvfb = laufey_test::StartXvfb("1280x1024x24");
   if (g_xvfb < 0) {
     std::printf("window_size_linux_test: skipped (no Xvfb)\n");
     return 77;
