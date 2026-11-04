@@ -1055,19 +1055,6 @@ jobs:
         shell: bash
         run: scripts/exit-e2e-run.sh ${{ matrix.backend }} 3
 
-      # TEMPORARY (diag): the same quick quits with Chrome's code-signing clone
-      # turned back on, for the before/after of the slow macOS quit.
-      - name: TEMPORARY quick quits with the code-signing clone on (macOS, cef)
-        if: matrix.backend == 'cef' && runner.os == 'macOS'
-        continue-on-error: true
-        timeout-minutes: 15
-        shell: bash
-        env:
-          LAUFEY_E2E_QUICK_ONLY: "1"
-          LAUFEY_E2E_QUICK_QUITS: "80"
-          LAUFEY_E2E_QUICK_ARGS: --enable-features=MacAppCodeSignClone
-        run: scripts/exit-e2e-run.sh cef 0
-
       # localStorage over 200 quick relaunches of one app, its page served
       # over a custom scheme: each launch's page reads the previous launch's
       # value and stores its own as it loads, and the launch quits at once.
