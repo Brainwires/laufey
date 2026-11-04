@@ -709,7 +709,10 @@ async fn end(win: &Window, mode: &str) {
     .duration_since(UNIX_EPOCH)
     .map(|d| d.as_millis())
     .unwrap_or(0);
-  eprintln!("[e2e] ending with {mode} at {at}");
+  // One write: the host's own stderr lines (LAUFEY_TIMING) can't land inside
+  // it, and the driver parses it.
+  let _ = std::io::stderr()
+    .write_all(format!("[e2e] ending with {mode} at {at}\n").as_bytes());
   let _ = std::io::stderr().flush();
   if mode == "quit-open" {
     // As an app's desktop.quit(): the window is still open, and the backend

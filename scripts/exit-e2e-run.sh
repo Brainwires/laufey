@@ -21,6 +21,9 @@
 # With CEF on macOS and Linux it then also quits LAUFEY_E2E_QUICK_QUITS times (default 30) with
 # the window still open, relaunching at once, and on macOS fails a quit whose
 # process took longer than LAUFEY_E2E_QUIT_BUDGET_MS (default 3000) to end.
+# LAUFEY_E2E_QUICK_ARGS adds switches to those launches (e.g.
+# --enable-features=MacAppCodeSignClone), and LAUFEY_E2E_QUICK_ONLY=1 with 0
+# iterations runs only them.
 #
 # A launch that hasn't ended LAUFEY_E2E_EXIT_TIMEOUT seconds (default 60)
 # after it started is a hang. The run stops at the first one: on Windows such
@@ -249,7 +252,7 @@ torn_step() {
     sed 's/^/    | /' "$scratch/logs/$name-read.log" | tail -30
   fi
 }
-if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
+if [ "$backend" = cef ] && [ "$hung" = 0 ] && [ -z "${LAUFEY_E2E_QUICK_ONLY:-}" ]; then
   torn_step torn '*Local Storage/leveldb'
   torn_step torn-idb '*IndexedDB/*.indexeddb.leveldb' LAUFEY_E2E_STORAGE_IDB=1
 fi
@@ -258,7 +261,7 @@ fi
 # the process, and the next launch reads back what the page stored. On macOS
 # CefShutdown used to wait for good on thread-pool workers at background QoS,
 # which such a load starves (laufey_cef_keychain_interpose.h).
-if [ "$backend" = cef ] && [ "$hung" = 0 ]; then
+if [ "$backend" = cef ] && [ "$hung" = 0 ] && [ -z "${LAUFEY_E2E_QUICK_ONLY:-}" ]; then
   cpus="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
   burners=()
   for ((c = 0; c < cpus; c++)); do
@@ -324,6 +327,8 @@ if [ "$backend" = cef ] && [ "$hung" = 0 ] && [ "$platform" != windows ]; then
     else
       qcmd+=("$bin")
     fi
+    # shellcheck disable=SC2206
+    [ -z "${LAUFEY_E2E_QUICK_ARGS:-}" ] || qcmd+=(${LAUFEY_E2E_QUICK_ARGS})
     "${qcmd[@]}" >"$qlog" 2>&1 &
     qpid=$!
     qdeadline=$(($(now_ms) + timeout_s * 1000))
