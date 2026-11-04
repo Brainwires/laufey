@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `52`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `53`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -497,6 +497,33 @@ its pages.
 a Windows tray menu's `"quit"` role, which quits like `quit()` with no reason
 given. The handler never fires on Linux (a termination signal is its own path)
 or on the Winit backends. A runtime that registers no handler quits as before.
+
+## Media capture (API ≥ 53)
+
+```c
+#define LAUFEY_MEDIA_CAPTURE_MICROPHONE (1u << 0)
+#define LAUFEY_MEDIA_CAPTURE_CAMERA (1u << 1)
+typedef void (*laufey_media_capture_fn)(uint32_t window_id,
+                                        uint64_t request_id,
+                                        const char* origin, uint32_t kinds,
+                                        void* user_data);
+void (*set_media_capture_handler)(void* backend_data,
+                                  laufey_media_capture_fn handler,
+                                  void* user_data);
+bool (*answer_media_capture)(void* backend_data, uint64_t request_id,
+                             bool allow);
+```
+
+A page's `getUserMedia`. The backend refuses a request from a sub-frame of
+another origin than the top-level document's, from an opaque origin, or for
+anything but the microphone and camera; allows one the launch file's
+`mediaCapture` grants for every kind it asks; and asks `handler` about the rest
+(refused when no handler is set). `handler` fires on the UI thread with the
+asking document's serialized origin; the request waits until
+`answer_media_capture` (any thread), the window's `close_window`, or
+`set_media_capture_handler(NULL)`, which refuses every request still waiting.
+`answer_media_capture` returns false for a request that is not waiting. NULL on
+the Winit backends. See [Microphone and camera](media-capture.md).
 
 ## UI-thread tasks (API ≥ 42)
 

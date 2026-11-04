@@ -23,6 +23,7 @@
 //     "inspectable": false,
 //     "requireSandbox": true,
 //     "passkeyRpIds": ["example.com"],
+//     "mediaCapture": { "microphone": ["myapp://app"] },
 //     "strictPolicy": true }
 //
 // Every key is optional. Each key stands in for its environment variable: an
@@ -92,6 +93,12 @@ struct LaunchConfig {
   // for any other RP ID is refused (an empty list refuses every one).
   bool has_passkey_rp_ids = false;
   std::vector<std::string> passkey_rp_ids;
+  // "mediaCapture" (API 53): the origins whose documents get the microphone
+  // and the camera without asking the runtime, as serialized exact origins
+  // ("scheme://host[:port]"; no wildcards). See laufey_media_capture.h.
+  bool has_media_capture = false;
+  std::vector<std::string> media_capture_microphone;
+  std::vector<std::string> media_capture_camera;
   // "strictPolicy": the file was written by a toolchain that pins every
   // policy the app needs (denext's packaging does), so a policy key it
   // leaves out (or that is invalid) refuses instead of allowing: no

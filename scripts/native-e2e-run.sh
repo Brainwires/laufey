@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--navigation|--lifetime|--tray-roles|--quit-request|--overlay-edge|--initial-size|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--media-capture|--navigation|--lifetime|--tray-roles|--quit-request|--overlay-edge|--initial-size|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -20,6 +20,11 @@
 # page on another origin that must not reach loopback.
 # --bridge-origin runs only the API 44 bridge pin checks
 # (bridge_origin_checks.rs) under a launch file it writes next to the backend.
+# --media-capture runs only the API 53 microphone / camera checks
+# (media_capture_checks.rs) under a launch file it writes next to the backend
+# granting both to app://e2e-media-ok, with the engine's stand-in devices
+# (CEF --use-fake-device-for-media-stream; WebView2 the same and WebKit's mock
+# capture devices through the LAUFEY_TEST_MOCK_CAPTURE_DEVICES test hook).
 # --navigation runs only the API 48 navigation guard checks
 # (navigation_checks.rs) against a loopback server, with the open-external
 # capture on so nothing reaches a real browser.
@@ -146,6 +151,13 @@ if [ "$mode" = "--lifetime" ]; then
 fi
 if [ "$mode" = "--tray-roles" ]; then
   export LAUFEY_E2E_ONLY=tray-roles
+fi
+if [ "$mode" = "--media-capture" ]; then
+  export LAUFEY_E2E_ONLY=media-capture
+  # Stand-in capture devices through the test hook: WebKit's mock devices,
+  # Chromium's fake devices for WebView2 (the CEF host takes the switch on its
+  # command line below).
+  export LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1
 fi
 if [ "$mode" = "--quit-request" ]; then
   export LAUFEY_E2E_ONLY=quit-request
@@ -307,7 +319,7 @@ esac
 
 # --bridge-origin: a launch file next to the backend pins the bridge to one
 # origin (docs/launch-config.md); removed when the run ends.
-if [ "$mode" = "--bridge-origin" ]; then
+if [ "$mode" = "--bridge-origin" ] || [ "$mode" = "--media-capture" ]; then
   case "$bin" in
     */Contents/MacOS/*) launch_file="${bin%/MacOS/*}/Resources/laufey-launch.json" ;;
     *) launch_file="$(dirname "$bin")/laufey-launch.json" ;;
@@ -330,7 +342,11 @@ if [ "$mode" = "--bridge-origin" ]; then
   [ ! -e "$launch_file" ] || { echo "refusing to replace $launch_file"; exit 1; }
   [ ! -e "$colocated_rt" ] || { echo "refusing to replace $colocated_rt"; exit 1; }
   mkdir -p "$(dirname "$launch_file")"
-  printf '{ "bridgeOrigins": ["app://e2e-bridge-ok"] }\n' >"$launch_file"
+  if [ "$mode" = "--media-capture" ]; then
+    printf '{ "mediaCapture": { "microphone": ["app://e2e-media-ok"], "camera": ["app://e2e-media-ok"] } }\n' >"$launch_file"
+  else
+    printf '{ "bridgeOrigins": ["app://e2e-bridge-ok"] }\n' >"$launch_file"
+  fi
   trap 'rm -f "$launch_file" "$colocated_rt"' EXIT
   # First without the runtime: a packaged app that ships none must exit at
   # once with status 3 and say why, not wait (a dialog, an empty window).
@@ -397,6 +413,12 @@ if [ "$backend" = "cef" ]; then
   # own choice (API 45: basic when no one can answer the prompt) instead.
   if [ "$(uname -s)" = "Linux" ] && [ "$mode" != "--platform" ]; then
     args+=(--password-store=basic)
+  fi
+  # Stand-in microphone and camera (media_capture_checks.rs). Not
+  # --use-fake-ui-for-media-stream: that would answer the request without
+  # asking the host, which is what the checks test.
+  if [ "$mode" = "--media-capture" ]; then
+    args+=(--use-fake-device-for-media-stream)
   fi
   # On Windows the display itself is scaled (windows-display-scale.ps1).
   if [ "$mode" = "--hidpi" ] && [ "$(uname -s)" = "Linux" ]; then

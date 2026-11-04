@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 52
+#define LAUFEY_API_VERSION 53
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -524,6 +524,20 @@ typedef void (*laufey_platform_features_changed_fn)(void* user_data);
 #define LAUFEY_QUIT_REQUEST_SESSION_END \
   1  // the user's session is ending (logout, restart, shutdown)
 typedef void (*laufey_quit_requested_fn)(int32_t kind, void* user_data);
+
+// What a page asks to capture (set_media_capture_handler, API >= 53), a
+// bitmask: getUserMedia({audio}) is MICROPHONE, {video} CAMERA, both both.
+// Screen and window capture (getDisplayMedia) is never granted.
+#define LAUFEY_MEDIA_CAPTURE_MICROPHONE (1u << 0)
+#define LAUFEY_MEDIA_CAPTURE_CAMERA (1u << 1)
+// A page asks for the microphone and / or camera: `request_id` names it for
+// answer_media_capture, `origin` is the asking document's serialized origin
+// (the window's top-level document's too: a sub-frame of another origin is
+// refused before anyone is asked), `kinds` LAUFEY_MEDIA_CAPTURE_* bits.
+// Fires on the UI thread.
+typedef void (*laufey_media_capture_fn)(uint32_t window_id, uint64_t request_id,
+                                        const char* origin, uint32_t kinds,
+                                        void* user_data);
 
 // Callback fired when what title_bar_preferences reports changed (API 47):
 // the user moved the window buttons, picked another double-click action,
@@ -2671,6 +2685,39 @@ struct laufey_backend_api {
   // answered or its deadline passed, so a runtime's own notion of "held" can't
   // outlive the OS's wait. Any thread.
   bool (*quit_request_pending)(void* backend_data);
+
+  // --- Media capture (API >= 53) -------------------------------------------
+  //
+  // Who may use the microphone and camera (getUserMedia). Every request is
+  // decided exactly once, and refused by default:
+  //   1. a request from a sub-frame whose origin is not the top-level
+  //      document's, an opaque origin, or one asking for anything but the
+  //      microphone and camera (screen capture) is refused;
+  //   2. a request the launch file's "mediaCapture" grants for every kind it
+  //      asks (exact origins; docs/launch-config.md) is allowed;
+  //   3. otherwise `handler`, when set, is asked and the request waits for
+  //      answer_media_capture; with no handler it is refused.
+  // The engines: WKWebView's requestMediaCapturePermissionForOrigin (macOS
+  // 12+), CEF's OnRequestMediaAccessPermission, WebView2's
+  // PermissionRequested (Microphone, Camera), WebKitGTK's permission-request
+  // (WebKitUserMediaPermissionRequest). An allowed request still meets the
+  // OS's own consent (macOS TCC: the app needs NSMicrophoneUsageDescription /
+  // NSCameraUsageDescription, and the hardened runtime's audio-input /
+  // camera entitlements). WebKitGTK does not say which frame asks: there the
+  // top-level document's origin is checked, and a sub-frame reaches the
+  // devices only when that document delegates them (Permissions Policy,
+  // allow="microphone"). See docs/media-capture.md.
+  //
+  // One handler per process; NULL clears it and refuses every request still
+  // waiting. Any thread.
+  void (*set_media_capture_handler)(void* backend_data,
+                                    laufey_media_capture_fn handler,
+                                    void* user_data);
+  // Answer request `request_id`: true allows every kind it asked for. False
+  // when it is not waiting (answered, refused when its window closed, or
+  // never asked). Any thread.
+  bool (*answer_media_capture)(void* backend_data, uint64_t request_id,
+                               bool allow);
 };
 
 #ifdef __cplusplus

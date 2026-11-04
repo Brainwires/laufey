@@ -12,6 +12,7 @@
 #include "laufey_io.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
+#include "laufey_media_capture.h"
 #include "laufey_menu.h"
 #include "laufey_external_links.h"
 #include "laufey_downloads.h"
@@ -351,6 +352,8 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
     g_unrevealed_hidden_windows.erase(laufey_id_);
     RuntimeLoader::GetInstance()->UnregisterBrowser(laufey_id_);
     laufey_common::ForgetWindow(laufey_id_);
+    // A microphone / camera request it waits on is refused.
+    laufey_common::MediaCaptureRequests::Instance().ForgetWindow(laufey_id_);
 #if defined(_WIN32) || defined(__linux__)
     laufey_cef_menu::ForgetWindow(laufey_id_);
 #endif
@@ -492,6 +495,15 @@ void LaufeyHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
   const std::string url = frame->GetURL().ToString();
   int released = laufey_common::CommitGates().Committed(
       browser->GetIdentifier(), frame->IsMain(), url);
+  // The main frame committed another document (CEF doesn't call this for a
+  // same-document navigation): a microphone / camera request the old document
+  // waits on is refused, so a late answer never reaches the new one
+  // (laufey_media_capture.h).
+  if (frame->IsMain()) {
+    if (uint32_t wid =
+            RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser))
+      laufey_common::MediaCaptureRequests::Instance().ForgetDocument(wid);
+  }
   if (laufey_common::TimingEnabled())
     laufey_common::Timing(std::string("load start ") +
                           (frame->IsMain() ? "main " : "sub ") + url + " (" +
@@ -1443,7 +1455,78 @@ bool LaufeyHandler::OnShowPermissionPrompt(
     case laufey_common::LocalNetworkPromptDecision::kDefault:
       break;
   }
+  // A microphone or camera prompt only comes here for a request that went
+  // around OnRequestMediaAccessPermission, which decides every getUserMedia:
+  // refused, never Chrome's prompt.
+  if (requested_permissions &
+      (CEF_PERMISSION_TYPE_CAMERA_STREAM | CEF_PERMISSION_TYPE_MIC_STREAM)) {
+    callback->Continue(CEF_PERMISSION_RESULT_DENY);
+    return true;
+  }
   return false;
+}
+
+bool LaufeyHandler::OnRequestMediaAccessPermission(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+    const CefString& requesting_origin, uint32_t requested_permissions,
+    CefRefPtr<CefMediaAccessCallback> callback) {
+  if (!callback)
+    return true;
+  uint32_t kinds = 0;
+  if (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE)
+    kinds |= LAUFEY_MEDIA_CAPTURE_MICROPHONE;
+  if (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE)
+    kinds |= LAUFEY_MEDIA_CAPTURE_CAMERA;
+  if (requested_permissions &
+      ~static_cast<uint32_t>(CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE |
+                             CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE))
+    kinds |= laufey_common::kMediaCaptureOther;
+  // The asking document: the origin Chromium names, which must be its
+  // frame's. Chromium names the embedding (top-level) origin for a sub-frame
+  // the device is delegated to (`<iframe allow="microphone">`), so the frame's
+  // own URL is what tells a cross-origin sub-frame apart; with no frame to
+  // check, the request is refused. The top-level document's from the main
+  // frame.
+  std::string requesting =
+      laufey_common::OriginOfUrl(requesting_origin.ToString());
+  if (!frame || !frame->IsValid() ||
+      laufey_common::OriginOfUrl(frame->GetURL().ToString()) != requesting)
+    requesting = laufey_common::kOpaqueOrigin;
+  std::string top = laufey_common::kOpaqueOrigin;
+  CefRefPtr<CefFrame> main = browser ? browser->GetMainFrame() : nullptr;
+  if (main && main->IsValid())
+    top = laufey_common::OriginOfUrl(main->GetURL().ToString());
+  // A browser that is no laufey window (DevTools) has id 0: nothing grants
+  // it anything but the launch file, and the runtime is never asked for it.
+  uint32_t wid = RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
+  if (wid == 0)
+    top = laufey_common::kOpaqueOrigin;
+  const uint32_t granted = requested_permissions;
+  laufey_common::MediaCaptureRequests::Instance().Request(
+      wid, top, requesting, kinds,
+      [callback, granted, browser, top](bool allow) {
+        // On TID_UI. A grant stands only while the browser's top-level
+        // document is still of the origin the request was made for.
+        CefPostTask(TID_UI, base::BindOnce(
+                                [](CefRefPtr<CefMediaAccessCallback> cb,
+                                   CefRefPtr<CefBrowser> b, std::string origin,
+                                   uint32_t mask, bool ok) {
+                                  std::string current =
+                                      laufey_common::kOpaqueOrigin;
+                                  CefRefPtr<CefFrame> main =
+                                      ok && b ? b->GetMainFrame() : nullptr;
+                                  if (main && main->IsValid())
+                                    current = laufey_common::OriginOfUrl(
+                                        main->GetURL().ToString());
+                                  if (laufey_common::MediaCaptureGrantStands(
+                                          ok, origin, current))
+                                    cb->Continue(mask);
+                                  else
+                                    cb->Cancel();
+                                },
+                                callback, browser, top, granted, allow));
+      });
+  return true;
 }
 
 bool LaufeyHandler::OnChromeCommand(

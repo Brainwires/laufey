@@ -40,6 +40,7 @@ mod io_checks;
 mod keychain_checks;
 mod launch_checks;
 mod lna_checks;
+mod media_capture_checks;
 mod menu_notification_checks;
 mod navigation_checks;
 mod network_quiet_checks;
@@ -835,6 +836,9 @@ fn e2e_main() {
           let Some(req) = bridge_origin_checks::serve(req) else {
             return;
           };
+          let Some(req) = media_capture_checks::serve(req) else {
+            return;
+          };
           let Some(req) = body_echo::serve(req, &received) else {
             return;
           };
@@ -870,6 +874,12 @@ fn e2e_main() {
     // native-e2e-run.sh --bridge-origin writes the file.
     if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("bridge-origin") {
       bridge_origin_checks::run().await;
+      finish();
+    }
+    // LAUFEY_E2E_ONLY=media-capture: microphone and camera requests (API
+    // 53); native-e2e-run.sh --media-capture writes the launch file.
+    if std::env::var("LAUFEY_E2E_ONLY").as_deref() == Ok("media-capture") {
+      media_capture_checks::run().await;
       finish();
     }
     // LAUFEY_E2E_ONLY=share: the share sheet's answers (API 49).

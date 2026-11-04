@@ -8,6 +8,7 @@
 #include "laufey_window.h"
 #include "laufey_window_blur.h"
 #include "laufey_backend_common.h"
+#include "laufey_media_capture.h"
 #include "laufey_io.h"
 #include "laufey_platform_features.h"
 #include "laufey_launch_config.h"
@@ -774,6 +775,72 @@ static bool SaveSchemeResponseIfDownload(uint32_t wid,
                                          const char* uri);
 #endif
 
+// getUserMedia (API 53, laufey_media_capture.h). WebKitGTK names neither
+// the asking frame nor its origin, so the top-level document's origin is the
+// one checked; a sub-frame only gets this far when that document delegates
+// the device to it (Permissions Policy, allow="microphone"), as WebKit
+// enforces before asking. Screen capture is refused. Every other permission
+// keeps WebKit's default (refused). The request is answered exactly once, on
+// the GTK thread.
+static gboolean on_permission_request(WebKitWebView* webview,
+                                      WebKitPermissionRequest* request,
+                                      gpointer user_data) {
+  if (!WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request))
+    return FALSE;
+  auto* media = WEBKIT_USER_MEDIA_PERMISSION_REQUEST(request);
+  uint32_t kinds = 0;
+  if (webkit_user_media_permission_is_for_audio_device(media))
+    kinds |= LAUFEY_MEDIA_CAPTURE_MICROPHONE;
+  if (webkit_user_media_permission_is_for_video_device(media))
+    kinds |= LAUFEY_MEDIA_CAPTURE_CAMERA;
+#if WEBKIT_CHECK_VERSION(2, 34, 0)
+  if (webkit_user_media_permission_is_for_display_device(media))
+    kinds |= laufey_common::kMediaCaptureOther;
+#endif
+  const char* uri = webkit_web_view_get_uri(webview);
+  std::string origin = uri ? laufey_common::OriginOfUrl(uri)
+                           : std::string(laufey_common::kOpaqueOrigin);
+  uint32_t wid = static_cast<uint32_t>(GPOINTER_TO_UINT(user_data));
+  g_object_ref(request);
+  g_object_ref(webview);
+  laufey_common::MediaCaptureRequests::Instance().Request(
+      wid, origin, origin, kinds, [request, webview, origin](bool allow) {
+        struct Answer {
+          WebKitPermissionRequest* request;
+          WebKitWebView* webview;
+          std::string origin;
+          bool allow;
+        };
+        // Runs at once on the GTK thread, else is queued to it. A grant
+        // stands only while the web view's top-level document is still of
+        // the origin the request was made for.
+        g_main_context_invoke_full(
+            nullptr, G_PRIORITY_DEFAULT,
+            [](gpointer data) -> gboolean {
+              auto* answer = static_cast<Answer*>(data);
+              std::string current = laufey_common::kOpaqueOrigin;
+              if (answer->allow) {
+                if (const char* now = webkit_web_view_get_uri(answer->webview))
+                  current = laufey_common::OriginOfUrl(now);
+              }
+              if (laufey_common::MediaCaptureGrantStands(
+                      answer->allow, answer->origin, current))
+                webkit_permission_request_allow(answer->request);
+              else
+                webkit_permission_request_deny(answer->request);
+              return G_SOURCE_REMOVE;
+            },
+            new Answer{request, webview, origin, allow},
+            [](gpointer data) {
+              auto* answer = static_cast<Answer*>(data);
+              g_object_unref(answer->request);
+              g_object_unref(answer->webview);
+              delete answer;
+            });
+      });
+  return TRUE;
+}
+
 static gboolean on_decide_policy(WebKitWebView* /*webview*/,
                                  WebKitPolicyDecision* decision,
                                  WebKitPolicyDecisionType type,
@@ -830,6 +897,13 @@ static void on_load_changed(WebKitWebView* webview, WebKitLoadEvent load_event,
 #else
   (void)webview;
 #endif
+  if (load_event == WEBKIT_LOAD_COMMITTED) {
+    // The main frame committed another document (load-changed doesn't fire
+    // for a same-document navigation): a microphone / camera request the old
+    // document waits on is refused (laufey_media_capture.h).
+    laufey_common::MediaCaptureRequests::Instance().ForgetDocument(wid);
+    return;
+  }
   if (load_event != WEBKIT_LOAD_FINISHED) {
     return;
   }
@@ -1308,6 +1382,8 @@ static void on_window_destroy(GtkWidget* widget, gpointer user_data) {
       g_gtk_backend->ForgetDestroyedWindow(wid);
     UnregisterWidget(widget);
     laufey_common::ForgetWindow(wid);
+    // A microphone / camera request it waits on is refused.
+    laufey_common::MediaCaptureRequests::Instance().ForgetWindow(wid);
   }
   // If no more windows, quit -- unless the app keeps running without one
   // (set_quit_on_last_window_closed(false)); quit() ends it anyway.
@@ -1900,6 +1976,9 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     g_signal_connect(webview, "create", G_CALLBACK(on_create), nullptr);
     g_signal_connect(webview, "decide-policy", G_CALLBACK(on_decide_policy),
                      GUINT_TO_POINTER(window_id));
+    g_signal_connect(webview, "permission-request",
+                     G_CALLBACK(on_permission_request),
+                     GUINT_TO_POINTER(window_id));
     g_signal_connect(webview, "drag-motion", G_CALLBACK(on_file_drag_motion),
                      GUINT_TO_POINTER(window_id));
     g_signal_connect(webview, "drag-data-received",
@@ -1928,6 +2007,12 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
         wk_settings, laufey_common::LaunchInspectable() ? TRUE : FALSE);
     TrackInspector(webview);
     DisableByteStreamFetchSource(wk_settings);
+    // getUserMedia exists (WebKitGTK leaves it off); who may capture is
+    // on_permission_request's decision, refused by default. The e2e battery's
+    // stand-in devices only under the test hook.
+    webkit_settings_set_enable_media_stream(wk_settings, TRUE);
+    if (laufey_common::MockCaptureDevicesForTests())
+      webkit_settings_set_enable_mock_capture_devices(wk_settings, TRUE);
 
     if (transparent) {
       // Let the page's own alpha show through the webview (any region the

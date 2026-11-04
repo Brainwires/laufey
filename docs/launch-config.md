@@ -33,12 +33,13 @@ The directory comes from the running executable's real path
   "requireSandbox": true,
   "bridgeOrigins": ["myapp://app"],
   "passkeyRpIds": ["example.com"],
+  "mediaCapture": { "microphone": ["myapp://app"] },
   "strictPolicy": true
 }
 ```
 
-Every key is optional, and each key but `passkeyRpIds`, `bridgeOrigins` and
-`strictPolicy` stands in for one environment variable:
+Every key is optional, and each key but `passkeyRpIds`, `bridgeOrigins`,
+`mediaCapture` and `strictPolicy` stands in for one environment variable:
 
 | Key                | Environment variable       | Value                                                             |
 | ------------------ | -------------------------- | ----------------------------------------------------------------- |
@@ -52,6 +53,7 @@ Every key is optional, and each key but `passkeyRpIds`, `bridgeOrigins` and
 | `activationPolicy` | `LAUFEY_ACTIVATION_POLICY` | `"regular"`, `"accessory"` or `"prohibited"` (macOS)              |
 | `bridgeOrigins`    | none (file only)           | array of origins, `<scheme>://*` or `*` (see below)               |
 | `passkeyRpIds`     | none (file only)           | array of RP IDs: domain names, no scheme, port or path            |
+| `mediaCapture`     | none (file only)           | `{ "microphone": [origins], "camera": [origins] }` (exact)        |
 | `strictPolicy`     | none (file only)           | `true` / `false`                                                  |
 
 Values follow the same rules as the environment variables, and each key does
@@ -121,6 +123,17 @@ what its variable does:
   skipped, but the key still pins: an empty list (or one with no valid entry)
   gives the bridge to no document. The WebView and CEF backends read it (CEF's
   renderers too).
+
+- `mediaCapture` (API 53) grants the microphone and / or the camera to documents
+  of the listed origins without asking the runtime
+  ([Microphone and camera](media-capture.md)). Each entry is an exact origin
+  (`"myapp://app"`, `"http://127.0.0.1:5173"`); `*`, `<scheme>://*`, paths and
+  opaque origins are reported and skipped, as is a kind other than
+  `"microphone"` or `"camera"`. Without the key, or for an origin it doesn't
+  list, a request is asked of the runtime's handler, and refused when there is
+  none. A sub-frame of another origin than its window's top-level document is
+  never granted anything. There is no environment variable. The WebView and CEF
+  backends read it.
 
 - `strictPolicy` (default `false`) set to `true` says the file comes from a
   packager that pins every policy the app needs (denext's packaging writes it),

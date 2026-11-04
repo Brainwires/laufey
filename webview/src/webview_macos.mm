@@ -10,6 +10,7 @@
 #import <objc/message.h>
 #include "laufey_backend_common.h"
 #include "laufey_quit_request.h"
+#include "laufey_media_capture.h"
 #include "laufey_io.h"
 #include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
@@ -995,6 +996,67 @@ static void LaufeyOpenInBrowser(NSURL* url) {
 
 @implementation LaufeyUIDelegate
 
+// getUserMedia (API 53; laufey_media_capture.h). WebKit hands the delegate
+// the top-level document's origin and the asking frame; the web view's own
+// URL is checked too, so a request from a page that is no longer the
+// window's is refused. The decision handler is called exactly once, on the
+// main thread. An allowed request still meets macOS's own consent (TCC):
+// the app's Info.plist needs NSMicrophoneUsageDescription /
+// NSCameraUsageDescription, and a hardened-runtime build the audio-input /
+// camera entitlements.
+- (void)webView:(WKWebView*)webView
+    requestMediaCapturePermissionForOrigin:(WKSecurityOrigin*)origin
+                          initiatedByFrame:(WKFrameInfo*)frame
+                                      type:(WKMediaCaptureType)type
+                           decisionHandler:
+                               (void (^)(WKPermissionDecision decision))
+                                   decisionHandler API_AVAILABLE(macos(12.0)) {
+  uint32_t kinds = laufey_common::kMediaCaptureOther;
+  switch (type) {
+    case WKMediaCaptureTypeCamera:
+      kinds = LAUFEY_MEDIA_CAPTURE_CAMERA;
+      break;
+    case WKMediaCaptureTypeMicrophone:
+      kinds = LAUFEY_MEDIA_CAPTURE_MICROPHONE;
+      break;
+    case WKMediaCaptureTypeCameraAndMicrophone:
+      kinds = LAUFEY_MEDIA_CAPTURE_MICROPHONE | LAUFEY_MEDIA_CAPTURE_CAMERA;
+      break;
+  }
+  std::string requesting = frame ? LaufeyOriginString(frame.securityOrigin)
+                                 : laufey_common::kOpaqueOrigin;
+  std::string top = LaufeyOriginString(origin);
+  NSString* page = webView.URL.absoluteString;
+  if (!page || laufey_common::OriginOfUrl(page.UTF8String ?: "") != top)
+    top = laufey_common::kOpaqueOrigin;
+  uint32_t window_id = [webView isKindOfClass:[LaufeyWebView class]]
+                           ? ((LaufeyWebView*)webView).laufeyWindowId
+                           : 0;
+  void (^handler)(WKPermissionDecision) = [decisionHandler copy];
+  __weak WKWebView* weakView = webView;
+  // On the main thread: a grant stands only while the web view's top-level
+  // document is still of the origin the request was made for.
+  void (^decide)(bool) = ^(bool allow) {
+    WKWebView* view = weakView;
+    NSString* now = view ? view.URL.absoluteString : nil;
+    std::string current = now ? laufey_common::OriginOfUrl(now.UTF8String ?: "")
+                              : std::string(laufey_common::kOpaqueOrigin);
+    handler(laufey_common::MediaCaptureGrantStands(allow, top, current)
+                ? WKPermissionDecisionGrant
+                : WKPermissionDecisionDeny);
+  };
+  laufey_common::MediaCaptureRequests::Instance().Request(
+      window_id, top, requesting, kinds, [decide](bool allow) {
+        if ([NSThread isMainThread]) {
+          decide(allow);
+        } else {
+          dispatch_async(dispatch_get_main_queue(), ^{
+            decide(allow);
+          });
+        }
+      });
+}
+
 // The page's window.outerWidth / outerHeight and screenX / screenY. WebKit
 // asks its UI delegate for the window's frame through this informal
 // WKUIDelegatePrivate method (Safari implements it) and answers 0 for all
@@ -1352,6 +1414,15 @@ API_AVAILABLE(macos(11.3))
     LaufeyOpenInBrowser(url);
 }
 
+// The main frame committed a navigation to another document (WebKit doesn't
+// call this for a same-document one): a microphone / camera request the old
+// document waits on is refused, so a late answer never reaches the new one
+// (laufey_media_capture.h).
+- (void)webView:(WKWebView*)webView
+    didCommitNavigation:(WKNavigation*)navigation {
+  laufey_common::MediaCaptureRequests::Instance().ForgetDocument(self.windowId);
+}
+
 // Fired when a main-frame navigation finishes loading. Used to reveal a window
 // created with LAUFEY_WINDOW_FLAG_HIDDEN once it has real content to show.
 - (void)webView:(WKWebView*)webView
@@ -1643,6 +1714,8 @@ void WKWebViewBackend::OnWindowClosedByUser(uint32_t window_id) {
       win = state->window;
     RemoveWindowState(window_id);
   }
+  // A microphone / camera request it waits on is refused (outside the lock).
+  laufey_common::MediaCaptureRequests::Instance().ForgetWindow(window_id);
   // A passkey sheet anchored to the window ends with it (`cancelled`).
   // Outside the lock: the result callback may re-enter the backend.
   if (win) {
@@ -1979,6 +2052,16 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       ApplyBackgroundThrottling(
           config.preferences,
           laufey_common::BackgroundThrottlingFromFlags(flags));
+      // Test hook: WebKit's stand-in capture devices, so the e2e battery's
+      // getUserMedia has a microphone and camera on a machine without one
+      // (laufey_media_capture.h). An SPI preference: KVC, guarded.
+      if (laufey_common::MockCaptureDevicesForTests()) {
+        @try {
+          [config.preferences setValue:@YES
+                                forKey:@"mockCaptureDevicesEnabled"];
+        } @catch (NSException*) {
+        }
+      }
       [config.userContentController addScriptMessageHandler:handler
                                                        name:@"laufey"];
 
