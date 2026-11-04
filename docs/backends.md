@@ -586,6 +586,22 @@ background QoS into user-initiated (the interposer dylib it already ships for
 the keychain; `laufey_cef_keychain_interpose.h`). The exit e2e ends with a quit
 while every core is busy.
 
+A quit should also be quick: on macOS CEF the exit e2e quits 30 times with the
+window still open, as an app's `desktop.quit()` does, relaunching at once, and
+fails a process that took more than 3 s to end after the app asked. The macOS
+host times each step of its shutdown from the quit request, and a shutdown of 2
+s or more prints one line on stderr naming them (`laufey_shutdown_phases.h`):
+
+```
+laufey: the shutdown took 4523 ms (loop 0 ms, renderers 105 ms, drain 394 ms, runtime 3997 ms, CefShutdown 27 ms, helpers 0 ms)
+```
+
+`loop` is the quit request to the end of the loop (the windows closing),
+`runtime` the runtime's thread returning (up to 10 s after `quit()`, 200 ms
+after `exit_app`), and `helpers` the helper wait after `CefShutdown` (up to 5 s,
+then up to 3 s for the profile's storage). With `LAUFEY_TIMING=1` each step is
+also a `laufey-timing` line.
+
 The WebKit backends (WebKitGTK on Linux, WKWebView on macOS) also flush
 `localStorage` before the process ends. WebKit writes it from its network
 process, in an SQLite transaction committed 500 ms after the first write
