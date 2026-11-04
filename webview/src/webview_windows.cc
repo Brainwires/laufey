@@ -1859,6 +1859,30 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                     })
                     .Get(),
                 nullptr);
+            // Screen, window and tab capture (getDisplayMedia) is never
+            // granted (laufey_media_capture.h). WebView2 doesn't raise
+            // PermissionRequested for it: it shows its own source picker, so
+            // without this any document in the window (another origin's
+            // top-level page, a sub-frame the page delegates
+            // `display-capture` to) could capture the screen once the user
+            // picks a source. ScreenCaptureStarting is raised before the
+            // picker for the main frame and every sub-frame (no frame-level
+            // handler takes it first); cancelling it refuses the request
+            // (NotAllowedError). A runtime without the event (older than
+            // 1.0.2903) keeps WebView2's picker.
+            ComPtr<ICoreWebView2_27> media_webview27;
+            if (SUCCEEDED(state->webview.As(&media_webview27))) {
+              media_webview27->add_ScreenCaptureStarting(
+                  Callback<ICoreWebView2ScreenCaptureStartingEventHandler>(
+                      [](ICoreWebView2*,
+                         ICoreWebView2ScreenCaptureStartingEventArgs* args)
+                          -> HRESULT {
+                        args->put_Cancel(TRUE);
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+            }
 
             // The navigation guard (API 48, laufey_navigation_guard.h).
             // NavigationStarting fires for the main frame only (sub-frames

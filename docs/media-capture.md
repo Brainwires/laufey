@@ -77,11 +77,22 @@ ancestor it knows), is refused; so is every request in a window with a frame
 whose requests can't be caught at the frame (an older runtime).
 
 CEF never shows Chrome's own prompt, and WebView2's decisions are not saved in
-the profile. WebKitGTK does not say which frame asks, so there a sub-frame
-reaches the devices only when the top-level document delegates them to it
-(Permissions Policy: `<iframe allow="microphone">`), which WebKit enforces
-before it asks; on the other backends a sub-frame of another origin is refused
-even then. WebKitGTK's `enable-media-stream` setting is turned on so that
+the profile.
+
+Screen capture never reaches the handler. CEF reports it in the same hook
+(`DESKTOP_AUDIO_CAPTURE`, `DESKTOP_VIDEO_CAPTURE`) and WebKitGTK as a display
+device request, and both are refused there; WKWebView refuses a display request
+itself when the app has no display-capture delegate. WebView2 asks nobody: it
+shows its own source picker, so laufey cancels its `ScreenCaptureStarting` event
+(`ICoreWebView2_27`, raised for the main frame and every sub-frame), and the
+page gets `NotAllowedError`. A WebView2 runtime older than 1.0.2903 lacks the
+event and keeps the picker.
+
+WebKitGTK does not say which frame asks, so there a sub-frame reaches the
+devices only when the top-level document delegates them to it (Permissions
+Policy: `<iframe allow="microphone">`), which WebKit enforces before it asks; on
+the other backends a sub-frame of another origin is refused even then.
+WebKitGTK's `enable-media-stream` setting is turned on so that
 `navigator.mediaDevices` exists; requests are still refused unless granted.
 
 ## The operating system's consent
@@ -103,10 +114,10 @@ manage:
 
 `scripts/native-e2e-run.sh <backend> --media-capture` runs
 `examples/native_e2e/src/media_capture_checks.rs` under a launch file granting
-`app://e2e-media-ok`, with stand-in devices: Chromium's
-`--use-fake-device-for-media-stream` (CEF on its command line, WebView2 as a
-browser argument) and WebKit's mock capture devices, the latter two through the
-`LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1` test hook. On macOS an unsigned test host
-may be refused by TCC, so an allowed request that ends in `NotAllowedError` is
-reported N/A there. The decision logic is unit-tested in
+`app://e2e-media-ok`, with stand-in devices (the screen capture check needs
+none): Chromium's `--use-fake-device-for-media-stream` (CEF on its command line,
+WebView2 as a browser argument) and WebKit's mock capture devices, the latter
+two through the `LAUFEY_TEST_MOCK_CAPTURE_DEVICES=1` test hook. On macOS an
+unsigned test host may be refused by TCC, so an allowed request that ends in
+`NotAllowedError` is reported N/A there. The decision logic is unit-tested in
 `backend-common/tests/media_capture_test.cc`.
