@@ -132,8 +132,10 @@ what its variable does:
   `"microphone"` or `"camera"`. Without the key, or for an origin it doesn't
   list, a request is asked of the runtime's handler, and refused when there is
   none. A sub-frame of another origin than its window's top-level document is
-  never granted anything. There is no environment variable. The WebView and CEF
-  backends read it.
+  never granted anything. On Linux's WebView backend the key's presence, an
+  empty `{}` included, also turns on WebKitGTK's WebRTC
+  ([WebRTC](media-capture.md#webrtc)). There is no environment variable. The
+  WebView and CEF backends read it.
 
 - `strictPolicy` (default `false`) set to `true` says the file comes from a
   packager that pins every policy the app needs (denext's packaging writes it),

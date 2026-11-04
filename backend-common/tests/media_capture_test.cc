@@ -94,6 +94,22 @@ int main() {
     EXPECT(!ParseLaunchConfig("{}", nullptr).has_media_capture);
   }
 
+  // --- WebKitGTK's WebRTC follows the key ------------------------------------
+  {
+    // On with a grant, and with an empty key (a handler-only app's opt-in).
+    EXPECT(WebRtcEnabledBy(ParseLaunchConfig(
+        R"({"mediaCapture":{"microphone":["myapp://app"]}})", nullptr)));
+    EXPECT(
+        WebRtcEnabledBy(ParseLaunchConfig(R"({"mediaCapture":{}})", nullptr)));
+    // Off without the key, or with one that isn't an object.
+    EXPECT(!WebRtcEnabledBy(ParseLaunchConfig("{}", nullptr)));
+    EXPECT(!WebRtcEnabledBy(LaunchConfig{}));
+    EXPECT(!WebRtcEnabledBy(
+        ParseLaunchConfig(R"({"mediaCapture":["myapp://app"]})", nullptr)));
+    EXPECT(!WebRtcEnabledBy(
+        ParseLaunchConfig(R"({"mediaCapture":true})", nullptr)));
+  }
+
   // --- Who may capture -------------------------------------------------------
   {
     const MediaCapturePolicy none = PolicyOf("{}");
