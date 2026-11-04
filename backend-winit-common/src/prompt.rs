@@ -1220,6 +1220,33 @@ mod tests {
   }
 
   #[test]
+  fn gtk_usable_waits_only_for_gtk_init() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    // It tells what the thread's jobs are told (never true off Linux).
+    let ok = gtk_thread::usable();
+    assert_eq!(gtk_thread::run(|gtk_ok| gtk_ok), Some(ok));
+    if cfg!(not(target_os = "linux")) {
+      assert!(!ok);
+    }
+    // A job holding the thread (a modal dialog) doesn't hold up the answer.
+    let (held_tx, held_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    assert!(gtk_thread::spawn(move |_| {
+      let _ = held_tx.send(());
+      let _ = release_rx.recv_timeout(Duration::from_secs(10));
+    }));
+    held_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+      let _ = tx.send(gtk_thread::usable());
+    });
+    let answer = rx.recv_timeout(Duration::from_secs(5));
+    let _ = release_tx.send(());
+    assert_eq!(answer, Ok(ok));
+  }
+
+  #[test]
   fn gtk_jobs_run_in_queue_order() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     for i in 0..20 {

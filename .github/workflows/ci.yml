@@ -90,7 +90,7 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # native_e2e's Windows-only checks (`#[cfg(windows)]`) are invisible to
       # the Linux clippy above. Clippy for another target needs only that
@@ -98,7 +98,7 @@ jobs:
       - name: cargo clippy (native_e2e, Windows target)
         run: |
           rustup target add x86_64-pc-windows-msvc
-          cargo clippy -p native_e2e_runtime --target x86_64-pc-windows-msvc -- -D warnings
+          cargo clippy -p native_e2e_runtime --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 
       - name: clang-format
         run: |
