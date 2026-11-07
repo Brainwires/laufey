@@ -190,6 +190,15 @@ struct PlatformFeatures {
   // passkey_capabilities says the same as flags.
   std::string passkeys;
   std::string passkeys_reason;
+  // Windows: whether the OS lets this desktop app use the microphone / the
+  // camera (its privacy switches, laufey_media_consent.h): "allowed",
+  // "denied" with which switch refuses, or empty (JSON null: not Windows, or
+  // no switch is set). Probed on every call (the user can flip a switch while
+  // the app runs).
+  std::string microphone_access;
+  std::string microphone_access_reason;
+  std::string camera_access;
+  std::string camera_access_reason;
 };
 
 // --- The probe
@@ -399,6 +408,14 @@ std::string NotificationUnavailableReason(const PlatformFeatures& f);
 
 // The JSON object platform_features hands out (docs/platform-features.md).
 std::string PlatformFeaturesToJson(const PlatformFeatures& f);
+
+struct OsMediaConsentState;  // laufey_media_consent.h
+
+// Puts the OS's consent for the microphone and the camera into `out`
+// (microphone_access / camera_access and their reasons). Pure.
+void SetOsMediaConsent(PlatformFeatures* out,
+                       const OsMediaConsentState& microphone,
+                       const OsMediaConsentState& camera);
 
 // --- Backend hooks
 // ---------------------------------------------------------------

@@ -9,8 +9,10 @@ granted.
 
 1. A request is refused when it asks for nothing, for anything but the
    microphone and camera, comes from an opaque origin (`about:`, `data:`,
-   `file:`), or comes from a sub-frame whose origin is not the window's
-   top-level document's. Nobody is asked about such a request.
+   `file:`), comes from a sub-frame whose origin is not the window's top-level
+   document's, or asks for a device Windows' privacy switches keep from the app
+   ([below](#the-operating-systems-consent)). Nobody is asked about such a
+   request.
 2. A request is allowed when the launch file's `mediaCapture` grants its origin
    every kind it asks for ([Launch configuration](launch-config.md)). The
    runtime is not asked.
@@ -135,8 +137,7 @@ in a browser. No STUN or TURN server is configured: a page that names one in its
 
 ## The operating system's consent
 
-An allowed request still meets the OS's own consent, which laufey does not
-manage:
+An allowed request still meets the OS's own consent, which laufey never changes:
 
 - macOS asks the user once per app (TCC). The app's `Info.plist` must carry
   `NSMicrophoneUsageDescription` and / or `NSCameraUsageDescription`; without
@@ -144,8 +145,23 @@ manage:
   build also needs the `com.apple.security.device.audio-input` and / or
   `com.apple.security.device.camera` entitlements. A refusal there reaches the
   page as `NotAllowedError`, like laufey's own.
-- Windows has a per-user privacy switch for desktop apps' microphone and camera
-  access.
+- Windows has privacy switches for each device (Settings > Privacy & security >
+  Microphone / Camera): one for the whole device, set by an administrator, this
+  user's "Microphone access" / "Camera access", and "Let desktop apps access
+  your microphone / camera", which covers every laufey app. laufey reads them
+  (the registry's `CapabilityAccessManager\ConsentStore` keys `microphone` and
+  `webcam`, under `HKLM` and `HKCU`, and `HKCU`'s `NonPackaged` subkey) at every
+  request. When one is off, a request for that device is refused like any other
+  refusal, before the launch file or the handler is consulted, so the page gets
+  `NotAllowedError` (the engine alone would grant it and then fail to open the
+  device with an error of its own), and the handler is never asked about a
+  device the OS keeps from the app. A switch turned back on counts from the next
+  request. `platform_features` reports them as `microphoneAccess` /
+  `cameraAccess` (`"allowed"`, `"denied"` with the switch in `…Reason`, or
+  `null` when none is set), for an app that wants to point the user at Settings
+  (`ms-settings:privacy-microphone`, `ms-settings:privacy-webcam`). laufey does
+  not read Group Policy (`LetAppsAccessMicrophone` / `LetAppsAccessCamera`);
+  whatever the OS still refuses reaches the page as the engine reports it.
 - Linux has no consent of its own for these devices (a Flatpak's portal aside).
 
 ## Tests
@@ -160,7 +176,12 @@ unsigned test host may be refused by TCC, so an allowed request that ends in
 `NotAllowedError` is reported N/A there. The same run makes an
 `RTCPeerConnection` loopback in a page that captures nothing (it must create an
 offer, and no host candidate may name the host's address) and in the granted
-page with its microphone track (an audio offer and at least one candidate). On a
+page with its microphone track (an audio offer and at least one candidate). On
+Windows it then turns this user's "Let desktop apps access your microphone"
+switch off (the run turns the microphone's and camera's on for its length and
+puts back what was there): the granted origin's microphone is refused and its
+camera still captures, `platform_features` says `microphoneAccess` is `"denied"`
+and why, and the switch turned back on lets the next request through. On a
 WebKitGTK built without WebRTC these are N/A, unless
 `LAUFEY_E2E_EXPECT_WEBRTC=1` says the WebKitGTK has it. The decision logic is
 unit-tested in `backend-common/tests/media_capture_test.cc`.

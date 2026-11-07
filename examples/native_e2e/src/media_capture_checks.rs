@@ -28,10 +28,19 @@
 //!   page sends its microphone over one (an audio offer, a candidate). N/A on
 //!   a WebKitGTK built without WebRTC unless LAUFEY_E2E_EXPECT_WEBRTC=1.
 //!
+//! - Windows' privacy switch: with "Let desktop apps access your microphone"
+//!   off (the run sets this user's switch, and restores it), the granted
+//!   origin's microphone is refused (NotAllowedError) while its camera still
+//!   captures, platform_features reports `microphoneAccess` "denied" with the
+//!   switch as the reason, and turning the switch back on lets the next
+//!   request through. Elsewhere the probe reports no switch (null).
+//!
 //! An allowed request still meets the OS's consent: on macOS (TCC) an
 //! unsigned test host may be refused there, which the page can't tell from
 //! laufey's refusal, so an allowed request that ends in NotAllowedError is
-//! N/A on macOS.
+//! N/A on macOS. On Windows the run turns this user's desktop-apps switch for
+//! the microphone and camera on for its length (Windows' stand-in devices
+//! never meet it, but laufey reads it), and puts back what was there.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -271,6 +280,11 @@ pub async fn run() {
   // app must outlive its last window in between.
   laufey::set_quit_on_last_window_closed(false);
   let reports: Reports = Arc::new(Mutex::new(Vec::new()));
+  #[cfg(windows)]
+  let _switches = (
+    consent::Restore::allow(consent::MICROPHONE),
+    consent::Restore::allow(consent::CAMERA),
+  );
 
   // --- Screen capture: never granted, never the engine's own picker -------
   // Even the origin the launch file grants both devices to. An engine that
@@ -488,6 +502,158 @@ pub async fn run() {
         .all(|id| !laufey::answer_media_capture(*id, true)),
   );
   laufey::clear_media_capture_handler();
+
+  os_consent_checks(&reports).await;
+}
+
+/// platform_features' `<key>` (a string or null), and `<key>Reason`.
+fn probe_access(key: &str) -> (Option<String>, Option<String>) {
+  let v: serde_json::Value = laufey::platform_features()
+    .and_then(|f| serde_json::from_str(&f).ok())
+    .unwrap_or(serde_json::Value::Null);
+  let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+  (s(key), s(&format!("{key}Reason")))
+}
+
+/// The OS's own consent (laufey_media_consent.h): Windows' privacy switches
+/// refuse a granted request and are reported; no other OS reports any.
+async fn os_consent_checks(reports: &Reports) {
+  #[cfg(not(windows))]
+  {
+    let _ = reports;
+    let (mic, _) = probe_access("microphoneAccess");
+    let (cam, _) = probe_access("cameraAccess");
+    check(
+      &format!("media-capture: the probe reports no OS privacy switch outside Windows ({mic:?}, {cam:?})"),
+      mic.is_none() && cam.is_none(),
+    );
+  }
+  #[cfg(windows)]
+  {
+    let (mic, why) = probe_access("microphoneAccess");
+    check(
+      &format!("media-capture: the probe reports the desktop-apps switch on ({mic:?}, {why:?})"),
+      mic.as_deref() == Some("allowed") && why.is_none(),
+    );
+    if !consent::set(consent::MICROPHONE, Some("Deny")) {
+      check(
+        "media-capture: the run turns the microphone switch off",
+        false,
+      );
+      return;
+    }
+    let (mic, why) = probe_access("microphoneAccess");
+    let (cam, _) = probe_access("cameraAccess");
+    check(
+      &format!("media-capture: the probe reports the microphone switch off, and why ({mic:?}, {why:?}, camera {cam:?})"),
+      mic.as_deref() == Some("denied")
+        && why.as_deref().is_some_and(|w| {
+          w.contains("Let desktop apps access your microphone")
+        })
+        && cam.as_deref() == Some("allowed"),
+    );
+    let off = window(
+      &format!("{OK_ORIGIN}/?tag=os-off-&steps=audio,video"),
+      reports,
+    );
+    let audio = result_of(reports, OK_ORIGIN, "os-off-audio").await;
+    let video = result_of(reports, OK_ORIGIN, "os-off-video").await;
+    check(
+      &format!("media-capture: with Windows' switch off the granted microphone is refused ({audio})"),
+      refused(&audio),
+    );
+    check_allowed(
+      "media-capture: with only the microphone switch off the granted camera captures",
+      &video,
+    );
+    off.close();
+    consent::set(consent::MICROPHONE, Some("Allow"));
+    let on = window(&format!("{OK_ORIGIN}/?tag=os-on-&steps=audio"), reports);
+    let audio = result_of(reports, OK_ORIGIN, "os-on-audio").await;
+    check_allowed(
+      "media-capture: the switch is read at every request (back on: captures)",
+      &audio,
+    );
+    on.close();
+  }
+}
+
+/// This user's "Let desktop apps access your microphone / camera" switch
+/// (HKCU ...\ConsentStore\<device>\NonPackaged "Value"), through reg.exe.
+#[cfg(windows)]
+mod consent {
+  use std::process::Command;
+
+  pub const MICROPHONE: &str = "microphone";
+  pub const CAMERA: &str = "webcam";
+
+  fn key(device: &str) -> String {
+    format!(
+      r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\{device}\NonPackaged"
+    )
+  }
+
+  fn reg(args: &[&str]) -> Option<String> {
+    let root =
+      std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let out = Command::new(format!(r"{root}\System32\reg.exe"))
+      .args(args)
+      .output()
+      .ok()?;
+    out
+      .status
+      .success()
+      .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+  }
+
+  /// The switch's value, or None when it isn't set.
+  pub fn get(device: &str) -> Option<String> {
+    let out = reg(&["query", &key(device), "/v", "Value"])?;
+    out.lines().find_map(|line| {
+      let mut f = line.split_whitespace();
+      (f.next() == Some("Value") && f.next() == Some("REG_SZ"))
+        .then(|| f.next().unwrap_or("").to_string())
+    })
+  }
+
+  /// Sets the switch (`None`: removes the value). Whether it took.
+  pub fn set(device: &str, value: Option<&str>) -> bool {
+    let k = key(device);
+    match value {
+      Some(v) => {
+        reg(&["add", &k, "/v", "Value", "/t", "REG_SZ", "/d", v, "/f"])
+          .is_some()
+      }
+      None => {
+        reg(&["delete", &k, "/v", "Value", "/f"]);
+        get(device).is_none()
+      }
+    }
+  }
+
+  /// Turns a switch on for the run; puts the old value back when dropped
+  /// (at the end of the run, an early return's too; a run the watchdog kills
+  /// leaves the switch on).
+  pub struct Restore {
+    device: &'static str,
+    old: Option<String>,
+  }
+
+  impl Restore {
+    pub fn allow(device: &'static str) -> Self {
+      let old = get(device);
+      if !set(device, Some("Allow")) {
+        eprintln!("[e2e] could not turn on {device}'s desktop-apps switch");
+      }
+      Restore { device, old }
+    }
+  }
+
+  impl Drop for Restore {
+    fn drop(&mut self) {
+      set(self.device, self.old.as_deref());
+    }
+  }
 }
 
 fn asked_ids(asked: &Arc<Mutex<Vec<MediaCaptureRequest>>>) -> Vec<u64> {
