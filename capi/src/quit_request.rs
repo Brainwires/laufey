@@ -6,7 +6,7 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{api, LaufeyBackendApi};
+use crate::{api, lock_unpoisoned, LaufeyBackendApi};
 
 /// Why the OS asks the app to quit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ fn handler_slot() -> &'static Mutex<Option<Handler>> {
 }
 
 unsafe extern "C" fn trampoline(kind: i32, _user_data: *mut c_void) {
-  let handler = handler_slot().lock().unwrap().clone();
+  let handler = lock_unpoisoned(handler_slot()).clone();
   if let Some(handler) = handler {
     handler(QuitRequestKind::from_raw(kind));
   }
@@ -45,7 +45,7 @@ pub(crate) fn on_quit_requested_with<F>(api: &LaufeyBackendApi, handler: F)
 where
   F: Fn(QuitRequestKind) + Send + Sync + 'static,
 {
-  *handler_slot().lock().unwrap() = Some(Arc::new(handler));
+  *lock_unpoisoned(handler_slot()) = Some(Arc::new(handler));
   if let Some(f) = api.set_quit_requested_handler {
     unsafe {
       f(api.backend_data, Some(trampoline), std::ptr::null_mut());

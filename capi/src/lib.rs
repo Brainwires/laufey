@@ -171,6 +171,16 @@ pub(crate) fn try_api() -> Option<&'static LaufeyBackendApi> {
   BACKEND_API.get().copied()
 }
 
+/// Locks `mutex` even when a thread panicked while holding it. For the
+/// `extern "C"` callbacks the backends call: a panic there can't unwind into
+/// the C caller and aborts the process, and a handler slot (an `Option` /
+/// map swapped whole) is never left half-written by a panic.
+pub(crate) fn lock_unpoisoned<T: ?Sized>(
+  mutex: &Mutex<T>,
+) -> std::sync::MutexGuard<'_, T> {
+  mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn bindings(
 ) -> &'static Mutex<HashMap<u32, HashMap<String, Arc<BindingHandler>>>> {
   BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -3979,6 +3989,26 @@ macro_rules! main {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn lock_unpoisoned_takes_a_poisoned_mutex() {
+    let m = Arc::new(Mutex::new(1));
+    let held = m.clone();
+    let panicked = std::thread::spawn(move || {
+      let mut g = held.lock().unwrap();
+      *g = 2;
+      panic!("poison the mutex");
+    })
+    .join();
+    assert!(panicked.is_err());
+    assert!(m.is_poisoned());
+    assert!(m.lock().is_err());
+    let mut g = lock_unpoisoned(&m);
+    assert_eq!(*g, 2);
+    *g = 3;
+    drop(g);
+    assert_eq!(*lock_unpoisoned(&m), 3);
+  }
 
   // --- Dialogs: OK, cancel, and (API 45) unsupported ---
 

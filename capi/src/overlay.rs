@@ -9,7 +9,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::io::take_backend_string;
-use crate::{api, ffi, try_api, LaufeyBackendApi, Window};
+use crate::{api, ffi, lock_unpoisoned, try_api, LaufeyBackendApi, Window};
 
 pub const LAUFEY_WINDOW_LEVEL_NORMAL: i32 = 0;
 pub const LAUFEY_WINDOW_LEVEL_FLOATING: i32 = 1;
@@ -322,9 +322,7 @@ unsafe extern "C" fn tray_event_callback(
   let Some(e) = TrayEvent::from_raw(unsafe { &*event }) else {
     return;
   };
-  let handler = tray_event_handlers()
-    .lock()
-    .unwrap()
+  let handler = lock_unpoisoned(tray_event_handlers())
     .get(&e.tray_id)
     .cloned();
   if let Some(h) = handler {
@@ -344,10 +342,7 @@ pub fn set_tray_event_handler(
   };
   match handler {
     Some(h) => {
-      tray_event_handlers()
-        .lock()
-        .unwrap()
-        .insert(tray_id, Arc::from(h));
+      lock_unpoisoned(tray_event_handlers()).insert(tray_id, Arc::from(h));
       unsafe {
         f(
           api.backend_data,
@@ -358,7 +353,7 @@ pub fn set_tray_event_handler(
       };
     }
     None => {
-      tray_event_handlers().lock().unwrap().remove(&tray_id);
+      lock_unpoisoned(tray_event_handlers()).remove(&tray_id);
       unsafe { f(api.backend_data, tray_id, None, std::ptr::null_mut()) };
     }
   }
