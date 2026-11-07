@@ -154,6 +154,13 @@ class RuntimeLoader {
     return js_calls_.Take(call_id, route);
   }
 
+  // The window's top-level document was replaced (its main frame committed a
+  // navigation to another document): the calls it made are forgotten, so a
+  // late answer never reaches the page the window shows now. Any thread.
+  void ForgetJsCallsOfDocument(uint32_t window_id) {
+    js_calls_.ForgetDocument(window_id);
+  }
+
   // Records that the embedder explicitly set this window's title via the C
   // API. Once set, the page's document.title / URL must not clobber it (see
   // LaufeyHandler::OnTitleChange).

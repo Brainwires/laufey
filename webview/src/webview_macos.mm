@@ -1539,10 +1539,11 @@ API_AVAILABLE(macos(11.3))
 // The main frame committed a navigation to another document (WebKit doesn't
 // call this for a same-document one): a microphone / camera request the old
 // document waits on is refused, so a late answer never reaches the new one
-// (laufey_media_capture.h).
+// (laufey_media_capture.h); the same goes for a bridge call it made.
 - (void)webView:(WKWebView*)webView
     didCommitNavigation:(WKNavigation*)navigation {
   laufey_common::MediaCaptureRequests::Instance().ForgetDocument(self.windowId);
+  RuntimeLoader::GetInstance()->ForgetJsCallsOfDocument(self.windowId);
 }
 
 // Fired when a main-frame navigation finishes loading. Used to reveal a window

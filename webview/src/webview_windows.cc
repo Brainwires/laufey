@@ -1947,13 +1947,16 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // The main frame committed another document (ContentLoading isn't
             // raised for a same-document navigation): a microphone / camera
             // request the old document waits on is refused, so a late answer
-            // never reaches the new one.
+            // never reaches the new one; the same goes for a bridge call it
+            // made.
             state->webview->add_ContentLoading(
                 Callback<ICoreWebView2ContentLoadingEventHandler>(
                     [wid](ICoreWebView2*,
                           ICoreWebView2ContentLoadingEventArgs*) -> HRESULT {
                       laufey_common::MediaCaptureRequests::Instance()
                           .ForgetDocument(wid);
+                      RuntimeLoader::GetInstance()->ForgetJsCallsOfDocument(
+                          wid);
                       return S_OK;
                     })
                     .Get(),

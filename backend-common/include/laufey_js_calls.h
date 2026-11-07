@@ -9,7 +9,9 @@
 // unique in the process, and keeps which window and which page number it
 // answers. js_call_respond then reaches exactly the window that made the call,
 // under the number that page used, and a call id the runtime never issued (or
-// already answered) reaches nothing.
+// already answered) reaches nothing. A call is the document's that made it:
+// once the window's top-level document is replaced (ForgetDocument), its
+// answer reaches nothing either.
 
 #ifndef LAUFEY_JS_CALLS_H_
 #define LAUFEY_JS_CALLS_H_
@@ -60,6 +62,16 @@ class JsCallTable {
       else
         ++it;
     }
+  }
+
+  // Drops every call window `window_id`'s top-level document made, because
+  // that document was replaced: the backend calls it when the window's main
+  // frame commits a navigation to another document (not for a same-document
+  // one: a fragment, pushState). An answer the runtime sends later reaches
+  // nothing, so it never lands in whatever page the window shows now (which
+  // numbers its own calls from 1 too). Any thread.
+  void ForgetDocument(uint32_t window_id) {
+    ForgetWindow(window_id);
   }
 
   size_t size() {

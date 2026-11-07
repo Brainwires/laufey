@@ -1023,8 +1023,10 @@ static void on_load_changed(WebKitWebView* webview, WebKitLoadEvent load_event,
   if (load_event == WEBKIT_LOAD_COMMITTED) {
     // The main frame committed another document (load-changed doesn't fire
     // for a same-document navigation): a microphone / camera request the old
-    // document waits on is refused (laufey_media_capture.h).
+    // document waits on is refused (laufey_media_capture.h), and a bridge
+    // call it made is never answered into the new one.
     laufey_common::MediaCaptureRequests::Instance().ForgetDocument(wid);
+    RuntimeLoader::GetInstance()->ForgetJsCallsOfDocument(wid);
     return;
   }
   if (load_event != WEBKIT_LOAD_FINISHED) {

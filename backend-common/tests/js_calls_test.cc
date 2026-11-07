@@ -3,8 +3,9 @@
 // JsCallTable (laufey_js_calls.h): bridge calls reach the runtime under
 // backend-issued ids, so two windows' pages (both counting from 1) never
 // collide, an answer goes back to the window and page number that made the
-// call, and an id the backend never issued or already answered reaches
-// nothing. Plain asserts, no framework.
+// call, an id the backend never issued or already answered reaches nothing,
+// and a call the window's previous document made is never answered into the
+// document that replaced it. Plain asserts, no framework.
 
 #include "laufey_js_calls.h"
 
@@ -66,6 +67,24 @@ int main() {
     EXPECT(table.size() == 1);
     JsCallRoute route;
     EXPECT(table.Take(keep, &route) && route.page_call_id == 10);
+  }
+  {
+    // The window's top-level document is replaced while a call is with the
+    // runtime: the late answer reaches nothing (not the new document, which
+    // may number its own calls from 1 too). Other windows keep theirs, and
+    // the new document's calls are answered as usual.
+    JsCallTable table;
+    uint64_t old_call = table.Add(1, 1);
+    uint64_t other = table.Add(2, 1);
+    table.ForgetDocument(1);
+    JsCallRoute route;
+    EXPECT(!table.Take(old_call, &route));
+    uint64_t new_call = table.Add(1, 1);
+    EXPECT(new_call != old_call);
+    EXPECT(table.Take(new_call, &route));
+    EXPECT(route.window_id == 1 && route.page_call_id == 1);
+    EXPECT(table.Take(other, &route) && route.window_id == 2);
+    EXPECT(table.size() == 0);
   }
   {
     // Any thread: concurrent adds and takes stay consistent.

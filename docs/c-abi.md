@@ -249,7 +249,13 @@ and free it with `release_js_callback(id)`.
 
 `call_id` is issued by the backend, unique in the process; it is not the page's
 own number for the call. An answer reaches exactly the call that asked, and an
-id that was never issued or was already answered reaches nothing.
+id that was never issued or was already answered reaches nothing. A call belongs
+to the document that made it: once the window's main frame commits a navigation
+to another document (WKWebView's `didCommitNavigation`, CEF's `OnLoadStart` for
+the main frame, WebView2's `ContentLoading`, WebKitGTK's
+`WEBKIT_LOAD_COMMITTED`; not a same-document one such as a fragment or
+`pushState`), the old document's calls are forgotten, and their answers reach
+nothing rather than the page the window shows now.
 
 Only a window's top-level document can call: CEF binds the namespace in the main
 frame and drops a call from any other frame, WKWebView takes script messages

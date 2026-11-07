@@ -604,11 +604,13 @@ void LaufeyHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
   // The main frame committed another document (CEF doesn't call this for a
   // same-document navigation): a microphone / camera request the old document
   // waits on is refused, so a late answer never reaches the new one
-  // (laufey_media_capture.h).
+  // (laufey_media_capture.h); the same goes for a bridge call it made.
   if (frame->IsMain()) {
-    if (uint32_t wid =
-            RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser))
+    RuntimeLoader* loader = RuntimeLoader::GetInstance();
+    if (uint32_t wid = loader->GetLaufeyIdForBrowser(browser)) {
       laufey_common::MediaCaptureRequests::Instance().ForgetDocument(wid);
+      loader->ForgetJsCallsOfDocument(wid);
+    }
   }
   if (laufey_common::TimingEnabled())
     laufey_common::Timing(std::string("load start ") +

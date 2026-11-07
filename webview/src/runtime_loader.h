@@ -82,6 +82,13 @@ class RuntimeLoader {
     return js_calls_.Take(call_id, route);
   }
 
+  // The window's top-level document was replaced (its main frame committed a
+  // navigation to another document): the calls it made are forgotten, so a
+  // late answer never reaches the page the window shows now. Any thread.
+  void ForgetJsCallsOfDocument(uint32_t window_id) {
+    js_calls_.ForgetDocument(window_id);
+  }
+
   // `page_call_id` is the number the page gave the call (its bridge script's
   // callId); the runtime sees a backend-issued id instead.
   // `origin` is the serialized origin of the calling document (a call from
