@@ -434,6 +434,13 @@ jobs:
             -Ibackend-common/include \
             backend-common/tests/js_calls_test.cc -o "$RUNNER_TEMP/js_calls_test"
           "$RUNNER_TEMP/js_calls_test"
+      # The count in a stream ack the page posts (WebView2's stream shim).
+      - name: stream_ack_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -pthread \
+            -Ibackend-common/include \
+            backend-common/tests/stream_ack_test.cc -o "$RUNNER_TEMP/stream_ack_test"
+          "$RUNNER_TEMP/stream_ack_test"
       - name: passkey_test
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \

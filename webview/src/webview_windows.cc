@@ -56,6 +56,7 @@
 #include <condition_variable>
 #include <vector>
 #include <functional>
+#include <memory>
 #include <thread>
 #include <algorithm>
 #include <cmath>
@@ -1665,46 +1666,58 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                     [this, wid](ICoreWebView2* sender,
                                 ICoreWebView2WebMessageReceivedEventArgs* args)
                         -> HRESULT {
-                      // The injected bridge script runs in every frame
-                      // (AddScriptToExecuteOnDocumentCreated cannot be scoped
-                      // to the main frame), so validate the message source
-                      // here: only accept messages whose document URI matches
-                      // the top-level document. This stops cross-origin/sub
-                      // frames from invoking bindings that run with the host
-                      // process's permissions.
-                      LPWSTR msgSource = nullptr;
-                      LPWSTR topSource = nullptr;
-                      args->get_Source(&msgSource);
-                      sender->get_Source(&topSource);
-                      bool from_main_frame = msgSource && topSource &&
-                                             wcscmp(msgSource, topSource) == 0;
-                      // API 44: the calling document's origin.
-                      std::string origin = msgSource
-                                               ? laufey_common::OriginOfUrl(
-                                                     WideToUtf8(msgSource))
-                                               : laufey_common::kOpaqueOrigin;
-                      if (msgSource) {
-                        CoTaskMemFree(msgSource);
-                      }
-                      if (topSource) {
-                        CoTaskMemFree(topSource);
-                      }
-                      if (!from_main_frame) {
-                        return S_OK;
-                      }
+                      // A message the page wrote must never end the app: a
+                      // handler that throws on it is logged and the message
+                      // dropped. The engine's strings are held so they are
+                      // freed on that path too.
+                      using CoTaskString =
+                          std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)>;
+                      try {
+                        // The injected bridge script runs in every frame
+                        // (AddScriptToExecuteOnDocumentCreated cannot be scoped
+                        // to the main frame), so validate the message source
+                        // here: only accept messages whose document URI matches
+                        // the top-level document. This stops cross-origin/sub
+                        // frames from invoking bindings that run with the host
+                        // process's permissions.
+                        LPWSTR msgSource = nullptr;
+                        LPWSTR topSource = nullptr;
+                        args->get_Source(&msgSource);
+                        CoTaskString msg_source(msgSource, CoTaskMemFree);
+                        sender->get_Source(&topSource);
+                        CoTaskString top_source(topSource, CoTaskMemFree);
+                        bool from_main_frame =
+                            msgSource && topSource &&
+                            wcscmp(msgSource, topSource) == 0;
+                        // API 44: the calling document's origin.
+                        std::string origin = msgSource
+                                                 ? laufey_common::OriginOfUrl(
+                                                       WideToUtf8(msgSource))
+                                                 : laufey_common::kOpaqueOrigin;
+                        if (!from_main_frame) {
+                          return S_OK;
+                        }
 
-                      LPWSTR messageRaw = nullptr;
-                      args->TryGetWebMessageAsString(&messageRaw);
-                      if (messageRaw) {
-                        LPWSTR source = nullptr;
-                        args->get_Source(&source);
-                        if (!laufey_wv2::HandleStreamMessage(wid, messageRaw,
-                                                             source) &&
-                            !HandleFileDropMessage(wid, messageRaw, args))
-                          HandleJsMessage(wid, messageRaw, origin);
-                        if (source)
-                          CoTaskMemFree(source);
-                        CoTaskMemFree(messageRaw);
+                        LPWSTR messageRaw = nullptr;
+                        args->TryGetWebMessageAsString(&messageRaw);
+                        CoTaskString message(messageRaw, CoTaskMemFree);
+                        if (messageRaw) {
+                          LPWSTR sourceRaw = nullptr;
+                          args->get_Source(&sourceRaw);
+                          CoTaskString source(sourceRaw, CoTaskMemFree);
+                          if (!laufey_wv2::HandleStreamMessage(wid, messageRaw,
+                                                               sourceRaw) &&
+                              !HandleFileDropMessage(wid, messageRaw, args))
+                            HandleJsMessage(wid, messageRaw, origin);
+                        }
+                      } catch (const std::exception& e) {
+                        std::cerr << "laufey: dropped a web message the "
+                                     "bridge could not handle: "
+                                  << e.what() << std::endl;
+                      } catch (...) {
+                        std::cerr << "laufey: dropped a web message the "
+                                     "bridge could not handle"
+                                  << std::endl;
                       }
                       return S_OK;
                     })

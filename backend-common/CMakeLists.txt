@@ -328,6 +328,11 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_js_calls_test COMMAND laufey_js_calls_test)
 
+  # The count in a stream ack the page posts (laufey_stream_ack.h).
+  add_executable(laufey_stream_ack_test tests/stream_ack_test.cc)
+  target_link_libraries(laufey_stream_ack_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_stream_ack_test COMMAND laufey_stream_ack_test)
+
   # The calling document's origin and the launch file's bridge pin.
   add_executable(laufey_bridge_origin_test tests/bridge_origin_test.cc)
   target_link_libraries(laufey_bridge_origin_test PRIVATE laufey_backend_common)

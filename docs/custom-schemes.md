@@ -280,7 +280,10 @@ streams through the page instead:
 - The page acknowledges what it reads: at most 4 MiB is in flight to a page that
   is not reading. Beyond that the backend holds up to the 4 MiB high-water mark
   and then answers `write` with 0 until the page reads (backpressure, above);
-  the handler's `write` itself never blocks.
+  the handler's `write` itself never blocks. An acknowledgement whose count is
+  not a plain number of 1 to 11 digits is ignored (`laufey_stream_ack.h`), and a
+  web message the backend cannot handle is logged and dropped rather than ending
+  the app.
 - Only a same-origin document may receive a body: the backend checks the origin
   of the document that asks for it against the request URL.
 

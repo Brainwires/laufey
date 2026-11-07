@@ -20,6 +20,7 @@
 
 #include "laufey_scheme_cancel.h"
 #include "laufey_scheme_registry.h"
+#include "laufey_stream_ack.h"
 #include "runtime_loader.h"
 #include "scheme_exchange.h"
 
@@ -949,8 +950,10 @@ bool HandleStreamMessage(uint32_t window_id, const wchar_t* message,
   if (t == "attach") {
     x->Attach(OriginOf(WideToUtf8(source)));
   } else if (t == "ack") {
-    if (JsonField(m, "n", &n) && n.size() < 12)
-      x->Ack(static_cast<size_t>(std::stoull(n)));
+    // The page wrote `n`: only a plain count is taken (laufey_stream_ack.h).
+    size_t count = 0;
+    if (JsonField(m, "n", &n) && laufey_common::ParseStreamAckCount(n, &count))
+      x->Ack(count);
   } else if (t == "cancel") {
     x->Cancel();
   }
