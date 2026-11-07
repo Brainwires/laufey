@@ -247,7 +247,8 @@ static void Backend_ExecuteJs(void* data, uint32_t window_id,
   }
 
   // With callback: send IPC to renderer for eval with result
-  uint64_t eval_id = loader->StoreEvalCallback(callback, callback_data);
+  uint64_t eval_id = loader->StoreEvalCallback(browser->GetIdentifier(),
+                                               callback, callback_data);
   std::string script_str(script);
   CefPostTask(TID_UI,
               base::BindOnce(
@@ -4046,18 +4047,14 @@ void RuntimeLoader::Shutdown() {
   }
 }
 
-void RuntimeLoader::HandleEvalResult(uint64_t eval_id,
+void RuntimeLoader::HandleEvalResult(int browser_id, uint64_t eval_id,
                                      CefRefPtr<CefValue> result,
                                      const std::string& error) {
+  // Only the browser the script was sent to settles it; another browser's
+  // result (or an id never issued, or a second answer) is dropped.
   PendingEval eval;
-  {
-    std::lock_guard<std::mutex> lock(eval_mutex_);
-    auto it = pending_evals_.find(eval_id);
-    if (it == pending_evals_.end())
-      return;
-    eval = it->second;
-    pending_evals_.erase(it);
-  }
+  if (!pending_evals_.Take(eval_id, browser_id, &eval) || !eval.callback)
+    return;
 
   if (!error.empty()) {
     laufey_value errLaufey(laufey::Value::String(error));

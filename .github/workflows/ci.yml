@@ -369,6 +369,13 @@ jobs:
             -Ibackend-common/include \
             backend-common/tests/js_calls_test.cc -o "$RUNNER_TEMP/js_calls_test"
           "$RUNNER_TEMP/js_calls_test"
+      # CEF's evaluations waiting for a result: settled only by their browser.
+      - name: pending_evals_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \
+            -Ibackend-common/include \
+            backend-common/tests/pending_evals_test.cc -o "$RUNNER_TEMP/pending_evals_test"
+          "$RUNNER_TEMP/pending_evals_test"
       - name: passkey_test
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=thread -pthread \

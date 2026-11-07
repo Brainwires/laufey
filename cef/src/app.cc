@@ -1085,11 +1085,17 @@ bool LaufeyHandler::OnProcessMessageReceived(
   }
 
   if (name == "laufey_eval_result") {
+    // The script went to the main frame (Backend_ExecuteJs): its result comes
+    // from there, and settles only an evaluation sent to this browser. Drop
+    // anything else, as for laufey_call.
+    if (!frame || !frame->IsMain())
+      return true;
     CefRefPtr<CefListValue> args = message->GetArgumentList();
     uint64_t eval_id = static_cast<uint64_t>(args->GetDouble(0));
     CefRefPtr<CefValue> result = args->GetValue(1);
     std::string error = args->GetString(2).ToString();
-    RuntimeLoader::GetInstance()->HandleEvalResult(eval_id, result, error);
+    RuntimeLoader::GetInstance()->HandleEvalResult(browser->GetIdentifier(),
+                                                   eval_id, result, error);
     return true;
   }
 

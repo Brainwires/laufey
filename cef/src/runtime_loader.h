@@ -23,6 +23,7 @@
 // and converts to/from CefValue only at the renderer<->browser IPC boundary
 // (CefValueToLaufey / LaufeyToCefValue in runtime_loader.cc).
 #include "laufey_js_calls.h"
+#include "laufey_pending_evals.h"
 #include "laufey_sync_call.h"
 #include "laufey_value.h"
 
@@ -451,16 +452,16 @@ class RuntimeLoader {
     js_call_notify_data_ = notify_data;
   }
 
-  uint64_t StoreEvalCallback(laufey_js_result_fn callback,
+  // An evaluation sent to browser `browser_id`'s main frame; its result
+  // settles it only from that browser (laufey_pending_evals.h).
+  uint64_t StoreEvalCallback(int browser_id, laufey_js_result_fn callback,
                              void* callback_data) {
-    std::lock_guard<std::mutex> lock(eval_mutex_);
-    uint64_t id = next_eval_id_++;
-    pending_evals_[id] = {callback, callback_data};
-    return id;
+    return pending_evals_.Add(browser_id, {callback, callback_data});
   }
 
-  void HandleEvalResult(uint64_t eval_id, CefRefPtr<CefValue> result,
-                        const std::string& error);
+  // A result browser `browser_id`'s main frame sent for `eval_id`.
+  void HandleEvalResult(int browser_id, uint64_t eval_id,
+                        CefRefPtr<CefValue> result, const std::string& error);
 
   void SetJsNamespace(const std::string& name) {
     std::lock_guard<std::mutex> lock(js_namespace_mutex_);
@@ -574,12 +575,10 @@ class RuntimeLoader {
   mutable std::mutex js_namespace_mutex_;
 
   struct PendingEval {
-    laufey_js_result_fn callback;
-    void* callback_data;
+    laufey_js_result_fn callback = nullptr;
+    void* callback_data = nullptr;
   };
-  std::map<uint64_t, PendingEval> pending_evals_;
-  std::atomic<uint64_t> next_eval_id_{1};
-  std::mutex eval_mutex_;
+  laufey_common::PendingEvals<PendingEval> pending_evals_;
 
   struct PendingJsCall {
     uint32_t window_id;

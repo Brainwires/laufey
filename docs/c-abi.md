@@ -282,6 +282,11 @@ window). When the runtime services calls off the UI thread, the backend signals
 readiness via `set_js_call_notify` and the runtime drains the queue with
 `poll_js_calls`.
 
+On CEF the script runs in the window's main frame, and its result settles the
+call only when it comes from that frame of the browser the script was sent to
+(`laufey_pending_evals.h`); a result from a sub-frame or another browser is
+dropped, and the call keeps waiting for its own.
+
 ## Custom URL scheme handler (API ≥ 26)
 
 A custom scheme handler lets the runtime service webview requests for a
