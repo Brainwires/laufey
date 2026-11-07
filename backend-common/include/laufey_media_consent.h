@@ -3,21 +3,25 @@
 // The operating system's own consent for the microphone and camera
 // (docs/media-capture.md#the-operating-systems-consent).
 //
-// Windows keeps it in the registry, as three switches per device, each the
-// "Value" string ("Allow" / "Deny") of a CapabilityAccessManager ConsentStore
-// key (the camera's key is "webcam"):
+// Windows keeps it in the registry, each switch the "Value" string ("Allow" /
+// "Deny") of a CapabilityAccessManager ConsentStore key (the camera's key is
+// "webcam"):
 //
-//   HKLM ...\ConsentStore\<device>              the device-wide switch, for
-//                                               every user (an
-//                                               administrator's)
-//   HKCU ...\ConsentStore\<device>              this user's "Microphone
-//                                               access" / "Camera access"
+//   HKLM ...\ConsentStore\<device>              "Microphone access" /
+//                                               "Camera access": the whole
+//                                               device, every app
+//   HKCU ...\ConsentStore\<device>              "Let apps access your
+//                                               microphone / camera": Store
+//                                               (packaged) apps only
 //   HKCU ...\ConsentStore\<device>\NonPackaged  "Let desktop apps access your
 //                                               microphone / camera"
 //
-// A laufey app is a desktop (unpackaged) app, so any of the three set to
-// "Deny" keeps the device from it: the engine would fail to open the device
-// (an error of its own) after laufey had granted it. laufey refuses
+// A laufey app is a desktop (unpackaged) app: the device-wide switch and the
+// desktop-apps switch govern it, and the packaged apps' switch does not (a
+// machine can have it off while desktop apps capture: GitHub's Windows
+// images do). Either of the two set to "Deny" keeps the device from the app:
+// the engine would fail to open the device (an error of its own) after laufey
+// had granted it. laufey refuses
 // such a request itself (NotAllowedError, as macOS's TCC refusal reads), and
 // platform_features reports the switches (microphoneAccess / cameraAccess).
 // The switches are read at every request, so a change the user makes while
@@ -42,7 +46,8 @@ namespace laufey_common {
 // empty when the key or the value is missing (or unreadable).
 struct ConsentStoreSwitches {
   std::string machine;       // HKLM ...\ConsentStore\<device>
-  std::string user;          // HKCU ...\ConsentStore\<device>
+  std::string user;          // HKCU ...\ConsentStore\<device> (packaged
+                             // apps': never refuses a desktop app)
   std::string desktop_apps;  // HKCU ...\ConsentStore\<device>\NonPackaged
 };
 
@@ -88,8 +93,10 @@ inline const char* ConsentStoreDevice(uint32_t kind) {
   return nullptr;
 }
 
-// What `switches` say for `kind` (one LAUFEY_MEDIA_CAPTURE_* bit). The first
-// "Deny", device-wide first, names the reason. Pure.
+// What `switches` say for `kind` (one LAUFEY_MEDIA_CAPTURE_* bit) to a
+// desktop app: the device-wide switch, then the desktop-apps one; the first
+// "Deny" names the reason. The packaged apps' switch (`user`) is not read.
+// Pure.
 inline OsMediaConsentState ConsentFromSwitches(
     const ConsentStoreSwitches& switches, uint32_t kind) {
   using media_consent_internal::EqualsIgnoringCase;
@@ -100,15 +107,9 @@ inline OsMediaConsentState ConsentFromSwitches(
   OsMediaConsentState out;
   if (EqualsIgnoringCase(switches.machine, "deny")) {
     out.consent = OsMediaConsent::kDenied;
-    out.reason = "Windows turns off " + device +
-                 " access for every user of this device (" + page +
-                 ", set by an administrator)";
-    return out;
-  }
-  if (EqualsIgnoringCase(switches.user, "deny")) {
-    out.consent = OsMediaConsent::kDenied;
-    out.reason = "Windows' " + device + " access is off (" + page + " > " +
-                 (mic ? "Microphone access" : "Camera access") + ")";
+    out.reason = "Windows turns off " + device + " access on this device (" +
+                 page + " > " + (mic ? "Microphone access" : "Camera access") +
+                 ")";
     return out;
   }
   if (EqualsIgnoringCase(switches.desktop_apps, "deny")) {
@@ -118,7 +119,6 @@ inline OsMediaConsentState ConsentFromSwitches(
     return out;
   }
   if (EqualsIgnoringCase(switches.machine, "allow") ||
-      EqualsIgnoringCase(switches.user, "allow") ||
       EqualsIgnoringCase(switches.desktop_apps, "allow"))
     out.consent = OsMediaConsent::kAllowed;
   return out;

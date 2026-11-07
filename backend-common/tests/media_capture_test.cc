@@ -342,16 +342,15 @@ int main() {
 
   // --- The OS's consent (Windows' privacy switches) --------------------------
   {
-    // Which switch refuses: the device-wide one first, then the user's, then
-    // desktop apps'. Case doesn't matter; anything but Allow / Deny is unset.
+    // A desktop app meets the device-wide switch, then the desktop-apps one;
+    // the packaged apps' switch (`user`) is never read. Case doesn't matter;
+    // anything but Allow / Deny is unset.
     ConsentStoreSwitches s;
     EXPECT(ConsentFromSwitches(s, kMic).consent == OsMediaConsent::kUnknown);
     EXPECT(ConsentFromSwitches(s, kMic).reason.empty());
     s.desktop_apps = "Allow";
     EXPECT(ConsentFromSwitches(s, kMic).consent == OsMediaConsent::kAllowed);
     EXPECT(ConsentFromSwitches(s, kMic).reason.empty());
-    s.user = "Prompt";
-    EXPECT(ConsentFromSwitches(s, kMic).consent == OsMediaConsent::kAllowed);
     s.desktop_apps = "Deny";
     OsMediaConsentState d = ConsentFromSwitches(s, kMic);
     EXPECT(d.consent == OsMediaConsent::kDenied);
@@ -359,19 +358,35 @@ int main() {
            std::string::npos);
     EXPECT(d.reason.find("Settings > Privacy & security > Microphone") !=
            std::string::npos);
-    s.user = "deny";
-    d = ConsentFromSwitches(s, kMic);
-    EXPECT(d.consent == OsMediaConsent::kDenied &&
-           d.reason.find("> Microphone access)") != std::string::npos);
     s.machine = "DENY";
     d = ConsentFromSwitches(s, kCam);
     EXPECT(d.consent == OsMediaConsent::kDenied &&
-           d.reason.find("camera access for every user") != std::string::npos &&
-           d.reason.find("> Camera,") != std::string::npos);
-    // A machine-wide Allow doesn't override the user's Deny.
-    ConsentStoreSwitches mixed{"Allow", "Deny", "Allow"};
-    EXPECT(ConsentFromSwitches(mixed, kCam).consent == OsMediaConsent::kDenied);
+           d.reason.find("camera access on this device") != std::string::npos &&
+           d.reason.find("> Camera > Camera access)") != std::string::npos);
+    // A device-wide Allow doesn't override the desktop-apps Deny.
+    EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"Allow", "", "Deny"}, kCam)
+               .consent == OsMediaConsent::kDenied);
     EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"Denied", "", ""}, kMic)
+               .consent == OsMediaConsent::kUnknown);
+    // GitHub's windows-latest image (run 42331063931): the packaged apps'
+    // switch is off for both devices, the device-wide one isn't, and desktop
+    // apps capture. Not a refusal, with the desktop-apps value set or absent.
+    for (const char* machine : {"", "Allow"}) {
+      for (const char* desktop : {"", "Allow"}) {
+        ConsentStoreSwitches runner{machine, "Deny", desktop};
+        for (uint32_t kind : {kMic, kCam}) {
+          OsMediaConsentState r = ConsentFromSwitches(runner, kind);
+          EXPECT(r.consent != OsMediaConsent::kDenied && r.reason.empty());
+          EXPECT(r.consent == ((machine[0] || desktop[0])
+                                   ? OsMediaConsent::kAllowed
+                                   : OsMediaConsent::kUnknown));
+        }
+      }
+    }
+    // The packaged apps' switch alone, either way, says nothing.
+    EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"", "Allow", ""}, kMic)
+               .consent == OsMediaConsent::kUnknown);
+    EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"", "deny", ""}, kMic)
                .consent == OsMediaConsent::kUnknown);
 
     EXPECT(std::string(ConsentStoreDevice(kMic)) == "microphone");

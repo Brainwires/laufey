@@ -281,6 +281,10 @@ pub async fn run() {
   laufey::set_quit_on_last_window_closed(false);
   let reports: Reports = Arc::new(Mutex::new(Vec::new()));
   #[cfg(windows)]
+  // What the machine says before the run changes anything (read-only).
+  #[cfg(windows)]
+  consent::log_switches("before the run");
+  #[cfg(windows)]
   let _switches = (
     consent::Restore::allow(consent::MICROPHONE),
     consent::Restore::allow(consent::CAMERA),
@@ -587,10 +591,34 @@ mod consent {
   pub const MICROPHONE: &str = "microphone";
   pub const CAMERA: &str = "webcam";
 
+  const STORE: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore";
+
   fn key(device: &str) -> String {
-    format!(
-      r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\{device}\NonPackaged"
-    )
+    format!(r"HKCU\{STORE}\{device}\NonPackaged")
+  }
+
+  /// `full_key`'s "Value" string, or None when it isn't set.
+  fn value_of(full_key: &str) -> Option<String> {
+    let out = reg(&["query", full_key, "/v", "Value"])?;
+    out.lines().find_map(|line| {
+      let mut f = line.split_whitespace();
+      (f.next() == Some("Value") && f.next() == Some("REG_SZ"))
+        .then(|| f.next().unwrap_or("").to_string())
+    })
+  }
+
+  /// Logs the three switches laufey reads for each device (read-only): the
+  /// device-wide one (HKLM), the packaged apps' (HKCU, which a desktop app
+  /// never meets) and the desktop apps' (HKCU NonPackaged).
+  pub fn log_switches(when: &str) {
+    for device in [MICROPHONE, CAMERA] {
+      eprintln!(
+        "[e2e] consent store {when}: {device}: HKLM={:?} HKCU={:?} HKCU\\NonPackaged={:?}",
+        value_of(&format!(r"HKLM\{STORE}\{device}")),
+        value_of(&format!(r"HKCU\{STORE}\{device}")),
+        value_of(&key(device)),
+      );
+    }
   }
 
   fn reg(args: &[&str]) -> Option<String> {
@@ -608,12 +636,7 @@ mod consent {
 
   /// The switch's value, or None when it isn't set.
   pub fn get(device: &str) -> Option<String> {
-    let out = reg(&["query", &key(device), "/v", "Value"])?;
-    out.lines().find_map(|line| {
-      let mut f = line.split_whitespace();
-      (f.next() == Some("Value") && f.next() == Some("REG_SZ"))
-        .then(|| f.next().unwrap_or("").to_string())
-    })
+    value_of(&key(device))
   }
 
   /// Sets the switch (`None`: removes the value). Whether it took.

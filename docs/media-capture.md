@@ -146,22 +146,25 @@ An allowed request still meets the OS's own consent, which laufey never changes:
   `com.apple.security.device.camera` entitlements. A refusal there reaches the
   page as `NotAllowedError`, like laufey's own.
 - Windows has privacy switches for each device (Settings > Privacy & security >
-  Microphone / Camera): one for the whole device, set by an administrator, this
-  user's "Microphone access" / "Camera access", and "Let desktop apps access
-  your microphone / camera", which covers every laufey app. laufey reads them
-  (the registry's `CapabilityAccessManager\ConsentStore` keys `microphone` and
-  `webcam`, under `HKLM` and `HKCU`, and `HKCU`'s `NonPackaged` subkey) at every
-  request. When one is off, a request for that device is refused like any other
-  refusal, before the launch file or the handler is consulted, so the page gets
-  `NotAllowedError` (the engine alone would grant it and then fail to open the
-  device with an error of its own), and the handler is never asked about a
-  device the OS keeps from the app. A switch turned back on counts from the next
-  request. `platform_features` reports them as `microphoneAccess` /
-  `cameraAccess` (`"allowed"`, `"denied"` with the switch in `…Reason`, or
-  `null` when none is set), for an app that wants to point the user at Settings
-  (`ms-settings:privacy-microphone`, `ms-settings:privacy-webcam`). laufey does
-  not read Group Policy (`LetAppsAccessMicrophone` / `LetAppsAccessCamera`);
-  whatever the OS still refuses reaches the page as the engine reports it.
+  Microphone / Camera). Two govern a desktop app such as a laufey app:
+  "Microphone access" / "Camera access", for the whole device (the registry's
+  `HKLM\...\CapabilityAccessManager\ConsentStore\microphone` / `webcam`), and
+  "Let desktop apps access your microphone / camera" (`HKCU`'s `NonPackaged`
+  subkey of the same keys). "Let apps access your microphone / camera" (`HKCU`'s
+  key itself) covers Store (packaged) apps only and is not read: a machine can
+  have it off while desktop apps capture, as GitHub's Windows images do. laufey
+  reads the two at every request. When one is off, a request for that device is
+  refused like any other refusal, before the launch file or the handler is
+  consulted, so the page gets `NotAllowedError` (the engine alone would grant it
+  and then fail to open the device with an error of its own), and the handler is
+  never asked about a device the OS keeps from the app. A switch turned back on
+  counts from the next request. `platform_features` reports them as
+  `microphoneAccess` / `cameraAccess` (`"allowed"`, `"denied"` with the switch
+  in `…Reason`, or `null` when none is set), for an app that wants to point the
+  user at Settings (`ms-settings:privacy-microphone`,
+  `ms-settings:privacy-webcam`). laufey does not read Group Policy
+  (`LetAppsAccessMicrophone` / `LetAppsAccessCamera`); whatever the OS still
+  refuses reaches the page as the engine reports it.
 - Linux has no consent of its own for these devices (a Flatpak's portal aside).
 
 ## Tests
