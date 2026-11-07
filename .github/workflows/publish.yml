@@ -30,7 +30,8 @@ concurrency:
 jobs:
   publish:
     name: cargo publish (laufey)
-    runs-on: ubuntu-latest
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-latest (tag pushes only).
+    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && '"ubuntu-latest"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-latest'))) }}
     steps:
       - uses: actions/checkout@v4
 
