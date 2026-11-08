@@ -12,6 +12,7 @@
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
 #include "laufey_io.h"
+#include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
 #include "laufey_bridge_origin.h"
@@ -284,6 +285,10 @@ class WKWebViewBackend : public LaufeyBackend {
                           const laufey_file_dialog_options_t* options,
                           laufey_file_dialog_result_fn callback,
                           void* user_data) override;
+  uint32_t ShowMessageDialog(uint32_t window_id,
+                             const laufey_message_dialog_options_t* options,
+                             laufey_message_dialog_result_fn callback,
+                             void* user_data) override;
   bool CancelFileDialog(uint32_t dialog_id) override {
     return laufey_common::CancelFileDialogMac(dialog_id);
   }
@@ -3734,6 +3739,21 @@ uint32_t WKWebViewBackend::ShowFileDialog(
                                           user_data);
 }
 
+uint32_t WKWebViewBackend::ShowMessageDialog(
+    uint32_t window_id, const laufey_message_dialog_options_t* options,
+    laufey_message_dialog_result_fn callback, void* user_data) {
+  laufey_common::ParentResolver parent;
+  if (window_id != 0) {
+    parent = [this, window_id]() -> void* {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      return state ? (__bridge void*)state->window : nullptr;
+    };
+  }
+  return laufey_common::ShowMessageDialogMac(std::move(parent), options,
+                                             callback, user_data);
+}
+
 uint32_t WKWebViewBackend::WindowCapabilities() {
   return LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
          LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS | LAUFEY_WINDOW_CAP_SCREENS |
@@ -3745,7 +3765,8 @@ uint32_t WKWebViewBackend::WindowCapabilities() {
          LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
          LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOGS |
          LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES |
-         LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+         LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL |
+         LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS;
 }
 
 void WKWebViewBackend::SetWindowState(uint32_t window_id, int action) {

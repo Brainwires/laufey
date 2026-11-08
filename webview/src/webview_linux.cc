@@ -10,6 +10,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_media_capture.h"
 #include "laufey_io.h"
+#include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
@@ -1052,6 +1053,10 @@ class WebKitGTKBackend : public LaufeyBackend {
                           const laufey_file_dialog_options_t* options,
                           laufey_file_dialog_result_fn callback,
                           void* user_data) override;
+  uint32_t ShowMessageDialog(uint32_t window_id,
+                             const laufey_message_dialog_options_t* options,
+                             laufey_message_dialog_result_fn callback,
+                             void* user_data) override;
   bool CancelFileDialog(uint32_t dialog_id) override {
     return laufey_common::CancelFileDialogLinux(dialog_id);
   }
@@ -2397,6 +2402,8 @@ uint32_t WebKitGTKBackend::WindowCapabilities() {
           LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
           LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOGS |
           LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL;
+  // Message dialogs (API 54): transient for the window, or app-modal.
+  caps |= LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS;
   // KWin's blur, probed now (the Blur effect can be turned on and off).
   bool blur = false;
   gtk_invoke_sync(
@@ -2543,6 +2550,21 @@ uint32_t WebKitGTKBackend::ShowFileDialog(
   }
   return laufey_common::ShowFileDialogLinux(std::move(parent), options,
                                             callback, user_data);
+}
+
+uint32_t WebKitGTKBackend::ShowMessageDialog(
+    uint32_t window_id, const laufey_message_dialog_options_t* options,
+    laufey_message_dialog_result_fn callback, void* user_data) {
+  laufey_common::ParentResolver parent;
+  if (window_id != 0) {
+    parent = [this, window_id]() -> void* {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      return state ? state->window : nullptr;
+    };
+  }
+  return laufey_common::ShowMessageDialogLinux(std::move(parent), options,
+                                               callback, user_data);
 }
 
 void WebKitGTKBackend::SetWindowState(uint32_t window_id, int action) {

@@ -60,6 +60,7 @@ set(LAUFEY_COMMON_SRCS
   src/title_bar.cc
   src/overlay.cc
   src/quit_request.cc
+  src/message_dialog.cc
 )
 
 if(WIN32)
@@ -92,6 +93,7 @@ if(APPLE)
     src/user_activity_mac.mm
     src/overlay_mac.mm
     src/quit_request_mac.mm
+    src/message_dialog_mac.mm
     src/speech_mac.mm
   )
 elseif(UNIX)
@@ -99,6 +101,7 @@ elseif(UNIX)
     src/notifications_linux.cc
     src/launcher_entry_linux.cc
     src/dialog_linux.cc
+    src/message_dialog_linux.cc
     src/clipboard_linux.cc
     src/clipboard_data_control_linux.cc
     src/clipboard_x11_linux.cc
@@ -129,6 +132,7 @@ elseif(WIN32)
     src/notifications_win.cc
     src/share_win.cc
     src/dialog_win.cc
+    src/message_dialog_win.cc
     src/clipboard_win.cc
     src/tray_win.cc
     src/passkey_win.cc
@@ -352,6 +356,11 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_overlay_test tests/overlay_test.cc)
   target_link_libraries(laufey_overlay_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_overlay_test COMMAND laufey_overlay_test)
+
+  # Message dialogs (API 54): the options, the ids, exactly-once results.
+  add_executable(laufey_message_dialog_test tests/message_dialog_test.cc)
+  target_link_libraries(laufey_message_dialog_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_message_dialog_test COMMAND laufey_message_dialog_test)
 
   add_executable(laufey_quit_request_test tests/quit_request_test.cc)
   target_link_libraries(laufey_quit_request_test PRIVATE laufey_backend_common)

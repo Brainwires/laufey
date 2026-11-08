@@ -931,6 +931,18 @@ static uint32_t Backend_ShowFileDialog(
   return 0;
 }
 
+static uint32_t Backend_ShowMessageDialog(
+    void* data, uint32_t window_id,
+    const laufey_message_dialog_options_t* options,
+    laufey_message_dialog_result_fn callback, void* user_data) {
+  if (!callback)
+    return 0;
+  if (LaufeyBackend* backend = BackendOf(data))
+    return backend->ShowMessageDialog(window_id, options, callback, user_data);
+  callback(user_data, 0, LAUFEY_MESSAGE_DIALOG_FAILED, -1);
+  return 0;
+}
+
 static bool Backend_CancelFileDialog(void* data, uint32_t dialog_id) {
   if (LaufeyBackend* backend = BackendOf(data))
     return backend->CancelFileDialog(dialog_id);
@@ -1750,6 +1762,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.show_file_dialog = Backend_ShowFileDialog;
   backend_api_.cancel_file_dialog = Backend_CancelFileDialog;
   backend_api_.test_file_dialog_respond = Backend_TestFileDialogRespond;
+  backend_api_.show_message_dialog = Backend_ShowMessageDialog;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

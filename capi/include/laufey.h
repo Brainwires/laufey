@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 53
+#define LAUFEY_API_VERSION 54
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -198,6 +198,8 @@ extern "C" {
 // on Linux, probed when asked; ACRYLIC is then reported too, as the same
 // blur).
 #define LAUFEY_WINDOW_CAP_BACKDROP_BLUR (1u << 21)
+// API >= 54: show_message_dialog works (with no window open too).
+#define LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS (1u << 22)
 
 // --- Drag and drop (API >= 39) ----------------------------------------------
 //
@@ -296,6 +298,51 @@ typedef void (*laufey_file_dialog_result_fn)(void* user_data,
 // Actions for test_file_dialog_respond.
 #define LAUFEY_TEST_DIALOG_CANCEL 0
 #define LAUFEY_TEST_DIALOG_ACCEPT 1
+
+// --- Native message dialogs (API >= 54) -------------------------------------
+//
+// Kinds for laufey_message_dialog_options_t.kind: the icon the OS shows.
+#define LAUFEY_MESSAGE_DIALOG_INFO 0
+#define LAUFEY_MESSAGE_DIALOG_WARNING 1
+#define LAUFEY_MESSAGE_DIALOG_ERROR 2
+
+// Result statuses passed to laufey_message_dialog_result_fn: ANSWERED, a
+// button was pressed (`response`); CANCELLED, dismissed without a button
+// (Escape with no cancel button, the close button, quitting); FAILED, the OS
+// could not show it, or the options were invalid.
+#define LAUFEY_MESSAGE_DIALOG_ANSWERED 0
+#define LAUFEY_MESSAGE_DIALOG_CANCELLED 1
+#define LAUFEY_MESSAGE_DIALOG_FAILED 2
+
+// Most buttons one dialog has; a longer list is refused (FAILED).
+#define LAUFEY_MESSAGE_DIALOG_MAX_BUTTONS 16
+
+// Options for show_message_dialog. Every string is UTF-8; `message` is the
+// main line (required, non-empty), `detail` the smaller text under it (NULL
+// for none), `title` the window title where the OS shows one (NULL: the app's
+// name; macOS alerts have no title bar). `buttons` are the labels, in the
+// order the indexes count (each OS places them its own way: macOS stacks the
+// first rightmost); 0 buttons is one "OK".
+// `default_index` is the button Return presses (-1: the first);
+// `cancel_index` the one Escape presses (-1: none, Escape then dismisses the
+// dialog as CANCELLED where the OS lets it). The backend copies everything it
+// needs before show_message_dialog returns.
+typedef struct laufey_message_dialog_options {
+  int kind;  // LAUFEY_MESSAGE_DIALOG_INFO / _WARNING / _ERROR
+  const char* title;
+  const char* message;
+  const char* detail;
+  const char* const* buttons;
+  size_t button_count;
+  int32_t default_index;
+  int32_t cancel_index;
+} laufey_message_dialog_options_t;
+
+// Result of show_message_dialog: `status` is LAUFEY_MESSAGE_DIALOG_*;
+// `response` is the index of the pressed button for ANSWERED, else -1.
+typedef void (*laufey_message_dialog_result_fn)(void* user_data,
+                                                uint32_t dialog_id, int status,
+                                                int32_t response);
 
 // --- Clipboard: HTML, images, formats and change events (API >= 39) ---------
 //
@@ -2718,6 +2765,29 @@ struct laufey_backend_api {
   // never asked). Any thread.
   bool (*answer_media_capture)(void* backend_data, uint64_t request_id,
                                bool allow);
+
+  // --- Native message dialogs (API >= 54) ----------------------------------
+  //
+  // Show the OS's own message box: NSAlert (macOS), TaskDialogIndirect
+  // (Windows; its custom buttons carry the labels), GtkMessageDialog (Linux).
+  // `window_id` != 0 makes it modal to that window (a sheet on macOS) when
+  // the window is open and visible; 0 (or a window that is gone) shows an
+  // app-modal dialog, which works with no window open at all (a tray app, a
+  // quit guard). Any thread: the backend shows it on its UI thread (Windows:
+  // its I/O thread, so the dialog's modal loop never stalls the engine's UI
+  // thread) and returns at once; the runtime thread never blocks. Several
+  // may be open at once.
+  //
+  // Returns the dialog id (> 0) the callback carries, or 0 when the request
+  // was answered at once. `callback` fires EXACTLY ONCE: when the dialog
+  // closes, or FAILED when the OS could not show it (no display), on the UI
+  // / I/O thread; or synchronously on the calling thread before this returns
+  // 0 (FAILED for bad options or a NULL `options`). A NULL `callback` returns
+  // 0 and shows nothing.
+  uint32_t (*show_message_dialog)(
+      void* backend_data, uint32_t window_id,
+      const laufey_message_dialog_options_t* options,
+      laufey_message_dialog_result_fn callback, void* user_data);
 };
 
 #ifdef __cplusplus

@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `53`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `54`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -117,6 +117,9 @@ The pointers group into:
   folder dialog, from any thread, resolved through a callback; never blocks the
   caller), `cancel_file_dialog`, and the `test_file_dialog_respond` hook. See
   [file-dialogs.md](file-dialogs.md).
+- **Message dialogs** (API ≥ 54) — `show_message_dialog` (the OS's message box
+  with custom button labels, app-modal with no window; asynchronous like the
+  file dialogs). See [message-dialogs.md](message-dialogs.md).
 - **Clipboard** — `read_clipboard_text` / `write_clipboard_text` (API ≥ 27) and,
   from API 39, `clipboard_capabilities`, HTML and PNG reads and writes,
   `read_clipboard_formats`, `set_clipboard_change_handler` and `buffer_free`;
@@ -524,6 +527,26 @@ asking document's serialized origin; the request waits until
 `set_media_capture_handler(NULL)`, which refuses every request still waiting.
 `answer_media_capture` returns false for a request that is not waiting. NULL on
 the Winit backends. See [Microphone and camera](media-capture.md).
+
+## Message dialogs (API ≥ 54)
+
+```c
+uint32_t (*show_message_dialog)(void* backend_data, uint32_t window_id,
+                                const laufey_message_dialog_options_t* options,
+                                laufey_message_dialog_result_fn callback,
+                                void* user_data);
+typedef void (*laufey_message_dialog_result_fn)(void* user_data,
+                                                uint32_t dialog_id, int status,
+                                                int32_t response);
+```
+
+The OS's message box (NSAlert, TaskDialogIndirect, GtkMessageDialog) with the
+app's button labels. Asynchronous like `show_file_dialog`: any thread, never
+blocking the caller, `callback` exactly once with `ANSWERED` and the pressed
+button's index, `CANCELLED` (no button) or `FAILED`. A `window_id` of 0, or one
+that is gone, gives an app-modal dialog, which works with no window open.
+Several may be open at once. Reported by `LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS`;
+NULL on the Winit backends. See [Message dialogs](message-dialogs.md).
 
 ## UI-thread tasks (API ≥ 42)
 
