@@ -1011,7 +1011,7 @@ pub struct LaufeyBackendApi {
       *mut c_void,
       u32,
       *const c_void,
-      Option<unsafe extern "C" fn(*mut c_void, u32, c_int, i32)>,
+      Option<LaufeyMessageDialogResultFn>,
       *mut c_void,
     ) -> u32,
   >,
@@ -1081,6 +1081,10 @@ pub type ShortcutResultFn =
 /// `laufey_file_dialog_result_fn` (API 39).
 pub type LaufeyFileDialogResultFn =
   unsafe extern "C" fn(*mut c_void, u32, c_int, *const *const c_char, usize);
+
+/// `laufey_message_dialog_result_fn` (API 54).
+pub type LaufeyMessageDialogResultFn =
+  unsafe extern "C" fn(*mut c_void, u32, c_int, i32);
 
 /// `laufey_window_state_fn` (API 38).
 pub type LaufeyWindowStateFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32);
