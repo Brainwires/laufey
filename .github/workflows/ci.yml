@@ -66,9 +66,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Self-hosted pools: only `release` (tags only) runs there. Every other job stays on GitHub's
+# images while this workflow's push runs on main / denext/integration, which the pools' vetting does not serve (laufey's default branch is development-denext), besides the gap each job names.
 jobs:
   lint:
     name: lint
+    # Stays on GitHub-hosted: sudo apt-get (inert in the self-hosted Linux containers).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -128,6 +131,7 @@ jobs:
   # vulnerability; unmaintained/unsound/yanked warnings are printed only.
   cargo-audit:
     name: cargo audit
+    # Stays on GitHub-hosted: the trigger (see the jobs: header).
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -144,6 +148,7 @@ jobs:
 
   test:
     name: cargo test (capi)
+    # Stays on GitHub-hosted: the trigger (see the jobs: header).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -347,6 +352,7 @@ jobs:
   # call it happens to, where a plain run only hangs now and then.
   tsan:
     name: ThreadSanitizer (backend-common)
+    # Stays on GitHub-hosted: sudo sysctl / apt-get (no capability, sudo inert in the self-hosted Linux containers).
     runs-on: ubuntu-24.04
     env:
       TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
@@ -426,6 +432,7 @@ jobs:
   # here: exit 77 fails the step.
   clipboard-linux:
     name: clipboard (headless sway + Xvfb)
+    # Stays on GitHub-hosted: a `container:` job (no Docker socket in the self-hosted Linux containers).
     runs-on: ubuntu-latest
     container: ubuntu:26.04
     steps:
@@ -1289,6 +1296,7 @@ jobs:
   # host's `laufey: sandbox: <mode>` line and, from outside, the renderers.
   sandbox-modes-linux:
     name: native-e2e / cef sandbox modes / ubuntu-24.04
+    # Stays on GitHub-hosted: sudo sysctl (AppArmor userns) and a root-owned setuid chrome-sandbox.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -1377,6 +1385,7 @@ jobs:
 
   e2e-cef-linux:
     name: e2e / cef / x86_64-unknown-linux-gnu (Xvfb)
+    # Stays on GitHub-hosted: sudo apt-get (inert in the self-hosted Linux containers).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1558,6 +1567,7 @@ jobs:
   storage-stress-cef-macos-x64:
     name: storage stress / cef / x86_64-apple-darwin (${{ matrix.shard }})
     if: github.event_name == 'workflow_dispatch' && inputs.storage_stress_shards != ''
+    # Stays on GitHub-hosted: brew install llvm ninja (no Homebrew on the self-hosted macOS pools).
     runs-on: macos-15-intel
     strategy:
       fail-fast: false
@@ -1643,7 +1653,8 @@ jobs:
         build-webview,
         build-cef,
       ]
-    runs-on: ubuntu-latest
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-latest (tag runs only).
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-latest"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-latest'))) }}
     permissions:
       contents: write
     steps:
