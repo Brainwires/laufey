@@ -10,6 +10,7 @@
 #include <cctype>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <utility>
@@ -429,6 +430,65 @@ void FireContextMenuClosedNow(uint32_t window_id,
                               void* on_closed_data) {
   if (on_closed)
     on_closed(on_closed_data, window_id);
+}
+
+// --- Application-menu clicks for the app (API 55)
+// -----------------------------------------------
+
+namespace {
+
+struct AppMenuClickState {
+  std::mutex mutex;
+  laufey_menu_click_fn handler = nullptr;
+  void* handler_data = nullptr;
+  // The interned (on_click, on_click_data) pairs WrapAppMenuClick hands out.
+  std::map<std::pair<laufey_menu_click_fn, void*>,
+           std::unique_ptr<AppMenuClickFn>>
+      wrapped;
+};
+
+// Leaked: a menu item may call in during process exit.
+AppMenuClickState& AppMenuClicks() {
+  static AppMenuClickState* state = new AppMenuClickState();
+  return *state;
+}
+
+void AppMenuClickTrampoline(void* data, uint32_t window_id,
+                            const char* item_id) {
+  const AppMenuClickFn* own = static_cast<const AppMenuClickFn*>(data);
+  if (own && own->fn)
+    own->fn(own->data, window_id, item_id);
+  laufey_menu_click_fn handler;
+  void* handler_data;
+  {
+    AppMenuClickState& state = AppMenuClicks();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    handler = state.handler;
+    handler_data = state.handler_data;
+  }
+  // Called without the lock: the handler may replace itself.
+  if (handler)
+    handler(handler_data, window_id, item_id);
+}
+
+}  // namespace
+
+void SetAppMenuClickHandler(laufey_menu_click_fn handler, void* user_data) {
+  AppMenuClickState& state = AppMenuClicks();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.handler = handler;
+  state.handler_data = handler ? user_data : nullptr;
+}
+
+AppMenuClickFn WrapAppMenuClick(laufey_menu_click_fn on_click,
+                                void* on_click_data) {
+  AppMenuClickState& state = AppMenuClicks();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  std::unique_ptr<AppMenuClickFn>& own =
+      state.wrapped[std::make_pair(on_click, on_click_data)];
+  if (!own)
+    own.reset(new AppMenuClickFn{on_click, on_click_data});
+  return AppMenuClickFn{AppMenuClickTrampoline, own.get()};
 }
 
 }  // namespace laufey_common

@@ -182,6 +182,34 @@ std::vector<MenuAccelBinding> CollectMenuAccelerators(
 const MenuAccelBinding* FindMenuAccelerator(
     const std::vector<MenuAccelBinding>& bindings, const Accelerator& accel);
 
+// --- Application-menu clicks for the app (API 55)
+// -----------------------------------------------
+//
+// set_app_menu_click_handler: every click on a custom item of an application
+// menu (set_application_menu) is reported to one app-level handler too,
+// whether or not the window the menu was set for is still open. A backend
+// builds each application menu with the click function WrapAppMenuClick
+// returns in place of the caller's: it calls the caller's `on_click` (when
+// not NULL), then the app-level handler, with the same window id and item.
+// Context, dock and tray menus are built with the caller's function and are
+// not reported.
+
+// Sets (or, with a NULL `handler`, clears) the app-level handler. Any thread;
+// a click already running may still reach the previous handler.
+void SetAppMenuClickHandler(laufey_menu_click_fn handler, void* user_data);
+
+struct AppMenuClickFn {
+  laufey_menu_click_fn fn;
+  void* data;
+};
+
+// The click function and data to build an application menu with for the
+// caller's `on_click` / `on_click_data`. The data is interned per pair and
+// never freed: a menu can outlive its window (the macOS menu bar keeps the
+// menu of a window that closed), so its items may call it at any time.
+AppMenuClickFn WrapAppMenuClick(laufey_menu_click_fn on_click,
+                                void* on_click_data);
+
 }  // namespace laufey_common
 
 #endif  // LAUFEY_MENU_H_

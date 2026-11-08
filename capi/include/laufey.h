@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 54
+#define LAUFEY_API_VERSION 55
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -2788,6 +2788,25 @@ struct laufey_backend_api {
       void* backend_data, uint32_t window_id,
       const laufey_message_dialog_options_t* options,
       laufey_message_dialog_result_fn callback, void* user_data);
+
+  // --- Application-menu clicks for the app (API >= 55) ---------------------
+  //
+  // Register the app-level handler (NULL clears it). Every click on a custom
+  // item (one with an "id"; on Windows / Linux one without falls back to its
+  // label, as on_click does) of an application menu set with
+  // set_application_menu is reported here too, right after that menu's own
+  // on_click (which may be NULL: a menu whose clicks only the app handles),
+  // with the window id the menu was set for. That window may have closed:
+  // the macOS menu bar keeps showing the menu of the last window that set
+  // one until another window with a menu becomes key, so the handler is how
+  // an app whose windows are gone (keepAlive, a tray app) still hears its
+  // menu. On Windows and Linux the menu bar belongs to its window, so its
+  // clicks come from an open window. Context, dock and tray menus are not
+  // reported. Fires on the backend UI thread. CEF and WebView implement it;
+  // NULL on Winit.
+  void (*set_app_menu_click_handler)(void* backend_data,
+                                     laufey_menu_click_fn handler,
+                                     void* user_data);
 };
 
 #ifdef __cplusplus

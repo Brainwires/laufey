@@ -1687,6 +1687,11 @@ static void Backend_SetApplicationMenu(void* data, uint32_t window_id,
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (!browser)
     return;
+  // Clicks also reach the app-level handler (API 55).
+  laufey_common::AppMenuClickFn click =
+      laufey_common::WrapAppMenuClick(on_click, on_click_data);
+  on_click = click.fn;
+  on_click_data = click.data;
   CefPostTask(
       TID_UI,
       base::BindOnce(
@@ -3755,6 +3760,12 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.cancel_file_dialog = Backend_CancelFileDialog;
   backend_api_.test_file_dialog_respond = Backend_TestFileDialogRespond;
   backend_api_.show_message_dialog = Backend_ShowMessageDialog;
+  // Application-menu clicks for the app (API 55): both menu builders (the
+  // macOS menu bar, the Views menu bar elsewhere) use WrapAppMenuClick.
+  backend_api_.set_app_menu_click_handler =
+      [](void*, laufey_menu_click_fn handler, void* user_data) {
+        laufey_common::SetAppMenuClickHandler(handler, user_data);
+      };
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

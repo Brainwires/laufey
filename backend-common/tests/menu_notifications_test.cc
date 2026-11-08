@@ -2,7 +2,9 @@
 //
 // Unit tests for the portable parts of API 41: menu template parsing with
 // accelerators (laufey_menu.h), the accelerator lookup and key-code helpers,
-// the context-menu session (exactly-once close, the dismiss hook), and the
+// the context-menu session (exactly-once close, the dismiss hook), the
+// application-menu click wrapper (API 55: the window's callback, then the
+// app-level handler), and the
 // notification core (laufey_notifications.h) over a fake platform: option
 // validation, generated tags, live routing of shown / clicks / actions /
 // closes, responses for notifications no live callback owns, the response
@@ -223,6 +225,79 @@ void TestContextMenuSession() {
   FireContextMenuClosedNow(3, OnClosed, &one);
   EXPECT(g_closed == 2 && g_closed_window == 3);
   FireContextMenuClosedNow(3, nullptr, nullptr);  // no callback: fine
+}
+
+// --- Application-menu clicks for the app (API 55) ---
+
+struct Click {
+  std::string who;
+  uint32_t window_id;
+  std::string id;
+};
+std::vector<Click> g_clicks;
+void OnWindowClick(void* data, uint32_t window_id, const char* id) {
+  g_clicks.push_back({static_cast<const char*>(data), window_id, id});
+}
+void OnAppClick(void* data, uint32_t window_id, const char* id) {
+  g_clicks.push_back({static_cast<const char*>(data), window_id, id});
+}
+void OnAppClickReplacing(void*, uint32_t window_id, const char* id) {
+  g_clicks.push_back({"replacing", window_id, id});
+  static char second[] = "second";
+  SetAppMenuClickHandler(OnAppClick, second);
+}
+
+void TestAppMenuClicks() {
+  static char main_menu[] = "main";
+  static char other_menu[] = "other";
+  static char app[] = "app";
+  AppMenuClickFn main_fn = WrapAppMenuClick(OnWindowClick, main_menu);
+  AppMenuClickFn other_fn = WrapAppMenuClick(OnWindowClick, other_menu);
+  // Interned: the same pair gets the same data, another pair other data.
+  AppMenuClickFn again = WrapAppMenuClick(OnWindowClick, main_menu);
+  EXPECT(again.fn == main_fn.fn && again.data == main_fn.data);
+  EXPECT(other_fn.data != main_fn.data);
+
+  // No app handler: only the window's own callback.
+  g_clicks.clear();
+  main_fn.fn(main_fn.data, 1, "new");
+  EXPECT(g_clicks.size() == 1 && g_clicks[0].who == "main");
+
+  // With one: the window's callback, then the app's, same window and item
+  // (whether or not the window is still open: the wrapper doesn't know).
+  SetAppMenuClickHandler(OnAppClick, app);
+  g_clicks.clear();
+  main_fn.fn(main_fn.data, 1, "new");
+  other_fn.fn(other_fn.data, 2, "close");
+  EXPECT(g_clicks.size() == 4);
+  EXPECT(g_clicks[0].who == "main" && g_clicks[0].window_id == 1 &&
+         g_clicks[0].id == "new");
+  EXPECT(g_clicks[1].who == "app" && g_clicks[1].window_id == 1 &&
+         g_clicks[1].id == "new");
+  EXPECT(g_clicks[2].who == "other" && g_clicks[3].who == "app" &&
+         g_clicks[3].window_id == 2 && g_clicks[3].id == "close");
+
+  // A menu set without a window callback still reaches the app.
+  AppMenuClickFn app_only = WrapAppMenuClick(nullptr, nullptr);
+  g_clicks.clear();
+  app_only.fn(app_only.data, 5, "about");
+  EXPECT(g_clicks.size() == 1 && g_clicks[0].who == "app" &&
+         g_clicks[0].window_id == 5);
+
+  // The handler may replace itself (it runs without the lock).
+  SetAppMenuClickHandler(OnAppClickReplacing, nullptr);
+  g_clicks.clear();
+  app_only.fn(app_only.data, 5, "a");
+  app_only.fn(app_only.data, 5, "b");
+  EXPECT(g_clicks.size() == 2 && g_clicks[0].who == "replacing" &&
+         g_clicks[1].who == "second" && g_clicks[1].id == "b");
+
+  // Cleared: back to the window's callback alone.
+  SetAppMenuClickHandler(nullptr, app);
+  g_clicks.clear();
+  main_fn.fn(main_fn.data, 1, "new");
+  app_only.fn(app_only.data, 5, "about");
+  EXPECT(g_clicks.size() == 1 && g_clicks[0].who == "main");
 }
 
 // --- Notifications ---
@@ -946,6 +1021,7 @@ int main() {
   TestTrayRoles();
   TestKeyCodes();
   TestContextMenuSession();
+  TestAppMenuClicks();
   TestValidate();
   TestRouting();
   TestFormats();

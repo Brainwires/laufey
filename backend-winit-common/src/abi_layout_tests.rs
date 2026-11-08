@@ -251,7 +251,8 @@ fn vtable_layout_matches_the_header() {
     quit_request_pending,
     set_media_capture_handler,
     answer_media_capture,
-    show_message_dialog
+    show_message_dialog,
+    set_app_menu_click_handler
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

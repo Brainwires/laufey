@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `54`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `55`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -79,7 +79,9 @@ The pointers group into:
   `show_context_menu_ex` (a close callback fired exactly once; the backend takes
   the template), `menu_capabilities`, and the `test_trigger_menu_accelerator` /
   `test_dismiss_context_menu` hooks. App-menu accelerators fire their items on
-  every desktop backend from API 41. See [menus.md](menus.md).
+  every desktop backend from API 41. From API 55 `set_app_menu_click_handler`
+  hears every application-menu click at the app level, the window that set the
+  menu open or not. See [menus.md](menus.md).
 - **DevTools** — `open_devtools` and, from API 40, `close_devtools`,
   `is_devtools_open` and `is_devtools_enabled` (read back from the engine;
   `LAUFEY_INSPECTABLE=0` / `"inspectable": false` turns DevTools off for the
@@ -547,6 +549,26 @@ button's index, `CANCELLED` (no button) or `FAILED`. A `window_id` of 0, or one
 that is gone, gives an app-modal dialog, which works with no window open.
 Several may be open at once. Reported by `LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS`;
 NULL on the Winit backends. See [Message dialogs](message-dialogs.md).
+
+## Application-menu clicks for the app (API ≥ 55)
+
+```c
+void (*set_app_menu_click_handler)(void* backend_data,
+                                   laufey_menu_click_fn handler,
+                                   void* user_data);
+```
+
+One app-level handler (NULL clears it) hears every click on a custom item of an
+application menu set with `set_application_menu`, right after that menu's own
+`on_click` (which may be NULL), with the id of the window the menu was set for.
+That window may have closed: the macOS menu bar keeps the menu of the last
+window that set one until another window with a menu becomes key, so this is how
+an app with no window left still hears its menu. Context, dock and tray menus
+are not reported. UI thread. CEF and WebView implement it (each builds its
+application menus with `laufey_common::WrapAppMenuClick`); NULL on the Winit
+backends, where the `laufey` crate's `set_app_menu_click_handler` takes the
+clicks from the window menus' own callback instead. See
+[menus.md](menus.md#application-menu-clicks-for-the-app).
 
 ## UI-thread tasks (API ≥ 42)
 
