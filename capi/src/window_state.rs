@@ -56,6 +56,8 @@ pub const LAUFEY_WINDOW_CAP_FILE_DIALOGS: u32 = 1 << 18;
 pub const LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES: u32 = 1 << 19;
 pub const LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL: u32 = 1 << 20;
 pub const LAUFEY_WINDOW_CAP_BACKDROP_BLUR: u32 = 1 << 21;
+// API 54: native message dialogs.
+pub const LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS: u32 = 1 << 22;
 
 // --- Types ---
 
@@ -312,6 +314,10 @@ impl WindowCapabilities {
   /// A dialog given a window is modal to it.
   pub fn file_dialog_modal(&self) -> bool {
     self.has(LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL)
+  }
+  /// `show_message_dialog` works, with no window open too (API 54).
+  pub fn message_dialogs(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS)
   }
 }
 
@@ -729,6 +735,15 @@ mod tests {
     assert!(caps.state() && caps.vibrancy());
     assert!(!caps.mica() && !caps.screens() && !caps.keep_alive());
     assert!(!caps.blur());
+    assert!(!caps.message_dialogs());
+    let caps = WindowCapabilities {
+      bits: LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS,
+    };
+    assert!(caps.message_dialogs() && !caps.file_dialogs());
+    assert_eq!(
+      LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS,
+      ffi::LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS
+    );
   }
 
   static SCREEN_COUNT: std::sync::atomic::AtomicUsize =

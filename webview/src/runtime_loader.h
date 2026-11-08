@@ -700,6 +700,14 @@ class LaufeyBackend {
   virtual bool TestFileDialogRespond(int /*action*/, const char* /*path*/) {
     return false;
   }
+  // Message dialogs (API 54): FAILED on a backend without them (iOS).
+  virtual uint32_t ShowMessageDialog(
+      uint32_t /*window_id*/, const laufey_message_dialog_options_t* /*opts*/,
+      laufey_message_dialog_result_fn callback, void* user_data) {
+    if (callback)
+      callback(user_data, 0, LAUFEY_MESSAGE_DIALOG_FAILED, -1);
+    return 0;
+  }
   virtual uint32_t ClipboardCapabilities() {
     return LAUFEY_CLIPBOARD_CAP_TEXT;
   }

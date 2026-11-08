@@ -69,6 +69,9 @@ pub use quit_request::*;
 mod media_capture;
 pub use media_capture::*;
 
+mod message_dialog;
+pub use message_dialog::*;
+
 mod background;
 pub use background::*;
 
@@ -84,7 +87,7 @@ mod build_support_tests;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 53;
+pub const LAUFEY_API_VERSION: u32 = 54;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.

@@ -12,6 +12,7 @@
 - [Menus](menus.md)
 - [Native dialogs](dialogs.md)
 - [File dialogs](file-dialogs.md)
+- [Message dialogs](message-dialogs.md)
 - [Drag and drop](drag-and-drop.md)
 - [Downloads](downloads.md)
 - [Input events](input-events.md)

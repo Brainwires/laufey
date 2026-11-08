@@ -4,6 +4,7 @@
 
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
+#include "laufey_message_dialog.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_downloads.h"
 #include "laufey_navigation_guard.h"
@@ -2863,6 +2864,28 @@ uint32_t LaufeyShowFileDialog(uint32_t window_id,
                                 user_data);
 }
 
+// Message dialogs (API 54; laufey_message_dialog.h). On Linux GTK's dialog
+// can't be transient for Chromium's (non-GTK) window, so it is app-modal.
+static uint32_t Backend_ShowMessageDialog(
+    void* /*data*/, uint32_t window_id,
+    const laufey_message_dialog_options_t* options,
+    laufey_message_dialog_result_fn callback, void* user_data) {
+  if (!callback)
+    return 0;
+#if defined(__APPLE__)
+  return laufey_common::ShowMessageDialogMac(CefParentResolver(window_id),
+                                             options, callback, user_data);
+#elif defined(_WIN32)
+  return laufey_common::ShowMessageDialogWin(CefParentResolver(window_id),
+                                             options, callback, user_data);
+#else
+  (void)window_id;
+  EnsureGtkReady();
+  return laufey_common::ShowMessageDialogLinux(nullptr, options, callback,
+                                               user_data);
+#endif
+}
+
 static bool Backend_CancelFileDialog(void* /*data*/, uint32_t dialog_id) {
 #if defined(__APPLE__)
   return laufey_common::CancelFileDialogMac(dialog_id);
@@ -3115,6 +3138,9 @@ static uint32_t Backend_WindowCapabilities(void* /*data*/) {
   // macOS sheets and Windows owner windows are modal; on Linux the GTK dialog
   // can't be made modal to Chromium's (non-GTK) window.
   caps |= LAUFEY_WINDOW_CAP_FILE_DIALOGS;
+  // Message dialogs (API 54): NSAlert / TaskDialog / GtkMessageDialog, app-
+  // modal with no window (on Linux always: Chromium's windows aren't GTK's).
+  caps |= LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS;
 #if defined(__APPLE__)
   caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
           LAUFEY_WINDOW_CAP_FILE_DROP_ENTER_PATHS |
@@ -3728,6 +3754,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.show_file_dialog = Backend_ShowFileDialog;
   backend_api_.cancel_file_dialog = Backend_CancelFileDialog;
   backend_api_.test_file_dialog_respond = Backend_TestFileDialogRespond;
+  backend_api_.show_message_dialog = Backend_ShowMessageDialog;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

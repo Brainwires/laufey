@@ -8,6 +8,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
+#include "laufey_message_dialog.h"
 #include "laufey_window.h"
 
 #include <algorithm>
@@ -54,6 +55,8 @@ void CancelGtkDialogsForQuit() {
   // here when no thread owns the context (before the loop starts), which
   // could be a thread other than the UI thread.
   g_idle_add_full(G_PRIORITY_HIGH, CancelRunningDialogs, nullptr, nullptr);
+  // The message dialogs (API 54) run no nested loop, but end with the app.
+  CancelGtkMessageDialogsForQuit();
 }
 
 int ShowDialogLinux(int dialog_type, const std::string& title,

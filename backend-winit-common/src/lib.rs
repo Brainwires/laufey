@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 53;
+pub const LAUFEY_API_VERSION: u32 = 54;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -1005,6 +1005,16 @@ pub struct LaufeyBackendApi {
   >,
   pub answer_media_capture:
     Option<unsafe extern "C" fn(*mut c_void, u64, bool) -> bool>,
+  // --- Native message dialogs (API >= 54)
+  pub show_message_dialog: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *const c_void,
+      Option<LaufeyMessageDialogResultFn>,
+      *mut c_void,
+    ) -> u32,
+  >,
 }
 
 /// `laufey_rect_t` (API 50).
@@ -1071,6 +1081,10 @@ pub type ShortcutResultFn =
 /// `laufey_file_dialog_result_fn` (API 39).
 pub type LaufeyFileDialogResultFn =
   unsafe extern "C" fn(*mut c_void, u32, c_int, *const *const c_char, usize);
+
+/// `laufey_message_dialog_result_fn` (API 54).
+pub type LaufeyMessageDialogResultFn =
+  unsafe extern "C" fn(*mut c_void, u32, c_int, i32);
 
 /// `laufey_window_state_fn` (API 38).
 pub type LaufeyWindowStateFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32);
@@ -1963,6 +1977,9 @@ pub fn create_api_base() -> LaufeyBackendApi {
     // API 53: Winit has no web engine to capture media for.
     set_media_capture_handler: None,
     answer_media_capture: None,
+    // API 54: like its file dialogs, Winit shows no message dialogs (the
+    // capability bit stays off).
+    show_message_dialog: None,
   }
 }
 
