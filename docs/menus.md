@@ -76,6 +76,21 @@ and CEF accelerators have no Windows-key (`Super`) modifier, so such an
 accelerator is shown but not bound there. On Windows the label shows the
 accelerator in the canonical form (`Ctrl+Shift+N`).
 
+## Application-menu clicks for the app
+
+`laufey::set_app_menu_click_handler(|window_id, id| …)` (C ABI:
+`set_app_menu_click_handler`, API 55) hears every click on a custom item of an
+application menu, after the window's own `set_menu` handler, with the id of the
+window the menu was set for. Unlike that handler it doesn't depend on the window
+being open: on macOS the menu bar keeps showing the menu of the last window that
+set one (until another window with a menu becomes key), so an app kept alive
+with its windows closed, or a tray app, still gets its menu's clicks here, with
+the closed window's id. On Windows and Linux the menu bar belongs to its window,
+so its clicks come from an open window. Context, dock and tray menus are not
+reported. `clear_app_menu_click_handler()` removes it. On Winit, whose backend
+leaves the C entry NULL, the crate reports the clicks from the window menus' own
+callback, so the handler works on every backend.
+
 ## The context menu's close callback
 
 `Window::show_context_menu_with_close` (C ABI: `show_context_menu_ex`, API 41)

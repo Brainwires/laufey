@@ -708,9 +708,12 @@ void Backend_SetApplicationMenu_Mac(void* data, uint32_t window_id,
   auto entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
       laufey_common::ParseMenuTemplate(menu_template, &loader->GetBackendApi(),
                                        true));
+  // Clicks also reach the app-level handler (API 55).
+  laufey_common::AppMenuClickFn click =
+      laufey_common::WrapAppMenuClick(on_click, on_click_data);
   dispatch_async(dispatch_get_main_queue(), ^{
     NSMenu* menubar = laufey_common::BuildNSMenuFromEntries(
-        *entries, on_click, on_click_data, window_id);
+        *entries, click.fn, click.data, window_id);
     EnsureEditMenu(menubar);
     // Store per-window
     {

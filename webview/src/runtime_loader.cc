@@ -11,6 +11,7 @@
 #include "laufey_notifications.h"
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
+#include "laufey_menu.h"
 #include "laufey_platform_features.h"
 #include "laufey_title_bar.h"
 #if defined(__linux__) || defined(__APPLE__)
@@ -616,10 +617,20 @@ static void Backend_SetApplicationMenu(void* data, uint32_t window_id,
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   LaufeyBackend* backend = loader->GetBackend();
   if (backend && menu_template) {
+    // Clicks also reach the app-level handler (API 55).
+    laufey_common::AppMenuClickFn click =
+        laufey_common::WrapAppMenuClick(on_click, on_click_data);
     backend->SetApplicationMenu(window_id, menu_template,
-                                &loader->GetBackendApi(), on_click,
-                                on_click_data);
+                                &loader->GetBackendApi(), click.fn, click.data);
   }
+}
+
+// Application-menu clicks for the app (API 55): every backend builds its
+// application menus with laufey_common::WrapAppMenuClick.
+static void Backend_SetAppMenuClickHandler(void* /*data*/,
+                                           laufey_menu_click_fn handler,
+                                           void* user_data) {
+  laufey_common::SetAppMenuClickHandler(handler, user_data);
 }
 
 static void Backend_ShowContextMenu(void* data, uint32_t window_id, int x,
@@ -1763,6 +1774,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.cancel_file_dialog = Backend_CancelFileDialog;
   backend_api_.test_file_dialog_respond = Backend_TestFileDialogRespond;
   backend_api_.show_message_dialog = Backend_ShowMessageDialog;
+  backend_api_.set_app_menu_click_handler = Backend_SetAppMenuClickHandler;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

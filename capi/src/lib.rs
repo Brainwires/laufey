@@ -72,6 +72,9 @@ pub use media_capture::*;
 mod message_dialog;
 pub use message_dialog::*;
 
+mod app_menu;
+pub use app_menu::*;
+
 mod background;
 pub use background::*;
 
@@ -87,7 +90,7 @@ mod build_support_tests;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 54;
+pub const LAUFEY_API_VERSION: u32 = 55;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -2565,6 +2568,9 @@ unsafe extern "C" fn menu_click_callback(
   if let Some(handler) = handler {
     handler(&id);
   }
+  // API 55: the app-level handler, where the backend doesn't report the
+  // click to it itself.
+  app_menu::report_window_menu_click(window_id, &id);
 }
 
 fn menu_click_handlers(
