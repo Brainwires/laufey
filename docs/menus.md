@@ -91,6 +91,18 @@ reported. `clear_app_menu_click_handler()` removes it. On Winit, whose backend
 leaves the C entry NULL, the crate reports the clicks from the window menus' own
 callback, so the handler works on every backend.
 
+## The app's own application menu (API 56)
+
+`laufey::set_app_menu(&template, |id| …)` (C ABI: `set_app_menu`) sets an
+application menu that belongs to no window, so an app can update it with every
+window closed (a tray app, one kept alive). On macOS the menu bar shows it
+whenever the key window has no menu of its own (`Window::set_menu`) and while no
+window is key; clicks reach `on_click` and the app-level handler above with
+window id 0. `clear_app_menu()` removes it (the bar keeps what it shows until
+another menu replaces it). Windows and Linux have no app menu bar (a menu bar
+belongs to its window), so it returns `false` there and on Winit: set the menu
+on each window instead.
+
 ## The context menu's close callback
 
 `Window::show_context_menu_with_close` (C ABI: `show_context_menu_ex`, API 41)

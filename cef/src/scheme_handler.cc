@@ -488,7 +488,13 @@ CefRefPtr<CefResourceHandler> LaufeySchemeHandlerFactory::Create(
   const cef_resource_type_t type = request->GetResourceType();
   const bool main_frame = type == RT_MAIN_FRAME;
   const bool frame_document = browser && (main_frame || type == RT_SUB_FRAME);
-  return new LaufeySchemeHandler(window_id,
-                                 browser ? browser->GetIdentifier() : 0,
-                                 frame_document, main_frame);
+  CefRefPtr<LaufeySchemeHandler> handler =
+      new LaufeySchemeHandler(window_id, browser ? browser->GetIdentifier() : 0,
+                              frame_document, main_frame);
+  // The requesting frame as CEF knows it (null for a request no frame made,
+  // a service worker's): never what the page sent.
+  if (frame)
+    handler->frame_kind =
+        frame->IsMain() ? LAUFEY_FRAME_MAIN : LAUFEY_FRAME_SUB;
+  return handler;
 }

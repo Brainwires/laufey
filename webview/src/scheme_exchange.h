@@ -34,6 +34,11 @@ class SchemeExchangeBase {
 
   // Complete the response and release this exchange (typically `delete this`).
   virtual void Finish() = 0;
+
+  // The frame that made the request (API 56, LAUFEY_FRAME_*: 0 unknown, 1
+  // the top-level document, 2 a sub-frame), set by the backend from the
+  // engine's own record of the request before it is dispatched.
+  uint32_t frame_kind = 0;
 };
 
 // Decode the flat name\0value\0...\0 header encoding into pairs.

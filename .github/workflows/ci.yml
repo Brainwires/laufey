@@ -212,6 +212,15 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/media_capture_test"
           "$RUNNER_TEMP/media_capture_test"
+      # Will-navigate (API 56): each reported navigation decided once (answer,
+      # deadline, closed window, cleared handler); the embedder's own loads.
+      - name: backend-common will_navigate_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/will_navigate_test.cc -pthread \
+            -o "$RUNNER_TEMP/will_navigate_test"
+          "$RUNNER_TEMP/will_navigate_test"
       # Page-triggered downloads: the file name the save dialog proposes, the
       # origins a window may download from, the prompt budget.
       - name: backend-common downloads_test

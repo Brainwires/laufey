@@ -4,6 +4,7 @@
 
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
+#include "laufey_will_navigate.h"
 #include "laufey_message_dialog.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_downloads.h"
@@ -193,6 +194,9 @@ static void Backend_Navigate(void* data, uint32_t window_id, const char* url) {
     // (laufey_navigation_guard.h); recorded before the load starts, so
     // OnBeforeBrowse lets it through.
     laufey_common::NavigationGuard::Instance().SetWindowUrl(window_id, url_str);
+    // The embedder's own load is not reported to will-navigate (API 56).
+    laufey_common::WillNavigateRequests::Instance().ExpectEmbedderNavigation(
+        window_id, url_str);
     CefPostTask(TID_UI, base::BindOnce(
                             [](CefRefPtr<CefBrowser> b, std::string u) {
                               b->GetMainFrame()->LoadURL(u);
@@ -317,6 +321,19 @@ static bool Backend_AnswerMediaCapture(void* /*data*/, uint64_t request_id,
                                        bool allow) {
   return laufey_common::MediaCaptureRequests::Instance().Answer(request_id,
                                                                 allow);
+}
+
+// Will-navigate (API 56; laufey_will_navigate.h).
+static void Backend_SetWillNavigateHandler(void* /*data*/,
+                                           laufey_will_navigate_fn handler,
+                                           void* user_data) {
+  laufey_common::WillNavigateRequests::Instance().SetHandler(handler,
+                                                             user_data);
+}
+static bool Backend_AnswerWillNavigate(void* /*data*/, uint64_t request_id,
+                                       uint32_t decision) {
+  return laufey_common::WillNavigateRequests::Instance().Answer(request_id,
+                                                                decision);
 }
 
 // Quit requests (API 52; laufey_quit_request.h).
@@ -1550,6 +1567,14 @@ static intptr_t Backend_SchemeRequestReadBody(
       buf, cap);
 }
 
+// The frame a scheme request came from (API 56).
+static uint32_t Backend_SchemeRequestFrame(void* /*data*/,
+                                           laufey_scheme_exchange_t* exchange) {
+  if (!exchange)
+    return LAUFEY_FRAME_UNKNOWN;
+  return reinterpret_cast<LaufeySchemeExchange*>(exchange)->frame_kind;
+}
+
 static void Backend_SchemeResponseBegin(void* /*data*/,
                                         laufey_scheme_exchange_t* exchange,
                                         int status, const char* headers,
@@ -1811,6 +1836,9 @@ static uint32_t Backend_MenuCapabilities(void* /*data*/) {
 
 #if defined(__APPLE__)
 // Defined in runtime_loader_mac.mm
+extern bool Backend_SetAppMenu_Mac(void* data, laufey_value_t* menu_template,
+                                   laufey_menu_click_fn on_click,
+                                   void* on_click_data);
 extern void Backend_SetApplicationMenu_Mac(void* data, uint32_t window_id,
                                            laufey_value_t* menu_template,
                                            laufey_menu_click_fn on_click,
@@ -2598,6 +2626,7 @@ static void Backend_CloseWindow(void* data, uint32_t window_id) {
   laufey_common::DownloadPolicy::Instance().ForgetWindow(window_id);
   // A microphone / camera request the window still waits on is refused.
   laufey_common::MediaCaptureRequests::Instance().ForgetWindow(window_id);
+  laufey_common::WillNavigateRequests::Instance().ForgetWindow(window_id);
   auto* loader = RuntimeLoader::GetInstance();
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
@@ -3652,12 +3681,16 @@ void RuntimeLoader::InitializeBackendApi() {
 
   backend_api_.register_scheme_handler = Backend_RegisterSchemeHandler;
   backend_api_.scheme_request_read_body = Backend_SchemeRequestReadBody;
+  backend_api_.scheme_request_frame = Backend_SchemeRequestFrame;
+  backend_api_.set_will_navigate_handler = Backend_SetWillNavigateHandler;
+  backend_api_.answer_will_navigate = Backend_AnswerWillNavigate;
   backend_api_.scheme_response_begin = Backend_SchemeResponseBegin;
   backend_api_.scheme_response_write = Backend_SchemeResponseWrite;
   backend_api_.scheme_response_finish = Backend_SchemeResponseFinish;
 
 #if defined(__APPLE__)
   backend_api_.set_application_menu = Backend_SetApplicationMenu_Mac;
+  backend_api_.set_app_menu = Backend_SetAppMenu_Mac;
   backend_api_.show_context_menu = Backend_ShowContextMenu_Mac;
   backend_api_.show_context_menu_ex = Backend_ShowContextMenuEx_Mac;
   backend_api_.menu_capabilities = [](void*) -> uint32_t {

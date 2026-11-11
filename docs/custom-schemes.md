@@ -102,6 +102,14 @@ the backend logs a warning. Each backend installs the schemes in its own way:
 laufey --laufey-custom-schemes=myapp --runtime ./libmyapp.so
 ```
 
+## Which frame asked (API 56)
+
+`SchemeExchange::frame()` (C ABI: `scheme_request_frame`) is `Main` for a
+request the window's top-level document made, `Sub` for one from a frame inside
+it, and `Unknown` where the engine does not tell (WebView2, WebKitGTK; WKWebView
+when its scheme task has no frame info). It comes from the engine, never from
+the request's headers.
+
 ## Local Network Access (CEF)
 
 Chromium's Local Network Access checks (formerly Private Network Access) hold a

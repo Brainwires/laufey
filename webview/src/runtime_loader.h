@@ -550,6 +550,15 @@ class LaufeyBackend {
                                   laufey_menu_click_fn on_click,
                                   void* on_click_data) = 0;
 
+  // The app's own application menu (API 56; set_app_menu in laufey.h).
+  // False where the OS has no app menu bar (the default).
+  virtual bool SetAppMenu(laufey_value_t* /*menu_template*/,
+                          const laufey_backend_api_t* /*api*/,
+                          laufey_menu_click_fn /*on_click*/,
+                          void* /*on_click_data*/) {
+    return false;
+  }
+
   virtual void ShowContextMenu(uint32_t window_id, int x, int y,
                                laufey_value_t* menu_template,
                                const laufey_backend_api_t* api,

@@ -9,6 +9,7 @@
 #include "laufey_window_blur.h"
 #include "laufey_backend_common.h"
 #include "laufey_media_capture.h"
+#include "laufey_will_navigate.h"
 #include "laufey_io.h"
 #include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
@@ -899,10 +900,63 @@ static gboolean on_decide_policy(WebKitWebView* /*webview*/,
   WebKitURIResponse* response =
       webkit_response_policy_decision_get_response(response_decision);
   const char* uri = response ? webkit_uri_response_get_uri(response) : nullptr;
-  if (wid != 0 &&
-      webkit_response_policy_decision_is_main_frame_main_resource(
-          response_decision) &&
-      GuardRefuses(wid, uri)) {
+  bool main_resource =
+      wid != 0 && webkit_response_policy_decision_is_main_frame_main_resource(
+                      response_decision);
+  // Will-navigate (API 56), where the guard decides: the main frame's
+  // response, held (WebKit lets the decision come later) until the embedder
+  // answers. WebKitGTK says neither how the navigation started nor which
+  // document started it: kind OTHER, no initiator.
+  if (main_resource && uri) {
+    auto& will = laufey_common::WillNavigateRequests::Instance();
+    std::string url(uri);
+    if (!will.TakeEmbedderNavigation(wid, url) && will.HandlerSet() &&
+        laufey_common::WillNavigateReported(url)) {
+      g_object_ref(decision);
+      auto start = will.Ask(
+          wid, url, "", LAUFEY_NAVIGATION_KIND_OTHER,
+          [decision, wid, url](uint32_t answer) {
+            struct Held {
+              WebKitPolicyDecision* decision;
+              uint32_t wid;
+              std::string url;
+              uint32_t answer;
+            };
+            g_main_context_invoke_full(
+                nullptr, G_PRIORITY_DEFAULT,
+                [](gpointer data) -> gboolean {
+                  auto* held = static_cast<Held*>(data);
+                  auto* rd = WEBKIT_RESPONSE_POLICY_DECISION(held->decision);
+                  WebKitURIResponse* r =
+                      webkit_response_policy_decision_get_response(rd);
+                  bool ignore = false;
+                  if (held->answer == LAUFEY_NAVIGATION_REFUSE)
+                    ignore = true;
+                  else if (held->answer == LAUFEY_NAVIGATION_DEFAULT)
+                    ignore = GuardRefuses(held->wid, held->url.c_str());
+                  if (!ignore && r &&
+                      SaveSchemeResponseIfDownload(held->wid, rd, r,
+                                                   held->url.c_str()))
+                    ignore = true;
+                  if (ignore)
+                    webkit_policy_decision_ignore(held->decision);
+                  else
+                    webkit_policy_decision_use(held->decision);
+                  return G_SOURCE_REMOVE;
+                },
+                new Held{decision, wid, url, answer},
+                [](gpointer data) {
+                  auto* held = static_cast<Held*>(data);
+                  g_object_unref(held->decision);
+                  delete held;
+                });
+          });
+      if (start == laufey_common::WillNavigateStart::kAsked)
+        return TRUE;
+      g_object_unref(decision);
+    }
+  }
+  if (main_resource && GuardRefuses(wid, uri)) {
     webkit_policy_decision_ignore(decision);
     return TRUE;
   }
@@ -1434,6 +1488,7 @@ static void on_window_destroy(GtkWidget* widget, gpointer user_data) {
     laufey_common::ForgetWindow(wid);
     // A microphone / camera request it waits on is refused.
     laufey_common::MediaCaptureRequests::Instance().ForgetWindow(wid);
+    laufey_common::WillNavigateRequests::Instance().ForgetWindow(wid);
   }
   // If no more windows, quit -- unless the app keeps running without one
   // (set_quit_on_last_window_closed(false)); quit() ends it anyway.

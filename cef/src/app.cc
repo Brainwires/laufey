@@ -13,6 +13,7 @@
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_media_capture.h"
+#include "laufey_will_navigate.h"
 #include "laufey_menu.h"
 #include "laufey_external_links.h"
 #include "laufey_downloads.h"
@@ -354,6 +355,7 @@ void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
     laufey_common::ForgetWindow(laufey_id_);
     // A microphone / camera request it waits on is refused.
     laufey_common::MediaCaptureRequests::Instance().ForgetWindow(laufey_id_);
+    laufey_common::WillNavigateRequests::Instance().ForgetWindow(laufey_id_);
 #if defined(_WIN32) || defined(__linux__)
     laufey_cef_menu::ForgetWindow(laufey_id_);
 #endif
@@ -455,11 +457,42 @@ bool LaufeyHandler::OnBeforePopup(
   return true;
 }
 
+// How a top-level navigation started (API 56, LAUFEY_NAVIGATION_KIND_*).
+static uint32_t LaufeyNavigationKind(CefRefPtr<CefRequest> request,
+                                     bool user_gesture, bool is_redirect) {
+  if (is_redirect)
+    return LAUFEY_NAVIGATION_KIND_REDIRECT;
+  const int source = request->GetTransitionType() & TT_SOURCE_MASK;
+  if (source == TT_LINK)
+    return user_gesture ? LAUFEY_NAVIGATION_KIND_LINK
+                        : LAUFEY_NAVIGATION_KIND_SCRIPT;
+  return LAUFEY_NAVIGATION_KIND_OTHER;
+}
+
+// A navigation will-navigate (API 56) let load, started again: CEF cannot
+// hold one, so OnBeforeBrowse cancelled it. A same-origin non-GET keeps its
+// method, body and headers (LoadRequest refuses another origin); anything
+// else is loaded by URL. The re-issue token lets the new load through.
+static void LaufeyReissueNavigation(CefRefPtr<CefBrowser> browser,
+                                    uint32_t window_id,
+                                    CefRefPtr<CefRequest> request) {
+  CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+  if (!frame)
+    return;
+  std::string url = request->GetURL().ToString();
+  laufey_common::WillNavigateRequests::Instance().ExpectReissue(window_id, url);
+  bool same_origin = laufey_common::OriginOfUrl(frame->GetURL().ToString()) ==
+                     laufey_common::OriginOfUrl(url);
+  if (request->GetMethod().ToString() != "GET" && same_origin)
+    frame->LoadRequest(request);
+  else
+    frame->LoadURL(url);
+}
+
 bool LaufeyHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                                    CefRefPtr<CefFrame> frame,
                                    CefRefPtr<CefRequest> request,
-                                   bool /*user_gesture*/,
-                                   bool /*is_redirect*/) {
+                                   bool user_gesture, bool is_redirect) {
   CEF_REQUIRE_UI_THREAD();
   if (!frame || !frame->IsMain() || !request)
     return false;
@@ -468,6 +501,54 @@ bool LaufeyHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
   if (window_id == 0)
     return false;
   std::string url = request->GetURL().ToString();
+  // Will-navigate (API 56): the embedder sees the navigation first. CEF
+  // cannot hold it, so it is cancelled and started again once decided.
+  auto& will = laufey_common::WillNavigateRequests::Instance();
+  if (will.TakeReissue(window_id, url))
+    return false;
+  bool embedder = will.TakeEmbedderNavigation(window_id, url);
+  const int transition = request->GetTransitionType();
+  bool history = (transition & TT_FORWARD_BACK_FLAG) ||
+                 (transition & TT_SOURCE_MASK) == TT_RELOAD;
+  if (!embedder && !history && will.HandlerSet() &&
+      laufey_common::WillNavigateReported(url)) {
+    CefRefPtr<CefRequest> copy = CefRequest::Create();
+    CefRequest::HeaderMap headers;
+    request->GetHeaderMap(headers);
+    copy->Set(request->GetURL(), request->GetMethod(), request->GetPostData(),
+              headers);
+    auto start = will.Ask(
+        window_id, url, frame->GetURL().ToString(),
+        LaufeyNavigationKind(request, user_gesture, is_redirect),
+        [browser, window_id, copy](uint32_t answer) {
+          CefPostTask(
+              TID_UI,
+              base::BindOnce(
+                  [](CefRefPtr<CefBrowser> b, uint32_t wid,
+                     CefRefPtr<CefRequest> r, uint32_t d) {
+                    if (d == LAUFEY_NAVIGATION_REFUSE)
+                      return;
+                    if (d == LAUFEY_NAVIGATION_DEFAULT) {
+                      std::string u = r->GetURL().ToString();
+                      laufey_common::NavigationDecision decision =
+                          laufey_common::NavigationGuard::Instance().Decide(wid,
+                                                                            u);
+                      if (decision !=
+                          laufey_common::NavigationDecision::kAllow) {
+                        laufey_common::LogGuardedNavigation(u, decision);
+                        if (decision ==
+                            laufey_common::NavigationDecision::kOpenInBrowser)
+                          LaufeyOpenExternalURL(u);
+                        return;
+                      }
+                    }
+                    LaufeyReissueNavigation(b, wid, r);
+                  },
+                  browser, window_id, copy, answer));
+        });
+    if (start == laufey_common::WillNavigateStart::kAsked)
+      return true;
+  }
   laufey_common::NavigationDecision decision =
       laufey_common::NavigationGuard::Instance().Decide(window_id, url);
   if (decision == laufey_common::NavigationDecision::kAllow)

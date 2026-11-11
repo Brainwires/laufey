@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 55
+#define LAUFEY_API_VERSION 56
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -1123,6 +1123,42 @@ typedef void (*laufey_scheme_request_fn)(void* user_data, uint32_t window_id,
 // and the next scheme_response_write fails instead.
 typedef void (*laufey_scheme_cancel_fn)(void* user_data,
                                         laufey_scheme_exchange_t* exchange);
+
+// --- Frames of scheme requests (API >= 56) ----------------------------------
+//
+// Which frame of its window made a custom-scheme request, as the engine
+// knows it (scheme_request_frame). UNKNOWN where the engine does not say:
+// WebView2 and WebKitGTK, and WKWebView before the frame was exposed to the
+// scheme handler.
+#define LAUFEY_FRAME_UNKNOWN 0
+#define LAUFEY_FRAME_MAIN 1  // the window's top-level document
+#define LAUFEY_FRAME_SUB 2   // a frame inside it
+
+// --- Will-navigate (API >= 56) -----------------------------------------------
+//
+// How a top-level navigation started (laufey_will_navigate_fn's `kind`).
+#define LAUFEY_NAVIGATION_KIND_OTHER 0     // a form, typed, anything else
+#define LAUFEY_NAVIGATION_KIND_LINK 1      // a link the user activated
+#define LAUFEY_NAVIGATION_KIND_SCRIPT 2    // `location = …` and the like
+#define LAUFEY_NAVIGATION_KIND_REDIRECT 3  // a server or meta redirect
+#define LAUFEY_NAVIGATION_KIND_WINDOW_OPEN \
+  4  // reserved: popups (window.open,
+     // target=_blank) keep their own
+     // rule and are not reported
+
+// The embedder's answer (answer_will_navigate).
+#define LAUFEY_NAVIGATION_DEFAULT 0  // the navigation guard decides
+#define LAUFEY_NAVIGATION_ALLOW 1    // load it in the window, guard or not
+#define LAUFEY_NAVIGATION_REFUSE 2   // cancel it; nothing opens anywhere
+
+// A top-level navigation of `window_id` is about to happen and waits for
+// answer_will_navigate(`request_id`, …). `url` is the destination; the
+// `initiator` is the URL of the document that started it, or NULL when the
+// engine does not say. Fires on the backend UI thread; the strings are valid
+// for the call only.
+typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
+                                        uint64_t request_id, const char* url,
+                                        const char* initiator, uint32_t kind);
 
 struct laufey_backend_api {
   uint32_t version;
@@ -2807,6 +2843,62 @@ struct laufey_backend_api {
   void (*set_app_menu_click_handler)(void* backend_data,
                                      laufey_menu_click_fn handler,
                                      void* user_data);
+
+  // --- Frames of scheme requests (API >= 56) -------------------------------
+  //
+  // The frame that made the request `exchange` carries (LAUFEY_FRAME_*):
+  // MAIN for the window's top-level document, SUB for a frame inside it,
+  // UNKNOWN where the engine does not tell (see LAUFEY_FRAME_UNKNOWN). Read
+  // from the engine's own record of the request (CEF's frame, WKWebView's
+  // frame info), never from anything the page sent. Valid while `exchange`
+  // is; any thread.
+  uint32_t (*scheme_request_frame)(void* backend_data,
+                                   laufey_scheme_exchange_t* exchange);
+
+  // --- Will-navigate (API >= 56) -------------------------------------------
+  //
+  // Register `handler` (NULL clears it): every top-level navigation of a
+  // window — a link, a script, a form, a server redirect — is reported to it
+  // BEFORE the navigation guard (set_allowed_navigation_origins) decides,
+  // and waits for answer_will_navigate: DEFAULT lets the guard decide as it
+  // would have, ALLOW loads it in the window although the guard would refuse
+  // it, REFUSE cancels it (nothing opens in the browser either). Not
+  // reported: the embedder's own navigate(), back / forward and reloads,
+  // about:blank / about:srcdoc, and sub-frames. A navigation the embedder
+  // does not answer within 10 seconds, or whose window closes first, is
+  // decided by the guard (closed: cancelled). With no handler the guard
+  // decides alone and nothing waits.
+  //
+  // WKWebView holds the navigation itself until the answer. WebKitGTK
+  // (2.40+) holds the main frame's response, where its guard decides too
+  // (its request is already sent; kind OTHER, no initiator, and an embedder
+  // load that redirects is reported at its final URL). CEF and WebView2
+  // cannot hold one: they cancel it and, when the answer (or the guard) lets
+  // it load, start it again (CEF: a same-origin non-GET with its method, body
+  // and headers, anything else by URL; WebView2 as a GET of the URL), so a
+  // re-started navigation is a new history entry. Fires on the backend UI
+  // thread. NULL on Winit.
+  void (*set_will_navigate_handler)(void* backend_data,
+                                    laufey_will_navigate_fn handler,
+                                    void* user_data);
+  // Answer `request_id` (a LAUFEY_NAVIGATION_* decision). False when it is
+  // not waiting (answered, timed out, its window closed). Any thread.
+  bool (*answer_will_navigate)(void* backend_data, uint64_t request_id,
+                               uint32_t decision);
+
+  // --- The app's own application menu (API >= 56) --------------------------
+  //
+  // Set the application menu of the app itself, owned by no window, so it
+  // can be updated with every window closed (NULL `menu_template` removes
+  // it). macOS: the menu bar shows it whenever the key window has no menu of
+  // its own (set_application_menu) and while no window is open; it is
+  // applied at once when that is the case now. Clicks reach `on_click` (may
+  // be NULL) and the app-level handler (set_app_menu_click_handler) with
+  // window id 0. Returns false where the OS has no app menu bar (Windows,
+  // Linux: a menu bar belongs to its window, so an embedder sets the menu on
+  // each window there) and on Winit. Any thread.
+  bool (*set_app_menu)(void* backend_data, laufey_value_t* menu_template,
+                       laufey_menu_click_fn on_click, void* on_click_data);
 };
 
 #ifdef __cplusplus

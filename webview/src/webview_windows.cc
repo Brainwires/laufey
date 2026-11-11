@@ -4,6 +4,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
+#include "laufey_will_navigate.h"
 #include "laufey_io.h"
 #include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
@@ -992,6 +993,7 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         laufey_wv2::CancelStreamsForWindow(wid);
         // A microphone / camera request it waits on is refused.
         laufey_common::MediaCaptureRequests::Instance().ForgetWindow(wid);
+        laufey_common::WillNavigateRequests::Instance().ForgetWindow(wid);
       }
       WinForgetNormalFrame(hwnd);
       win32_menu::ForgetWindow(hwnd);
@@ -1897,7 +1899,7 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // and an http(s) destination opens in the OS browser.
             state->webview->add_NavigationStarting(
                 Callback<ICoreWebView2NavigationStartingEventHandler>(
-                    [this, wid](ICoreWebView2*,
+                    [this, wid](ICoreWebView2* sender,
                                 ICoreWebView2NavigationStartingEventArgs* args)
                         -> HRESULT {
                       LPWSTR uriRaw = nullptr;
@@ -1905,6 +1907,70 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                         return S_OK;
                       std::string url = laufey_common::WideToUtf8(uriRaw);
                       CoTaskMemFree(uriRaw);
+                      // Will-navigate (API 56): the embedder sees it first.
+                      // NavigationStarting cannot be deferred, so it is
+                      // cancelled and, once decided, started again as a GET
+                      // of the URL (the re-issue token lets that through).
+                      auto& will =
+                          laufey_common::WillNavigateRequests::Instance();
+                      if (will.TakeReissue(wid, url))
+                        return S_OK;
+                      bool embedder = will.TakeEmbedderNavigation(wid, url);
+                      bool history = false;
+                      ComPtr<ICoreWebView2NavigationStartingEventArgs3> args3;
+                      if (SUCCEEDED(
+                              args->QueryInterface(IID_PPV_ARGS(&args3)))) {
+                        COREWEBVIEW2_NAVIGATION_KIND nav_kind;
+                        if (SUCCEEDED(args3->get_NavigationKind(&nav_kind)))
+                          history = nav_kind !=
+                                    COREWEBVIEW2_NAVIGATION_KIND_NEW_DOCUMENT;
+                      }
+                      if (!embedder && !history && will.HandlerSet() &&
+                          laufey_common::WillNavigateReported(url)) {
+                        BOOL redirected = FALSE, user = FALSE;
+                        args->get_IsRedirected(&redirected);
+                        args->get_IsUserInitiated(&user);
+                        uint32_t kind = redirected
+                                            ? LAUFEY_NAVIGATION_KIND_REDIRECT
+                                        : user ? LAUFEY_NAVIGATION_KIND_LINK
+                                               : LAUFEY_NAVIGATION_KIND_SCRIPT;
+                        std::string initiator;
+                        LPWSTR sourceRaw = nullptr;
+                        if (sender &&
+                            SUCCEEDED(sender->get_Source(&sourceRaw)) &&
+                            sourceRaw) {
+                          initiator = laufey_common::WideToUtf8(sourceRaw);
+                          CoTaskMemFree(sourceRaw);
+                        }
+                        auto start = will.Ask(
+                            wid, url, initiator, kind,
+                            [this, wid, url](uint32_t answer) {
+                              RunOnUiThread([this, wid, url, answer] {
+                                if (answer == LAUFEY_NAVIGATION_REFUSE)
+                                  return;
+                                if (answer == LAUFEY_NAVIGATION_DEFAULT) {
+                                  laufey_common::NavigationDecision d =
+                                      laufey_common::NavigationGuard::Instance()
+                                          .Decide(wid, url);
+                                  if (d != laufey_common::NavigationDecision::
+                                               kAllow) {
+                                    laufey_common::LogGuardedNavigation(url, d);
+                                    if (d == laufey_common::NavigationDecision::
+                                                 kOpenInBrowser)
+                                      OpenExternalURL(url);
+                                    return;
+                                  }
+                                }
+                                laufey_common::WillNavigateRequests::Instance()
+                                    .ExpectReissue(wid, url);
+                                Navigate(wid, url);
+                              });
+                            });
+                        if (start == laufey_common::WillNavigateStart::kAsked) {
+                          args->put_Cancel(TRUE);
+                          return S_OK;
+                        }
+                      }
                       laufey_common::NavigationDecision decision =
                           laufey_common::NavigationGuard::Instance().Decide(
                               wid, url);

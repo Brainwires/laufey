@@ -74,6 +74,8 @@ pub use message_dialog::*;
 
 mod app_menu;
 pub use app_menu::*;
+mod will_navigate;
+pub use will_navigate::*;
 
 mod background;
 pub use background::*;
@@ -90,7 +92,7 @@ mod build_support_tests;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 55;
+pub const LAUFEY_API_VERSION: u32 = 56;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -718,7 +720,46 @@ unsafe extern "C" fn scheme_cancel_trampoline(
 unsafe impl Send for SchemeExchange {}
 unsafe impl Sync for SchemeExchange {}
 
+fn scheme_frame_with(
+  api: &LaufeyBackendApi,
+  exchange: *mut ffi::laufey_scheme_exchange_t,
+) -> SchemeFrame {
+  match api.scheme_request_frame {
+    Some(f) => SchemeFrame::from_raw(unsafe { f(api.backend_data, exchange) }),
+    None => SchemeFrame::Unknown,
+  }
+}
+
+/// Which frame of its window made a scheme request (API 56,
+/// `LAUFEY_FRAME_*`), as the engine recorded it: never from the request's
+/// headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SchemeFrame {
+  /// The engine doesn't say (WebView2, WebKitGTK, an older backend).
+  Unknown,
+  /// The window's top-level document.
+  Main,
+  /// A frame inside it.
+  Sub,
+}
+
+impl SchemeFrame {
+  fn from_raw(raw: u32) -> Self {
+    match raw {
+      1 => SchemeFrame::Main,
+      2 => SchemeFrame::Sub,
+      _ => SchemeFrame::Unknown,
+    }
+  }
+}
+
 impl SchemeExchange {
+  /// The frame that made the request (API 56); [`SchemeFrame::Unknown`]
+  /// where the backend can't tell.
+  pub fn frame(&self) -> SchemeFrame {
+    scheme_frame_with(api(), self.0)
+  }
+
   /// Pull up to `buf.len()` bytes of the request body. Returns bytes read
   /// (>0), 0 at end of body, or a negative value on error.
   pub fn read_body(&self, buf: &mut [u8]) -> isize {

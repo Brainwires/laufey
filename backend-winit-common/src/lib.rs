@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 55;
+pub const LAUFEY_API_VERSION: u32 = 56;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -189,6 +189,16 @@ pub const LAUFEY_DIALOG_PROMPT: i32 = 2;
 
 pub const LAUFEY_WHEEL_DELTA_PIXEL: i32 = 0;
 pub const LAUFEY_WHEEL_DELTA_LINE: i32 = 1;
+
+/// `laufey_will_navigate_fn` (API 56).
+pub type LaufeyWillNavigateFn = unsafe extern "C" fn(
+  *mut c_void,
+  u32,
+  u64,
+  *const c_char,
+  *const c_char,
+  u32,
+);
 
 #[repr(C)]
 pub struct LaufeyBackendApi {
@@ -1018,6 +1028,26 @@ pub struct LaufeyBackendApi {
   // --- Application-menu clicks for the app (API >= 55)
   pub set_app_menu_click_handler: Option<
     unsafe extern "C" fn(*mut c_void, Option<LaufeyMenuClickFn>, *mut c_void),
+  >,
+  // --- Frames of scheme requests, will-navigate, the app's menu (API >= 56)
+  pub scheme_request_frame:
+    Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32>,
+  pub set_will_navigate_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<LaufeyWillNavigateFn>,
+      *mut c_void,
+    ),
+  >,
+  pub answer_will_navigate:
+    Option<unsafe extern "C" fn(*mut c_void, u64, u32) -> bool>,
+  pub set_app_menu: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      *mut LaufeyValue,
+      Option<LaufeyMenuClickFn>,
+      *mut c_void,
+    ) -> bool,
   >,
 }
 
@@ -1987,6 +2017,10 @@ pub fn create_api_base() -> LaufeyBackendApi {
     // API 55: NULL; the laufey crate reports app-menu clicks to its app
     // handler from the window menus' own callbacks instead.
     set_app_menu_click_handler: None,
+    scheme_request_frame: None,
+    set_will_navigate_handler: None,
+    answer_will_navigate: None,
+    set_app_menu: None,
   }
 }
 

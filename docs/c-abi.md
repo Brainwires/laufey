@@ -570,6 +570,30 @@ backends, where the `laufey` crate's `set_app_menu_click_handler` takes the
 clicks from the window menus' own callback instead. See
 [menus.md](menus.md#application-menu-clicks-for-the-app).
 
+## Scheme request frames, will-navigate, the app's own menu (API ≥ 56)
+
+```c
+uint32_t (*scheme_request_frame)(void* backend_data,
+                                 laufey_scheme_exchange_t* exchange);
+void (*set_will_navigate_handler)(void* backend_data,
+                                  laufey_will_navigate_fn handler,
+                                  void* user_data);
+bool (*answer_will_navigate)(void* backend_data, uint64_t request_id,
+                             uint32_t decision);
+bool (*set_app_menu)(void* backend_data, laufey_value_t* menu_template,
+                     laufey_menu_click_fn on_click, void* on_click_data);
+```
+
+`scheme_request_frame` says which frame made a scheme request
+(`LAUFEY_FRAME_MAIN` / `_SUB`), from the engine's own record of it: CEF's
+`CefFrame`, WKWebView's frame info where the scheme task exposes it.
+`LAUFEY_FRAME_UNKNOWN` on WebView2 and WebKitGTK, which do not say. An embedder
+can so tell its page from a frame inside it without trusting a header the page
+sent. `set_will_navigate_handler` / `answer_will_navigate`: see
+[window-management.md](window-management.md#will-navigate-api-56).
+`set_app_menu`: see [menus.md](menus.md#the-apps-own-application-menu-api-56);
+macOS only (false elsewhere).
+
 ## UI-thread tasks (API ≥ 42)
 
 ```c

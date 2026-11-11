@@ -413,6 +413,10 @@ bool IsNSWindowClickPassthroughForward(uint32_t window_id) {
 // Per-window menu storage (must be declared before focus observer uses them)
 static std::map<uint32_t, NSMenu*> g_window_menus;
 static std::mutex g_window_menus_mutex;
+// The app's own application menu (API 56): owned by no window, shown while
+// the key window has no menu of its own and while no window is key. Main
+// thread only.
+static NSMenu* g_app_menu = nil;
 
 void InstallNativeMouseMonitor() {
   if (g_mouse_monitor)
@@ -541,6 +545,9 @@ void InstallNativeMouseMonitor() {
                   auto it = g_window_menus.find(wid);
                   if (it != g_window_menus.end() && it->second) {
                     [NSApp setMainMenu:it->second];
+                  } else if (g_app_menu) {
+                    // No menu of its own: the app's (API 56).
+                    [NSApp setMainMenu:g_app_menu];
                   }
                 }
               }];
@@ -553,6 +560,10 @@ void InstallNativeMouseMonitor() {
                 uint32_t wid = LaufeyIdForNSWindow([note object]);
                 if (wid > 0) {
                   RuntimeLoader::GetInstance()->DispatchFocusedEvent(wid, 0);
+                  // The app's menu (API 56) until a window with its own
+                  // becomes key: what the bar shows with no window key.
+                  if (g_app_menu)
+                    [NSApp setMainMenu:g_app_menu];
                 }
               }];
 
@@ -727,6 +738,42 @@ void Backend_SetApplicationMenu_Mac(void* data, uint32_t window_id,
       [NSApp setMainMenu:menubar];
     }
   });
+}
+
+bool Backend_SetAppMenu_Mac(void* data, laufey_value_t* menu_template,
+                            laufey_menu_click_fn on_click,
+                            void* on_click_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  std::shared_ptr<std::vector<laufey_common::MenuEntry>> entries;
+  if (menu_template) {
+    entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
+        laufey_common::ParseMenuTemplate(menu_template,
+                                         &loader->GetBackendApi(), true));
+  }
+  // Clicks reach the app-level handler too, with window id 0.
+  laufey_common::AppMenuClickFn click =
+      laufey_common::WrapAppMenuClick(on_click, on_click_data);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSMenu* menubar = nil;
+    if (entries) {
+      menubar = laufey_common::BuildNSMenuFromEntries(*entries, click.fn,
+                                                      click.data, 0);
+      EnsureEditMenu(menubar);
+    }
+    g_app_menu = menubar;
+    if (!menubar)
+      return;
+    uint32_t keyWid = LaufeyIdForNSWindow([NSApp keyWindow]);
+    bool keyHasOwn = false;
+    if (keyWid > 0) {
+      std::lock_guard<std::mutex> lock(g_window_menus_mutex);
+      auto it = g_window_menus.find(keyWid);
+      keyHasOwn = it != g_window_menus.end() && it->second;
+    }
+    if (!keyHasOwn)
+      [NSApp setMainMenu:menubar];
+  });
+  return true;
 }
 
 // --- Dock (macOS) ---

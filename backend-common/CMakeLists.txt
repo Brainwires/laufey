@@ -363,6 +363,12 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_message_dialog_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_message_dialog_test COMMAND laufey_message_dialog_test)
 
+  # Will-navigate (API 56): reported navigations decided exactly once, and
+  # the embedder / re-issue tokens.
+  add_executable(laufey_will_navigate_test tests/will_navigate_test.cc)
+  target_link_libraries(laufey_will_navigate_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_will_navigate_test COMMAND laufey_will_navigate_test)
+
   add_executable(laufey_quit_request_test tests/quit_request_test.cc)
   target_link_libraries(laufey_quit_request_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_quit_request_test COMMAND laufey_quit_request_test)

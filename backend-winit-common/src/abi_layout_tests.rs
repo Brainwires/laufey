@@ -252,7 +252,11 @@ fn vtable_layout_matches_the_header() {
     set_media_capture_handler,
     answer_media_capture,
     show_message_dialog,
-    set_app_menu_click_handler
+    set_app_menu_click_handler,
+    scheme_request_frame,
+    set_will_navigate_handler,
+    answer_will_navigate,
+    set_app_menu
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

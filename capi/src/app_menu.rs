@@ -68,6 +68,73 @@ fn set_app_menu_click_handler_with(
   }
 }
 
+type AppMenuItemHandler = Arc<dyn Fn(&str) + Send + Sync>;
+
+static APP_MENU_ITEM_HANDLER: Mutex<Option<AppMenuItemHandler>> =
+  Mutex::new(None);
+
+unsafe extern "C" fn app_menu_item_callback(
+  _user_data: *mut c_void,
+  _window_id: u32,
+  item_id: *const c_char,
+) {
+  if item_id.is_null() {
+    return;
+  }
+  let id = unsafe { CStr::from_ptr(item_id) }.to_string_lossy();
+  let handler = APP_MENU_ITEM_HANDLER.lock().unwrap().clone();
+  if let Some(handler) = handler {
+    handler(&id);
+  }
+}
+
+/// Sets the app's own application menu (API 56), owned by no window, so it
+/// can be updated with every window closed. On macOS the menu bar shows it
+/// whenever the key window has no menu of its own ([`crate::Window::set_menu`])
+/// and while no window is open. `on_click(item_id)` runs for each click on
+/// a custom item, and the app-level handler
+/// ([`set_app_menu_click_handler`]) hears it too, with window id 0. Returns
+/// `false` where the OS has no app menu bar (Windows, Linux: set the menu on
+/// each window there) or the backend has no such entry (Winit, older than
+/// API 56).
+pub fn set_app_menu<F>(template: &[crate::MenuItem], on_click: F) -> bool
+where
+  F: Fn(&str) + Send + Sync + 'static,
+{
+  set_app_menu_with(api(), Some(template), Some(Arc::new(on_click)))
+}
+
+/// Removes the app's own application menu ([`set_app_menu`]). Returns
+/// `false` where there is none to remove (see [`set_app_menu`]).
+pub fn clear_app_menu() -> bool {
+  set_app_menu_with(api(), None, None)
+}
+
+fn set_app_menu_with(
+  api: &LaufeyBackendApi,
+  template: Option<&[crate::MenuItem]>,
+  on_click: Option<AppMenuItemHandler>,
+) -> bool {
+  let Some(f) = api.set_app_menu else {
+    return false;
+  };
+  *APP_MENU_ITEM_HANDLER.lock().unwrap() = on_click;
+  let raw = match template {
+    Some(items) => {
+      crate::Value::List(items.iter().map(|i| i.to_value()).collect()).to_raw()
+    }
+    None => std::ptr::null_mut(),
+  };
+  unsafe {
+    f(
+      api.backend_data,
+      raw,
+      template.map(|_| app_menu_item_callback as _),
+      std::ptr::null_mut(),
+    )
+  }
+}
+
 fn run_app_menu_click_handler(window_id: u32, item_id: &str) {
   // Cloned out: the handler runs without the lock held (it may replace
   // itself).

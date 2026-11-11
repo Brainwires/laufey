@@ -11,6 +11,7 @@
 #include "laufey_notifications.h"
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
+#include "laufey_will_navigate.h"
 #include "laufey_menu.h"
 #include "laufey_platform_features.h"
 #include "laufey_title_bar.h"
@@ -132,6 +133,9 @@ static void Backend_Navigate(void* data, uint32_t window_id, const char* url) {
     // (laufey_navigation_guard.h); recorded before the load starts, so the
     // load's own check passes.
     laufey_common::NavigationGuard::Instance().SetWindowUrl(window_id, url);
+    // The embedder's own load is not reported to will-navigate (API 56).
+    laufey_common::WillNavigateRequests::Instance().ExpectEmbedderNavigation(
+        window_id, url);
     backend->Navigate(window_id, url);
   }
 }
@@ -174,6 +178,19 @@ static bool Backend_AnswerMediaCapture(void* /*data*/, uint64_t request_id,
                                        bool allow) {
   return laufey_common::MediaCaptureRequests::Instance().Answer(request_id,
                                                                 allow);
+}
+
+// Will-navigate (API 56; laufey_will_navigate.h).
+static void Backend_SetWillNavigateHandler(void* /*data*/,
+                                           laufey_will_navigate_fn handler,
+                                           void* user_data) {
+  laufey_common::WillNavigateRequests::Instance().SetHandler(handler,
+                                                             user_data);
+}
+static bool Backend_AnswerWillNavigate(void* /*data*/, uint64_t request_id,
+                                       uint32_t decision) {
+  return laufey_common::WillNavigateRequests::Instance().Answer(request_id,
+                                                                decision);
 }
 
 // Quit requests (API 52; laufey_quit_request.h).
@@ -507,6 +524,15 @@ static intptr_t Backend_SchemeRequestReadBody(
                                                                           cap);
 }
 
+// The frame a scheme request came from (API 56), as the backend recorded
+// it on the exchange.
+static uint32_t Backend_SchemeRequestFrame(void* /*data*/,
+                                           laufey_scheme_exchange_t* exchange) {
+  if (!exchange)
+    return LAUFEY_FRAME_UNKNOWN;
+  return reinterpret_cast<SchemeExchangeBase*>(exchange)->frame_kind;
+}
+
 static void Backend_SchemeResponseBegin(void* /*data*/,
                                         laufey_scheme_exchange_t* exchange,
                                         int status, const char* headers,
@@ -625,6 +651,17 @@ static void Backend_SetApplicationMenu(void* data, uint32_t window_id,
   }
 }
 
+// The app's own application menu (API 56): macOS only (the backend's
+// SetAppMenu answers false elsewhere).
+static bool Backend_SetAppMenu(void* data, laufey_value_t* menu_template,
+                               laufey_menu_click_fn on_click,
+                               void* on_click_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  LaufeyBackend* backend = loader->GetBackend();
+  return backend && backend->SetAppMenu(menu_template, &loader->GetBackendApi(),
+                                        on_click, on_click_data);
+}
+
 // Application-menu clicks for the app (API 55): every backend builds its
 // application menus with laufey_common::WrapAppMenuClick.
 static void Backend_SetAppMenuClickHandler(void* /*data*/,
@@ -714,6 +751,7 @@ static void Backend_CloseWindow(void* data, uint32_t window_id) {
   laufey_common::DownloadPolicy::Instance().ForgetWindow(window_id);
   // A microphone / camera request the window still waits on is refused.
   laufey_common::MediaCaptureRequests::Instance().ForgetWindow(window_id);
+  laufey_common::WillNavigateRequests::Instance().ForgetWindow(window_id);
 }
 
 static void Backend_SetCloseRequestedHandler(void* data,
@@ -1775,6 +1813,11 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.test_file_dialog_respond = Backend_TestFileDialogRespond;
   backend_api_.show_message_dialog = Backend_ShowMessageDialog;
   backend_api_.set_app_menu_click_handler = Backend_SetAppMenuClickHandler;
+  // API 56: scheme request frames, will-navigate, the app's own menu.
+  backend_api_.scheme_request_frame = Backend_SchemeRequestFrame;
+  backend_api_.set_will_navigate_handler = Backend_SetWillNavigateHandler;
+  backend_api_.answer_will_navigate = Backend_AnswerWillNavigate;
+  backend_api_.set_app_menu = Backend_SetAppMenu;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

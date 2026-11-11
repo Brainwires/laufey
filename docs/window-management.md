@@ -640,6 +640,30 @@ the engine has already sent the request, but nothing from the response is
 committed or run. Before 2.40 it stops the main frame's load as it starts or
 redirects.
 
+### Will-navigate (API 56)
+
+`laufey::set_will_navigate_handler(|nav| …)` (C ABI: `set_will_navigate_handler`
+/ `answer_will_navigate`) sees each top-level navigation a page starts BEFORE
+the guard decides it: `nav` carries the window, the URL, the URL of the document
+that started it when the engine says, and how it started (`link`, `script`,
+`redirect`, `other`). The navigation waits for
+`laufey::answer_will_navigate(nav.id, answer)`: `Default` lets the guard decide
+as it would have, `Allow` loads it in the window although the guard would refuse
+it, `Refuse` cancels it and opens nothing in the browser. An unanswered one is
+decided by the guard after 10 seconds; one whose window closes is cancelled. Not
+reported: the embedder's own `navigate()`, back / forward and reloads,
+`about:blank` / `about:srcdoc`, sub-frames and popups (which keep their own
+rule). With no handler nothing waits.
+
+| Backend   | How it waits                                                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| WKWebView | the navigation's `decisionHandler` is called with the answer                                                                    |
+| WebKitGTK | the main frame's response decision is held (2.40+; kind `other`, no initiator; an embedder load that redirects is reported)     |
+| CEF       | cancelled in `OnBeforeBrowse`, then started again when it may load (a same-origin non-GET keeps its body; anything else by URL) |
+| WebView2  | cancelled in `NavigationStarting`, then started again as a GET of the URL when it may load                                      |
+
+A navigation started again is a new history entry.
+
 A test can turn on `test_capture_external_opens`: every URL a backend would hand
 to the browser (the guard, a popup, the reserved call) is then recorded for
 `test_take_external_opens` instead of opened.

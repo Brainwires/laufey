@@ -11,6 +11,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
+#include "laufey_will_navigate.h"
 #include "laufey_io.h"
 #include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
@@ -50,6 +51,11 @@
 // already exposes -copy:. Cmd+C/V on macOS dispatch via the main menu, so
 // this has to be present for them to work at all.
 extern void EnsureEditMenu(NSMenu* menubar);
+
+// The app's own application menu (API 56): owned by no window, shown while
+// the key window has no menu of its own and while no window is key. Main
+// thread only.
+static NSMenu* g_app_menu = nil;
 
 // Per-window state
 struct MacWindowState {
@@ -151,6 +157,10 @@ class WKWebViewBackend : public LaufeyBackend {
                           const laufey_backend_api_t* api,
                           laufey_menu_click_fn on_click,
                           void* on_click_data) override;
+
+  bool SetAppMenu(laufey_value_t* menu_template,
+                  const laufey_backend_api_t* api,
+                  laufey_menu_click_fn on_click, void* on_click_data) override;
 
   void ShowContextMenu(uint32_t window_id, int x, int y,
                        laufey_value_t* menu_template,
@@ -873,6 +883,58 @@ class MacSchemeExchange : public SchemeExchangeBase {
 @property(nonatomic, assign) uint32_t windowId;
 @end
 
+// The frame a scheme task's request came from (API 56). WKURLSchemeTask
+// has no public frame; WebKit's own `_frame` (WKFrameInfo, macOS 11+) is
+// read where the task answers it, else the frame is unknown. Never read from
+// the request's headers, which the page controls.
+static void LaufeyOpenInBrowser(NSURL* url);
+
+// How a top-level navigation started (API 56, LAUFEY_NAVIGATION_KIND_*):
+// a link the user activated, a server redirect (WebKit's own `_isRedirect`,
+// where the action answers it), a navigation another document's script
+// started, or anything else (a form, typed, the embedder's).
+static uint32_t LaufeyNavigationKind(WKNavigationAction* action) {
+  if (action.navigationType == WKNavigationTypeLinkActivated)
+    return LAUFEY_NAVIGATION_KIND_LINK;
+  SEL redirect = NSSelectorFromString(@"_isRedirect");
+  if ([action respondsToSelector:redirect] &&
+      ((BOOL (*)(id, SEL))objc_msgSend)(action, redirect))
+    return LAUFEY_NAVIGATION_KIND_REDIRECT;
+  if (action.navigationType == WKNavigationTypeOther && action.sourceFrame)
+    return LAUFEY_NAVIGATION_KIND_SCRIPT;
+  return LAUFEY_NAVIGATION_KIND_OTHER;
+}
+
+// The navigation guard's decision for a top-level navigation of `windowId`
+// to `url` (laufey_navigation_guard.h): `allow` loads it, otherwise it is
+// cancelled and, when the guard says so, opened in the browser.
+static void LaufeyApplyNavigationGuard(
+    uint32_t windowId, const std::string& urlString, NSURL* url,
+    WKNavigationActionPolicy allow,
+    void (^decisionHandler)(WKNavigationActionPolicy)) {
+  laufey_common::NavigationDecision decision =
+      laufey_common::NavigationGuard::Instance().Decide(windowId, urlString);
+  if (decision == laufey_common::NavigationDecision::kAllow) {
+    decisionHandler(allow);
+    return;
+  }
+  laufey_common::LogGuardedNavigation(urlString, decision);
+  decisionHandler(WKNavigationActionPolicyCancel);
+  if (decision == laufey_common::NavigationDecision::kOpenInBrowser)
+    LaufeyOpenInBrowser(url);
+}
+
+static uint32_t LaufeySchemeTaskFrame(id<WKURLSchemeTask> task) {
+  SEL selector = NSSelectorFromString(@"_frame");
+  if (![(id)task respondsToSelector:selector])
+    return LAUFEY_FRAME_UNKNOWN;
+  id frame = ((id (*)(id, SEL))objc_msgSend)((id)task, selector);
+  if (![frame isKindOfClass:[WKFrameInfo class]])
+    return LAUFEY_FRAME_UNKNOWN;
+  return ((WKFrameInfo*)frame).isMainFrame ? LAUFEY_FRAME_MAIN
+                                           : LAUFEY_FRAME_SUB;
+}
+
 @implementation LaufeyURLSchemeHandler
 
 - (void)webView:(WKWebView*)webView
@@ -900,6 +962,7 @@ class MacSchemeExchange : public SchemeExchangeBase {
   MacSchemeExchange* exchange =
       new MacSchemeExchange(task, req.HTTPBody, state);
   state->exchange = exchange;
+  exchange->frame_kind = LaufeySchemeTaskFrame(task);
   RuntimeLoader::GetInstance()->DispatchSchemeRequest(self.windowId, exchange,
                                                       method, url, flat);
 }
@@ -1406,17 +1469,37 @@ API_AVAILABLE(macos(11.3))
     return;
   }
   std::string urlString = absolute.UTF8String ? absolute.UTF8String : "";
-  laufey_common::NavigationDecision decision =
-      laufey_common::NavigationGuard::Instance().Decide(self.windowId,
-                                                        urlString);
-  if (decision == laufey_common::NavigationDecision::kAllow) {
-    decisionHandler(allow);
-    return;
+  uint32_t windowId = self.windowId;
+  // Will-navigate (API 56): the embedder sees the navigation first, and the
+  // navigation waits for its answer (WebKit lets a decision come later).
+  auto& will = laufey_common::WillNavigateRequests::Instance();
+  bool embedder = will.TakeEmbedderNavigation(windowId, urlString);
+  WKNavigationType type = navigationAction.navigationType;
+  bool history =
+      type == WKNavigationTypeBackForward || type == WKNavigationTypeReload;
+  if (!embedder && !history && will.HandlerSet() &&
+      laufey_common::WillNavigateReported(urlString)) {
+    WKFrameInfo* source = navigationAction.sourceFrame;
+    NSString* initiator = source ? source.request.URL.absoluteString : nil;
+    void (^decide)(WKNavigationActionPolicy) = [decisionHandler copy];
+    auto start =
+        will.Ask(windowId, urlString, initiator.UTF8String ?: "",
+                 LaufeyNavigationKind(navigationAction),
+                 [decide, windowId, urlString, url, allow](uint32_t decision) {
+                   dispatch_async(dispatch_get_main_queue(), ^{
+                     if (decision == LAUFEY_NAVIGATION_ALLOW)
+                       decide(allow);
+                     else if (decision == LAUFEY_NAVIGATION_REFUSE)
+                       decide(WKNavigationActionPolicyCancel);
+                     else
+                       LaufeyApplyNavigationGuard(windowId, urlString, url,
+                                                  allow, decide);
+                   });
+                 });
+    if (start == laufey_common::WillNavigateStart::kAsked)
+      return;
   }
-  laufey_common::LogGuardedNavigation(urlString, decision);
-  decisionHandler(WKNavigationActionPolicyCancel);
-  if (decision == laufey_common::NavigationDecision::kOpenInBrowser)
-    LaufeyOpenInBrowser(url);
+  LaufeyApplyNavigationGuard(windowId, urlString, url, allow, decisionHandler);
 }
 
 // The main frame committed a navigation to another document (WebKit doesn't
@@ -1721,6 +1804,7 @@ void WKWebViewBackend::OnWindowClosedByUser(uint32_t window_id) {
   }
   // A microphone / camera request it waits on is refused (outside the lock).
   laufey_common::MediaCaptureRequests::Instance().ForgetWindow(window_id);
+  laufey_common::WillNavigateRequests::Instance().ForgetWindow(window_id);
   // A passkey sheet anchored to the window ends with it (`cancelled`).
   // Outside the lock: the result callback may re-enter the backend.
   if (win) {
@@ -2173,6 +2257,9 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                     auto* state = GetWindow(window_id);
                     if (state && state->menu) {
                       [NSApp setMainMenu:state->menu];
+                    } else if (g_app_menu) {
+                      // No menu of its own: the app's (API 56).
+                      [NSApp setMainMenu:g_app_menu];
                     }
                   }];
 
@@ -2183,6 +2270,10 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
                   usingBlock:^(NSNotification*) {
                     RuntimeLoader::GetInstance()->DispatchFocusedEvent(
                         window_id, 0);
+                    // The app's menu (API 56) until a window with its own
+                    // becomes key: what the bar shows with no window key.
+                    if (g_app_menu)
+                      [NSApp setMainMenu:g_app_menu];
                   }];
 
       id resize_obs = [[NSNotificationCenter defaultCenter]
@@ -3414,6 +3505,41 @@ void WKWebViewBackend::SetApplicationMenu(uint32_t window_id,
       [NSApp setMainMenu:menubar];
     }
   });
+}
+
+bool WKWebViewBackend::SetAppMenu(laufey_value_t* menu_template,
+                                  const laufey_backend_api_t* api,
+                                  laufey_menu_click_fn on_click,
+                                  void* on_click_data) {
+  std::shared_ptr<std::vector<laufey_common::MenuEntry>> entries;
+  if (menu_template) {
+    entries = std::make_shared<std::vector<laufey_common::MenuEntry>>(
+        laufey_common::ParseMenuTemplate(menu_template, api, true));
+  }
+  // Clicks reach the app-level handler too, with window id 0.
+  laufey_common::AppMenuClickFn click =
+      laufey_common::WrapAppMenuClick(on_click, on_click_data);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSMenu* menubar = nil;
+    if (entries) {
+      menubar = laufey_common::BuildNSMenuFromEntries(*entries, click.fn,
+                                                      click.data, 0);
+      EnsureEditMenu(menubar);
+    }
+    g_app_menu = menubar;
+    if (!menubar)
+      return;
+    uint32_t keyWid = LaufeyIdForNSWindow([NSApp keyWindow]);
+    bool keyHasOwn = false;
+    if (keyWid > 0) {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      auto* state = GetWindow(keyWid);
+      keyHasOwn = state && state->menu;
+    }
+    if (!keyHasOwn)
+      [NSApp setMainMenu:menubar];
+  });
+  return true;
 }
 
 void WKWebViewBackend::ShowContextMenu(uint32_t window_id, int x, int y,

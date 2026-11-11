@@ -33,6 +33,10 @@ class LaufeySchemeExchange {
   virtual intptr_t WriteResponse(const uint8_t* buf, size_t len) = 0;
   virtual void FinishResponse() = 0;
 
+  // The frame that made the request (API 56, LAUFEY_FRAME_*), from the
+  // CefFrame CEF hands the factory; set before the request is dispatched.
+  uint32_t frame_kind = 0;
+
  protected:
   virtual ~LaufeySchemeExchange() = default;
 };
