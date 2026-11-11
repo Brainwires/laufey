@@ -2874,9 +2874,12 @@ struct laufey_backend_api {
   // (its request is already sent; kind OTHER, no initiator, and an embedder
   // load that redirects is reported at its final URL). CEF and WebView2
   // cannot hold one: they cancel it and, when the answer (or the guard) lets
-  // it load, start it again (CEF: a same-origin non-GET with its method, body
-  // and headers, anything else by URL; WebView2 as a GET of the URL), so a
-  // re-started navigation is a new history entry. Fires on the backend UI
+  // it load, start it again by URL, so a re-started navigation is a new
+  // history entry. They never hold a non-GET navigation (a form POST): it is
+  // not reported and the guard decides it at once, since started again it
+  // would carry its body on the window's authority whatever frame submitted
+  // it (WebView2, which reports no method, reads a non-GET from its
+  // `Content-Type` / `Origin` request headers). Fires on the backend UI
   // thread. NULL on Winit.
   void (*set_will_navigate_handler)(void* backend_data,
                                     laufey_will_navigate_fn handler,

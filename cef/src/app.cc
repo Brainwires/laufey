@@ -470,23 +470,18 @@ static uint32_t LaufeyNavigationKind(CefRefPtr<CefRequest> request,
 }
 
 // A navigation will-navigate (API 56) let load, started again: CEF cannot
-// hold one, so OnBeforeBrowse cancelled it. A same-origin non-GET keeps its
-// method, body and headers (LoadRequest refuses another origin); anything
-// else is loaded by URL. The re-issue token lets the new load through.
+// hold one, so OnBeforeBrowse cancelled it. Only a GET is ever held
+// (WillNavigateHoldsMethod), so it is loaded again by URL. The re-issue token
+// lets that load through, and only it (TT_DIRECT_LOAD_FLAG: a LoadURL /
+// LoadRequest load, which a page cannot start).
 static void LaufeyReissueNavigation(CefRefPtr<CefBrowser> browser,
                                     uint32_t window_id,
-                                    CefRefPtr<CefRequest> request) {
+                                    const std::string& url) {
   CefRefPtr<CefFrame> frame = browser->GetMainFrame();
   if (!frame)
     return;
-  std::string url = request->GetURL().ToString();
   laufey_common::WillNavigateRequests::Instance().ExpectReissue(window_id, url);
-  bool same_origin = laufey_common::OriginOfUrl(frame->GetURL().ToString()) ==
-                     laufey_common::OriginOfUrl(url);
-  if (request->GetMethod().ToString() != "GET" && same_origin)
-    frame->LoadRequest(request);
-  else
-    frame->LoadURL(url);
+  frame->LoadURL(url);
 }
 
 bool LaufeyHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
@@ -504,32 +499,33 @@ bool LaufeyHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
   // Will-navigate (API 56): the embedder sees the navigation first. CEF
   // cannot hold it, so it is cancelled and started again once decided.
   auto& will = laufey_common::WillNavigateRequests::Instance();
-  if (will.TakeReissue(window_id, url))
+  const int transition = request->GetTransitionType();
+  // The re-issue token is bound to the load LaufeyReissueNavigation starts:
+  // LoadURL's direct-load flag, which a page's own navigation never has.
+  if (will.TakeReissue(window_id, url,
+                       (transition & TT_DIRECT_LOAD_FLAG) != 0 && !is_redirect))
     return false;
   bool embedder = will.TakeEmbedderNavigation(window_id, url);
-  const int transition = request->GetTransitionType();
   bool history = (transition & TT_FORWARD_BACK_FLAG) ||
                  (transition & TT_SOURCE_MASK) == TT_RELOAD;
+  // A non-GET navigation (a form POST) is never held: started again it
+  // would carry its body on the main frame's authority, whatever frame
+  // really submitted it. It is not reported; the guard decides it now.
   if (!embedder && !history && will.HandlerSet() &&
-      laufey_common::WillNavigateReported(url)) {
-    CefRefPtr<CefRequest> copy = CefRequest::Create();
-    CefRequest::HeaderMap headers;
-    request->GetHeaderMap(headers);
-    copy->Set(request->GetURL(), request->GetMethod(), request->GetPostData(),
-              headers);
+      laufey_common::WillNavigateReported(url) &&
+      laufey_common::WillNavigateHoldsMethod(request->GetMethod().ToString())) {
     auto start = will.Ask(
         window_id, url, frame->GetURL().ToString(),
         LaufeyNavigationKind(request, user_gesture, is_redirect),
-        [browser, window_id, copy](uint32_t answer) {
+        [browser, window_id, url](uint32_t answer) {
           CefPostTask(
               TID_UI,
               base::BindOnce(
-                  [](CefRefPtr<CefBrowser> b, uint32_t wid,
-                     CefRefPtr<CefRequest> r, uint32_t d) {
+                  [](CefRefPtr<CefBrowser> b, uint32_t wid, std::string u,
+                     uint32_t d) {
                     if (d == LAUFEY_NAVIGATION_REFUSE)
                       return;
                     if (d == LAUFEY_NAVIGATION_DEFAULT) {
-                      std::string u = r->GetURL().ToString();
                       laufey_common::NavigationDecision decision =
                           laufey_common::NavigationGuard::Instance().Decide(wid,
                                                                             u);
@@ -542,9 +538,9 @@ bool LaufeyHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                         return;
                       }
                     }
-                    LaufeyReissueNavigation(b, wid, r);
+                    LaufeyReissueNavigation(b, wid, u);
                   },
-                  browser, window_id, copy, answer));
+                  browser, window_id, url, answer));
         });
     if (start == laufey_common::WillNavigateStart::kAsked)
       return true;

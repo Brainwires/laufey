@@ -22,6 +22,18 @@
 // (NavigationMatchKey) and expire after kWillNavigateTokenLifetime, so a
 // token for a load that never happened can't let a later one through.
 //
+// A backend that cannot hold a navigation (CEF, WebView2) never holds a
+// non-GET one either (WillNavigateHoldsMethod): starting it again would send
+// its body on the window's authority, not on that of the frame that really
+// submitted it (a cross-origin sub-frame's `target=_top` form would arrive as
+// same-origin), and WebView2 can only start a GET. Such a navigation is not
+// reported; the guard decides it at once, as with no handler. A re-issue token
+// is bound to the load the backend starts itself: the window's next
+// navigation start spends it whether or not it matches, and it lets through
+// only a navigation the engine says the backend started
+// (`started_by_backend`), so a page's own navigation to the same URL is
+// reported and guarded as usual.
+//
 // Header-only.
 
 #ifndef LAUFEY_WILL_NAVIGATE_H_
@@ -91,6 +103,50 @@ inline std::string NavigationMatchKey(const std::string& url) {
     out.push_back('/');
   out += u.substr(host_end);
   return out;
+}
+
+// Whether a backend that cancels and restarts a navigation (CEF, WebView2)
+// may hold one with this HTTP method for will-navigate: GET only (an empty
+// method is GET). A non-GET one goes to the guard at once, unreported.
+inline bool WillNavigateHoldsMethod(const std::string& method) {
+  if (method.empty())
+    return true;
+  if (method.size() != 3)
+    return false;
+  auto up = [](char c) {
+    return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+  };
+  return up(method[0]) == 'G' && up(method[1]) == 'E' && up(method[2]) == 'T';
+}
+
+// Whether `header_names` holds `lower_name` (given lowercase), in any case.
+inline bool HeaderNamesContain(const std::vector<std::string>& header_names,
+                               const std::string& lower_name) {
+  for (const std::string& name : header_names) {
+    if (name.size() != lower_name.size())
+      continue;
+    bool same = true;
+    for (size_t i = 0; i < name.size() && same; ++i) {
+      char c = name[i];
+      if (c >= 'A' && c <= 'Z')
+        c = static_cast<char>(c - 'A' + 'a');
+      same = c == lower_name[i];
+    }
+    if (same)
+      return true;
+  }
+  return false;
+}
+
+// Whether a navigation's request header names say it is not a GET, for an
+// engine that reports headers but no method (WebView2's NavigationStarting):
+// a form submission carries `Content-Type` and the engine adds `Origin` to a
+// non-GET navigation; a GET carries neither. Errs toward non-GET (a GET read
+// as non-GET is merely left to the guard).
+inline bool NavigationHeadersMarkNonGet(
+    const std::vector<std::string>& header_names) {
+  return HeaderNamesContain(header_names, "content-type") ||
+         HeaderNamesContain(header_names, "origin");
 }
 
 // A decision the embedder may give; anything else reads as DEFAULT.
@@ -256,7 +312,8 @@ class WillNavigateRequests {
   }
 
   // A backend that cancelled a navigation to decide it starts it again:
-  // that load is already decided (neither reported nor guarded).
+  // that load is already decided (neither reported nor guarded). Call it
+  // right before starting the load, on the UI thread.
   void ExpectReissue(uint32_t window_id, const std::string& url,
                      Clock::time_point now = Clock::now()) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -264,10 +321,24 @@ class WillNavigateRequests {
         Token{NavigationMatchKey(url), now + kWillNavigateTokenLifetime};
   }
 
+  // Whether this navigation start of `window_id` is the backend's own
+  // re-issue. Call it for every top-level navigation start of the window,
+  // first: the window's next start after ExpectReissue spends the token
+  // whether or not it matches, so a token never waits for a later load to
+  // the same URL. It matches only when the URL is the re-issued one and the
+  // engine says the backend started this load (`started_by_backend`: CEF's
+  // explicit transition, WebView2's API navigation), never a page's own.
   bool TakeReissue(uint32_t window_id, const std::string& url,
+                   bool started_by_backend,
                    Clock::time_point now = Clock::now()) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return TakeLocked(&reissue_, window_id, url, now);
+    auto it = reissue_.find(window_id);
+    if (it == reissue_.end())
+      return false;
+    Token token = it->second;
+    reissue_.erase(it);
+    return started_by_backend && token.expires >= now &&
+           token.key == NavigationMatchKey(url);
   }
 
  private:

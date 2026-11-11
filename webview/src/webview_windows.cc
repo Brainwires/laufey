@@ -1913,7 +1913,50 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                       // of the URL (the re-issue token lets that through).
                       auto& will =
                           laufey_common::WillNavigateRequests::Instance();
-                      if (will.TakeReissue(wid, url))
+                      BOOL redirected = FALSE, user = FALSE;
+                      args->get_IsRedirected(&redirected);
+                      args->get_IsUserInitiated(&user);
+                      // The request's header names: WebView2 reports no
+                      // method, so a non-GET is read from them, and a
+                      // page's link click carries a Referer the
+                      // re-issue (Navigate()) does not.
+                      std::vector<std::string> header_names;
+                      ComPtr<ICoreWebView2HttpRequestHeaders> req_headers;
+                      if (SUCCEEDED(args->get_RequestHeaders(&req_headers)) &&
+                          req_headers) {
+                        ComPtr<ICoreWebView2HttpHeadersCollectionIterator> it;
+                        if (SUCCEEDED(req_headers->GetIterator(&it)) && it) {
+                          BOOL has_current = FALSE;
+                          while (SUCCEEDED(
+                                     it->get_HasCurrentHeader(&has_current)) &&
+                                 has_current) {
+                            LPWSTR name = nullptr;
+                            LPWSTR value = nullptr;
+                            if (SUCCEEDED(
+                                    it->GetCurrentHeader(&name, &value))) {
+                              if (name) {
+                                header_names.push_back(
+                                    laufey_common::WideToUtf8(name));
+                                CoTaskMemFree(name);
+                              }
+                              if (value)
+                                CoTaskMemFree(value);
+                            }
+                            BOOL has_next = FALSE;
+                            if (FAILED(it->MoveNext(&has_next)) || !has_next)
+                              break;
+                          }
+                        }
+                      }
+                      bool has_referer = laufey_common::HeaderNamesContain(
+                          header_names, "referer");
+                      // The re-issue token is bound to the load the
+                      // re-issue below starts: an API navigation (which
+                      // WebView2 reports as user-initiated), not a
+                      // redirect, with no Referer, as a page's own
+                      // navigation never is.
+                      if (will.TakeReissue(wid, url,
+                                           user && !redirected && !has_referer))
                         return S_OK;
                       bool embedder = will.TakeEmbedderNavigation(wid, url);
                       bool history = false;
@@ -1925,11 +1968,15 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                           history = nav_kind !=
                                     COREWEBVIEW2_NAVIGATION_KIND_NEW_DOCUMENT;
                       }
+                      // A non-GET navigation (a form POST) is never held:
+                      // it could only be started again as a GET, without
+                      // its body, and on the window's authority whatever
+                      // frame submitted it. It is not reported; the guard
+                      // decides it now.
                       if (!embedder && !history && will.HandlerSet() &&
-                          laufey_common::WillNavigateReported(url)) {
-                        BOOL redirected = FALSE, user = FALSE;
-                        args->get_IsRedirected(&redirected);
-                        args->get_IsUserInitiated(&user);
+                          laufey_common::WillNavigateReported(url) &&
+                          !laufey_common::NavigationHeadersMarkNonGet(
+                              header_names)) {
                         uint32_t kind = redirected
                                             ? LAUFEY_NAVIGATION_KIND_REDIRECT
                                         : user ? LAUFEY_NAVIGATION_KIND_LINK

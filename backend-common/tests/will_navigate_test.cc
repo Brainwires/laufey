@@ -157,8 +157,46 @@ int main() {
   // Re-issue tokens are kept apart from the embedder's.
   r.ExpectReissue(10, "https://a/form", t0);
   EXPECT(!r.TakeEmbedderNavigation(10, "https://a/form", t0));
-  EXPECT(r.TakeReissue(10, "https://a/form", t0));
-  EXPECT(!r.TakeReissue(10, "https://a/form", t0));
+  EXPECT(r.TakeReissue(10, "https://a/form", true, t0));
+  EXPECT(!r.TakeReissue(10, "https://a/form", true, t0));
+
+  // A re-issue token is bound to the load the backend starts: a page's own
+  // navigation to the same URL (not started by the backend) does not match,
+  // and it spends the token, so the backend's load that follows is asked
+  // again rather than a later page navigation getting through.
+  r.ExpectReissue(11, "https://a/page", t0);
+  EXPECT(!r.TakeReissue(11, "https://a/page", false, t0));
+  EXPECT(!r.TakeReissue(11, "https://a/page", true, t0));
+  // The window's next navigation start spends it, matching or not.
+  r.ExpectReissue(12, "https://a/one", t0);
+  EXPECT(!r.TakeReissue(12, "https://a/two", true, t0));
+  EXPECT(!r.TakeReissue(12, "https://a/one", true, t0));
+  // Expired: no match.
+  r.ExpectReissue(13, "https://a/late", t0);
+  EXPECT(!r.TakeReissue(
+      13, "https://a/late", true,
+      t0 + kWillNavigateTokenLifetime + std::chrono::milliseconds(1)));
+  // Other windows keep theirs.
+  r.ExpectReissue(14, "https://a/x", t0);
+  EXPECT(!r.TakeReissue(15, "https://a/x", true, t0));
+  EXPECT(r.TakeReissue(14, "https://a/x", true, t0));
+
+  // CEF and WebView2 never hold a non-GET navigation (it would be sent
+  // again on the window's authority): GET only.
+  EXPECT(WillNavigateHoldsMethod("GET"));
+  EXPECT(WillNavigateHoldsMethod("get"));
+  EXPECT(WillNavigateHoldsMethod(""));
+  EXPECT(!WillNavigateHoldsMethod("POST"));
+  EXPECT(!WillNavigateHoldsMethod("PUT"));
+  EXPECT(!WillNavigateHoldsMethod("GETX"));
+  EXPECT(!WillNavigateHoldsMethod("HEAD"));
+  // WebView2 reports headers, not the method.
+  EXPECT(!NavigationHeadersMarkNonGet({}));
+  EXPECT(!NavigationHeadersMarkNonGet({"Accept", "User-Agent", "Referer"}));
+  EXPECT(NavigationHeadersMarkNonGet({"Accept", "Content-Type"}));
+  EXPECT(NavigationHeadersMarkNonGet({"ORIGIN"}));
+  EXPECT(HeaderNamesContain({"Accept", "REFERER"}, "referer"));
+  EXPECT(!HeaderNamesContain({"Referrer", "Refere"}, "referer"));
 
   std::printf("will_navigate_test: all passed\n");
   return 0;

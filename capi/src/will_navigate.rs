@@ -174,6 +174,8 @@ where
 /// the UI thread for each top-level navigation a page starts, before the
 /// navigation guard; answer each with [`answer_will_navigate`] (any thread),
 /// or the guard decides after 10 seconds. Replaces any previous handler.
+/// On CEF and WebView2, which cancel a navigation and start it again, a
+/// non-GET one (a form POST) is not reported: the guard decides it at once.
 /// Returns `false` when the backend has no such hook (Winit, or older than
 /// API 56).
 pub fn set_will_navigate_handler<F>(handler: F) -> bool

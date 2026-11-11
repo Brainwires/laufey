@@ -655,12 +655,25 @@ reported: the embedder's own `navigate()`, back / forward and reloads,
 `about:blank` / `about:srcdoc`, sub-frames and popups (which keep their own
 rule). With no handler nothing waits.
 
-| Backend   | How it waits                                                                                                                    |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| WKWebView | the navigation's `decisionHandler` is called with the answer                                                                    |
-| WebKitGTK | the main frame's response decision is held (2.40+; kind `other`, no initiator; an embedder load that redirects is reported)     |
-| CEF       | cancelled in `OnBeforeBrowse`, then started again when it may load (a same-origin non-GET keeps its body; anything else by URL) |
-| WebView2  | cancelled in `NavigationStarting`, then started again as a GET of the URL when it may load                                      |
+| Backend   | How it waits                                                                                                                |
+| --------- | --------------------------------------------------------------------------------------------------------------------------- |
+| WKWebView | the navigation's `decisionHandler` is called with the answer                                                                |
+| WebKitGTK | the main frame's response decision is held (2.40+; kind `other`, no initiator; an embedder load that redirects is reported) |
+| CEF       | cancelled in `OnBeforeBrowse`, then started again by URL when it may load; a non-GET one is not reported                    |
+| WebView2  | cancelled in `NavigationStarting`, then started again by URL when it may load; a non-GET one is not reported                |
+
+CEF and WebView2 cannot hold a navigation, so they cancel it and start it again.
+A non-GET navigation (a form POST) is never held there: started again it would
+carry its body on the window's own authority, whatever frame really submitted it
+(a cross-origin sub-frame's `target="_top"` form would arrive as same-origin),
+and WebView2 can only start a GET, dropping the body. Such a navigation is not
+reported, and the guard decides it at once, as with no handler. WebView2 reports
+no method, so laufey reads it from the request's headers: one carrying
+`Content-Type` or `Origin` is taken as non-GET. The load started again is let
+through by a one-shot token: the window's next navigation start spends it, and
+it matches only the load the backend itself started (CEF's direct-load
+transition; WebView2's API navigation, with no Referer), never a page's own
+navigation to the same URL.
 
 A navigation started again is a new history entry.
 
