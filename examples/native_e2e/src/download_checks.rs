@@ -249,14 +249,23 @@ async fn eval_string(win: &Window, script: &str) -> Option<String> {
   None
 }
 
-/// Polls the window's `location.origin` until it is `want` (or about `tries` ×
-/// 200 ms pass) and returns the last answer. A server having answered the
-/// request doesn't mean the document has committed: until then the initial
-/// empty document answers, with the origin `null`.
+/// The window's origin once its document has been parsed (`document.body`
+/// exists); while it is still loading, the origin followed by the ready state,
+/// so it never equals an origin.
+const PAGE_ORIGIN_JS: &str = "document.body && document.readyState !== \
+  'loading' ? String(location.origin) : String(location.origin) + ' (' + \
+  document.readyState + ', no body yet)'";
+
+/// Polls [`PAGE_ORIGIN_JS`] until it is `want` (or about `tries` × 200 ms
+/// pass) and returns the last answer. Neither the server logging the request
+/// nor the engine having sent it means the document has committed: until it
+/// does, scripts run in the window's initial empty document, whose origin is
+/// `null`, and a just-committed document may not have a body yet for the
+/// steps that append to it.
 async fn wait_origin(win: &Window, want: &str, tries: u32) -> Option<String> {
   let mut last = None;
   for _ in 0..tries {
-    last = eval_string(win, "String(location.origin)").await;
+    last = eval_string(win, PAGE_ORIGIN_JS).await;
     if last.as_deref() == Some(want) {
       break;
     }
@@ -423,11 +432,20 @@ pub async fn run() {
   let win = Window::new(480, 320).title("native-e2e-downloads");
   win.show();
   win.navigate(&format!("{own}/"));
+  // The page first, then the server's log of its request: the request was
+  // logged before the response that committed the page was sent, so once
+  // the page is up `/` is in the log (a short wait covers the server
+  // thread's push). Sampling the log first, with a deadline of its own,
+  // failed a first load slower than that deadline (a cold runner) while the
+  // page itself arrived in time.
+  let ready = wait_origin(&win, &own, 150).await;
   let loaded =
-    wait_for(|| hits.lock().unwrap().iter().any(|p| p == "/"), 100, 100).await;
-  let ready = wait_origin(&win, &own, 100).await;
+    wait_for(|| hits.lock().unwrap().iter().any(|p| p == "/"), 20, 100).await;
   check(
-    &format!("downloads: the window shows the app's page ({ready:?})"),
+    &format!(
+      "downloads: the window shows the app's page ({ready:?}, server saw / \
+       {loaded})"
+    ),
     loaded && ready.as_deref() == Some(own.as_str()),
   );
 
