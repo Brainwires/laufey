@@ -198,17 +198,23 @@ w.set_skip_taskbar(true);
   lets everything through. It is independent of `set_click_passthrough`, which
   wins while on and reads back only what it was set to. macOS has no input
   shape: the window's `ignoresMouseEvents` follows the cursor (a global and a
-  local mouse monitor, no permission) and is recomputed at once when the region
-  changes and when the window moves, resizes, shows, hides or changes screen
-  (API 51; a 30 Hz timer before), so a click right after any of them meets the
-  current region. A click the window server receives within about 2 ms of the
-  move that brought the cursor over a rectangle (a synthetic warp-and-click) can
-  still reach the window beneath: the move reaches the app after the window
-  server has seen it. Windows: `WS_EX_TRANSPARENT` follows the cursor on a 60 Hz
-  timer of the window's own thread, so the region is input-only (nothing is
-  clipped; `SetWindowRgn` would clip the painting, and `HTTRANSPARENT` only
-  passes clicks within one thread). Linux: the window's input shape (X11 SHAPE,
-  Wayland `wl_surface.set_input_region`), through GDK.
+  local mouse monitor on moves, presses, releases and scrolls, no permission)
+  and is recomputed at once when the region changes and when the window moves,
+  resizes, shows, hides or changes screen (API 51; a 30 Hz timer before), so a
+  click right after any of them meets the current region. A cursor warp
+  (`CGWarpMouseCursorPosition`, as automation tools use) posts no event: while
+  the cursor is within the frame of a window with a region, a 120 Hz timer reads
+  the cursor as well, so a warp onto a rectangle there is taken within about 8
+  ms; outside every such frame nothing polls, and a warp from there onto a
+  rectangle is noticed at the press that follows (only that first click can
+  pass). A click the window server receives within about 2 ms of the move that
+  brought the cursor over a rectangle (a synthetic move-and-click) can still
+  reach the window beneath: the move reaches the app after the window server has
+  seen it. Windows: `WS_EX_TRANSPARENT` follows the cursor on a 60 Hz timer of
+  the window's own thread, so the region is input-only (nothing is clipped;
+  `SetWindowRgn` would clip the painting, and `HTTRANSPARENT` only passes clicks
+  within one thread). Linux: the window's input shape (X11 SHAPE, Wayland
+  `wl_surface.set_input_region`), through GDK.
 - **Skip the taskbar** (`set_skip_taskbar`): Windows `ITaskbarList` `DeleteTab`
   / `AddTab`, re-applied after each show (the window stays in Alt-Tab); Linux
   X11 the skip-taskbar and skip-pager hints (`_NET_WM_STATE`); not on Wayland

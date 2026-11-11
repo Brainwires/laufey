@@ -102,6 +102,53 @@ static void TestInputRegion() {
   EXPECT(ShouldPassThrough(false, r, false, 15, 25));
 }
 
+// macOS: the hit test in AppKit's bottom-left screen space, and when the
+// cursor poll that notices event-less cursor warps runs.
+static void TestScreenHitRegion() {
+  // Content 200x100 at screen (1000, 500); the frame adds a 28 pt title bar.
+  ScreenRect content{1000, 500, 200, 100};
+  ScreenRect frame{1000, 500, 200, 128};
+  laufey_rect_t rects[] = {{10, 20, 30, 40}};  // content DIPs, top-left
+  InputRegion r = MakeInputRegion(rects, 1);
+  InputRegion none = MakeInputRegion(nullptr, 0);
+
+  // NSPointInRect's edges: left / bottom in, right / top out.
+  EXPECT(ScreenRectContains(content, 1000, 500));
+  EXPECT(!ScreenRectContains(content, 1200, 550));
+  EXPECT(!ScreenRectContains(content, 1100, 600));
+  EXPECT(!ScreenRectContains(ScreenRect{}, 0, 0));
+
+  // The rectangle's top-left (10, 20) is screen (1010, 580); its
+  // bottom-right corner (40, 60) is screen (1040, 540), outside.
+  EXPECT(!ShouldPassThroughAtScreenPoint(false, r, true, content, 1010, 580));
+  EXPECT(!ShouldPassThroughAtScreenPoint(false, r, true, content, 1039, 541));
+  EXPECT(ShouldPassThroughAtScreenPoint(false, r, true, content, 1040, 560));
+  EXPECT(ShouldPassThroughAtScreenPoint(false, r, true, content, 1020, 540));
+  // Inside the content, outside the rectangle; outside the window.
+  EXPECT(ShouldPassThroughAtScreenPoint(false, r, true, content, 1150, 520));
+  EXPECT(ShouldPassThroughAtScreenPoint(false, r, true, content, 900, 580));
+  // Over the title bar: outside the content, so it passes.
+  EXPECT(ShouldPassThroughAtScreenPoint(false, r, true, content, 1010, 610));
+  // A hidden window passes even over a rectangle.
+  EXPECT(ShouldPassThroughAtScreenPoint(false, r, false, content, 1010, 580));
+  // Explicit passthrough wins; no region takes everything.
+  EXPECT(ShouldPassThroughAtScreenPoint(true, r, true, content, 1010, 580));
+  EXPECT(!ShouldPassThroughAtScreenPoint(false, none, true, content, 900, 0));
+  EXPECT(ShouldPassThroughAtScreenPoint(true, none, true, content, 1010, 580));
+
+  // The poll runs while the cursor is within the frame of a visible window
+  // with a region and no explicit passthrough, and only then.
+  EXPECT(WantsHitRegionCursorPoll(false, r, true, frame, 1150, 520));
+  EXPECT(WantsHitRegionCursorPoll(false, r, true, frame, 1010, 580));
+  EXPECT(WantsHitRegionCursorPoll(false, r, true, frame, 1010, 610));
+  EXPECT(!WantsHitRegionCursorPoll(false, r, true, frame, 1010, 628));
+  EXPECT(!WantsHitRegionCursorPoll(false, r, true, frame, 999, 520));
+  EXPECT(!WantsHitRegionCursorPoll(false, r, false, frame, 1150, 520));
+  EXPECT(!WantsHitRegionCursorPoll(true, r, true, frame, 1150, 520));
+  EXPECT(!WantsHitRegionCursorPoll(false, none, true, frame, 1150, 520));
+  EXPECT(kHitRegionCursorPollHz >= 100);
+}
+
 static void TestLevelsAndPolicy() {
   EXPECT(IsValidWindowLevel(LAUFEY_WINDOW_LEVEL_NORMAL));
   EXPECT(IsValidWindowLevel(LAUFEY_WINDOW_LEVEL_SCREEN_SAVER));
@@ -221,6 +268,7 @@ static void TestSpeechTracker() {
 
 int main() {
   TestInputRegion();
+  TestScreenHitRegion();
   TestLayerEdgeAnchor();
   TestLevelsAndPolicy();
   TestSpeechRequest();

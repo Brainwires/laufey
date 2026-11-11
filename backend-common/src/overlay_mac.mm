@@ -6,17 +6,25 @@
 // macOS has no input-shape API for a window. A window with an input region
 // keeps ignoresMouseEvents on while the cursor is outside its rectangles and
 // turns it off while the cursor is over one, so the click that follows lands
-// in the window. The state is recomputed on every event that can change it,
-// never polled: a cursor move (a global and a local mouse monitor; mouse
-// moves need no permission), a new region, and the window moving, resizing,
-// showing or hiding, or changing screen, so a click right after any of them
-// meets the current state. The state lives in a weak-keyed map, so a window
-// that is gone drops out by itself.
+// in the window. The state is recomputed on every event that can change it:
+// a cursor move, a button press or release or a scroll (a global and a local
+// mouse monitor; mouse events need no permission), a new region, and the
+// window moving, resizing, showing or hiding, or changing screen, so a click
+// right after any of them meets the current state. The state lives in a
+// weak-keyed map, so a window that is gone drops out by itself.
+//
+// A cursor warp (CGWarpMouseCursorPosition, what automation tools use) posts
+// no event at all, so while the cursor is within the frame of a window with a
+// region a 120 Hz timer reads the cursor too (WantsHitRegionCursorPoll): a
+// warp onto a rectangle is taken within about 8 ms. With the cursor outside
+// every such frame the timer stops and nothing runs between events; a warp
+// from there onto a rectangle is caught by the press that follows (the
+// monitors see it), so only that first click can miss.
 //
 // What stays: the window server routes a click by the state it has when the
 // click arrives, and a cursor move reaches this process only after the
 // window server has seen it. A click posted within about 2 ms of the move
-// that brought the cursor over a rectangle (a synthetic warp-and-click) can
+// that brought the cursor over a rectangle (a synthetic move-and-click) can
 // still go to the window beneath; a pointing device's click comes much later.
 
 #include "laufey_overlay.h"
@@ -28,6 +36,9 @@
 
 @interface LaufeyOverlayState : NSObject
 @property(nonatomic) BOOL explicitPassthrough;
+// The cursor was within the window's frame at the last recompute, with a
+// region in force (WantsHitRegionCursorPoll): the cursor poll runs.
+@property(nonatomic) BOOL wantsCursorPoll;
 // The window's frame / visibility / screen observers while it has a region.
 @property(nonatomic, strong) NSArray<id>* windowObservers;
 @end
@@ -65,26 +76,78 @@ id g_local_monitor = nil;
 // The app-wide observers (screens reconfigured, the active Space changed).
 NSArray<id>* g_app_observers = nil;
 
+// The cursor poll: runs while some window wants it (UpdateCursorPoll).
+NSTimer* g_cursor_poll = nil;
+
+ScreenRect ToScreenRect(NSRect r) {
+  return ScreenRect{r.origin.x, r.origin.y, r.size.width, r.size.height};
+}
+
 void Recompute(NSWindow* window, LaufeyOverlayState* st) {
-  bool pass = st.explicitPassthrough;
-  if (!pass && st->region.active) {
-    NSPoint p = [NSEvent mouseLocation];  // bottom-left screen space
-    NSRect content = [window contentRectForFrameRect:[window frame]];
-    bool inside = [window isVisible] && NSPointInRect(p, content);
-    double x = p.x - content.origin.x;
-    double y = content.origin.y + content.size.height - p.y;
-    pass = ShouldPassThrough(false, st->region, inside, x, y);
-  }
+  NSPoint p = [NSEvent mouseLocation];  // bottom-left screen space
+  NSRect frame = [window frame];
+  bool visible = [window isVisible];
+  bool pass = ShouldPassThroughAtScreenPoint(
+      st.explicitPassthrough, st->region, visible,
+      ToScreenRect([window contentRectForFrameRect:frame]), p.x, p.y);
+  st.wantsCursorPoll =
+      WantsHitRegionCursorPoll(st.explicitPassthrough, st->region, visible,
+                               ToScreenRect(frame), p.x, p.y);
   if ((bool)[window ignoresMouseEvents] != pass)
     [window setIgnoresMouseEvents:pass];
 }
 
-void RecomputeAll() {
+void RecomputeAll();
+
+// Starts the cursor poll while any window's last recompute wants it, and
+// stops it otherwise: the poll runs only with the cursor within the frame of
+// a window with a region.
+void UpdateCursorPoll() {
+  bool want = false;
+  for (LaufeyOverlayState* st in [[States() objectEnumerator] allObjects]) {
+    if (st.wantsCursorPoll && st->region.active) {
+      want = true;
+      break;
+    }
+  }
+  if (want && !g_cursor_poll) {
+    g_cursor_poll = [NSTimer timerWithTimeInterval:1.0 / kHitRegionCursorPollHz
+                                           repeats:YES
+                                             block:^(NSTimer*) {
+                                               RecomputeAll();
+                                             }];
+    g_cursor_poll.tolerance = 0.001;
+    // Common modes: it keeps running while a menu or a drag tracks.
+    [[NSRunLoop mainRunLoop] addTimer:g_cursor_poll
+                              forMode:NSRunLoopCommonModes];
+  } else if (!want && g_cursor_poll) {
+    [g_cursor_poll invalidate];
+    g_cursor_poll = nil;
+  }
+}
+
+// Every window with a region but `skip`.
+void RecomputeAllExcept(NSWindow* skip) {
   for (NSWindow* window in [[States() keyEnumerator] allObjects]) {
     LaufeyOverlayState* st = [States() objectForKey:window];
-    if (st && st->region.active)
+    if (window != skip && st && st->region.active)
       Recompute(window, st);
   }
+  UpdateCursorPoll();
+}
+
+void RecomputeAll() {
+  RecomputeAllExcept(nil);
+}
+
+// A press already delivered to one of this app's windows stays that
+// window's: turning its passthrough on now would send the release elsewhere.
+// Every other window follows the event.
+void RecomputeForLocalEvent(NSEvent* e) {
+  NSEventType t = e.type;
+  bool press = t == NSEventTypeLeftMouseDown ||
+               t == NSEventTypeRightMouseDown || t == NSEventTypeOtherMouseDown;
+  RecomputeAllExcept(press ? e.window : nil);
 }
 
 bool AnyRegion() {
@@ -124,8 +187,10 @@ void WatchWindow(NSWindow* window, LaufeyOverlayState* st) {
                                            NSWindow* w = weak_window;
                                            LaufeyOverlayState* s =
                                                w ? StateFor(w, false) : nil;
-                                           if (s && s->region.active)
+                                           if (s && s->region.active) {
                                              Recompute(w, s);
+                                             UpdateCursorPoll();
+                                           }
                                          }]];
   }
   st.windowObservers = observers;
@@ -133,9 +198,17 @@ void WatchWindow(NSWindow* window, LaufeyOverlayState* st) {
 
 void UpdateFollowers() {
   bool want = AnyRegion();
+  // Moves, and also presses, releases and scrolls: after a cursor warp
+  // (no move event) the press that follows is the first event that says
+  // where the cursor is. The global monitor sees it as it goes to another
+  // app (the click passed this window by; the next one lands), the local
+  // one before this app handles it.
   NSEventMask mask = NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged |
                      NSEventMaskRightMouseDragged |
-                     NSEventMaskOtherMouseDragged;
+                     NSEventMaskOtherMouseDragged | NSEventMaskLeftMouseDown |
+                     NSEventMaskLeftMouseUp | NSEventMaskRightMouseDown |
+                     NSEventMaskRightMouseUp | NSEventMaskOtherMouseDown |
+                     NSEventMaskOtherMouseUp | NSEventMaskScrollWheel;
   if (want && !g_global_monitor) {
     g_global_monitor =
         [NSEvent addGlobalMonitorForEventsMatchingMask:mask
@@ -145,7 +218,7 @@ void UpdateFollowers() {
     g_local_monitor =
         [NSEvent addLocalMonitorForEventsMatchingMask:mask
                                               handler:^NSEvent*(NSEvent* e) {
-                                                RecomputeAll();
+                                                RecomputeForLocalEvent(e);
                                                 return e;
                                               }];
     id screens = [[NSNotificationCenter defaultCenter]
@@ -210,6 +283,7 @@ void MacSetClickPassthrough(void* nswindow, bool enabled) {
   LaufeyOverlayState* st = StateFor(window, true);
   st.explicitPassthrough = enabled;
   Recompute(window, st);
+  UpdateCursorPoll();
 }
 
 bool MacIsClickPassthrough(void* nswindow) {
@@ -229,6 +303,7 @@ void MacSetInputRegion(void* nswindow, const InputRegion& region) {
   Recompute(window, st);
   WatchWindow(window, st);
   UpdateFollowers();
+  UpdateCursorPoll();
 }
 
 void MacForgetOverlayWindow(void* nswindow) {
@@ -241,6 +316,7 @@ void MacForgetOverlayWindow(void* nswindow) {
   }
   [States() removeObjectForKey:window];
   UpdateFollowers();
+  UpdateCursorPoll();
 }
 
 bool MacSetVisibleOnAllWorkspaces(void* nswindow, bool visible,

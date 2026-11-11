@@ -51,6 +51,36 @@ bool RegionTakesInput(const InputRegion& region, double x, double y);
 bool ShouldPassThrough(bool explicit_passthrough, const InputRegion& region,
                        bool inside_window, double x, double y);
 
+// A rectangle in a bottom-left-origin screen space (AppKit's): the origin is
+// its bottom-left corner. A point is inside as NSPointInRect has it: left and
+// bottom edges in, right and top edges out.
+struct ScreenRect {
+  double x = 0;
+  double y = 0;
+  double width = 0;
+  double height = 0;
+};
+bool ScreenRectContains(const ScreenRect& rect, double px, double py);
+
+// macOS: ShouldPassThrough for the cursor at (px, py) in AppKit's screen
+// space, `content` being the window's content rectangle there and `visible`
+// whether the window is on screen (a hidden window takes nothing).
+bool ShouldPassThroughAtScreenPoint(bool explicit_passthrough,
+                                    const InputRegion& region, bool visible,
+                                    const ScreenRect& content, double px,
+                                    double py);
+
+// macOS: whether the cursor poll runs for a window, at
+// kHitRegionCursorPollHz: while it has a region, no explicit passthrough, is
+// on screen and the cursor (px, py) is within its frame. A cursor warp
+// (CGWarpMouseCursorPosition, an automation tool) posts no event, so the poll
+// is what notices a cursor moved onto a rectangle without one; outside every
+// such frame nothing runs and the mouse monitors alone keep the state.
+bool WantsHitRegionCursorPoll(bool explicit_passthrough,
+                              const InputRegion& region, bool visible,
+                              const ScreenRect& frame, double px, double py);
+constexpr double kHitRegionCursorPollHz = 120.0;
+
 // --- Levels and the activation policy --------------------------------------
 
 bool IsValidWindowLevel(int32_t level);
