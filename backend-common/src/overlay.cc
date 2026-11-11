@@ -48,6 +48,29 @@ bool ShouldPassThrough(bool explicit_passthrough, const InputRegion& region,
   return !RegionTakesInput(region, x, y);
 }
 
+bool ScreenRectContains(const ScreenRect& rect, double px, double py) {
+  return px >= rect.x && px < rect.x + rect.width && py >= rect.y &&
+         py < rect.y + rect.height;
+}
+
+bool ShouldPassThroughAtScreenPoint(bool explicit_passthrough,
+                                    const InputRegion& region, bool visible,
+                                    const ScreenRect& content, double px,
+                                    double py) {
+  bool inside = visible && ScreenRectContains(content, px, py);
+  // Content DIPs from the top-left.
+  double x = px - content.x;
+  double y = content.y + content.height - py;
+  return ShouldPassThrough(explicit_passthrough, region, inside, x, y);
+}
+
+bool WantsHitRegionCursorPoll(bool explicit_passthrough,
+                              const InputRegion& region, bool visible,
+                              const ScreenRect& frame, double px, double py) {
+  return !explicit_passthrough && region.active && visible &&
+         ScreenRectContains(frame, px, py);
+}
+
 bool IsValidWindowLevel(int32_t level) {
   return level >= LAUFEY_WINDOW_LEVEL_NORMAL &&
          level <= LAUFEY_WINDOW_LEVEL_SCREEN_SAVER;
