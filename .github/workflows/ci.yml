@@ -121,8 +121,13 @@ jobs:
       - name: CEF de-elevation tripwire
         run: scripts/check-cef-de-elevation.sh
 
-      # A warning (never a failure) when the pinned CEF's Chromium is more
-      # than 2 majors behind Chrome stable: time to update CEF.
+      # The gate's decisions against saved Chrome stable answers (offline).
+      - name: CEF staleness gate tests
+        run: scripts/test-check-cef-staleness.sh
+
+      # Warns when the pinned CEF's Chromium is 2 majors behind Chrome stable
+      # and fails at 3, unless a dated cef/staleness-waiver for this pin
+      # covers it (docs/backends.md, "CEF bump cadence").
       - name: CEF staleness
         run: scripts/check-cef-staleness.sh
 

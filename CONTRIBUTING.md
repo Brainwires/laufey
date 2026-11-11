@@ -4,6 +4,10 @@ Build and test instructions are in the [README](README.md) and
 [docs/e2e-testing.md](docs/e2e-testing.md). This file lists the checks CI cannot
 run.
 
+Updating CEF has its own cadence and checklist (CI fails on a pin 3 Chromium
+majors behind Chrome stable): see
+[docs/backends.md, "CEF bump cadence"](docs/backends.md#cef-bump-cadence).
+
 ## Manual checks
 
 ### CEF on macOS: a team-signed app's Safe Storage item
