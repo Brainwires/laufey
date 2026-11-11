@@ -158,7 +158,7 @@ bool FindNumberLiteral(const std::string& json, const std::string& key,
 }
 
 double Clamp(double v, double lo, double hi) {
-  return std::max(lo, std::min(hi, v));
+  return (std::max)(lo, (std::min)(hi, v));
 }
 
 }  // namespace

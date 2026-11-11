@@ -309,13 +309,13 @@ class WillNavigateRequests {
     std::thread([this] {
       std::unique_lock<std::mutex> lock(mutex_);
       for (;;) {
-        Clock::time_point next = Clock::time_point::max();
+        Clock::time_point next = (Clock::time_point::max)();
         for (auto& [id, pending] : pending_) {
           if (pending.deadline != Clock::time_point() &&
               pending.deadline < next)
             next = pending.deadline;
         }
-        if (next == Clock::time_point::max()) {
+        if (next == (Clock::time_point::max)()) {
           timer_cv_.wait(lock);
           continue;
         }
