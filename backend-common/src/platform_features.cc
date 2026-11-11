@@ -5,6 +5,7 @@
 // probe is platform_features_linux.cc. See laufey_platform_features.h.
 
 #include "laufey_platform_features.h"
+#include "laufey_media_consent.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -395,6 +396,17 @@ std::string NotificationUnavailableReason(const PlatformFeatures& f) {
          DesktopSuffix(f);
 }
 
+void SetOsMediaConsent(PlatformFeatures* out,
+                       const OsMediaConsentState& microphone,
+                       const OsMediaConsentState& camera) {
+  const char* mic = OsMediaConsentName(microphone.consent);
+  const char* cam = OsMediaConsentName(camera.consent);
+  out->microphone_access = mic ? mic : "";
+  out->microphone_access_reason = microphone.reason;
+  out->camera_access = cam ? cam : "";
+  out->camera_access_reason = camera.reason;
+}
+
 std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   std::string out = "{";
   out += "\"os\":" + Quote(f.os);
@@ -463,6 +475,15 @@ std::string PlatformFeaturesToJson(const PlatformFeatures& f) {
   out += ",\"passkeys\":" + StringOrNull(f.passkeys);
   out += ",\"passkeysReason\":" +
          StringOrNull(f.passkeys.empty() ? f.passkeys_reason : std::string());
+  out += ",\"microphoneAccess\":" + StringOrNull(f.microphone_access);
+  out +=
+      ",\"microphoneAccessReason\":" +
+      StringOrNull(f.microphone_access == "denied" ? f.microphone_access_reason
+                                                   : std::string());
+  out += ",\"cameraAccess\":" + StringOrNull(f.camera_access);
+  out += ",\"cameraAccessReason\":" + StringOrNull(f.camera_access == "denied"
+                                                       ? f.camera_access_reason
+                                                       : std::string());
   out += "}";
   return out;
 }
@@ -711,6 +732,8 @@ PlatformFeatures ProbePlatformFeatures() {
 #elif defined(_WIN32)
   f.os = "windows";
   f.badge = "title";
+  SetOsMediaConsent(&f, ProbeOsMediaConsent(LAUFEY_MEDIA_CAPTURE_MICROPHONE),
+                    ProbeOsMediaConsent(LAUFEY_MEDIA_CAPTURE_CAMERA));
 #else
   f.os = "unknown";
 #endif

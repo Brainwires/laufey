@@ -340,6 +340,105 @@ int main() {
                               kMic, true) == kDeny);
   }
 
+  // --- The OS's consent (Windows' privacy switches) --------------------------
+  {
+    // A desktop app meets the device-wide switch, then the desktop-apps one;
+    // the packaged apps' switch (`user`) is never read. Case doesn't matter;
+    // anything but Allow / Deny is unset.
+    ConsentStoreSwitches s;
+    EXPECT(ConsentFromSwitches(s, kMic).consent == OsMediaConsent::kUnknown);
+    EXPECT(ConsentFromSwitches(s, kMic).reason.empty());
+    s.desktop_apps = "Allow";
+    EXPECT(ConsentFromSwitches(s, kMic).consent == OsMediaConsent::kAllowed);
+    EXPECT(ConsentFromSwitches(s, kMic).reason.empty());
+    s.desktop_apps = "Deny";
+    OsMediaConsentState d = ConsentFromSwitches(s, kMic);
+    EXPECT(d.consent == OsMediaConsent::kDenied);
+    EXPECT(d.reason.find("Let desktop apps access your microphone") !=
+           std::string::npos);
+    EXPECT(d.reason.find("Settings > Privacy & security > Microphone") !=
+           std::string::npos);
+    s.machine = "DENY";
+    d = ConsentFromSwitches(s, kCam);
+    EXPECT(d.consent == OsMediaConsent::kDenied &&
+           d.reason.find("camera access on this device") != std::string::npos &&
+           d.reason.find("> Camera > Camera access)") != std::string::npos);
+    // A device-wide Allow doesn't override the desktop-apps Deny.
+    EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"Allow", "", "Deny"}, kCam)
+               .consent == OsMediaConsent::kDenied);
+    EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"Denied", "", ""}, kMic)
+               .consent == OsMediaConsent::kUnknown);
+    // GitHub's windows-latest image (run 42331063931): the packaged apps'
+    // switch is off for both devices, the device-wide one isn't, and desktop
+    // apps capture. Not a refusal, with the desktop-apps value set or absent.
+    for (const char* machine : {"", "Allow"}) {
+      for (const char* desktop : {"", "Allow"}) {
+        ConsentStoreSwitches runner{machine, "Deny", desktop};
+        for (uint32_t kind : {kMic, kCam}) {
+          OsMediaConsentState r = ConsentFromSwitches(runner, kind);
+          EXPECT(r.consent != OsMediaConsent::kDenied && r.reason.empty());
+          EXPECT(r.consent == ((machine[0] || desktop[0])
+                                   ? OsMediaConsent::kAllowed
+                                   : OsMediaConsent::kUnknown));
+        }
+      }
+    }
+    // The packaged apps' switch alone, either way, says nothing.
+    EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"", "Allow", ""}, kMic)
+               .consent == OsMediaConsent::kUnknown);
+    EXPECT(ConsentFromSwitches(ConsentStoreSwitches{"", "deny", ""}, kMic)
+               .consent == OsMediaConsent::kUnknown);
+
+    EXPECT(std::string(ConsentStoreDevice(kMic)) == "microphone");
+    EXPECT(std::string(ConsentStoreDevice(kCam)) == "webcam");
+    EXPECT(ConsentStoreDevice(kMic | kCam) == nullptr);
+    EXPECT(std::string(OsMediaConsentName(OsMediaConsent::kAllowed)) ==
+           "allowed");
+    EXPECT(std::string(OsMediaConsentName(OsMediaConsent::kDenied)) ==
+           "denied");
+    EXPECT(OsMediaConsentName(OsMediaConsent::kUnknown) == nullptr);
+
+    OsMediaConsentState denied{OsMediaConsent::kDenied, "off"};
+    OsMediaConsentState allowed{OsMediaConsent::kAllowed, ""};
+    OsMediaConsentState unknown;
+    EXPECT(DeniedMediaKinds(denied, allowed) == kMic);
+    EXPECT(DeniedMediaKinds(unknown, denied) == kCam);
+    EXPECT(DeniedMediaKinds(denied, denied) == (kMic | kCam));
+    EXPECT(DeniedMediaKinds(allowed, unknown) == 0);
+#ifndef _WIN32
+    EXPECT(ProcessOsDeniedMediaKinds() == 0);
+#endif
+
+    // A kind the OS refuses is refused, granted or not, and never asked.
+    const std::string app = "myapp://app";
+    const MediaCapturePolicy p = PolicyOf(
+        R"({"mediaCapture":{"microphone":["myapp://app"],"camera":["myapp://app"]}})");
+    EXPECT(DecideMediaCapture(p, app, app, kMic, false, kMic) == kDeny);
+    EXPECT(DecideMediaCapture(p, app, app, kCam, false, kMic) == kAllow);
+    EXPECT(DecideMediaCapture(p, app, app, kMic | kCam, false, kCam) == kDeny);
+    EXPECT(DecideMediaCapture(MediaCapturePolicy{}, app, app, kMic, true,
+                              kMic) == kDeny);
+    EXPECT(DecideMediaCapture(MediaCapturePolicy{}, app, app, kCam, true,
+                              kMic) == kAsk);
+    // The other refusals still come first (and the OS's never grants).
+    EXPECT(DecideMediaCapture(p, app, "https://evil.example", kCam, true,
+                              kMic) == kDeny);
+    EXPECT(DecideMediaCapture(p, app, app, kMic, true, 0) == kAllow);
+
+    MediaCaptureRequests requests;
+    AskedLog().clear();
+    requests.SetHandler(RecordAsk, &AskedLog());
+    std::vector<bool> replies;
+    auto reply = [&replies](bool allow) { replies.push_back(allow); };
+    EXPECT(requests.Request(MediaCapturePolicy{}, 3, app, app, kMic, reply,
+                            kMic) == kDeny);
+    EXPECT(requests.Request(p, 3, app, app, kMic, reply, kMic) == kDeny);
+    EXPECT(requests.Request(p, 3, app, app, kCam, reply, kMic) == kAllow);
+    EXPECT(AskedLog().empty() && requests.PendingCount() == 0);
+    EXPECT(replies == (std::vector<bool>{false, false, true}));
+    requests.SetHandler(nullptr, nullptr);
+  }
+
   std::printf("media_capture_test: ok\n");
   return 0;
 }

@@ -11,7 +11,9 @@
 //   1. refused: nothing asked for, anything but the microphone and camera
 //      (screen capture), an opaque origin, or an asking document whose
 //      origin is not the window's top-level document's (a sub-frame of
-//      another origin never gets the devices, whatever anyone says);
+//      another origin never gets the devices, whatever anyone says), or a
+//      kind the OS keeps from the app (Windows' privacy switches,
+//      laufey_media_consent.h: the engine would fail to open the device);
 //   2. allowed: the launch file's "mediaCapture" grants the origin every kind
 //      it asks for (exact origins only; docs/launch-config.md);
 //   3. asked: the runtime's handler (set_media_capture_handler), which answers
@@ -45,6 +47,7 @@
 #include "laufey.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_launch_config.h"
+#include "laufey_media_consent.h"
 
 namespace laufey_common {
 
@@ -161,15 +164,20 @@ class SubFrameOrigin {
 // Steps 1-3 above for one request: `top_origin` is the window's top-level
 // document's serialized origin, `requesting_origin` the asking document's,
 // `kinds` LAUFEY_MEDIA_CAPTURE_* bits (plus kMediaCaptureOther for anything
-// else), `handler_set` whether the runtime has a handler. Pure.
+// else), `handler_set` whether the runtime has a handler, `os_denied_kinds`
+// the kinds the OS keeps from the app (ProcessOsDeniedMediaKinds): a request
+// for one is refused, granted or not, and the handler isn't asked. Pure.
 inline MediaCaptureDecision DecideMediaCapture(
     const MediaCapturePolicy& policy, const std::string& top_origin,
-    const std::string& requesting_origin, uint32_t kinds, bool handler_set) {
+    const std::string& requesting_origin, uint32_t kinds, bool handler_set,
+    uint32_t os_denied_kinds = 0) {
   using media_capture_internal::Contains;
   if (kinds == 0 || (kinds & ~kMediaCaptureKnownKinds) != 0)
     return MediaCaptureDecision::kDeny;
   if (requesting_origin.empty() || requesting_origin == kOpaqueOrigin ||
       top_origin != requesting_origin)
+    return MediaCaptureDecision::kDeny;
+  if ((kinds & os_denied_kinds) != 0)
     return MediaCaptureDecision::kDeny;
   bool granted = true;
   if (kinds & LAUFEY_MEDIA_CAPTURE_MICROPHONE)
@@ -215,23 +223,26 @@ class MediaCaptureRequests {
     return handler_ != nullptr;
   }
 
-  // Decides a request (see the top of the file) under `policy`; `reply` runs
-  // exactly once: now for an allowed or refused request, later for an asked
-  // one. Returns the decision. The handler is called on this thread (the UI
-  // thread) and outside the lock.
+  // Decides a request (see the top of the file) under `policy`, with
+  // `os_denied_kinds` kept from the app by the OS; `reply` runs exactly once:
+  // now for an allowed or refused request, later for an asked one. Returns
+  // the decision. The handler is called on this thread (the UI thread) and
+  // outside the lock.
   MediaCaptureDecision Request(const MediaCapturePolicy& policy,
                                uint32_t window_id,
                                const std::string& top_origin,
                                const std::string& requesting_origin,
-                               uint32_t kinds, Reply reply) {
+                               uint32_t kinds, Reply reply,
+                               uint32_t os_denied_kinds = 0) {
     laufey_media_capture_fn handler = nullptr;
     void* user_data = nullptr;
     uint64_t id = 0;
     MediaCaptureDecision decision;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      decision = DecideMediaCapture(policy, top_origin, requesting_origin,
-                                    kinds, handler_ != nullptr);
+      decision =
+          DecideMediaCapture(policy, top_origin, requesting_origin, kinds,
+                             handler_ != nullptr, os_denied_kinds);
       if (decision == MediaCaptureDecision::kAsk) {
         id = ++last_id_;
         pending_[id] = Pending{window_id, std::move(reply)};
@@ -248,13 +259,15 @@ class MediaCaptureRequests {
     return decision;
   }
 
-  // The process's policy.
+  // The process's policy, and the OS's switches as they are now (Windows;
+  // read at every request, so the user's change counts from the next one).
   MediaCaptureDecision Request(uint32_t window_id,
                                const std::string& top_origin,
                                const std::string& requesting_origin,
                                uint32_t kinds, Reply reply) {
     return Request(ProcessMediaCapturePolicy(), window_id, top_origin,
-                   requesting_origin, kinds, std::move(reply));
+                   requesting_origin, kinds, std::move(reply),
+                   ProcessOsDeniedMediaKinds());
   }
 
   // Answers request `id`; false when it is not waiting. Any thread.

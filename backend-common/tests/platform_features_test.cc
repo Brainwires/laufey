@@ -6,6 +6,7 @@
 // Plain asserts, no framework.
 
 #include "laufey_platform_features.h"
+#include "laufey_media_consent.h"
 
 #include <chrono>
 #include <cstdio>
@@ -552,7 +553,9 @@ int main() {
          "\"badgeReason\":null,\"fileChooser\":null,"
          "\"fileChooserReason\":null,\"windowBlur\":null,"
          "\"windowBlurReason\":null,\"passkeys\":null,"
-         "\"passkeysReason\":null}");
+         "\"passkeysReason\":null,\"microphoneAccess\":null,"
+         "\"microphoneAccessReason\":null,\"cameraAccess\":null,"
+         "\"cameraAccessReason\":null}");
   // The file chooser (L2): the portal's, or GTK's with the reason.
   {
     PlatformFeatures c = f;
@@ -583,12 +586,35 @@ int main() {
     p.passkeys_reason = "ignored when they work";
     EXPECT(Contains(PlatformFeaturesToJson(p),
                     "\"passkeys\":\"security-keys\","
-                    "\"passkeysReason\":null}"));
+                    "\"passkeysReason\":null,"));
     p.passkeys.clear();
     p.passkeys_reason = "liblaufey_webauthn.so is not installed";
     EXPECT(Contains(PlatformFeaturesToJson(p),
                     "\"passkeys\":null,\"passkeysReason\":"
-                    "\"liblaufey_webauthn.so is not installed\"}"));
+                    "\"liblaufey_webauthn.so is not installed\","));
+  }
+  // Windows' privacy switches for the microphone and camera: "allowed",
+  // "denied" with the reason (only then), or null.
+  {
+    PlatformFeatures m = f;
+    OsMediaConsentState denied;
+    denied.consent = OsMediaConsent::kDenied;
+    denied.reason = "desktop apps are off";
+    OsMediaConsentState allowed;
+    allowed.consent = OsMediaConsent::kAllowed;
+    allowed.reason = "ignored when allowed";
+    SetOsMediaConsent(&m, denied, allowed);
+    EXPECT(Contains(PlatformFeaturesToJson(m),
+                    "\"microphoneAccess\":\"denied\","
+                    "\"microphoneAccessReason\":\"desktop apps are off\","
+                    "\"cameraAccess\":\"allowed\","
+                    "\"cameraAccessReason\":null}"));
+    SetOsMediaConsent(&m, OsMediaConsentState{}, denied);
+    EXPECT(Contains(PlatformFeaturesToJson(m),
+                    "\"microphoneAccess\":null,"
+                    "\"microphoneAccessReason\":null,"
+                    "\"cameraAccess\":\"denied\","
+                    "\"cameraAccessReason\":\"desktop apps are off\"}"));
   }
   // The notification platform's facts and the badge (L1).
   {
@@ -703,6 +729,20 @@ int main() {
   abi = PlatformFeaturesJsonForAbi();
   EXPECT(abi && Contains(abi, "\"sandbox\":null,\"sandboxReason\":null"));
   std::free(abi);
+  // The OS's consent for the devices: read on Windows (whatever this
+  // machine's switches say), never elsewhere.
+  {
+    PlatformFeatures probed = ProbePlatformFeatures();
+#ifdef _WIN32
+    for (const std::string* access :
+         {&probed.microphone_access, &probed.camera_access})
+      EXPECT(access->empty() || *access == "allowed" || *access == "denied");
+    EXPECT((probed.microphone_access == "denied") ==
+           !probed.microphone_access_reason.empty());
+#else
+    EXPECT(probed.microphone_access.empty() && probed.camera_access.empty());
+#endif
+  }
 
   std::printf("laufey_platform_features_test: OK\n");
   return 0;

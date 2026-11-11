@@ -64,7 +64,8 @@ set(LAUFEY_COMMON_SRCS
 )
 
 if(WIN32)
-  list(APPEND LAUFEY_COMMON_SRCS src/single_instance_win.cc)
+  list(APPEND LAUFEY_COMMON_SRCS src/single_instance_win.cc
+    src/media_consent_win.cc)
 else()
   list(APPEND LAUFEY_COMMON_SRCS src/single_instance_posix.cc)
 endif()
