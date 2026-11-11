@@ -27,7 +27,9 @@ make all        # everything
 `vendor/cef/<cef-version>/<cef-platform>/` and builds `libcef_dll_wrapper`. The
 exact CEF build is pinned at the top of the `Makefile` (`CEF_FULL_VERSION`).
 Changing the pin selects a new cache directory; `make clean-cef-vendor` removes
-every downloaded CEF build.
+every downloaded CEF build. The pin follows Chrome stable on a fixed cadence,
+and CI fails when it falls 3 majors behind: see
+[backends.md, "CEF bump cadence"](backends.md#cef-bump-cadence).
 
 Host OS/arch and the matching CEF archive are detected automatically.
 

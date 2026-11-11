@@ -357,12 +357,61 @@ defaults turn off (`NetworkTimeServiceQuerying`, `AimEnabled`,
 also adds `--disable-signin-promo-on-avatar-pill-for-testing` before the hook,
 which a deep-link launch's strip doesn't touch.
 
-CI warns (`scripts/check-cef-staleness.sh`, never a failure) when the pinned
-Chromium is more than 2 majors behind Chrome stable. At every CEF update:
+### CEF bump cadence
+
+Chromium ships its security fixes on the current stable milestone (and Chrome's
+Extended Stable one) only, so the CEF pin follows Chrome stable:
+
+- **When.** Within two weeks of each Chrome stable milestone (every four weeks),
+  as soon as CEF has published that milestone's stable build for all six
+  platforms; and on the same milestone, when Chrome stable ships a security fix
+  (CI prints a `::notice::` when Chrome stable is a newer build than the pin),
+  move to the CEF build that carries it.
+- **Who.** The maintainer who cuts the next laufey release owns the bump; a CEF
+  staleness warning or failure on `development-denext` makes it the next item in
+  the queue, ahead of feature work.
+- **How.** The steps below; in short: the new `CEF_VERSION` and
+  `CEF_FULL_VERSION` plus the six `CEF_SHA256_*` values in the `Makefile`
+  (checked against the `.sha256` files beside each archive in the CEF builds
+  index), the same `cefVersion` / `cefFullVersion` and the two macOS `hash`
+  values (SRI form, `sha256-<base64>`) in `cef/flake.nix`, a fork note above
+  listing what the new CEF changed for the host, and the full CI matrix.
+
+CI enforces it (`scripts/check-cef-staleness.sh`, the "CEF staleness" step of
+`ci.yml`), measuring how many majors the pinned Chromium trails the newest
+Chrome stable release:
+
+| Majors behind Chrome stable | Result                                                               |
+| --------------------------- | -------------------------------------------------------------------- |
+| 0 or 1                      | passes (a newer build on the same milestone prints a notice)         |
+| 2                           | passes with a warning: the pin is off Chrome's security fixes; bump  |
+| 3 or more                   | fails, unless a waiver covers it                                     |
+| Chrome stable unknown       | passes with a warning (offline or an unreadable answer: not checked) |
+
+The check also fails when `cef/flake.nix` pins another CEF than the `Makefile`.
+When a bump is blocked (no CEF build for every platform yet, a regression the
+host must work around first), commit a waiver as `cef/staleness-waiver`:
+
+```text
+pin: 156.0.15+gcf671c0+chromium-156.0.8078.80
+expires: 2026-12-01
+reason: CEF 159 has no Windows arm64 build yet (tracking issue link)
+```
+
+A waiver turns the failure into a warning only for the exact `CEF_FULL_VERSION`
+it names and only until its `expires` date (inclusive, UTC), which may be at
+most 30 days ahead; an expired, malformed or longer waiver fails the step, and a
+waiver for another pin is ignored, so the bump that clears it should delete it.
+Renewing one means a new commit with a new date and reason.
+`scripts/test-check-cef-staleness.sh` checks these decisions offline against
+saved Chrome stable answers (also a CI step).
+
+At every CEF update:
 
 1. Pick a version published for every platform in the
    [CEF builds index](https://cef-builds.spotifycdn.com/index.html) and update
-   both pins and every hash.
+   both pins and every hash (above), and delete `cef/staleness-waiver` if there
+   is one.
 2. Re-sync `CefOwnDisabledFeatures()` (`laufey_cef_network_quiet.h`) with
    `ChromeMainDelegateCef::BasicStartupComplete` in CEF's
    `libcef/common/chrome/chrome_main_delegate_cef.cc` at the pinned commit (only
