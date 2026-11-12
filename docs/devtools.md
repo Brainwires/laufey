@@ -92,9 +92,16 @@ stop working. `native_e2e --devtools-off` checks that they still do.
   context menu are found the same way when the app has a single window; with
   several windows sharing a browser process they can't be attributed to a
   window, and `is_devtools_open` reports only those opened through the API. The
-  window appears a moment after `OpenDevToolsWindow`; a `close_devtools` before
-  that closes it as soon as it is found (and the DevTools read as closed
-  meanwhile), instead of finding nothing to close.
+  window appears a moment after `OpenDevToolsWindow` (on a loaded machine, many
+  seconds after); whenever it shows it is the window's, however many windows
+  share the browser process, and a `close_devtools` before that closes it as
+  soon as it is found (and the DevTools read as closed meanwhile), instead of
+  finding nothing to close. A DevTools window not shown 5 s after the call is
+  logged with the browser process's windows. A window whose WebView2 controller
+  fails to be created gets another from a new environment, as WebView2's
+  documentation asks (up to 4 attempts; not for `ERROR_INVALID_STATE` or a
+  closed window), so its DevTools and `is_devtools_enabled` don't stay off for a
+  creation that failed once.
 - **WebKitGTK:** `webkit_web_inspector_show` / `_close`; a window's inspector is
   open while it has an inspector web view. `show` makes that web view at once
   but opens the inspector only when the page's web process answers, and that
@@ -109,7 +116,14 @@ stop working. `native_e2e --devtools-off` checks that they still do.
 `native_e2e --system` checks, on every backend, that DevTools are enabled (the
 launch setting and the engine's own setting) and that open, close and two
 toggles each change `is_devtools_open`, and that DevTools closed right after
-`open_devtools` (before they finished opening) stay closed.
-`native_e2e --devtools-off` runs under `LAUFEY_INSPECTABLE=0` and checks the
-engine reports them off and that `open_devtools` / `toggle_devtools` open
-nothing (and, on CEF, that `print_to_pdf` still works).
+`open_devtools` (before they finished opening) stay closed. `open_devtools`
+called right after a window is created, before its web view exists, must open
+them once it does; on Windows that window's controller creation is also made to
+fail twice first (`LAUFEY_TEST_WV2_CONTROLLER_FAILURES=2`, set by
+`scripts/native-e2e-run.sh --system`), so it only passes through WebView2's
+retry. The engine's setting is read again after a navigation.
+`LAUFEY_E2E_DEVTOOLS_REPEAT=<n>` runs the round n times, each on new windows,
+and logs how many passed (a CI dispatch runs 10). `native_e2e --devtools-off`
+runs under `LAUFEY_INSPECTABLE=0` and checks the engine reports them off and
+that `open_devtools` / `toggle_devtools` open nothing (and, on CEF, that
+`print_to_pdf` still works).

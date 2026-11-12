@@ -146,6 +146,15 @@ struct WinWindowState {
   // closed until then. UI thread / the finder threads, under windows_mutex_.
   int devtools_opening = 0;
   bool devtools_close_pending = false;
+  // An open_devtools whose DevTools window hasn't been found yet, and the
+  // DevTools windows of the browser process when it was called: one not
+  // among them is this view's whenever it turns up, even after the finder
+  // thread has given up (DevTools can take many seconds to show on a loaded
+  // machine). Cleared once found, or by close_devtools.
+  bool devtools_awaiting = false;
+  std::vector<HWND> devtools_before;
+  // CreateCoreWebView2Controller failures so far (RetryControllerCreation).
+  int controller_failures = 0;
 };
 
 // Custom window message for UI tasks
@@ -162,6 +171,37 @@ constexpr UINT kWebViewReadyTimeoutMs = 45000;
 // ready (distinct from "window not found", which means no such window).
 constexpr char kWebViewNotReady[] =
     "web view not ready (its WebView2 controller was not created)";
+// How many times a window's CreateCoreWebView2Controller may fail before its
+// web view is given up on. WebView2's contract (ICoreWebView2Environment::
+// CreateCoreWebView2Controller): the app retries a failed creation,
+// starting again from a new environment, unless the error is
+// ERROR_INVALID_STATE (a running instance with other environment options)
+// or the parent window is gone (E_ABORT). Without the retry a window whose
+// one creation failed (seen on CI right after another launch of the same
+// app) never gets a web view: no page, no DevTools.
+constexpr int kControllerAttempts = 4;
+// How long the DevTools finder thread looks for the window an
+// open_devtools brought up; past it FindDevToolsWindow still adopts it.
+constexpr ULONGLONG kDevToolsFindMs = 30000;
+
+// Test hook (LAUFEY_TEST_WV2_CONTROLLER_FAILURES=<n>): the process's first n
+// successful CreateCoreWebView2Controller completions are treated as
+// failures (E_FAIL; the controller is closed), so the documented retry runs
+// on demand. Off (0) by default. UI thread.
+static bool TestFailController() {
+  static int left = [] {
+    char buf[16] = {};
+    DWORD n = GetEnvironmentVariableA("LAUFEY_TEST_WV2_CONTROLLER_FAILURES",
+                                      buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf))
+      return 0;
+    return static_cast<int>(strtoul(buf, nullptr, 10));
+  }();
+  if (left <= 0)
+    return false;
+  left--;
+  return true;
+}
 
 struct UiTaskData {
   void (*task)(void*);
@@ -741,6 +781,13 @@ class WebView2Backend : public LaufeyBackend {
   void OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                           ICoreWebView2Environment* env,
                           std::vector<std::string> schemes);
+  // A failed CreateCoreWebView2Controller (`hr`): logs it and, when
+  // WebView2's contract allows (kControllerAttempts), starts the window's
+  // web view again from a new environment after a short pause. False when
+  // it gives up (the caller then settles the window's waiters as failed).
+  // UI thread.
+  bool RetryControllerCreation(uint32_t window_id, HWND hwnd, HRESULT hr,
+                               const std::vector<std::string>& schemes);
   static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
                                      LPARAM lParam);
 
@@ -772,6 +819,9 @@ class WebView2Backend : public LaufeyBackend {
   // The window's DevTools window (tracked or, with one window per browser
   // process, found by title), or null. Any thread.
   HWND FindDevToolsWindow(uint32_t window_id);
+  // Makes `found` the view's DevTools window (closing it instead when a
+  // close_devtools came while it was opening). windows_mutex_ held.
+  static void AdoptDevToolsWindow(WinWindowState* state, HWND found);
   std::recursive_mutex windows_mutex_;
   bool class_registered_ = false;
   // See SchemesForEnvironment.
@@ -1473,8 +1523,14 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
       Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
           [this, window_id, hwnd, env, schemes](
               HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
+            if (SUCCEEDED(result) && controller && TestFailController()) {
+              controller->Close();
+              controller = nullptr;
+              result = E_FAIL;
+            }
             if (FAILED(result) || !controller) {
-              std::cerr << "Failed to create WebView2 controller" << std::endl;
+              if (RetryControllerCreation(window_id, hwnd, result, schemes))
+                return S_OK;
               SettleWebViewWaiters(window_id, kWebViewNotReady);
               return result;
             }
@@ -2240,6 +2296,52 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             return S_OK;
           })
           .Get());
+}
+
+bool WebView2Backend::RetryControllerCreation(
+    uint32_t window_id, HWND hwnd, HRESULT hr,
+    const std::vector<std::string>& schemes) {
+  int failures = 0;
+  bool alive = false;
+  {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (state && state->hwnd == hwnd && IsWindow(hwnd)) {
+      alive = true;
+      failures = ++state->controller_failures;
+    }
+  }
+  std::cerr << "Failed to create WebView2 controller for window " << window_id
+            << " (hr=0x" << std::hex << static_cast<uint32_t>(hr) << std::dec
+            << ", attempt " << failures << " of " << kControllerAttempts << ")"
+            << std::endl;
+  // E_ABORT with the window gone is the documented outcome of closing a
+  // window while its web view was being created: nothing to retry.
+  if (!alive)
+    return false;
+  if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE) ||
+      failures >= kControllerAttempts) {
+    std::cerr << "laufey: window " << window_id
+              << " has no web view: WebView2 could not create its controller"
+              << std::endl;
+    return false;
+  }
+  // From a new environment, as WebView2's documentation asks; the pause
+  // lets a browser process that was shutting down finish exiting.
+  DWORD delay_ms = 250u << (failures - 1);
+  std::thread([this, window_id, hwnd, schemes, delay_ms] {
+    Sleep(delay_ms);
+    RunOnUiThread([this, window_id, hwnd, schemes] {
+      {
+        std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+        auto* state = GetWindow(window_id);
+        if (!state || state->hwnd != hwnd || !IsWindow(hwnd))
+          return;
+      }
+      CreateEnvironmentForWindow(window_id, hwnd, schemes);
+    });
+  }).detach();
+  return true;
 }
 
 void WebView2Backend::CloseWindow(uint32_t window_id) {
@@ -3418,6 +3520,44 @@ bool IsDevToolsWindowOf(HWND hwnd, DWORD pid) {
   return false;
 }
 
+// The first of `now` not in `before`, or null.
+HWND NewDevToolsWindow(const std::vector<HWND>& now,
+                       const std::vector<HWND>& before) {
+  for (HWND h : now) {
+    if (std::find(before.begin(), before.end(), h) == before.end())
+      return h;
+  }
+  return nullptr;
+}
+
+// The browser process's top-level windows (visibility and title), for the
+// log line of a DevTools window that is slow to show.
+std::string DescribeTopLevelWindowsOf(DWORD pid) {
+  struct Scan {
+    DWORD pid;
+    std::string out;
+    int n = 0;
+  } scan{pid, {}, 0};
+  EnumWindows(
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* sc = reinterpret_cast<Scan*>(lp);
+        DWORD owner = 0;
+        GetWindowThreadProcessId(hwnd, &owner);
+        if (owner != sc->pid)
+          return TRUE;
+        wchar_t title[64] = {};
+        GetWindowTextW(hwnd, title, 64);
+        if (sc->n++)
+          sc->out += ", ";
+        sc->out += IsWindowVisible(hwnd) ? "visible \"" : "hidden \"";
+        sc->out += laufey_common::WideToUtf8(title);
+        sc->out += "\"";
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&scan));
+  return scan.n ? scan.out : "none";
+}
+
 }  // namespace
 
 void WebView2Backend::OpenDevTools(uint32_t window_id) {
@@ -3442,48 +3582,77 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
           &not_ready))
     return;
   DWORD pid = static_cast<DWORD>(state->browser_pid);
-  std::vector<HWND> before = DevToolsWindowsOf(pid);
+  if (!state->devtools_awaiting) {
+    // A repeated open while the first one's window hasn't shown keeps the
+    // first one's baseline: that window is still the one to adopt.
+    state->devtools_before = DevToolsWindowsOf(pid);
+    state->devtools_awaiting = true;
+  }
+  std::vector<HWND> before = state->devtools_before;
   state->devtools_opening++;
   state->devtools_close_pending = false;
   state->webview->OpenDevToolsWindow();
   // The window appears asynchronously (or, when this view's DevTools are
   // already open, the existing one comes to the front): find it and remember
-  // it, for close_devtools / is_devtools_open.
+  // it, for close_devtools / is_devtools_open. Past kDevToolsFindMs the
+  // thread stops, but FindDevToolsWindow still adopts the window from
+  // devtools_before whenever it shows.
   std::thread([this, window_id, pid, before] {
     HWND found = nullptr;
-    for (int i = 0; i < 100 && !found; i++) {
+    ULONGLONG start = GetTickCount64();
+    bool reported = false;
+    for (int i = 0; !found; i++) {
       Sleep(50);
-      for (HWND h : DevToolsWindowsOf(pid)) {
-        if (std::find(before.begin(), before.end(), h) == before.end()) {
-          found = h;
+      {
+        std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+        auto* st = GetWindow(window_id);
+        // Gone, or found / closed through FindDevToolsWindow meanwhile.
+        if (!st || !st->devtools_awaiting)
           break;
-        }
       }
+      found = NewDevToolsWindow(DevToolsWindowsOf(pid), before);
       if (!found && i >= 10) {
         HWND fg = GetForegroundWindow();
         if (IsDevToolsWindowOf(fg, pid))
           found = fg;
       }
+      ULONGLONG elapsed = GetTickCount64() - start;
+      if (!found && !reported && elapsed >= 5000) {
+        reported = true;
+        std::cerr << "laufey: window " << window_id
+                  << "'s DevTools have not shown 5 s after open_devtools; "
+                     "the browser process's windows: "
+                  << DescribeTopLevelWindowsOf(pid) << std::endl;
+      }
+      if (!found && elapsed >= kDevToolsFindMs)
+        break;
+    }
+    if (found && reported) {
+      std::cerr << "laufey: window " << window_id << "'s DevTools showed "
+                << (GetTickCount64() - start) << " ms after open_devtools"
+                << std::endl;
     }
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
     auto* st = GetWindow(window_id);
     if (!st)
       return;
     st->devtools_opening--;
-    if (!found) {
-      if (st->devtools_opening == 0)
-        st->devtools_close_pending = false;
-      return;
-    }
-    if (st->devtools_close_pending) {
-      // Closed while still opening: close what has now opened.
-      st->devtools_close_pending = false;
-      st->devtools_hwnd = nullptr;
-      PostMessageW(found, WM_CLOSE, 0, 0);
-      return;
-    }
-    st->devtools_hwnd = found;
+    if (found)
+      AdoptDevToolsWindow(st, found);
   }).detach();
+}
+
+void WebView2Backend::AdoptDevToolsWindow(WinWindowState* state, HWND found) {
+  state->devtools_awaiting = false;
+  state->devtools_before.clear();
+  if (state->devtools_close_pending) {
+    // Closed while still opening: close what has now opened.
+    state->devtools_close_pending = false;
+    state->devtools_hwnd = nullptr;
+    PostMessageW(found, WM_CLOSE, 0, 0);
+    return;
+  }
+  state->devtools_hwnd = found;
 }
 
 HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
@@ -3495,6 +3664,14 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
   if (IsDevToolsWindowOf(state->devtools_hwnd, pid))
     return state->devtools_hwnd;
   state->devtools_hwnd = nullptr;
+  std::vector<HWND> all = DevToolsWindowsOf(pid);
+  if (state->devtools_awaiting) {
+    // The window an open_devtools brought up, however late it showed.
+    if (HWND late = NewDevToolsWindow(all, state->devtools_before)) {
+      AdoptDevToolsWindow(state, late);
+      return state->devtools_hwnd;
+    }
+  }
   // Opened some other way (F12, the context menu): attributable to this
   // view only when no other window shares its browser process.
   int sharing = 0;
@@ -3504,8 +3681,7 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
   }
   if (sharing != 1)
     return nullptr;
-  std::vector<HWND> found = DevToolsWindowsOf(pid);
-  return found.empty() ? nullptr : found.front();
+  return all.empty() ? nullptr : all.front();
 }
 
 void WebView2Backend::CloseDevTools(uint32_t window_id) {
@@ -3520,15 +3696,19 @@ void WebView2Backend::CloseDevTools(uint32_t window_id) {
   if (!hwnd) {
     // Still opening: the window doesn't exist yet and would open after this
     // close. Close it once it has been found.
-    if (state && state->devtools_opening > 0)
+    if (state && (state->devtools_opening > 0 || state->devtools_awaiting))
       state->devtools_close_pending = true;
     return;
   }
   // The DevTools window belongs to the browser process; closing it is what
   // its own close button does.
   PostMessageW(hwnd, WM_CLOSE, 0, 0);
-  if (state)
+  if (state) {
     state->devtools_hwnd = nullptr;
+    // A repeated open of DevTools already open found nothing new to wait for.
+    state->devtools_awaiting = false;
+    state->devtools_before.clear();
+  }
 }
 
 bool WebView2Backend::IsDevToolsOpen(uint32_t window_id) {

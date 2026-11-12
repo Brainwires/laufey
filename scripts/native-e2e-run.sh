@@ -78,6 +78,8 @@
 # conflict with a second process), launch at login (only in CI or with
 # LAUFEY_E2E_LOGIN_ITEM=1) and DevTools open / close / toggle.
 # --devtools-off runs the DevTools checks under LAUFEY_INSPECTABLE=0.
+# LAUFEY_E2E_DEVTOOLS_REPEAT=<n> runs --system's DevTools checks n times,
+# each round on a new window (each pass is counted in the log).
 # --menus-notifications runs only the API 41 checks: menu accelerators, the
 # context-menu close callback, notification responses, live callbacks and
 # scheduling. On Linux it starts a stand-in notification server
@@ -208,6 +210,14 @@ if [ "$mode" = "--system" ]; then
   export LAUFEY_E2E_ONLY=system
   # Names the login entry (HKCU Run value, XDG autostart file).
   export LAUFEY_APP_ID="${LAUFEY_APP_ID:-dev.laufey.e2e.system}"
+  # WebView2: the first DevTools window's controller creation fails twice
+  # (a test hook), so its web view comes from WebView2's documented retry
+  # with a new environment; the DevTools checks then need that web view.
+  case "$backend:$(uname -s)" in
+    webview:MINGW* | webview:MSYS* | webview:CYGWIN*)
+      export LAUFEY_TEST_WV2_CONTROLLER_FAILURES="${LAUFEY_TEST_WV2_CONTROLLER_FAILURES:-2}"
+      ;;
+  esac
 fi
 if [ "$mode" = "--devtools-off" ]; then
   export LAUFEY_E2E_ONLY=devtools-off

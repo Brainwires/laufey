@@ -42,12 +42,32 @@ pub async fn run() {
   );
   shortcut_checks(&caps).await;
   login_item_checks(&caps).await;
-  devtools_checks(&caps, true).await;
+  // LAUFEY_E2E_DEVTOOLS_REPEAT=<n>: the DevTools checks n times, each round
+  // on a new window (and web view), counted at the end.
+  let rounds = std::env::var("LAUFEY_E2E_DEVTOOLS_REPEAT")
+    .ok()
+    .and_then(|v| v.parse::<u32>().ok())
+    .unwrap_or(1)
+    .max(1);
+  let mut clean = 0;
+  for i in 1..=rounds {
+    let label = if rounds > 1 {
+      format!(" (round {i}/{rounds})")
+    } else {
+      String::new()
+    };
+    if devtools_checks(&caps, true, &label).await {
+      clean += 1;
+    }
+  }
+  if rounds > 1 {
+    eprintln!("[e2e] DevTools rounds passed: {clean}/{rounds}");
+  }
 }
 
 pub async fn devtools_off() {
   let caps = laufey::system_capabilities();
-  devtools_checks(&caps, false).await;
+  devtools_checks(&caps, false, "").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -496,13 +516,26 @@ fn login_artifact_present() -> Option<bool> {
 // DevTools
 // ---------------------------------------------------------------------------
 
-async fn devtools_checks(caps: &laufey::SystemCapabilities, expect_on: bool) {
+/// One round of the DevTools checks; true when every check in it passed.
+/// `label` ends each check's name (the round, when repeated).
+async fn devtools_checks(
+  caps: &laufey::SystemCapabilities,
+  expect_on: bool,
+  label: &str,
+) -> bool {
+  let all_ok = std::cell::Cell::new(true);
+  let check = |name: &str, ok: bool| {
+    if !ok {
+      all_ok.set(false);
+    }
+    check(&format!("{name}{label}"), ok);
+  };
   if !caps.devtools() {
     na("DevTools (no web engine)");
     check("devtools_enabled is false without an engine", {
       !laufey::devtools_enabled()
     });
-    return;
+    return all_ok.get();
   }
   check(
     if expect_on {
@@ -513,12 +546,46 @@ async fn devtools_checks(caps: &laufey::SystemCapabilities, expect_on: bool) {
     laufey::devtools_enabled() == expect_on,
   );
 
+  if expect_on {
+    // Asked for at once, before the web view exists (WebView2 and CEF
+    // create it asynchronously): the open must wait for it, not be lost.
+    // On Windows under scripts/native-e2e-run.sh --system the first web
+    // view's controller creation also fails twice first
+    // (LAUFEY_TEST_WV2_CONTROLLER_FAILURES), so this window's web view only
+    // exists if WebView2's documented retry works.
+    let early = Window::new(480, 360).title("native-e2e-devtools-early");
+    early.navigate("about:blank");
+    early.show();
+    early.open_devtools();
+    let asked = std::time::Instant::now();
+    let opened = wait_for(|| early.is_devtools_open(), 300, 50).await;
+    eprintln!(
+      "[e2e] open_devtools at creation: open={opened} after {} ms",
+      asked.elapsed().as_millis()
+    );
+    check(
+      "open_devtools right at window creation opens them once the web view \
+       exists",
+      opened,
+    );
+    check(
+      "the engine's DevTools setting is on in that window",
+      early.is_devtools_enabled(),
+    );
+    early.close_devtools();
+    check(
+      "close_devtools closes them",
+      wait_for(|| !early.is_devtools_open(), 300, 50).await,
+    );
+    early.close();
+  }
+
   let w = Window::new(480, 360).title("native-e2e-devtools");
   w.navigate("about:blank");
   w.show();
   if !wait_for(|| w.get_size().0 != 0, 100, 50).await {
     check("devtools window reports a size", false);
-    return;
+    return all_ok.get();
   }
   // The engine's own setting, read back (the web view may still be coming
   // up on WebView2).
@@ -530,20 +597,34 @@ async fn devtools_checks(caps: &laufey::SystemCapabilities, expect_on: bool) {
 
   if expect_on {
     w.open_devtools();
-    check(
-      "open_devtools opens them",
-      wait_for(|| w.is_devtools_open(), 300, 50).await,
+    let asked = std::time::Instant::now();
+    let opened = wait_for(|| w.is_devtools_open(), 300, 50).await;
+    eprintln!(
+      "[e2e] open_devtools: open={opened} after {} ms",
+      asked.elapsed().as_millis()
     );
+    check("open_devtools opens them", opened);
     w.close_devtools();
     check(
       "close_devtools closes them",
       wait_for(|| !w.is_devtools_open(), 300, 50).await,
     );
-    w.toggle_devtools();
+    // A navigation must not reset the engine's setting (WebView2 keeps
+    // ICoreWebView2Settings per web view, across documents).
+    w.navigate("about:blank");
+    tokio::time::sleep(Duration::from_millis(1000)).await;
     check(
-      "toggle_devtools opens them",
-      wait_for(|| w.is_devtools_open(), 300, 50).await,
+      "the engine's DevTools setting is still on after a navigation",
+      w.is_devtools_enabled(),
     );
+    w.toggle_devtools();
+    let asked = std::time::Instant::now();
+    let opened = wait_for(|| w.is_devtools_open(), 300, 50).await;
+    eprintln!(
+      "[e2e] toggle_devtools: open={opened} after {} ms",
+      asked.elapsed().as_millis()
+    );
+    check("toggle_devtools opens them", opened);
     w.toggle_devtools();
     check(
       "toggle_devtools closes them again",
@@ -587,7 +668,7 @@ async fn devtools_checks(caps: &laufey::SystemCapabilities, expect_on: bool) {
     if std::env::var("LAUFEY_E2E_BACKEND").as_deref() != Ok("cef") {
       na("print_to_pdf with DevTools off (only CEF prints through DevTools)");
       w.close();
-      return;
+      return all_ok.get();
     }
     let mut outcome = None;
     for attempt in 0..3u32 {
@@ -622,4 +703,5 @@ async fn devtools_checks(caps: &laufey::SystemCapabilities, expect_on: bool) {
     }
   }
   w.close();
+  all_ok.get()
 }
