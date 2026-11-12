@@ -428,6 +428,57 @@ unified toolbar). The traffic-light position is kept across resizes, fullscreen
 and title changes. Both work on WKWebView and on CEF's NSWindow; the other
 platforms have no title bar API of this kind and return `false`.
 
+## Title visibility and toolbar style (API ≥ 57)
+
+```rust
+use laufey::{TitleVisibility, ToolbarStyle};
+
+win.set_title_visibility(TitleVisibility::Hidden); // false where unsupported
+win.set_toolbar_style(ToolbarStyle::Unified);      // macOS 11+
+```
+
+`set_title_visibility(Hidden)` removes the title text and keeps everything else
+of the native title bar: its buttons, its drag area, its double-click action.
+The window keeps its title (`set_title`), so it is still named in the Dock /
+taskbar, the Window menu, Mission Control and alt-tab. Each OS does it natively;
+nothing is drawn by laufey:
+
+- **macOS** (WKWebView and CEF's NSWindow):
+  `NSWindow.titleVisibility =
+  NSWindowTitleHidden`. Under
+  `TitlebarStyle::Hidden` / `HiddenInset` the title is never drawn anyway; the
+  choice is kept and applies again when the style goes back to `Default`.
+- **Windows** (WebView2 and CEF):
+  `SetWindowThemeAttribute(WTA_NONCLIENT,
+  WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON)`
+  on the window's native frame: the caption text and icon go, the caption
+  buttons stay, with or without a Mica / Acrylic backdrop.
+- **Linux** (WebKitGTK): only where GTK draws the window's title bar itself
+  (client-side decorations: GNOME and other Wayland compositors without
+  server-side decorations, or `GTK_CSD=1`). The title bar GTK made gets an empty
+  title widget; the window's title is unchanged. Under a window manager's
+  decorations (KDE Plasma, X11 window managers) GTK has no title bar to change,
+  so `LAUFEY_WINDOW_CAP_TITLE_HIDDEN` is not reported and the setter returns
+  `false`: the window is never switched to client-side decorations to fake it.
+  The capability is probed once, on a window that is realized but never shown.
+  CEF on Linux draws Chromium's own windows and reports nothing.
+- **Winit**: not supported (`NULL`).
+
+`set_toolbar_style` (macOS 11+, `LAUFEY_WINDOW_CAP_TOOLBAR_STYLE`) attaches an
+empty `NSToolbar` and sets `NSWindow.toolbarStyle`; `Automatic` removes the
+toolbar. How it combines with the title bar style:
+
+| Title bar style | `Automatic`              | `Unified` / `UnifiedCompact`                       | `Expanded`                    |
+| --------------- | ------------------------ | -------------------------------------------------- | ----------------------------- |
+| `Default`       | the plain title bar      | one bar, the title left-aligned (Finder, Safari)   | the title on a row of its own |
+| `HiddenInset`   | the inset look as before | the inset toolbar in that style (compact: shorter) | the inset toolbar, expanded   |
+| `Hidden`        | no toolbar               | refused (`false`): use `HiddenInset` for that look | refused                       |
+
+`set_titlebar_style(Hidden)` is refused in turn while the toolbar style is not
+`Automatic`. `set_title_visibility(Hidden)` combines with every toolbar style.
+Windows and Linux have no toolbar style and return `false`. A frameless window
+has no title bar: both setters return `false` there.
+
 ## Backdrops: Mica, Acrylic, vibrancy, blur (API ≥ 38)
 
 ```rust

@@ -833,6 +833,14 @@ class LaufeyBackend {
                                              int /*y*/) {
     return false;
   }
+  // API 57 (laufey.h set_window_title_visibility / set_window_toolbar_style).
+  virtual bool SetWindowTitleVisibility(uint32_t /*window_id*/,
+                                        int /*visibility*/) {
+    return false;
+  }
+  virtual bool SetWindowToolbarStyle(uint32_t /*window_id*/, int /*style*/) {
+    return false;
+  }
   virtual bool SetWindowBackdrop(uint32_t /*window_id*/, int /*backdrop*/,
                                  int /*material*/) {
     return false;

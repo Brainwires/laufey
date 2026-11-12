@@ -401,6 +401,8 @@ class WKWebViewBackend : public LaufeyBackend {
   void SetDisplayChangedHandler(laufey_display_changed_fn handler,
                                 void* user_data) override;
   bool SetWindowTitlebarStyle(uint32_t window_id, int style) override;
+  bool SetWindowTitleVisibility(uint32_t window_id, int visibility) override;
+  bool SetWindowToolbarStyle(uint32_t window_id, int style) override;
   bool SetWindowTrafficLightPosition(uint32_t window_id, int x, int y) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
@@ -2243,6 +2245,10 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       RegisterNSWindow(window, window_id);
       // Window-state events and the normal-bounds tracker (API 38).
       laufey_common::MacWatchWindowState((__bridge void*)window, window_id);
+      if (transparent_titlebar) {
+        laufey_common::MacNoteTitlebarStyle((__bridge void*)window,
+                                            LAUFEY_TITLEBAR_HIDDEN);
+      }
 
       // Per-window notification observers
       id focus_obs = [[NSNotificationCenter defaultCenter]
@@ -3892,7 +3898,12 @@ uint32_t WKWebViewBackend::WindowCapabilities() {
          LAUFEY_WINDOW_CAP_FILE_DRAG_OUT | LAUFEY_WINDOW_CAP_FILE_DIALOGS |
          LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES |
          LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL |
-         LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS;
+         LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS |
+         // API 57: NSWindow.titleVisibility; toolbarStyle on macOS 11+.
+         LAUFEY_WINDOW_CAP_TITLE_HIDDEN |
+         (laufey_common::MacToolbarStyleAvailable()
+              ? LAUFEY_WINDOW_CAP_TOOLBAR_STYLE
+              : 0u);
 }
 
 void WKWebViewBackend::SetWindowState(uint32_t window_id, int action) {
@@ -4006,6 +4017,39 @@ bool WKWebViewBackend::SetWindowTitlebarStyle(uint32_t window_id, int style) {
     if (window)
       result =
           laufey_common::MacSetTitlebarStyle((__bridge void*)window, style);
+  });
+  return result;
+}
+
+bool WKWebViewBackend::SetWindowTitleVisibility(uint32_t window_id,
+                                                int visibility) {
+  __block bool result = false;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (window)
+      result = laufey_common::MacSetTitleVisibility((__bridge void*)window,
+                                                    visibility);
+  });
+  return result;
+}
+
+bool WKWebViewBackend::SetWindowToolbarStyle(uint32_t window_id, int style) {
+  __block bool result = false;
+  RunOnMainSync(^{
+    NSWindow* window = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (window)
+      result =
+          laufey_common::MacSetToolbarStyle((__bridge void*)window, style);
   });
   return result;
 }

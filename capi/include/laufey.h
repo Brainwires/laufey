@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 56
+#define LAUFEY_API_VERSION 57
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -124,6 +124,28 @@ extern "C" {
 #define LAUFEY_TITLEBAR_HIDDEN 1
 #define LAUFEY_TITLEBAR_HIDDEN_INSET 2
 
+// Title visibility for set_window_title_visibility (API >= 57).
+//   VISIBLE  the title bar draws the window's title (the default).
+//   HIDDEN   the title bar keeps its buttons and drag behaviour but draws no
+//            title text; the window's title (set_title) still names it in the
+//            Dock / taskbar, the Window menu, Mission Control and alt-tab.
+#define LAUFEY_TITLE_VISIBLE 0
+#define LAUFEY_TITLE_HIDDEN 1
+
+// Toolbar styles for set_window_toolbar_style (API >= 57, macOS 11+): how an
+// (empty) NSToolbar lays out the title bar.
+//   AUTOMATIC       no toolbar of its own (the default; HIDDEN_INSET keeps
+//                   its own inset toolbar in AppKit's automatic style).
+//   UNIFIED         one tall bar, the title left-aligned like Finder / Safari.
+//   UNIFIED_COMPACT UNIFIED, shorter.
+//   EXPANDED        the title on its own row above the toolbar.
+// The HIDDEN title bar style has no toolbar (HIDDEN_INSET is that look), so a
+// style other than AUTOMATIC is refused there; see set_window_toolbar_style.
+#define LAUFEY_TOOLBAR_STYLE_AUTOMATIC 0
+#define LAUFEY_TOOLBAR_STYLE_UNIFIED 1
+#define LAUFEY_TOOLBAR_STYLE_UNIFIED_COMPACT 2
+#define LAUFEY_TOOLBAR_STYLE_EXPANDED 3
+
 // Backdrops for set_window_backdrop.
 //   NONE       remove any backdrop (the window is opaque again).
 //   MICA       Windows 11 Mica (DWMSBT_MAINWINDOW).
@@ -200,6 +222,12 @@ extern "C" {
 #define LAUFEY_WINDOW_CAP_BACKDROP_BLUR (1u << 21)
 // API >= 54: show_message_dialog works (with no window open too).
 #define LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS (1u << 22)
+// API >= 57: set_window_title_visibility can hide the title text (macOS;
+// Windows; Linux only where GTK draws the window's title bar itself, i.e.
+// client-side decorations: not under a window manager's server-side ones).
+#define LAUFEY_WINDOW_CAP_TITLE_HIDDEN (1u << 23)
+// API >= 57: set_window_toolbar_style works (macOS 11+).
+#define LAUFEY_WINDOW_CAP_TOOLBAR_STYLE (1u << 24)
 
 // --- Drag and drop (API >= 39) ----------------------------------------------
 //
@@ -1993,6 +2021,8 @@ struct laufey_backend_api {
   // Set the title bar style (LAUFEY_TITLEBAR_*) at runtime. Returns false
   // (and changes nothing) when the backend can't do that style, which is
   // everything but macOS today. Frameless windows have no title bar to style.
+  // From API 57, HIDDEN is refused while the window's toolbar style
+  // (set_window_toolbar_style) is not AUTOMATIC.
   bool (*set_window_titlebar_style)(void* backend_data, uint32_t window_id,
                                     int style);
 
@@ -2902,6 +2932,37 @@ struct laufey_backend_api {
   // each window there) and on Winit. Any thread.
   bool (*set_app_menu)(void* backend_data, laufey_value_t* menu_template,
                        laufey_menu_click_fn on_click, void* on_click_data);
+
+  // --- Title visibility and toolbar style (API >= 57) ----------------------
+  //
+  // Show or hide the title text (LAUFEY_TITLE_*) while the native title bar,
+  // its buttons and its drag behaviour stay. The window keeps its title for
+  // the Dock / taskbar, the Window menu, Mission Control and alt-tab. macOS:
+  // NSWindow.titleVisibility (the HIDDEN / HIDDEN_INSET title bar styles never
+  // draw the title; the choice is kept and applies again under DEFAULT).
+  // Windows: SetWindowThemeAttribute(WTA_NONCLIENT, WTNCA_NODRAWCAPTION |
+  // WTNCA_NODRAWICON), the caption buttons stay. Linux (WebKitGTK): only a
+  // title bar GTK draws itself (client-side decorations, e.g. GNOME on
+  // Wayland) can hide its title; under a window manager's decorations this
+  // returns false. Returns false (and changes nothing) for a frameless
+  // window, an unknown id or value, and where LAUFEY_WINDOW_CAP_TITLE_HIDDEN
+  // is not reported. VISIBLE on a window that never hid its title is true.
+  // Any thread. NULL on Winit.
+  bool (*set_window_title_visibility)(void* backend_data, uint32_t window_id,
+                                      int visibility);
+
+  // Lay the title bar out with an empty NSToolbar in a LAUFEY_TOOLBAR_STYLE_*
+  // (macOS 11+; AUTOMATIC removes it). Under the DEFAULT title bar style the
+  // title sits in the toolbar's bar (left-aligned for UNIFIED /
+  // UNIFIED_COMPACT); under HIDDEN_INSET it sets the inset toolbar's style
+  // (UNIFIED_COMPACT: a shorter inset). Returns false (and changes nothing)
+  // under the HIDDEN title bar style for anything but AUTOMATIC, for a
+  // frameless window, an unknown id or value, and where
+  // LAUFEY_WINDOW_CAP_TOOLBAR_STYLE is not reported (Windows, Linux). While a
+  // window's toolbar style is not AUTOMATIC, set_window_titlebar_style(HIDDEN)
+  // returns false too. Any thread. NULL on Winit.
+  bool (*set_window_toolbar_style)(void* backend_data, uint32_t window_id,
+                                   int style);
 };
 
 #ifdef __cplusplus

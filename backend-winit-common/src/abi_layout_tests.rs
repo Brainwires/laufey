@@ -256,7 +256,9 @@ fn vtable_layout_matches_the_header() {
     scheme_request_frame,
     set_will_navigate_handler,
     answer_will_navigate,
-    set_app_menu
+    set_app_menu,
+    set_window_title_visibility,
+    set_window_toolbar_style
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

@@ -26,6 +26,14 @@ pub const LAUFEY_TITLEBAR_DEFAULT: c_int = 0;
 pub const LAUFEY_TITLEBAR_HIDDEN: c_int = 1;
 pub const LAUFEY_TITLEBAR_HIDDEN_INSET: c_int = 2;
 
+// API 57: title visibility and toolbar style.
+pub const LAUFEY_TITLE_VISIBLE: c_int = 0;
+pub const LAUFEY_TITLE_HIDDEN: c_int = 1;
+pub const LAUFEY_TOOLBAR_STYLE_AUTOMATIC: c_int = 0;
+pub const LAUFEY_TOOLBAR_STYLE_UNIFIED: c_int = 1;
+pub const LAUFEY_TOOLBAR_STYLE_UNIFIED_COMPACT: c_int = 2;
+pub const LAUFEY_TOOLBAR_STYLE_EXPANDED: c_int = 3;
+
 pub const LAUFEY_BACKDROP_NONE: c_int = 0;
 pub const LAUFEY_BACKDROP_MICA: c_int = 1;
 pub const LAUFEY_BACKDROP_ACRYLIC: c_int = 2;
@@ -58,6 +66,9 @@ pub const LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL: u32 = 1 << 20;
 pub const LAUFEY_WINDOW_CAP_BACKDROP_BLUR: u32 = 1 << 21;
 // API 54: native message dialogs.
 pub const LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS: u32 = 1 << 22;
+// API 57: title visibility and toolbar style.
+pub const LAUFEY_WINDOW_CAP_TITLE_HIDDEN: u32 = 1 << 23;
+pub const LAUFEY_WINDOW_CAP_TOOLBAR_STYLE: u32 = 1 << 24;
 
 // --- Types ---
 
@@ -179,6 +190,51 @@ impl TitlebarStyle {
       TitlebarStyle::Default => LAUFEY_TITLEBAR_DEFAULT,
       TitlebarStyle::Hidden => LAUFEY_TITLEBAR_HIDDEN,
       TitlebarStyle::HiddenInset => LAUFEY_TITLEBAR_HIDDEN_INSET,
+    }
+  }
+}
+
+/// Whether the title bar draws the window's title, for
+/// [`Window::set_title_visibility`] (API 57).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleVisibility {
+  Visible,
+  /// No title text; the title bar, its buttons and its drag behaviour stay,
+  /// and the title still names the window in the Dock / taskbar, the Window
+  /// menu, Mission Control and alt-tab.
+  Hidden,
+}
+
+impl TitleVisibility {
+  fn raw(self) -> c_int {
+    match self {
+      TitleVisibility::Visible => LAUFEY_TITLE_VISIBLE,
+      TitleVisibility::Hidden => LAUFEY_TITLE_HIDDEN,
+    }
+  }
+}
+
+/// How an (empty) toolbar lays the macOS title bar out, for
+/// [`Window::set_toolbar_style`] (API 57, macOS 11+).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarStyle {
+  /// No toolbar of the window's own.
+  Automatic,
+  /// One tall bar, the title left-aligned (Finder, Safari).
+  Unified,
+  /// [`ToolbarStyle::Unified`], shorter.
+  UnifiedCompact,
+  /// The title on its own row above the toolbar.
+  Expanded,
+}
+
+impl ToolbarStyle {
+  fn raw(self) -> c_int {
+    match self {
+      ToolbarStyle::Automatic => LAUFEY_TOOLBAR_STYLE_AUTOMATIC,
+      ToolbarStyle::Unified => LAUFEY_TOOLBAR_STYLE_UNIFIED,
+      ToolbarStyle::UnifiedCompact => LAUFEY_TOOLBAR_STYLE_UNIFIED_COMPACT,
+      ToolbarStyle::Expanded => LAUFEY_TOOLBAR_STYLE_EXPANDED,
     }
   }
 }
@@ -318,6 +374,15 @@ impl WindowCapabilities {
   /// `show_message_dialog` works, with no window open too (API 54).
   pub fn message_dialogs(&self) -> bool {
     self.has(LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS)
+  }
+  /// [`Window::set_title_visibility`] can hide the title (API 57): macOS,
+  /// Windows, and Linux where GTK draws the title bars.
+  pub fn title_hidden(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_TITLE_HIDDEN)
+  }
+  /// [`Window::set_toolbar_style`] works (API 57, macOS 11+).
+  pub fn toolbar_style(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_TOOLBAR_STYLE)
   }
 }
 
@@ -624,6 +689,24 @@ impl Window {
     }
   }
 
+  /// Show or hide the title text, keeping the native title bar, its buttons
+  /// and its drag behaviour (API 57). Returns `false` (nothing changes) for
+  /// a frameless window, under a Linux window manager's decorations, on
+  /// Winit and on older backends; see
+  /// [`WindowCapabilities::title_hidden`].
+  pub fn set_title_visibility(&self, visibility: TitleVisibility) -> bool {
+    set_title_visibility_with(api(), self.id(), visibility)
+  }
+
+  /// Lay the macOS title bar out with an empty toolbar in `style` (API 57,
+  /// macOS 11+; [`ToolbarStyle::Automatic`] removes it). Returns `false`
+  /// (nothing changes) under [`TitlebarStyle::Hidden`] for anything but
+  /// `Automatic`, for a frameless window, off macOS and on older backends;
+  /// see [`WindowCapabilities::toolbar_style`].
+  pub fn set_toolbar_style(&self, style: ToolbarStyle) -> bool {
+    set_toolbar_style_with(api(), self.id(), style)
+  }
+
   /// Move the macOS traffic lights to `(x, y)` from the window's top-left
   /// (`None` puts them back). Returns `false` where unsupported.
   pub fn set_traffic_light_position(
@@ -669,6 +752,28 @@ impl Window {
       )
     };
     ok.then_some(r)
+  }
+}
+
+fn set_title_visibility_with(
+  api: &LaufeyBackendApi,
+  window_id: u32,
+  visibility: TitleVisibility,
+) -> bool {
+  match api.set_window_title_visibility {
+    Some(f) => unsafe { f(api.backend_data, window_id, visibility.raw()) },
+    None => false,
+  }
+}
+
+fn set_toolbar_style_with(
+  api: &LaufeyBackendApi,
+  window_id: u32,
+  style: ToolbarStyle,
+) -> bool {
+  match api.set_window_toolbar_style {
+    Some(f) => unsafe { f(api.backend_data, window_id, style.raw()) },
+    None => false,
   }
 }
 
@@ -743,6 +848,101 @@ mod tests {
     assert_eq!(
       LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS,
       ffi::LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS
+    );
+  }
+
+  #[test]
+  fn title_options_encode_like_the_header() {
+    assert_eq!(
+      TitleVisibility::Visible.raw(),
+      ffi::LAUFEY_TITLE_VISIBLE as c_int
+    );
+    assert_eq!(
+      TitleVisibility::Hidden.raw(),
+      ffi::LAUFEY_TITLE_HIDDEN as c_int
+    );
+    assert_eq!(
+      ToolbarStyle::Automatic.raw(),
+      ffi::LAUFEY_TOOLBAR_STYLE_AUTOMATIC as c_int
+    );
+    assert_eq!(
+      ToolbarStyle::Unified.raw(),
+      ffi::LAUFEY_TOOLBAR_STYLE_UNIFIED as c_int
+    );
+    assert_eq!(
+      ToolbarStyle::UnifiedCompact.raw(),
+      ffi::LAUFEY_TOOLBAR_STYLE_UNIFIED_COMPACT as c_int
+    );
+    assert_eq!(
+      ToolbarStyle::Expanded.raw(),
+      ffi::LAUFEY_TOOLBAR_STYLE_EXPANDED as c_int
+    );
+    assert_eq!(
+      LAUFEY_WINDOW_CAP_TITLE_HIDDEN,
+      ffi::LAUFEY_WINDOW_CAP_TITLE_HIDDEN
+    );
+    assert_eq!(
+      LAUFEY_WINDOW_CAP_TOOLBAR_STYLE,
+      ffi::LAUFEY_WINDOW_CAP_TOOLBAR_STYLE
+    );
+    let caps = WindowCapabilities {
+      bits: LAUFEY_WINDOW_CAP_TITLE_HIDDEN,
+    };
+    assert!(caps.title_hidden() && !caps.toolbar_style());
+  }
+
+  static TITLE_CALLS: Mutex<Vec<(&'static str, u32, c_int)>> =
+    Mutex::new(Vec::new());
+
+  unsafe extern "C" fn fake_title_visibility(
+    _: *mut c_void,
+    window_id: u32,
+    visibility: c_int,
+  ) -> bool {
+    TITLE_CALLS
+      .lock()
+      .unwrap()
+      .push(("visibility", window_id, visibility));
+    true
+  }
+
+  unsafe extern "C" fn fake_toolbar_style(
+    _: *mut c_void,
+    window_id: u32,
+    style: c_int,
+  ) -> bool {
+    TITLE_CALLS
+      .lock()
+      .unwrap()
+      .push(("toolbar", window_id, style));
+    // The backend refuses an unknown style, as laufey.h says.
+    style <= LAUFEY_TOOLBAR_STYLE_EXPANDED
+  }
+
+  #[test]
+  fn title_setters_reach_the_backend_or_answer_false() {
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    // A backend without the entry points (Winit, an older one): false.
+    assert!(!set_title_visibility_with(
+      &fake,
+      3,
+      TitleVisibility::Hidden
+    ));
+    assert!(!set_toolbar_style_with(&fake, 3, ToolbarStyle::Unified));
+    fake.set_window_title_visibility = Some(fake_title_visibility);
+    fake.set_window_toolbar_style = Some(fake_toolbar_style);
+    assert!(set_title_visibility_with(&fake, 3, TitleVisibility::Hidden));
+    assert!(set_toolbar_style_with(
+      &fake,
+      4,
+      ToolbarStyle::UnifiedCompact
+    ));
+    assert_eq!(
+      *TITLE_CALLS.lock().unwrap(),
+      vec![
+        ("visibility", 3, LAUFEY_TITLE_HIDDEN),
+        ("toolbar", 4, LAUFEY_TOOLBAR_STYLE_UNIFIED_COMPACT)
+      ]
     );
   }
 
