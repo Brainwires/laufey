@@ -554,10 +554,37 @@ int WaitForChildProcessesToExit(int timeout_ms) {
   return left;
 }
 
-int RunningCefHelpersOfType(const std::string& type) {
-  return RunningChildren([&type](const std::string& command_line) {
-    return CefHelperType(command_line) == type;
-  });
+int RunningProcessCount(const std::vector<int>& pids) {
+  int n = 0;
+  for (int pid : pids) {
+    if (pid <= 0)
+      continue;
+#if defined(_WIN32)
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!h)
+      continue;
+    if (WaitForSingleObject(h, 0) == WAIT_TIMEOUT)
+      ++n;
+    CloseHandle(h);
+#else
+    if (kill(static_cast<pid_t>(pid), 0) != 0 && errno != EPERM)
+      continue;
+#if defined(__linux__)
+    std::ifstream stat("/proc/" + std::to_string(pid) + "/stat");
+    std::string line;
+    if (std::getline(stat, line)) {
+      size_t close_paren = line.rfind(')');
+      if (close_paren != std::string::npos && close_paren + 2 < line.size()) {
+        char state = line[close_paren + 2];
+        if (state == 'Z' || state == 'X')
+          continue;
+      }
+    }
+#endif
+    ++n;
+#endif
+  }
+  return n;
 }
 
 int WaitForCefHelpersOfType(const std::string& type, int timeout_ms,

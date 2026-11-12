@@ -535,6 +535,10 @@ void LaufeyQuitMainLoopMac();
 // CefQuitMessageLoop; a call while that runs does nothing. UI thread.
 void LaufeyQuitMainLoop();
 
+// A renderer process that hosts a page reported its process id (UI thread).
+// The pre-quit drain waits for these, not for every renderer child.
+void LaufeyNotePageRendererPid(int pid);
+
 #if !defined(__APPLE__)
 // Whether the pre-quit drain also waits for the renderer processes to end
 // (laufey_cef_profile_lock.h; Windows, with a persistent profile). Before

@@ -631,6 +631,8 @@ void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 namespace {
 
 bool g_wait_for_renderers_before_quit = false;
+// The renderer processes that have hosted a page (LaufeyNotePageRendererPid).
+std::vector<int> g_page_renderer_pids;
 // The pre-quit drain under way (LaufeyQuitMainLoop), null before.
 laufey_common::PreQuitDrain* g_quit_drain = nullptr;
 constexpr int64_t kQuitDrainStepMs = 10;
@@ -678,6 +680,26 @@ void LaufeySetWaitForRenderersBeforeQuit(bool wait) {
 }
 #endif
 
+void LaufeyNotePageRendererPid(int pid) {
+#if !defined(__APPLE__)
+  if (pid <= 0 ||
+      std::find(g_page_renderer_pids.begin(), g_page_renderer_pids.end(),
+                pid) != g_page_renderer_pids.end())
+    return;
+  // Drop the ones that have ended, so the list stays as long as the
+  // renderers running.
+  std::vector<int> running;
+  for (int p : g_page_renderer_pids) {
+    if (laufey_common::RunningProcessCount({p}) > 0)
+      running.push_back(p);
+  }
+  running.push_back(pid);
+  g_page_renderer_pids.swap(running);
+#else
+  (void)pid;
+#endif
+}
+
 void LaufeyQuitMainLoop() {
   // A window opened from here on would outlive the loop
   // (Backend_CreateWindowImpl refuses it).
@@ -704,8 +726,11 @@ void LaufeyQuitMainLoop() {
   hooks.live_windows = [] { return g_live_windows.size(); };
   hooks.close_live_windows = CloseLiveWindowsForShutdown;
   if (g_wait_for_renderers_before_quit) {
+    // The renderers that hosted a page, not every renderer child: Chromium
+    // keeps a spare renderer (no page, no storage) until its shutdown
+    // begins, which the loop never sees end.
     hooks.renderers_running = [] {
-      return laufey_common::RunningCefHelpersOfType("renderer");
+      return laufey_common::RunningProcessCount(g_page_renderer_pids);
     };
   }
   // Lives until the process ends: a quit request after the loop ended
@@ -1170,6 +1195,13 @@ bool LaufeyHandler::OnProcessMessageReceived(
   CEF_REQUIRE_UI_THREAD();
 
   const std::string& name = message->GetName().ToString();
+
+  // A renderer that hosts a page (render_process_handler.cc), for the
+  // pre-quit drain.
+  if (name == "laufey_renderer_pid") {
+    LaufeyNotePageRendererPid(message->GetArgumentList()->GetInt(0));
+    return true;
+  }
 
   if (name == "laufey_call") {
     // Defense in depth: even though the renderer only installs the bridge in

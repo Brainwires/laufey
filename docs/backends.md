@@ -611,19 +611,19 @@ has returned, Chromium's shutdown has begun, and from CEF 156.0.28 the first
 `CefDoMessageLoopWork()` takes a keep-alive, which fails a CHECK then (below).
 So when the app quits, or its last window closes, those hosts keep the loop
 running, check every 10 ms, and call `CefQuitMessageLoop()` once the windows are
-gone (and, on Windows with a persistent profile, the renderers have ended) or
-the bounds have passed, at most about 5 s; nothing pumps CEF after the loop.
-macOS, whose loop is `[NSApp run]` with CEF's external pump, still pumps after
-it. App code still runs on the runtime thread meanwhile (its calls are answered:
-the loop is running), so once the loop is ending (or the app has called
-`quit()`) a new window is refused (the create call returns window id 0), and a
-window still open when the drain starts (one whose creation was already under
-way) is closed, as `quit()` closes windows; one still there after the 2 s is
-asked again. The macOS host also stops its message-pump timer and drops the pump
-ticks it queues on the main queue when the loop ends, and once `CefShutdown` has
-returned and its helpers have ended it ends the process with `_exit`, as Windows
-does, instead of returning from `main` through static destructors, `atexit`
-callbacks and the CEF framework's unload.
+gone (and, on Windows with a persistent profile, the renderers that hosted a
+page have ended) or the bounds have passed, at most about 5 s; nothing pumps CEF
+after the loop. macOS, whose loop is `[NSApp run]` with CEF's external pump,
+still pumps after it. App code still runs on the runtime thread meanwhile (its
+calls are answered: the loop is running), so once the loop is ending (or the app
+has called `quit()`) a new window is refused (the create call returns window id
+0), and a window still open when the drain starts (one whose creation was
+already under way) is closed, as `quit()` closes windows; one still there after
+the 2 s is asked again. The macOS host also stops its message-pump timer and
+drops the pump ticks it queues on the main queue when the loop ends, and once
+`CefShutdown` has returned and its helpers have ended it ends the process with
+`_exit`, as Windows does, instead of returning from `main` through static
+destructors, `atexit` callbacks and the CEF framework's unload.
 
 CEF's `localStorage` lives in a LevelDB database that Chromium's storage service
 writes, and `CefShutdown` kills that service without waiting for a write in
@@ -632,14 +632,16 @@ things keep what the page stored:
 
 - On macOS and Windows the backend lets the closed windows' renderer processes
   end before `CefShutdown` (at most 2 s; on Windows inside the loop, before it
-  quits it, on macOS pumping CEF after `[NSApp run]` returns). The storage
-  service commits a page's `localStorage` 5 s after a write, or at once when the
-  page's renderer goes; a stopped loop no longer runs the tasks that end the
-  renderers, so without the wait they ended inside `CefShutdown` and the commit
-  raced the kill (a renderer was still running when `CefShutdown` started in 27
-  of 50 traced quits on macOS, 9 of 20 on Windows). On Linux they have already
-  ended when `CefRunMessageLoop` returns (none in 50 traced quits, idle and with
-  the CPU busy).
+  quits it, waiting for the renderers that reported hosting a page, since
+  Chromium keeps a spare renderer with no page until its shutdown begins; on
+  macOS pumping CEF after `[NSApp run]` returns). The storage service commits a
+  page's `localStorage` 5 s after a write, or at once when the page's renderer
+  goes; a stopped loop no longer runs the tasks that end the renderers, so
+  without the wait they ended inside `CefShutdown` and the commit raced the kill
+  (a renderer was still running when `CefShutdown` started in 27 of 50 traced
+  quits on macOS, 9 of 20 on Windows). On Linux they have already ended when
+  `CefRunMessageLoop` returns (none in 50 traced quits, idle and with the CPU
+  busy).
 - Before `CefInitialize` every CEF host cuts a write left half done at the end
   of the profile's LevelDB logs (once their `LOCK` files are free, and says so
   on stderr): `localStorage`, `sessionStorage` and every IndexedDB database

@@ -26,8 +26,10 @@
 // loop doesn't run, so CefShutdown ended them while the storage service was
 // being killed. So on macOS and Windows the host lets CEF run until they have
 // ended before CefShutdown: on Windows inside the loop, before it quits it
-// (the pre-quit drain in laufey_cef_window_drain.h, RunningCefHelpersOfType),
-// since CEF can't be pumped once CefRunMessageLoop has returned; on macOS,
+// (the pre-quit drain in laufey_cef_window_drain.h, RunningProcessCount over
+// the renderers that reported hosting a page: Chromium's spare renderer
+// lives until its shutdown begins), since CEF can't be pumped once
+// CefRunMessageLoop has returned; on macOS,
 // whose loop is [NSApp run] with CEF's external pump, by pumping CEF after
 // that loop (LaufeyWaitForRenderersBeforeShutdown). On Linux they have
 // already ended when CefRunMessageLoop returns (50 traced quits).
@@ -112,9 +114,8 @@ int RepairProfileLevelDbLogs(const std::string& root_cache_dir);
 // IsCefHelperToWaitFor), "" when it has none.
 std::string CefHelperType(const std::string& command_line);
 
-// This process's running children of CEF type `type` (e.g. "renderer"); a
-// zombie has ended.
-int RunningCefHelpersOfType(const std::string& type);
+// How many of the processes `pids` still run (a zombie has ended).
+int RunningProcessCount(const std::vector<int>& pids);
 
 // Waits up to `timeout_ms` for this process's running children of CEF type
 // `type` (e.g. "renderer") to end, calling `pump` (when set) between checks.
