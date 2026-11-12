@@ -2311,14 +2311,18 @@ bool WebView2Backend::RetryControllerCreation(
       failures = ++state->controller_failures;
     }
   }
+  // E_ABORT with the window gone is the documented outcome of closing a
+  // window while its web view was being created: nothing to retry.
+  if (!alive) {
+    std::cerr << "WebView2 controller for window " << window_id
+              << " not created: the window closed first (hr=0x" << std::hex
+              << static_cast<uint32_t>(hr) << std::dec << ")" << std::endl;
+    return false;
+  }
   std::cerr << "Failed to create WebView2 controller for window " << window_id
             << " (hr=0x" << std::hex << static_cast<uint32_t>(hr) << std::dec
             << ", attempt " << failures << " of " << kControllerAttempts << ")"
             << std::endl;
-  // E_ABORT with the window gone is the documented outcome of closing a
-  // window while its web view was being created: nothing to retry.
-  if (!alive)
-    return false;
   if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE) ||
       failures >= kControllerAttempts) {
     std::cerr << "laufey: window " << window_id

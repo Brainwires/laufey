@@ -118,10 +118,11 @@ launch setting and the engine's own setting) and that open, close and two
 toggles each change `is_devtools_open`, and that DevTools closed right after
 `open_devtools` (before they finished opening) stay closed. `open_devtools`
 called right after a window is created, before its web view exists, must open
-them once it does; on Windows that window's controller creation is also made to
-fail twice first (`LAUFEY_TEST_WV2_CONTROLLER_FAILURES=2`, set by
-`scripts/native-e2e-run.sh --system`), so it only passes through WebView2's
-retry. The engine's setting is read again after a navigation.
+them once it does. A first window stays open through the checks, so two windows
+share the browser process; on Windows its controller creation is made to fail
+twice (`LAUFEY_TEST_WV2_CONTROLLER_FAILURES=2`, set by
+`scripts/native-e2e-run.sh --system`), so it only gets a web view through
+WebView2's retry. The engine's setting is read again after a navigation.
 `LAUFEY_E2E_DEVTOOLS_REPEAT=<n>` runs the round n times, each on new windows,
 and logs how many passed (a CI dispatch runs 10). `native_e2e --devtools-off`
 runs under `LAUFEY_INSPECTABLE=0` and checks the engine reports them off and

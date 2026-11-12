@@ -210,9 +210,9 @@ if [ "$mode" = "--system" ]; then
   export LAUFEY_E2E_ONLY=system
   # Names the login entry (HKCU Run value, XDG autostart file).
   export LAUFEY_APP_ID="${LAUFEY_APP_ID:-dev.laufey.e2e.system}"
-  # WebView2: the first DevTools window's controller creation fails twice
-  # (a test hook), so its web view comes from WebView2's documented retry
-  # with a new environment; the DevTools checks then need that web view.
+  # WebView2: the first window's controller creation fails twice (a test
+  # hook), so its web view comes from WebView2's documented retry with a new
+  # environment (system_checks.rs checks it has one).
   case "$backend:$(uname -s)" in
     webview:MINGW* | webview:MSYS* | webview:CYGWIN*)
       export LAUFEY_TEST_WV2_CONTROLLER_FAILURES="${LAUFEY_TEST_WV2_CONTROLLER_FAILURES:-2}"

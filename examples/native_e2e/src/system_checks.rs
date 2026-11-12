@@ -49,6 +49,23 @@ pub async fn run() {
     .and_then(|v| v.parse::<u32>().ok())
     .unwrap_or(1)
     .max(1);
+  // Open through every round: closing a round's last window would quit the
+  // app, and it makes two windows share the browser process (WebView2), so
+  // a DevTools window is attributed by what open_devtools brought up, not by
+  // being the process's only one. On Windows under
+  // scripts/native-e2e-run.sh --system its controller creation fails twice
+  // first (LAUFEY_TEST_WV2_CONTROLLER_FAILURES): it only gets a web view
+  // through WebView2's documented retry from a new environment.
+  let anchor = Window::new(320, 240).title("native-e2e-devtools-anchor");
+  anchor.navigate("about:blank");
+  anchor.show();
+  if caps.devtools() {
+    check(
+      "the first window gets its web view (on Windows after two failed \
+       controller creations)",
+      wait_for(|| anchor.is_devtools_enabled(), 300, 50).await,
+    );
+  }
   let mut clean = 0;
   for i in 1..=rounds {
     let label = if rounds > 1 {
@@ -63,6 +80,7 @@ pub async fn run() {
   if rounds > 1 {
     eprintln!("[e2e] DevTools rounds passed: {clean}/{rounds}");
   }
+  anchor.close();
 }
 
 pub async fn devtools_off() {
@@ -549,10 +567,6 @@ async fn devtools_checks(
   if expect_on {
     // Asked for at once, before the web view exists (WebView2 and CEF
     // create it asynchronously): the open must wait for it, not be lost.
-    // On Windows under scripts/native-e2e-run.sh --system the first web
-    // view's controller creation also fails twice first
-    // (LAUFEY_TEST_WV2_CONTROLLER_FAILURES), so this window's web view only
-    // exists if WebView2's documented retry works.
     let early = Window::new(480, 360).title("native-e2e-devtools-early");
     early.navigate("about:blank");
     early.show();
