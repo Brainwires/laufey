@@ -23,7 +23,7 @@
 # MAX_WAIVER_DAYS from today, fails the run; a waiver for another pin is
 # ignored with a notice (remove it). The file holds three lines:
 #
-#   pin: 156.0.15+gcf671c0+chromium-156.0.8078.80
+#   pin: 156.0.28+g57389f0+chromium-156.0.8078.88
 #   expires: 2026-12-01
 #   reason: <why the bump is blocked, with a link to the tracking issue>
 #

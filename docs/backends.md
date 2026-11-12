@@ -19,7 +19,7 @@ There is also an **iOS** backend (UIKit + WKWebView, statically linked) — see
 
 ## CEF
 
-Embeds Chromium 156 (CEF 156.0.15, Chromium 156.0.8078.80) through the Chromium
+Embeds Chromium 156 (CEF 156.0.28, Chromium 156.0.8078.88) through the Chromium
 Embedded Framework and runs Chromium's real multi-process architecture — a
 browser process plus renderer, GPU, and utility subprocesses, with the same
 rendering and DevTools you get in Chrome. The engine is bundled into the app, so
@@ -316,7 +316,24 @@ and in `cef/flake.nix` (the macOS hashes). This fork moved from CEF 150.0.21
 platforms, matching Chrome stable's milestone at the time (CEF published no 153
 to 155 builds for every platform), then to CEF 156.0.15 (Chromium 156.0.8078.80,
 the same branch and API version) for Chrome's security fixes from 156.0.8078.73
-on; that step's CEF commit only moves the Chromium version and patch offsets.
+on; that step's CEF commit only moves the Chromium version and patch offsets. It
+then moved to CEF 156.0.28 (Chromium 156.0.8078.88, the same branch and API
+version) for the Extended Stable security fixes in 156.0.8078.88. CEF 156.0.15
+to 156.0.28 changes no public header (`include/` is unchanged); for the host:
+
+- CEF now runs `OnBeforeCommandLineProcessing` before Chromium's
+  `BasicStartupComplete` (CEF issue 4326), so the hook's `--do-not-de-elevate`
+  is seen by the de-elevation check again. The host's relaunch (above) still
+  runs for an elevated launch: now redundant, it is kept as a guard, and the
+  tripwire still expects it.
+- The first `CefDoMessageLoopWork()` takes an application keep-alive that
+  `CefShutdown()` releases (CEF issue 4353): closing the last window no longer
+  starts Chromium's own shutdown while the host drives the loop. The host ends
+  its loop itself (`LaufeyQuitMainLoop`), so nothing changes there.
+- The external message pump runs idle work while a delayed task is pending (CEF
+  issue 4332), and macOS no longer creates Chrome's `AppController` after an
+  enterprise enrollment (CEF issue 4339).
+
 The hashes were checked against the `.sha1` and `.sha256` files CEF publishes
 beside each archive. What CEF 151 to 156 changed for the host:
 
@@ -393,7 +410,7 @@ When a bump is blocked (no CEF build for every platform yet, a regression the
 host must work around first), commit a waiver as `cef/staleness-waiver`:
 
 ```text
-pin: 156.0.15+gcf671c0+chromium-156.0.8078.80
+pin: 156.0.28+g57389f0+chromium-156.0.8078.88
 expires: 2026-12-01
 reason: CEF 159 has no Windows arm64 build yet (tracking issue link)
 ```
