@@ -8,12 +8,24 @@
 // CefShutdown instead (BrowserManagerService::Shutdown, under ProfileManager's
 // teardown), where Chromium 156 reads freed memory in ~TabDragServiceImpl
 // (SIGSEGV, about 1 quit in 5,600 on macOS x64), and CEF requires every
-// browser to be closed before it shuts down. So once the loop has ended the
-// host pumps CEF until the windows are gone (DrainWindowsBeforeShutdown).
+// browser to be closed before it shuts down. So the host lets CEF run until
+// the windows are gone before CefShutdown.
+//
+// Where the loop is CefRunMessageLoop (Windows, Linux) that has to happen
+// before the loop ends: once CefQuitMessageLoop has let the loop end,
+// Chromium's shutdown has begun (BrowserProcessImpl::Unpin marks the
+// KeepAliveRegistry shutting down), and CEF 156.0.28's first
+// CefDoMessageLoopWork registers a keep-alive (CEF issue 4353), which
+// CHECK-fails then; running the loop again takes one too. So those hosts run
+// the drain as steps inside the loop and quit it at the end (PreQuitDrain).
+// macOS pumps CEF itself from [NSApp run] (external_message_pump): that
+// keep-alive is held from the first pump at launch until CefShutdown and the
+// loop's end doesn't touch it, so the host pumps by hand after the loop
+// (DrainWindowsBeforeShutdown).
 //
 // The runtime thread still runs app code while the host drains: a window it
 // opens then (a last-window handler that opens another), or one whose
-// creation was in flight when the loop ended (a window without a Browser yet
+// creation was in flight when the quit began (a window without a Browser yet
 // doesn't hold the loop open), would never be closed by anyone. So the drain
 // asks every window still live when it starts to close, and asks again, more
 // firmly, any still live when its budget runs out; and the host refuses new
@@ -91,6 +103,137 @@ class LiveWindowTable {
   std::vector<Entry> entries_;
 };
 
+struct WindowDrainResult {
+  // Windows asked to close when the drain started (they were not closing),
+  // and when its budget ran out (they were still live).
+  int closed_at_start = 0;
+  int closed_at_deadline = 0;
+  // Windows still live when the drain returned.
+  int left = 0;
+  // Renderer processes still running when the drain returned (0 when it
+  // didn't wait for them).
+  int renderers_left = 0;
+};
+
+struct PreQuitDrainHooks {
+  // The windows created and not yet destroyed.
+  std::function<int()> live_windows;
+  // Asks every live window to close now, with no close-requested
+  // negotiation. With `even_closing` false it skips one whose close is
+  // already under way; true asks again. Returns how many it asked.
+  std::function<int(bool even_closing)> close_live_windows;
+  // The renderer processes still running; unset: the drain doesn't wait
+  // for them.
+  std::function<int()> renderers_running;
+};
+
+// The drain as steps, for a host that runs it inside its loop: the loop runs
+// CEF's work between two steps, so nothing pumps CEF by hand. Step(now)
+// answers true once the loop may end:
+//   1. asks any window not closing to close, and waits until every window
+//      has been destroyed (at most `budget`); then asks any window still
+//      live to close again and waits at most `grace` more;
+//   2. waits until the renderer processes have ended (at most
+//      `renderer_budget`; only with renderers_running);
+//   3. lets the loop run `tail_steps` more times, for the tasks the last
+//      closes queued (the Browser's deletion is posted when its window's
+//      close completes).
+class PreQuitDrain {
+ public:
+  explicit PreQuitDrain(
+      PreQuitDrainHooks hooks,
+      std::chrono::milliseconds budget = std::chrono::seconds(2),
+      std::chrono::milliseconds grace = std::chrono::seconds(1),
+      std::chrono::milliseconds renderer_budget = std::chrono::seconds(2),
+      int tail_steps = 5)
+      : hooks_(std::move(hooks)),
+        budget_(budget),
+        grace_(grace),
+        renderer_budget_(renderer_budget),
+        tail_left_(tail_steps) {}
+
+  // True when done; call again after the loop has run a while otherwise.
+  // Once it has answered true it keeps answering true.
+  bool Step(std::chrono::steady_clock::time_point now) {
+    for (;;) {
+      switch (phase_) {
+        case Phase::kStart:
+          if (hooks_.live_windows() > 0)
+            result_.closed_at_start = hooks_.close_live_windows(false);
+          deadline_ = now + budget_;
+          phase_ = Phase::kWindows;
+          continue;
+        case Phase::kWindows:
+          if (hooks_.live_windows() > 0 && now < deadline_)
+            return false;
+          if (hooks_.live_windows() > 0) {
+            result_.closed_at_deadline = hooks_.close_live_windows(true);
+            deadline_ = now + grace_;
+            phase_ = Phase::kWindowsGrace;
+          } else {
+            StartRenderers(now);
+          }
+          continue;
+        case Phase::kWindowsGrace:
+          if (hooks_.live_windows() > 0 && now < deadline_)
+            return false;
+          StartRenderers(now);
+          continue;
+        case Phase::kRenderers:
+          if (hooks_.renderers_running() > 0 && now < deadline_)
+            return false;
+          phase_ = Phase::kTail;
+          continue;
+        case Phase::kTail:
+          if (tail_left_ > 0) {
+            --tail_left_;
+            return false;
+          }
+          result_.left = hooks_.live_windows();
+          if (hooks_.renderers_running)
+            result_.renderers_left = hooks_.renderers_running();
+          phase_ = Phase::kDone;
+          return true;
+        case Phase::kDone:
+          return true;
+      }
+    }
+  }
+
+  // Meaningful once Step answered true.
+  const WindowDrainResult& result() const {
+    return result_;
+  }
+
+ private:
+  enum class Phase {
+    kStart,
+    kWindows,
+    kWindowsGrace,
+    kRenderers,
+    kTail,
+    kDone
+  };
+
+  void StartRenderers(std::chrono::steady_clock::time_point now) {
+    if (hooks_.renderers_running) {
+      deadline_ = now + renderer_budget_;
+      phase_ = Phase::kRenderers;
+    } else {
+      phase_ = Phase::kTail;
+    }
+  }
+
+  PreQuitDrainHooks hooks_;
+  std::chrono::milliseconds budget_;
+  std::chrono::milliseconds grace_;
+  std::chrono::milliseconds renderer_budget_;
+  int tail_left_;
+  Phase phase_ = Phase::kStart;
+  std::chrono::steady_clock::time_point deadline_{};
+  WindowDrainResult result_;
+};
+
 struct WindowDrainHooks {
   // The windows created and not yet destroyed.
   std::function<int()> live_windows;
@@ -105,20 +248,9 @@ struct WindowDrainHooks {
   std::function<void(std::chrono::milliseconds)> sleep;
 };
 
-struct WindowDrainResult {
-  // Windows asked to close when the drain started (they were not closing),
-  // and when its budget ran out (they were still live).
-  int closed_at_start = 0;
-  int closed_at_deadline = 0;
-  // Windows still live when the drain returned.
-  int left = 0;
-};
-
-// Before CefShutdown, once the loop has ended: asks any window not closing to
-// close, pumps until every window has been destroyed (at most `budget`), asks
-// any window still live to close again and pumps for at most `grace` more,
-// then pumps a few more times for the tasks the last closes queued (the
-// Browser's deletion is posted when its window's close completes).
+// PreQuitDrain's window steps run by hand, for a host whose loop has ended
+// but may still be pumped (macOS: the external message pump holds CEF's
+// keep-alive until CefShutdown): `pump` with a 10 ms pause between steps.
 inline WindowDrainResult DrainWindowsBeforeShutdown(
     const WindowDrainHooks& hooks,
     std::chrono::milliseconds budget = std::chrono::seconds(2),
@@ -130,28 +262,15 @@ inline WindowDrainResult DrainWindowsBeforeShutdown(
   if (!sleep)
     sleep = [](std::chrono::milliseconds d) { std::this_thread::sleep_for(d); };
   constexpr std::chrono::milliseconds kPause(10);
-  auto pump_until_gone = [&](std::chrono::milliseconds limit) {
-    auto deadline = now() + limit;
-    while (hooks.live_windows() > 0 && now() < deadline) {
-      hooks.pump();
-      sleep(kPause);
-    }
-  };
-
-  WindowDrainResult result;
-  if (hooks.live_windows() > 0)
-    result.closed_at_start = hooks.close_live_windows(false);
-  pump_until_gone(budget);
-  if (hooks.live_windows() > 0) {
-    result.closed_at_deadline = hooks.close_live_windows(true);
-    pump_until_gone(grace);
-  }
-  for (int i = 0; i < 5; ++i) {
+  PreQuitDrainHooks steps;
+  steps.live_windows = hooks.live_windows;
+  steps.close_live_windows = hooks.close_live_windows;
+  PreQuitDrain drain(steps, budget, grace);
+  while (!drain.Step(now())) {
     hooks.pump();
     sleep(kPause);
   }
-  result.left = hooks.live_windows();
-  return result;
+  return drain.result();
 }
 
 }  // namespace laufey_common

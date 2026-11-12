@@ -962,7 +962,9 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
     if (!g_runtime_path.empty()) {
       if (!RuntimeLoader::GetInstance()->Load(g_runtime_path)) {
         std::cerr << "Failed to load runtime, exiting" << std::endl;
-        CefQuitMessageLoop();
+        // Ends the loop once it runs (CefQuitMessageLoop before
+        // CefRunMessageLoop has started ends nothing).
+        LaufeyQuitMainLoop();
         return;
       }
       // Defer Start() to the next message loop iteration.
@@ -1209,13 +1211,17 @@ int main(int argc, char* argv[]) {
 
   LaufeyClearSecondInstanceHooks();
 
-  // The closed windows' Browsers are deleted by tasks the ended loop may not
-  // have run yet, and one left for CefShutdown to delete reads freed memory
-  // there (~TabDragServiceImpl under ProfileManager's teardown; seen on macOS,
-  // the same Chromium code runs here). It also closes a window opened while
-  // the loop was ending. (The renderers, unlike on macOS and Windows, have
-  // already ended when the loop returns here: laufey_cef_profile_lock.h.)
-  LaufeyDrainClosedWindowsBeforeShutdown([]() { CefDoMessageLoopWork(); });
+  // Nothing pumps CEF from here on: once CefRunMessageLoop has returned,
+  // Chromium's shutdown has begun, and CefDoMessageLoopWork (which takes a
+  // keep-alive on its first call, CEF issue 4353) or another run of the loop
+  // fails a CHECK in KeepAliveRegistry::Register. The closed windows'
+  // Browsers were deleted, and a window opened while the app was quitting
+  // closed, inside the loop before it quit (LaufeyQuitMainLoop's drain): one
+  // left for CefShutdown to delete reads freed memory there
+  // (~TabDragServiceImpl under ProfileManager's teardown; seen on macOS, the
+  // same Chromium code runs here). (The renderers, unlike on macOS and
+  // Windows, have already ended when the loop returns here:
+  // laufey_cef_profile_lock.h.)
 
   RuntimeLoader::GetInstance()->Shutdown();
 

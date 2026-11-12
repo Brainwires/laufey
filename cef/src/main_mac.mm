@@ -599,7 +599,12 @@ int main(int argc, char* argv[]) {
     phases.Mark("loop");
 
     // The loop is over: from here the host pumps CEF itself (the renderer
-    // wait below) and then shuts it down. The steady timer stays scheduled
+    // wait and the window drain below) and then shuts it down. That is safe
+    // here, unlike after CefRunMessageLoop on Windows and Linux (which drain
+    // inside the loop instead, LaufeyQuitMainLoop): the pump's first
+    // CefDoMessageLoopWork, at launch, took the keep-alive CEF holds until
+    // CefShutdown (CEF issue 4353), and [NSApp run]'s end doesn't release
+    // it, so Chromium's shutdown hasn't begun. The steady timer stays scheduled
     // on the main run loop (in the common modes), and every
     // OnScheduleMessagePumpWork queues a tick on the main queue, so anything
     // that spins the main run loop from here on (CefShutdown included) would

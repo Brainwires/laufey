@@ -554,6 +554,12 @@ int WaitForChildProcessesToExit(int timeout_ms) {
   return left;
 }
 
+int RunningCefHelpersOfType(const std::string& type) {
+  return RunningChildren([&type](const std::string& command_line) {
+    return CefHelperType(command_line) == type;
+  });
+}
+
 int WaitForCefHelpersOfType(const std::string& type, int timeout_ms,
                             const std::function<void()>& pump) {
   auto match = [&type](const std::string& command_line) {

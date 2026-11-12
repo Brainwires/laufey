@@ -426,6 +426,13 @@ if [ "$backend" = "cef" ]; then
   if [ "$mode" = "--hidpi" ] && [ "$(uname -s)" = "Linux" ]; then
     args+=("--force-device-scale-factor=$LAUFEY_E2E_EXPECT_SCALE")
   fi
+  # CEF's own log (what LAUFEY_CEF_LOG_SEVERITY lets through; FATAL by
+  # default), printed below when the backend exits with a failure status.
+  # Git Bash: the native host needs a Windows path.
+  cef_log="$(mktemp "${TMPDIR:-/tmp}/laufey-cef-log.XXXXXX")"
+  cef_log_arg="$cef_log"
+  if command -v cygpath >/dev/null; then cef_log_arg="$(cygpath -w "$cef_log")"; fi
+  args+=("--log-file=$cef_log_arg")
   # Everything the network stack does, for netlog-hosts.py after the run.
   # Git Bash: the native host and Python need a Windows path.
   if [ "$mode" = "--network-quiet" ]; then
@@ -576,6 +583,27 @@ fi
 # Let tee drain what the process wrote last.
 sleep 1
 echo "== native-e2e: backend exited with status $status =="
+# A failure status from the CEF host: its log, so the CI log has whatever CEF
+# wrote before it ended. A Chromium CHECK in a release CEF build crashes
+# without a message (SIGTRAP on Linux and macOS, status 133 through the
+# shell; an abort, status 3, on Windows), so then the log may be empty and
+# the stack is the evidence (gdb, a crash dump).
+if [ -n "${cef_log:-}" ]; then
+  if [ "$status" != 0 ]; then
+    echo "== CEF log ($cef_log) =="
+    if [ -s "$cef_log" ]; then
+      tail -c 200000 "$cef_log"
+    else
+      echo "(empty)"
+    fi
+    case "$status" in
+      133) echo "== status 133: SIGTRAP, a Chromium CHECK or another immediate crash ==" ;;
+      134) echo "== status 134: SIGABRT ==" ;;
+      139) echo "== status 139: SIGSEGV ==" ;;
+    esac
+  fi
+  rm -f "$cef_log"
+fi
 if ! grep -q '^\[e2e\] OVERALL ' "$log"; then
   echo "native e2e exited before reporting an overall result" >&2
   rm -f "$log"

@@ -110,6 +110,13 @@ call `auth_session_cancel()`.
   non-ephemeral session is still up never hears back from the OS. laufey answers
   `cancelled` itself when it cancels (window closed, test hook, quit) and drops
   whatever the OS reports later.
+- **A session started right after a cancel** waits until the OS has dismissed
+  the cancelled sheet (at most 3 s), then starts. Every backend starts it on the
+  main dispatch queue, behind the cancel's dismissal (the CEF backend resolves
+  the window in a CEF UI task first, which its external pump can run from a
+  timer ahead of that queue, and then queues the start): a session started while
+  the cancelled sheet was still up was sometimes never presented and never
+  answered.
 - **The anchor window closing** cancels the session anchored to it.
 - **Quitting** (the event loop ending) cancels the running session before the
   runtime is shut down.

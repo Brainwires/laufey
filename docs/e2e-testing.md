@@ -675,9 +675,15 @@ When a run goes wrong in CI it leaves evidence: `native-e2e-run.sh` streams the
 backend's output (so a hang shows how far the battery got) and prints its exit
 status, and a watchdog (`LAUFEY_E2E_WATCHDOG_SECS`, default 300) prints every
 thread's stack (macOS `sample`, Linux `gdb` when installed) of a run that hasn't
-exited and kills it. Every e2e step has its own `timeout-minutes` besides. On
-macOS the `Crash reports` step waits for ReportCrash and prints the exception
-and the crashed thread of each report (`scripts/print-crash-report.py`).
+exited and kills it. A CEF host that exits with a failure status also gets its
+CEF log printed (the host runs with `--log-file` pointing at a temporary file;
+`LAUFEY_CEF_LOG_SEVERITY` sets what it holds, FATAL by default) and, for 133,
+134 and 139, the signal named. A Chromium CHECK in a release CEF build crashes
+without a message (`SIGTRAP`, status 133, on Linux; an abort, status 3, on
+Windows), so for one the stack is the evidence: run the host under `gdb`, as the
+watchdog does. Every e2e step has its own `timeout-minutes` besides. On macOS
+the `Crash reports` step waits for ReportCrash and prints the exception and the
+crashed thread of each report (`scripts/print-crash-report.py`).
 
 ---
 

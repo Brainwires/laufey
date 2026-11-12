@@ -327,12 +327,27 @@ to 156.0.28 changes no public header (`include/` is unchanged); for the host:
   runs for an elevated launch: now redundant, it is kept as a guard, and the
   tripwire still expects it.
 - The first `CefDoMessageLoopWork()` takes an application keep-alive that
-  `CefShutdown()` releases (CEF issue 4353): closing the last window no longer
-  starts Chromium's own shutdown while the host drives the loop. The host ends
-  its loop itself (`LaufeyQuitMainLoop`), so nothing changes there.
+  `CefShutdown()` releases (CEF commit a10dae340, issue 4353): closing the last
+  window no longer starts Chromium's own shutdown while the host drives the
+  loop. Taken after `CefRunMessageLoop()` has returned, when
+  `CefQuitMessageLoop()` has let Chromium's shutdown begin, it fails
+  `CHECK(!is_shutting_down_)` in `KeepAliveRegistry::Register` (`SIGTRAP`,
+  status 133, on Linux; an abort, status 3, on Windows). The Windows and Linux
+  hosts pumped CEF there (the renderer wait, the window drain), so every quit
+  that reached the end of the loop crashed before `CefShutdown`. They now run
+  both inside the loop and quit it afterwards (`LaufeyQuitMainLoop`, the
+  pre-quit drain above), and pump nothing after it. macOS is unaffected: its
+  external pump took the keep-alive at launch, and the end of `[NSApp run]`
+  doesn't release it.
 - The external message pump runs idle work while a delayed task is pending (CEF
   issue 4332), and macOS no longer creates Chrome's `AppController` after an
-  enterprise enrollment (CEF issue 4339).
+  enterprise enrollment (CEF issue 4339). On the first 156.0.28 CI run a macOS
+  auth session started right after `auth_session_cancel()` was left unpresented
+  (1 of 10). The CEF host started a session from a CEF UI task, which the pump's
+  timer can run ahead of the main dispatch queue, where the cancel's dismissal
+  waits, so the start could overtake it whatever the pump's timing. It now
+  queues the start on that queue, behind the dismissal, as the WebView backend
+  always has ([auth-session.md](auth-session.md)).
 
 The hashes were checked against the `.sha1` and `.sha256` files CEF publishes
 beside each archive. What CEF 151 to 156 changed for the host:
@@ -588,12 +603,21 @@ window's close completes; when the loop had stopped before that task ran, the
 shutdown, under `ProfileManager`'s teardown), and there Chromium 156 reads freed
 memory in `~TabDragServiceImpl`. The wait for the renderers above pumps CEF only
 while a renderer still runs, so it did not always run that task. Before
-`CefShutdown` every CEF host now pumps CEF until the app's windows have been
+`CefShutdown` every CEF host now lets CEF run until the app's windows have been
 destroyed (at most 2 s) and a few times more (Windows and Linux run the same
-Chromium code, though the crash was only seen on macOS). App code still runs on
-the runtime thread meanwhile, so once the loop is ending (or the app has called
+Chromium code, though the crash was only seen on macOS). On Windows and Linux
+this happens inside the loop, before the host quits it: once `CefRunMessageLoop`
+has returned, Chromium's shutdown has begun, and from CEF 156.0.28 the first
+`CefDoMessageLoopWork()` takes a keep-alive, which fails a CHECK then (below).
+So when the app quits, or its last window closes, those hosts keep the loop
+running, check every 10 ms, and call `CefQuitMessageLoop()` once the windows are
+gone (and, on Windows with a persistent profile, the renderers have ended) or
+the bounds have passed, at most about 5 s; nothing pumps CEF after the loop.
+macOS, whose loop is `[NSApp run]` with CEF's external pump, still pumps after
+it. App code still runs on the runtime thread meanwhile (its calls are answered:
+the loop is running), so once the loop is ending (or the app has called
 `quit()`) a new window is refused (the create call returns window id 0), and a
-window still open when the pumping starts (one whose creation was already under
+window still open when the drain starts (one whose creation was already under
 way) is closed, as `quit()` closes windows; one still there after the 2 s is
 asked again. The macOS host also stops its message-pump timer and drops the pump
 ticks it queues on the main queue when the loop ends, and once `CefShutdown` has
@@ -607,9 +631,10 @@ flight (Chromium waits only for the network service, which keeps cookies). Two
 things keep what the page stored:
 
 - On macOS and Windows the backend lets the closed windows' renderer processes
-  end before `CefShutdown` (at most 2 s, pumping CEF meanwhile). The storage
+  end before `CefShutdown` (at most 2 s; on Windows inside the loop, before it
+  quits it, on macOS pumping CEF after `[NSApp run]` returns). The storage
   service commits a page's `localStorage` 5 s after a write, or at once when the
-  page's renderer goes; the stopped loop no longer runs the tasks that end the
+  page's renderer goes; a stopped loop no longer runs the tasks that end the
   renderers, so without the wait they ended inside `CefShutdown` and the commit
   raced the kill (a renderer was still running when `CefShutdown` started in 27
   of 50 traced quits on macOS, 9 of 20 on Windows). On Linux they have already

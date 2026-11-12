@@ -1339,8 +1339,12 @@ static void Backend_AuthSessionStart(void* data, uint32_t window_id,
                       }
                       native = NSWindowForCefHandle(window->GetWindowHandle());
                     }
-                    // nullptr: the key / main window of the app.
-                    laufey_common::AuthSessionStartMac(s, native);
+                    // nullptr: the key / main window of the app. Queued
+                    // on the main dispatch queue, behind the dismissal of a
+                    // session the app cancelled just before this start
+                    // (laufey_auth_session.h): this task can run from the
+                    // pump's timer ahead of the queue.
+                    laufey_common::AuthSessionStartMacQueued(s, native);
                   },
                   browser, session));
   if (!posted) {
@@ -2546,7 +2550,8 @@ static void Backend_PrintToPdf(void* data, uint32_t window_id,
 static uint32_t Backend_CreateWindowImpl(void* data, uint32_t flags) {
   // Once the app is quitting or the loop is ending, a new window would
   // outlive the loop: nothing would close it, and CefShutdown would run with
-  // its Browser alive (LaufeyDrainClosedWindowsBeforeShutdown). Refuse it:
+  // its Browser alive (the drain before it: LaufeyQuitMainLoop,
+  // LaufeyDrainClosedWindowsBeforeShutdown on macOS). Refuse it:
   // 0 is no window.
   if (laufey_common::NewWindowsRefused())
     return 0;
@@ -2558,7 +2563,7 @@ static uint32_t Backend_CreateWindowImpl(void* data, uint32_t flags) {
                   [](uint32_t wid, uint32_t window_flags) {
                     auto* handler = LaufeyHandler::GetInstance();
                     // The loop may have begun to end since the task was
-                    // posted (the shutdown drain runs it too).
+                    // posted (the shutdown drain lets it run too).
                     if (!handler || laufey_common::NewWindowsRefused()) {
                       RuntimeLoader::GetInstance()->AbandonWindowCreation(wid);
                       return;

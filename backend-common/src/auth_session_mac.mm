@@ -288,4 +288,14 @@ void AuthSessionStartMac(std::shared_ptr<AuthSession> session,
   }
 }
 
+void AuthSessionStartMacQueued(std::shared_ptr<AuthSession> session,
+                               void* ns_window) {
+  if (!session)
+    return;
+  NSWindow* window = (__bridge NSWindow*)ns_window;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    AuthSessionStartMac(session, (__bridge void*)window);
+  });
+}
+
 }  // namespace laufey_common

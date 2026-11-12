@@ -527,9 +527,20 @@ class LaufeyApp : public CefApp, public CefBrowserProcessHandler {
 void LaufeyQuitMainLoopMac();
 #endif
 
-// Ends the CEF backend's main loop on every platform (LaufeyQuitMainLoopMac on
-// macOS, CefQuitMessageLoop elsewhere). UI thread.
+// Ends the CEF backend's main loop on every platform. On macOS it stops
+// [NSApp run] at once (LaufeyQuitMainLoopMac; the host drains after the loop).
+// On Windows and Linux it first runs the pre-quit drain inside the loop
+// (laufey_cef_window_drain.h: every window destroyed, then, when asked for,
+// the renderer processes ended, at most about 5 s) and then calls
+// CefQuitMessageLoop; a call while that runs does nothing. UI thread.
 void LaufeyQuitMainLoop();
+
+#if !defined(__APPLE__)
+// Whether the pre-quit drain also waits for the renderer processes to end
+// (laufey_cef_profile_lock.h; Windows, with a persistent profile). Before
+// the loop runs.
+void LaufeySetWaitForRenderersBeforeQuit(bool wait);
+#endif
 
 // The app's windows (LaufeyWindowDelegate) created and not yet destroyed. UI
 // thread.
@@ -541,19 +552,22 @@ int LaufeyLiveWindowCount();
 // show or size the app asks for meanwhile still reaches it. UI thread.
 CefRefPtr<CefBrowserView> LaufeyBrowserViewForId(uint32_t laufey_id);
 
-// Before CefShutdown, once the loop has ended: runs CEF's UI-thread tasks
+// Before CefShutdown, once the loop has ended (macOS only: Windows and Linux
+// drain inside the loop, LaufeyQuitMainLoop): runs CEF's UI-thread tasks
 // (`pump`) until the app's windows have been destroyed (at most 2 s), and
 // then a few more times. Chromium deletes a closed window's Browser in a task
 // it posts when the window's close completes; one the stopped loop never ran
 // is deleted inside CefShutdown instead (BrowserManagerService::Shutdown,
 // under ProfileManager's teardown), where Chromium 156 reads freed memory in
-// ~TabDragServiceImpl (SIGSEGV, about 1 quit in 5,600 on macOS x64). The
-// macOS, Windows and Linux hosts call it. It first refuses new windows
+// ~TabDragServiceImpl (SIGSEGV, about 1 quit in 5,600 on macOS x64). It
+// first refuses new windows
 // (laufey_common::MarkUiLoopEnding) and asks any window still open to close,
 // and asks again when the 2 s run out: app code still running on the runtime
 // thread may have opened one after the loop ended, or a creation may have
 // been in flight (laufey_cef_window_drain.h). UI thread.
+#if defined(__APPLE__)
 void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump);
+#endif
 
 // The app's own quit() (runtime_loader.cc): every window is closed and the
 // loop ends, so the host goes on to the runtime's shutdown and CefShutdown.

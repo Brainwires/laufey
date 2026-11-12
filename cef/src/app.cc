@@ -6,6 +6,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_bridge_origin.h"
 #include "laufey_cef_commit_gate.h"
+#include "laufey_cef_profile_lock.h"
 #include "laufey_cef_window_drain.h"
 #include "laufey_timing.h"
 #include "laufey_cef_network_quiet.h"
@@ -152,6 +153,7 @@ CefRefPtr<CefBrowserView> LaufeyBrowserViewForId(uint32_t laufey_id) {
   return live.browser_view;
 }
 
+#if defined(__APPLE__)
 void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump) {
   // No window opens from here on (Backend_CreateWindowImpl).
   laufey_common::MarkUiLoopEnding();
@@ -177,6 +179,7 @@ void LaufeyDrainClosedWindowsBeforeShutdown(const std::function<void()>& pump) {
               << std::endl;
   }
 }
+#endif
 
 // LaufeyWindowDelegate implementation
 
@@ -624,15 +627,93 @@ void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   }
 }
 
+#if !defined(__APPLE__)
+namespace {
+
+bool g_wait_for_renderers_before_quit = false;
+// The pre-quit drain under way (LaufeyQuitMainLoop), null before.
+laufey_common::PreQuitDrain* g_quit_drain = nullptr;
+constexpr int64_t kQuitDrainStepMs = 10;
+
+void ReportQuitDrain(const laufey_common::WindowDrainResult& result) {
+  if (result.closed_at_start > 0) {
+    std::cerr << "laufey: closed " << result.closed_at_start
+              << " window(s) still open when the app quit" << std::endl;
+  }
+  if (result.closed_at_deadline > 0) {
+    std::cerr << "laufey: " << result.closed_at_deadline
+              << " window(s) still not destroyed 2 s after the app quit; "
+                 "closed them again"
+              << std::endl;
+  }
+  if (result.left > 0) {
+    std::cerr << "laufey: " << result.left
+              << " window(s) still not destroyed when the loop ended"
+              << std::endl;
+  }
+  if (result.renderers_left > 0) {
+    std::cerr << "laufey: " << result.renderers_left
+              << " renderer process(es) still running 2 s after the windows "
+                 "closed; localStorage written just before may be lost"
+              << std::endl;
+  }
+}
+
+// One step of the pre-quit drain, then the next 10 ms later, while the loop
+// runs CEF's work in between; the loop ends once the drain is done.
+void StepQuitDrain() {
+  if (!g_quit_drain->Step(std::chrono::steady_clock::now())) {
+    CefPostDelayedTask(TID_UI, base::BindOnce(&StepQuitDrain),
+                       kQuitDrainStepMs);
+    return;
+  }
+  ReportQuitDrain(g_quit_drain->result());
+  CefQuitMessageLoop();
+}
+
+}  // namespace
+
+void LaufeySetWaitForRenderersBeforeQuit(bool wait) {
+  g_wait_for_renderers_before_quit = wait;
+}
+#endif
+
 void LaufeyQuitMainLoop() {
   // A window opened from here on would outlive the loop
   // (Backend_CreateWindowImpl refuses it).
   laufey_common::MarkUiLoopEnding();
 #if defined(__APPLE__)
-  // macOS runs [NSApp run] (external_message_pump); stop that instead.
+  // macOS runs [NSApp run] (external_message_pump); stop that instead. CEF
+  // can still be pumped after it (the pump's keep-alive is held until
+  // CefShutdown), so the host drains after the loop (main_mac.mm).
   LaufeyQuitMainLoopMac();
 #else
-  CefQuitMessageLoop();
+  // Already draining (the last window's OnBeforeClose during the drain, a
+  // second quit()): the drain ends the loop.
+  if (g_quit_drain)
+    return;
+  // Before the loop ends, CEF runs until the app's windows have been
+  // destroyed and (with a persistent profile on Windows) their renderer
+  // processes have ended (laufey_cef_window_drain.h,
+  // laufey_cef_profile_lock.h). That can't happen after it: once
+  // CefRunMessageLoop has returned, Chromium's shutdown has begun, and the
+  // first CefDoMessageLoopWork registers a keep-alive, a CHECK failure then
+  // (CEF issue 4353). The runtime keeps answering meanwhile: its UI tasks
+  // run in the same loop.
+  laufey_common::PreQuitDrainHooks hooks;
+  hooks.live_windows = [] { return g_live_windows.size(); };
+  hooks.close_live_windows = CloseLiveWindowsForShutdown;
+  if (g_wait_for_renderers_before_quit) {
+    hooks.renderers_running = [] {
+      return laufey_common::RunningCefHelpersOfType("renderer");
+    };
+  }
+  // Lives until the process ends: a quit request after the loop ended
+  // finds it and does nothing.
+  g_quit_drain = new laufey_common::PreQuitDrain(std::move(hooks));
+  // From a task of its own: this may run inside a browser's OnBeforeClose,
+  // and the first step may close windows.
+  CefPostTask(TID_UI, base::BindOnce(&StepQuitDrain));
 #endif
 }
 

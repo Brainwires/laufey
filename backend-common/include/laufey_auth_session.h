@@ -144,6 +144,18 @@ void UiLoopEnded();
 // to, or nullptr for the key / main / first visible window. Always ends
 // with session->Finish or session->Cancel.
 void AuthSessionStartMac(std::shared_ptr<AuthSession> session, void* ns_window);
+
+// AuthSessionStartMac on a later turn of the main dispatch queue, after every
+// block already queued there (`ns_window` is retained until then). Any
+// thread. For a backend that resolves the session's window outside the main
+// queue (CEF's UI-thread tasks, which the external pump runs from a timer as
+// well as from the queue): a cancel's dismissal is queued on the main queue
+// (AuthSession::Cancel from another thread), so a start that went straight
+// to AuthSessionStartMac could run before the dismissal of the session the
+// app cancelled just before it, while that sheet was still up, and was then
+// never presented. Queued, it runs after the dismissal and waits for it.
+void AuthSessionStartMacQueued(std::shared_ptr<AuthSession> session,
+                               void* ns_window);
 #endif
 
 }  // namespace laufey_common

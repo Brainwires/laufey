@@ -343,7 +343,9 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
                      laufey_common::Utf8ToWide(g_runtime_path))
                         .c_str(),
                     L"LAUFEY Error", MB_OK | MB_ICONERROR);
-        CefQuitMessageLoop();
+        // Ends the loop once it runs (CefQuitMessageLoop before
+        // CefRunMessageLoop has started ends nothing).
+        LaufeyQuitMainLoop();
         return;
       }
       // Defer Start() to the next message loop iteration.
@@ -616,6 +618,17 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
     }
   }
 
+  // The windows are closed, but their renderer processes are ended by tasks
+  // Chromium posts on the UI thread, and the windows' closes can complete
+  // before those have run (a trace of 20 quits had a renderer still running
+  // when the loop returned in 13, and when CefShutdown started in 9). The
+  // storage service commits a page's localStorage when its renderer goes
+  // (until then the write waits on a commit timer of 5 s), and CefShutdown
+  // kills the storage service without waiting for a commit still in flight.
+  // So with a persistent profile the loop doesn't end until the renderers
+  // have ended (LaufeyQuitMainLoop's drain, laufey_cef_profile_lock.h).
+  LaufeySetWaitForRenderersBeforeQuit(persistent_profile);
+
   laufey_common::Timing("CefInitialize");
   if (!CefInitialize(main_args, settings, app.get(), sandbox_info)) {
     LaufeyReportCefInitializeFailure(cache_path);
@@ -631,31 +644,19 @@ static int LaufeyWinMain(HINSTANCE hInstance, void* sandbox_info) {
   // auth session in progress ends cancelled, so a runtime thread waiting on
   // either is released before Shutdown waits for it.
   laufey_common::UiLoopEnded();
-  // No window opens from here on: the pumps below would create it, and it
-  // would outlive the loop (Backend_CreateWindowImpl).
+  // No window opens from here on: it would outlive the loop
+  // (Backend_CreateWindowImpl).
   laufey_common::MarkUiLoopEnding();
 
   LaufeyClearSecondInstanceHooks();
 
-  // The windows are closed, but their renderer processes are ended by tasks
-  // Chromium posts on the UI thread, and the loop can return before those
-  // have run (a trace of 20 quits had a renderer still running when it
-  // returned in 13, and when CefShutdown started in 9). The storage service
-  // commits a page's localStorage when its renderer goes (until then the write
-  // waits on a commit timer of 5 s), and CefShutdown kills the storage service
-  // without waiting for a commit still in flight. So pump CEF until the
-  // renderers have ended (laufey_cef_profile_lock.h), while the runtime still
-  // answers.
-  if (persistent_profile)
-    laufey_common::LaufeyWaitForRenderersBeforeShutdown(
-        []() { CefDoMessageLoopWork(); });
-
-  // The closed windows' Browsers are deleted by tasks the ended loop may not
-  // have run yet, and one left for CefShutdown to delete reads freed memory
-  // there (~TabDragServiceImpl under ProfileManager's teardown; seen on macOS,
-  // the same Chromium code runs here). The renderer wait above pumps only
-  // while a renderer runs, so it may not have pumped at all.
-  LaufeyDrainClosedWindowsBeforeShutdown([]() { CefDoMessageLoopWork(); });
+  // Nothing pumps CEF from here on: once CefRunMessageLoop has returned,
+  // Chromium's shutdown has begun, and CefDoMessageLoopWork (which takes a
+  // keep-alive on its first call, CEF issue 4353) or another run of the loop
+  // fails a CHECK. What the host used to pump for here (the closed windows'
+  // Browsers deleted, their renderers ended so the storage service has
+  // committed localStorage) ran inside the loop, before it quit
+  // (LaufeyQuitMainLoop's drain).
 
   RuntimeLoader::GetInstance()->Shutdown();
 

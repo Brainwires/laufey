@@ -24,9 +24,13 @@
 // waits only for the network service, which keeps cookies). The renderers
 // of the closed windows are ended by tasks on the UI thread, which a stopped
 // loop doesn't run, so CefShutdown ended them while the storage service was
-// being killed. So on macOS and Windows, before CefShutdown, the host pumps
-// CEF until they have ended (LaufeyWaitForRenderersBeforeShutdown). On Linux
-// they have already ended when CefRunMessageLoop returns (50 traced quits).
+// being killed. So on macOS and Windows the host lets CEF run until they have
+// ended before CefShutdown: on Windows inside the loop, before it quits it
+// (the pre-quit drain in laufey_cef_window_drain.h, RunningCefHelpersOfType),
+// since CEF can't be pumped once CefRunMessageLoop has returned; on macOS,
+// whose loop is [NSApp run] with CEF's external pump, by pumping CEF after
+// that loop (LaufeyWaitForRenderersBeforeShutdown). On Linux they have
+// already ended when CefRunMessageLoop returns (50 traced quits).
 //
 // A write the kill cuts short leaves a torn record at the end of the
 // database's log. LevelDB reuses the log on the next open and appends after
@@ -108,6 +112,10 @@ int RepairProfileLevelDbLogs(const std::string& root_cache_dir);
 // IsCefHelperToWaitFor), "" when it has none.
 std::string CefHelperType(const std::string& command_line);
 
+// This process's running children of CEF type `type` (e.g. "renderer"); a
+// zombie has ended.
+int RunningCefHelpersOfType(const std::string& type);
+
 // Waits up to `timeout_ms` for this process's running children of CEF type
 // `type` (e.g. "renderer") to end, calling `pump` (when set) between checks.
 // Returns the number still running.
@@ -117,8 +125,9 @@ int WaitForCefHelpersOfType(const std::string& type, int timeout_ms,
 // Both steps with their log lines, for the hosts.
 void LaufeyWaitForProfileLocksBeforeInit(const std::string& root_cache_dir);
 void LaufeyWaitForHelpersAfterShutdown(const std::string& root_cache_dir);
-// Before CefShutdown: pumps CEF (`pump`) until the closed windows' renderer
-// processes have ended, at most 2 s, and logs when they haven't.
+// Before CefShutdown (macOS, once [NSApp run] has returned): pumps CEF
+// (`pump`) until the closed windows' renderer processes have ended, at most
+// 2 s, and logs when they haven't.
 void LaufeyWaitForRenderersBeforeShutdown(const std::function<void()>& pump);
 
 }  // namespace laufey_common
