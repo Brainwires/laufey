@@ -604,8 +604,17 @@ int WaitForCefHelpersOfType(const std::string& type, int timeout_ms,
   return left;
 }
 
-void LaufeyWaitForRenderersBeforeShutdown(const std::function<void()>& pump) {
-  int left = WaitForCefHelpersOfType("renderer", 2000, pump);
+void LaufeyWaitForRenderersBeforeShutdown(const std::vector<int>& pids,
+                                          const std::function<void()>& pump) {
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+  int left = RunningProcessCount(pids);
+  while (left > 0 && std::chrono::steady_clock::now() < deadline) {
+    if (pump)
+      pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    left = RunningProcessCount(pids);
+  }
   if (left > 0) {
     std::cerr << "laufey: " << left
               << " renderer process(es) still running 2 s after the loop "

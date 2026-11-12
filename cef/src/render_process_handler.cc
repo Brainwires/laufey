@@ -210,9 +210,10 @@ void LaufeyRenderProcessHandler::OnContextCreated(
     CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
     CefRefPtr<CefV8Context> context) {
   // This process hosts a page: the browser process waits for it to end before
-  // it quits (the pre-quit drain in app.cc), so the storage service has
-  // committed its localStorage. Once per process; a renderer that never hosts
-  // a page (Chromium's spare renderer) never reports and isn't waited for.
+  // CefShutdown (app.cc's pre-quit drain; main_mac.mm), so the storage
+  // service has committed its localStorage. Once per process; a renderer that
+  // never hosts a page (Chromium's spare renderer) never reports and isn't
+  // waited for.
   static bool pid_reported = false;
   if (!pid_reported && frame) {
     pid_reported = true;

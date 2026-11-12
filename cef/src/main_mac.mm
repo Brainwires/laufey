@@ -634,11 +634,13 @@ int main(int argc, char* argv[]) {
     // runs. The storage service commits a page's localStorage when its
     // renderer goes (until then the write waits on a commit timer of 5 s),
     // and CefShutdown kills the storage service without waiting for a
-    // commit still in flight. So pump CEF until the renderers have ended
-    // (laufey_cef_profile_lock.h), while the runtime still answers.
+    // commit still in flight. So pump CEF until the renderers that hosted a
+    // page have ended (laufey_cef_profile_lock.h), while the runtime still
+    // answers. Not every renderer: Chromium's spare renderer, which never
+    // hosts a page, lives until CefShutdown since CEF 156.0.28.
     if (persistent_profile)
       laufey_common::LaufeyWaitForRenderersBeforeShutdown(
-          []() { CefDoMessageLoopWork(); });
+          LaufeyPageRendererPids(), []() { CefDoMessageLoopWork(); });
     phases.Mark("renderers");
 
     // The closed windows' Browsers are deleted by tasks the stopped loop may

@@ -336,9 +336,12 @@ to 156.0.28 changes no public header (`include/` is unchanged); for the host:
   hosts pumped CEF there (the renderer wait, the window drain), so every quit
   that reached the end of the loop crashed before `CefShutdown`. They now run
   both inside the loop and quit it afterwards (`LaufeyQuitMainLoop`, the
-  pre-quit drain above), and pump nothing after it. macOS is unaffected: its
-  external pump took the keep-alive at launch, and the end of `[NSApp run]`
-  doesn't release it.
+  pre-quit drain above), and pump nothing after it. macOS can still pump after
+  its loop: its external pump took the keep-alive at launch, and the end of
+  `[NSApp run]` doesn't release it. That same keep-alive keeps Chromium's
+  shutdown from starting before `CefShutdown`, so the spare renderer (which
+  never hosts a page) no longer ends during the host's renderer wait; every host
+  now waits only for the renderers that reported hosting a page.
 - The external message pump runs idle work while a delayed task is pending (CEF
   issue 4332), and macOS no longer creates Chrome's `AppController` after an
   enterprise enrollment (CEF issue 4339). On the first 156.0.28 CI run a macOS
@@ -632,14 +635,16 @@ things keep what the page stored:
 
 - On macOS and Windows the backend lets the closed windows' renderer processes
   end before `CefShutdown` (at most 2 s; on Windows inside the loop, before it
-  quits it, waiting for the renderers that reported hosting a page, since
-  Chromium keeps a spare renderer with no page until its shutdown begins; on
-  macOS pumping CEF after `[NSApp run]` returns). The storage service commits a
-  page's `localStorage` 5 s after a write, or at once when the page's renderer
-  goes; a stopped loop no longer runs the tasks that end the renderers, so
-  without the wait they ended inside `CefShutdown` and the commit raced the kill
-  (a renderer was still running when `CefShutdown` started in 27 of 50 traced
-  quits on macOS, 9 of 20 on Windows). On Linux they have already ended when
+  quits it, on macOS pumping CEF after `[NSApp run]` returns). It waits for the
+  renderers that reported hosting a page, not every renderer: Chromium keeps a
+  spare renderer, with no page, until its shutdown begins, which is never while
+  the host waits (on Windows the loop is still running; on macOS, from CEF
+  156.0.28, it begins in `CefShutdown`). The storage service commits a page's
+  `localStorage` 5 s after a write, or at once when the page's renderer goes; a
+  stopped loop no longer runs the tasks that end the renderers, so without the
+  wait they ended inside `CefShutdown` and the commit raced the kill (a renderer
+  was still running when `CefShutdown` started in 27 of 50 traced quits on
+  macOS, 9 of 20 on Windows). On Linux they have already ended when
   `CefRunMessageLoop` returns (none in 50 traced quits, idle and with the CPU
   busy).
 - Before `CefInitialize` every CEF host cuts a write left half done at the end

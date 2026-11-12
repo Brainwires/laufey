@@ -538,6 +538,9 @@ void LaufeyQuitMainLoop();
 // A renderer process that hosts a page reported its process id (UI thread).
 // The pre-quit drain waits for these, not for every renderer child.
 void LaufeyNotePageRendererPid(int pid);
+// Those process ids (the ones still running when the last was noted). UI
+// thread.
+std::vector<int> LaufeyPageRendererPids();
 
 #if !defined(__APPLE__)
 // Whether the pre-quit drain also waits for the renderer processes to end

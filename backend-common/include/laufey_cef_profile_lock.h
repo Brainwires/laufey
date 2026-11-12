@@ -26,12 +26,15 @@
 // loop doesn't run, so CefShutdown ended them while the storage service was
 // being killed. So on macOS and Windows the host lets CEF run until they have
 // ended before CefShutdown: on Windows inside the loop, before it quits it
-// (the pre-quit drain in laufey_cef_window_drain.h, RunningProcessCount over
-// the renderers that reported hosting a page: Chromium's spare renderer
-// lives until its shutdown begins), since CEF can't be pumped once
-// CefRunMessageLoop has returned; on macOS,
-// whose loop is [NSApp run] with CEF's external pump, by pumping CEF after
-// that loop (LaufeyWaitForRenderersBeforeShutdown). On Linux they have
+// (the pre-quit drain in laufey_cef_window_drain.h), since CEF can't be
+// pumped once CefRunMessageLoop has returned; on macOS, whose loop is
+// [NSApp run] with CEF's external pump, by pumping CEF after that loop
+// (LaufeyWaitForRenderersBeforeShutdown). Both wait for the renderers that
+// reported hosting a page (RunningProcessCount), not every renderer child:
+// Chromium keeps a spare renderer, with no page and no storage, until its
+// shutdown begins, and from CEF 156.0.28 that is after CefShutdown starts on
+// macOS too (the external pump's keep-alive, CEF issue 4353). On Linux they
+// have
 // already ended when CefRunMessageLoop returns (50 traced quits).
 //
 // A write the kill cuts short leaves a torn record at the end of the
@@ -127,9 +130,10 @@ int WaitForCefHelpersOfType(const std::string& type, int timeout_ms,
 void LaufeyWaitForProfileLocksBeforeInit(const std::string& root_cache_dir);
 void LaufeyWaitForHelpersAfterShutdown(const std::string& root_cache_dir);
 // Before CefShutdown (macOS, once [NSApp run] has returned): pumps CEF
-// (`pump`) until the closed windows' renderer processes have ended, at most
-// 2 s, and logs when they haven't.
-void LaufeyWaitForRenderersBeforeShutdown(const std::function<void()>& pump);
+// (`pump`) until the renderer processes `pids` (those that hosted a page)
+// have ended, at most 2 s, and logs when they haven't.
+void LaufeyWaitForRenderersBeforeShutdown(const std::vector<int>& pids,
+                                          const std::function<void()>& pump);
 
 }  // namespace laufey_common
 

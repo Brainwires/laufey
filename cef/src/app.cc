@@ -631,8 +631,6 @@ void LaufeyHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 namespace {
 
 bool g_wait_for_renderers_before_quit = false;
-// The renderer processes that have hosted a page (LaufeyNotePageRendererPid).
-std::vector<int> g_page_renderer_pids;
 // The pre-quit drain under way (LaufeyQuitMainLoop), null before.
 laufey_common::PreQuitDrain* g_quit_drain = nullptr;
 constexpr int64_t kQuitDrainStepMs = 10;
@@ -680,8 +678,12 @@ void LaufeySetWaitForRenderersBeforeQuit(bool wait) {
 }
 #endif
 
+namespace {
+// The renderer processes that have hosted a page (LaufeyNotePageRendererPid).
+std::vector<int> g_page_renderer_pids;
+}  // namespace
+
 void LaufeyNotePageRendererPid(int pid) {
-#if !defined(__APPLE__)
   if (pid <= 0 ||
       std::find(g_page_renderer_pids.begin(), g_page_renderer_pids.end(),
                 pid) != g_page_renderer_pids.end())
@@ -695,9 +697,10 @@ void LaufeyNotePageRendererPid(int pid) {
   }
   running.push_back(pid);
   g_page_renderer_pids.swap(running);
-#else
-  (void)pid;
-#endif
+}
+
+std::vector<int> LaufeyPageRendererPids() {
+  return g_page_renderer_pids;
 }
 
 void LaufeyQuitMainLoop() {
