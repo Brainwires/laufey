@@ -1089,6 +1089,15 @@ static void Backend_Focus(void* data, uint32_t window_id) {
                                 if (window) {
                                   LaufeyShowCefWindow(window, wid);
                                   window->Activate();
+#if defined(__APPLE__)
+                                  // As the WKWebView backend: activate
+                                  // ignoring other apps, never through the
+                                  // activation policy, so an Accessory
+                                  // app's window comes to the front.
+                                  laufey_common::MacFocusWindow(
+                                      NSWindowForCefHandle(
+                                          window->GetWindowHandle()));
+#endif
                                 }
                               }
                             },

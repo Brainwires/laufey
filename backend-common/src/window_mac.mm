@@ -741,4 +741,21 @@ void MacRevealWindowAtLaunch(void* nswindow) {
   [w orderFrontRegardless];
 }
 
+void MacFocusWindow(void* nswindow) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w)
+    return;
+  if (!([w styleMask] & NSWindowStyleMaskNonactivatingPanel)) {
+    // Never through the activation policy: see laufey_window.h.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [NSApp activateIgnoringOtherApps:YES];
+#pragma clang diagnostic pop
+  }
+  [w makeKeyAndOrderFront:nil];
+  // In front of the active app's windows even when the activation is
+  // declined (makeKeyAndOrderFront: orders within this app only).
+  [w orderFrontRegardless];
+}
+
 }  // namespace laufey_common

@@ -271,6 +271,19 @@ bool MacSetVibrancy(void* nswindow, void* webview, int backdrop, int material);
 // shown and may activate the app: never call it for a hidden or a
 // non-activating (panel) window.
 void MacRevealWindowAtLaunch(void* nswindow);
+// Brings `nswindow` to the front and makes it key for an explicit focus
+// request (Window::focus), whatever the activation policy: the app is
+// activated ignoring other apps, and the window is ordered in front of other
+// apps' windows even when the system declines the activation. It never
+// changes the activation policy, so an Accessory (tray / menu-bar) app can
+// focus its window without becoming Regular: an app that was ever Regular
+// gets a tile in the Dock's recent apps once its running tile goes away
+// (on quit, or on switching back to Accessory), and macOS has no opt-out.
+// `-[NSApp activate]` (macOS 14+) only asks for activation cooperatively and
+// often leaves an Accessory app's window behind the active app, so this uses
+// the deprecated `activateIgnoringOtherApps:`. A non-activating panel is made
+// key and ordered front without activating the app. Main thread only.
+void MacFocusWindow(void* nswindow);
 // Whether closing the last window should end the loop on macOS:
 // ShouldEndLoopAfterLastWindow(), except that an Accessory-policy app
 // (set_dock_visible(false)) keeps running unless it is quitting.
