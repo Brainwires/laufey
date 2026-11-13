@@ -79,6 +79,8 @@ elseif(PLATFORM_LINUX)
 elseif(PLATFORM_WINDOWS)
   set(LAUFEY_SRCS_PLATFORM
     src/webview_windows.cc
+    src/child_webview_win.cc
+    src/child_webview_win.h
     src/main_windows.cc
     src/wv2_scheme_stream.cc
     src/wv2_scheme_stream.h

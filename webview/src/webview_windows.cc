@@ -44,6 +44,7 @@
 // WebView2 headers
 #include "WebView2.h"
 #include "WebView2EnvironmentOptions.h"
+#include "child_webview_win.h"
 
 #include <shlwapi.h>
 
@@ -114,6 +115,9 @@ struct WinWindowState {
   HWND hwnd;
   ComPtr<ICoreWebView2Controller> controller;
   ComPtr<ICoreWebView2> webview;
+  // The environment the controller was created from; child web views
+  // (API 58) create theirs from it.
+  ComPtr<ICoreWebView2Environment> environment;
   bool webview_ready = false;
   // The web view will never be ready: its environment or controller failed,
   // or kWebViewReadyTimeoutMs passed since the window was created.
@@ -483,6 +487,26 @@ class WebView2Backend : public LaufeyBackend {
   void SetDisplayChangedHandler(laufey_display_changed_fn handler,
                                 void* user_data) override;
   bool SetWindowTitleVisibility(uint32_t window_id, int visibility) override;
+  // Child web views (API 58): child_webview_win.cc, on the UI thread.
+  uint32_t WebViewCapabilities() override {
+    return laufey_child_webview_win::Capabilities();
+  }
+  uint32_t CreateWebView(uint32_t window_id, const std::string& options_json,
+                         laufey_webview_event_fn on_event, void* user_data,
+                         int32_t* status_out) override;
+  bool WebViewSetBounds(uint32_t webview_id, double x, double y, double width,
+                        double height) override;
+  bool WebViewSetVisible(uint32_t webview_id, bool visible) override;
+  int32_t WebViewNavigate(uint32_t webview_id, const std::string& url) override;
+  bool WebViewCommand(uint32_t webview_id, int32_t command) override;
+  std::string WebViewState(uint32_t webview_id) override;
+  void WebViewEvaluate(uint32_t webview_id, const std::string& script,
+                       laufey_webview_eval_fn callback,
+                       void* user_data) override;
+  void WebViewCapture(uint32_t webview_id, int32_t format, int32_t quality,
+                      laufey_webview_capture_fn callback,
+                      void* user_data) override;
+  bool WebViewClose(uint32_t webview_id) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
   bool GetWindowNormalBounds(uint32_t window_id, int* x, int* y, int* width,
@@ -856,6 +880,8 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         }
       }
       if (wid > 0) {
+        // Child web views keep their CSS-pixel place over the page.
+        laufey_child_webview_win::RelayoutForWindow(wid);
         if (wParam == SIZE_RESTORED && !laufey_common::WinIsFullscreen(wid))
           WinNoteNormalFrame(hwnd);
         RECT rect;
@@ -1034,6 +1060,9 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       // deferred close resolved via close_window still quits the message
       // loop when the last window goes away.
       if (wid > 0) {
+        // Its child web views close with it (each fires CLOSED), while
+        // their parent still exists.
+        laufey_child_webview_win::CloseAllForWindow(wid);
         // A window the user closed (WM_CLOSE -> DestroyWindow) still has its
         // entry: drop it, or every later call naming the id would reach the
         // destroyed HWND and its web view. Lock order windows_mutex_ ->
@@ -1545,6 +1574,8 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             }
 
             state->controller = controller;
+            state->environment = env;
+            laufey_child_webview_win::NoteEnvironment(env);
             if (state->transparent) {
               ComPtr<ICoreWebView2Controller2> controller2;
               if (SUCCEEDED(state->controller.As(&controller2)) && controller2)
@@ -3210,6 +3241,165 @@ bool WebView2Backend::GetWindowNormalBounds(uint32_t window_id, int* x, int* y,
   if (height)
     *height = WinToDip((std::max)(0L, ph - frame.cy), scale);
   return true;
+}
+
+// --- Child web views (API 58) ---
+
+uint32_t WebView2Backend::CreateWebView(uint32_t window_id,
+                                        const std::string& options_json,
+                                        laufey_webview_event_fn on_event,
+                                        void* user_data, int32_t* status_out) {
+  laufey_common::WebViewOptions options;
+  std::string error;
+  int32_t status =
+      laufey_common::ParseWebViewOptions(options_json, &options, &error);
+  if (status != LAUFEY_WEBVIEW_OK) {
+    *status_out = status;
+    return 0;
+  }
+  uint32_t id = 0;
+  int32_t result = LAUFEY_WEBVIEW_NO_WINDOW;
+  bool ran = RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (!state || !IsWindow(state->hwnd)) {
+      result = LAUFEY_WEBVIEW_NO_WINDOW;
+      return;
+    }
+    if (state->environment && !laufey_child_webview_win::SupportsEnvironment(
+                                  state->environment.Get())) {
+      result = LAUFEY_WEBVIEW_UNSUPPORTED;
+      return;
+    }
+    id = laufey_child_webview_win::Create(window_id, state->hwnd, options,
+                                          on_event, user_data, &result);
+    if (!id)
+      return;
+    // The view's controller comes from the window's environment, so it is
+    // created once the window's own web view is ready (now, or from the
+    // queue); a failure after this call returns is a LOAD "failed" event
+    // and CLOSED.
+    const char* not_ready = nullptr;
+    if (!WebViewReadyOrQueue(
+            state,
+            [this, window_id, id](const char* wait_error) {
+              if (wait_error) {
+                laufey_child_webview_win::Fail(id, wait_error);
+                return;
+              }
+              ComPtr<ICoreWebView2Environment> env;
+              ComPtr<ICoreWebView2Controller> page;
+              {
+                std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+                if (auto* s = GetWindow(window_id)) {
+                  env = s->environment;
+                  page = s->controller;
+                }
+              }
+              if (!env || !page) {
+                laufey_child_webview_win::Fail(id, kWebViewNotReady);
+                return;
+              }
+              if (!laufey_child_webview_win::SupportsEnvironment(env.Get())) {
+                laufey_child_webview_win::Fail(
+                    id,
+                    "this WebView2 runtime has no profiles "
+                    "(ICoreWebView2Environment10)");
+                return;
+              }
+              HRESULT hr =
+                  laufey_child_webview_win::Start(id, env.Get(), page.Get());
+              if (FAILED(hr)) {
+                char message[96];
+                snprintf(message, sizeof(message),
+                         "the web view could not be created (hr=0x%08lx)",
+                         static_cast<unsigned long>(hr));
+                laufey_child_webview_win::Fail(id, message);
+              }
+            },
+            &not_ready)) {
+      if (not_ready) {
+        // The window's web view never became ready.
+        laufey_child_webview_win::Abandon(id);
+        id = 0;
+        result = LAUFEY_WEBVIEW_FAILED;
+      }
+      return;
+    }
+    HRESULT hr = laufey_child_webview_win::Start(id, state->environment.Get(),
+                                                 state->controller.Get());
+    if (FAILED(hr)) {
+      laufey_child_webview_win::Abandon(id);
+      id = 0;
+      result = hr == E_NOINTERFACE ? LAUFEY_WEBVIEW_UNSUPPORTED
+                                   : LAUFEY_WEBVIEW_FAILED;
+    }
+  });
+  *status_out = ran ? result : LAUFEY_WEBVIEW_FAILED;
+  return ran ? id : 0;
+}
+
+bool WebView2Backend::WebViewSetBounds(uint32_t webview_id, double x, double y,
+                                       double width, double height) {
+  bool ok = false;
+  RunOnUiThreadSync([&] {
+    ok = laufey_child_webview_win::SetBounds(webview_id, x, y, width, height);
+  });
+  return ok;
+}
+
+bool WebView2Backend::WebViewSetVisible(uint32_t webview_id, bool visible) {
+  bool ok = false;
+  RunOnUiThreadSync(
+      [&] { ok = laufey_child_webview_win::SetVisible(webview_id, visible); });
+  return ok;
+}
+
+int32_t WebView2Backend::WebViewNavigate(uint32_t webview_id,
+                                         const std::string& url) {
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  RunOnUiThreadSync(
+      [&] { status = laufey_child_webview_win::Navigate(webview_id, url); });
+  return status;
+}
+
+bool WebView2Backend::WebViewCommand(uint32_t webview_id, int32_t command) {
+  bool ok = false;
+  RunOnUiThreadSync(
+      [&] { ok = laufey_child_webview_win::Command(webview_id, command); });
+  return ok;
+}
+
+std::string WebView2Backend::WebViewState(uint32_t webview_id) {
+  std::string state;
+  RunOnUiThreadSync(
+      [&] { state = laufey_child_webview_win::State(webview_id); });
+  return state;
+}
+
+void WebView2Backend::WebViewEvaluate(uint32_t webview_id,
+                                      const std::string& script,
+                                      laufey_webview_eval_fn callback,
+                                      void* user_data) {
+  RunOnUiThread([webview_id, script, callback, user_data] {
+    laufey_child_webview_win::Evaluate(webview_id, script, callback, user_data);
+  });
+}
+
+void WebView2Backend::WebViewCapture(uint32_t webview_id, int32_t format,
+                                     int32_t quality,
+                                     laufey_webview_capture_fn callback,
+                                     void* user_data) {
+  RunOnUiThread([webview_id, format, quality, callback, user_data] {
+    laufey_child_webview_win::Capture(webview_id, format, quality, callback,
+                                      user_data);
+  });
+}
+
+bool WebView2Backend::WebViewClose(uint32_t webview_id) {
+  bool ok = false;
+  RunOnUiThreadSync([&] { ok = laufey_child_webview_win::Close(webview_id); });
+  return ok;
 }
 
 void WebView2Backend::Share(uint32_t window_id,
