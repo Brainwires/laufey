@@ -2,6 +2,8 @@
 // macOS-specific RuntimeLoader parts: NSEvent monitors, NSMenu, NSWindow
 // helpers.
 
+#import <objc/runtime.h>
+
 #include "runtime_loader.h"
 #include "child_webview.h"
 #include "laufey_overlay.h"
@@ -10,6 +12,7 @@
 #include "laufey_menu.h"
 
 #include <atomic>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -424,6 +427,56 @@ static std::mutex g_window_menus_mutex;
 // thread only.
 static NSMenu* g_app_menu = nil;
 
+// --- Child web view overlays (API 58; child_webview.cc) ----------------------
+//
+// CEF Views hosts each overlay in a child NSWindow of the laufey window. A
+// window that isn't key swallows the click that would make it key (unless
+// its view accepts first mouse) and gets no keys; so a mouse-down on an
+// overlay makes it key before the click is dispatched, and focus() makes it
+// key too. Chromium's window class decides canBecomeKeyWindow from the
+// widget; where it says NO, the overlay's class is swapped for a subclass
+// that can become key (never main), as KVO swaps a class.
+
+static BOOL LaufeyOverlayCanBecomeKey(id, SEL) {
+  return YES;
+}
+
+static BOOL LaufeyOverlayCanBecomeMain(id, SEL) {
+  return NO;
+}
+
+static void MakeOverlayKeyable(NSWindow* overlay) {
+  if (!overlay || [overlay canBecomeKeyWindow])
+    return;
+  Class base = object_getClass(overlay);
+  std::string name = std::string("LaufeyKeyableOverlay_") + class_getName(base);
+  Class sub = objc_getClass(name.c_str());
+  if (!sub) {
+    sub = objc_allocateClassPair(base, name.c_str(), 0);
+    if (!sub)
+      return;
+    class_addMethod(sub, @selector(canBecomeKeyWindow),
+                    (IMP)LaufeyOverlayCanBecomeKey, "c@:");
+    class_addMethod(sub, @selector(canBecomeMainWindow),
+                    (IMP)LaufeyOverlayCanBecomeMain, "c@:");
+    objc_registerClassPair(sub);
+  }
+  object_setClass(overlay, sub);
+}
+
+// A child window of a laufey window that is no laufey window itself: a
+// child web view's overlay.
+static bool IsChildWebViewOverlay(NSWindow* window) {
+  return window && window.parentWindow && LaufeyIdForNSWindow(window) == 0 &&
+         LaufeyIdForNSWindow(window.parentWindow) != 0;
+}
+
+static void MakeOverlayKey(NSWindow* overlay) {
+  MakeOverlayKeyable(overlay);
+  if (!overlay.isKeyWindow)
+    [overlay makeKeyWindow];
+}
+
 void InstallNativeMouseMonitor() {
   if (g_mouse_monitor)
     return;
@@ -436,6 +489,19 @@ void InstallNativeMouseMonitor() {
       addLocalMonitorForEventsMatchingMask:mask
                                    handler:^NSEvent*(NSEvent* event) {
                                      NSWindow* win = [event window];
+                                     // A click on a child web view's
+                                     // overlay: key first, so the click
+                                     // reaches its page (API 58).
+                                     if (IsChildWebViewOverlay(win)) {
+                                       if (event.type ==
+                                               NSEventTypeLeftMouseDown ||
+                                           event.type ==
+                                               NSEventTypeRightMouseDown ||
+                                           event.type ==
+                                               NSEventTypeOtherMouseDown)
+                                         MakeOverlayKey(win);
+                                       return event;
+                                     }
                                      uint32_t wid = LaufeyIdForNSWindow(win);
                                      if (wid == 0)
                                        return event;
@@ -944,6 +1010,12 @@ void LaufeyCefFocusOverlayMac(void* browser_view) {
   NSWindow* parent = overlay.parentWindow;
   if (parent && !NSApp.isActive)
     laufey_common::MacFocusWindow((__bridge void*)parent);
-  [overlay makeKeyWindow];
+  MakeOverlayKey(overlay);
   [overlay makeFirstResponder:view];
+  if (!overlay.isKeyWindow) {
+    std::fprintf(stderr,
+                 "laufey: a web view's overlay window did not become key "
+                 "(canBecomeKeyWindow=%d, app active=%d)\n",
+                 overlay.canBecomeKeyWindow ? 1 : 0, NSApp.isActive ? 1 : 0);
+  }
 }
