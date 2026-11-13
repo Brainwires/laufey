@@ -522,7 +522,7 @@ class ChildClient : public CefClient,
 
   bool OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>, int,
                      const CefString& target_url, const CefString&,
-                     WindowOpenDisposition target_disposition, bool,
+                     cef_window_open_disposition_t target_disposition, bool,
                      const CefPopupFeatures&, CefWindowInfo&,
                      CefRefPtr<CefClient>&, CefBrowserSettings&,
                      CefRefPtr<CefDictionaryValue>&, bool*) override {
@@ -671,7 +671,7 @@ class ChildClient : public CefClient,
 
   bool OnOpenURLFromTab(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>,
                         const CefString& target_url,
-                        WindowOpenDisposition target_disposition,
+                        cef_window_open_disposition_t target_disposition,
                         bool) override {
     if (ChildView* v = Find(id_))
       HandlePopup(v, target_url.ToString(),

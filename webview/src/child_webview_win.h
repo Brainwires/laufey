@@ -15,6 +15,9 @@
 #define LAUFEY_CHILD_WEBVIEW_WIN_H_
 
 #include <windows.h>
+// WebView2.h needs the COM / OLE declarations wrl.h brings in (as in
+// webview_windows.cc).
+#include <wrl.h>
 
 #include <cstdint>
 #include <string>
