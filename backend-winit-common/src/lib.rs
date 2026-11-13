@@ -1091,11 +1091,14 @@ pub struct LaufeyBackendApi {
       u32,
       i32,
       i32,
+      f64,
       WebViewCaptureFn,
       *mut c_void,
     ),
   >,
   pub webview_close: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub webview_set_z_order:
+    Option<unsafe extern "C" fn(*mut c_void, u32, i32) -> bool>,
 }
 
 /// `laufey_webview_event_fn` (API 58).
@@ -2091,6 +2094,7 @@ pub fn create_api_base() -> LaufeyBackendApi {
     webview_evaluate: None,
     webview_capture: None,
     webview_close: None,
+    webview_set_z_order: None,
   }
 }
 

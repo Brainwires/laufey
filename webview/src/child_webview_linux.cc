@@ -901,7 +901,31 @@ struct CaptureCall {
   void* user_data;
   int32_t format;
   int32_t quality;
+  // Output pixels per CSS px (0: device pixels) and the view's CSS size.
+  double scale;
+  double css_width;
+  double css_height;
 };
+
+// The snapshot resampled to `width` x `height` pixels (a new surface; the
+// caller destroys both).
+cairo_surface_t* Rescale(cairo_surface_t* surface, int width, int height) {
+  cairo_surface_set_device_scale(surface, 1, 1);
+  int sw = cairo_image_surface_get_width(surface);
+  int sh = cairo_image_surface_get_height(surface);
+  if (sw <= 0 || sh <= 0 || width <= 0 || height <= 0)
+    return nullptr;
+  cairo_surface_t* out =
+      cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+  cairo_t* cr = cairo_create(out);
+  cairo_scale(cr, static_cast<double>(width) / sw,
+              static_cast<double>(height) / sh);
+  cairo_set_source_surface(cr, surface, 0, 0);
+  cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+  cairo_paint(cr);
+  cairo_destroy(cr);
+  return out;
+}
 
 cairo_status_t AppendBytes(void* closure, const unsigned char* data,
                            unsigned int length) {
@@ -969,6 +993,17 @@ void OnSnapshotDone(GObject* source, GAsyncResult* res, gpointer data) {
     delete call;
     return;
   }
+  if (call->scale > 0 &&
+      cairo_surface_get_type(surface) == CAIRO_SURFACE_TYPE_IMAGE) {
+    int width =
+        std::max(1, static_cast<int>(call->css_width * call->scale + 0.5));
+    int height =
+        std::max(1, static_cast<int>(call->css_height * call->scale + 0.5));
+    if (cairo_surface_t* scaled = Rescale(surface, width, height)) {
+      cairo_surface_destroy(surface);
+      surface = scaled;
+    }
+  }
   std::vector<uint8_t> bytes = Encode(surface, call->format, call->quality);
   cairo_surface_destroy(surface);
   if (bytes.empty()) {
@@ -986,7 +1021,7 @@ void OnSnapshotDone(GObject* source, GAsyncResult* res, gpointer data) {
 uint32_t Capabilities() {
   uint32_t caps =
       LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_CAPTURE |
-      LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
+      LAUFEY_WEBVIEW_CAP_Z_ORDER | LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
       (LAUFEY_WEBVIEW_ENGINE_WEBKITGTK << LAUFEY_WEBVIEW_ENGINE_SHIFT);
 #if LAUFEY_CHILD_WEBVIEW_EVALUATE
   caps |= LAUFEY_WEBVIEW_CAP_EVALUATE;
@@ -1155,6 +1190,7 @@ std::string State(uint32_t id) {
   s.can_go_forward = webkit_web_view_can_go_forward(v->view);
   s.visible = v->visible;
   s.bounds = v->bounds;
+  s.z_order = laufey_common::WebViewSinks::Instance().ZOrderOf(id);
   return laufey_common::WebViewStateJson(s);
 }
 
@@ -1177,7 +1213,7 @@ void Evaluate(uint32_t view_id, const std::string& script,
 #endif
 }
 
-void Capture(uint32_t id, int32_t format, int32_t quality,
+void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
              laufey_webview_capture_fn callback, void* user_data) {
   ChildView* v = Find(id);
   if (!v) {
@@ -1188,7 +1224,23 @@ void Capture(uint32_t id, int32_t format, int32_t quality,
   webkit_web_view_get_snapshot(
       v->view, WEBKIT_SNAPSHOT_REGION_VISIBLE, WEBKIT_SNAPSHOT_OPTIONS_NONE,
       v->cancellable, OnSnapshotDone,
-      new CaptureCall{callback, user_data, format, quality});
+      new CaptureCall{callback, user_data, format, quality, scale,
+                      v->bounds.width, v->bounds.height});
+}
+
+bool Restack(const std::vector<uint32_t>& bottom_to_top) {
+  bool all = true;
+  for (uint32_t id : bottom_to_top) {
+    ChildView* v = Find(id);
+    if (!v || !v->overlay) {
+      all = false;
+      continue;
+    }
+    // -1: the last overlay child, drawn above the others.
+    gtk_overlay_reorder_overlay(GTK_OVERLAY(v->overlay), GTK_WIDGET(v->view),
+                                -1);
+  }
+  return all;
 }
 
 bool Close(uint32_t id) {

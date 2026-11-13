@@ -1347,15 +1347,46 @@ static int32_t Backend_WebViewNavigate(void* data, uint32_t webview_id,
   return LAUFEY_WEBVIEW_UNSUPPORTED;
 }
 
+// Applies the registry's order to the view's window (z-order changes).
+static bool RestackWindowOf(LaufeyBackend* backend, uint32_t webview_id) {
+  auto& sinks = laufey_common::WebViewSinks::Instance();
+  uint32_t window_id = sinks.WindowOf(webview_id);
+  return window_id != 0 &&
+         backend->WebViewRestack(window_id, sinks.StackOrder(window_id));
+}
+
 static bool Backend_WebViewCommand(void* data, uint32_t webview_id,
                                    int32_t command) {
   if (command < LAUFEY_WEBVIEW_COMMAND_BACK ||
-      command > LAUFEY_WEBVIEW_COMMAND_FOCUS)
+      command > LAUFEY_WEBVIEW_COMMAND_LOWER)
     return false;
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
-  if (LaufeyBackend* backend = loader->GetBackend())
-    return backend->WebViewCommand(webview_id, command);
-  return false;
+  LaufeyBackend* backend = loader->GetBackend();
+  if (!backend)
+    return false;
+  if (command == LAUFEY_WEBVIEW_COMMAND_RAISE ||
+      command == LAUFEY_WEBVIEW_COMMAND_LOWER) {
+    if (!(backend->WebViewCapabilities() & LAUFEY_WEBVIEW_CAP_Z_ORDER))
+      return false;
+    auto& sinks = laufey_common::WebViewSinks::Instance();
+    bool known = command == LAUFEY_WEBVIEW_COMMAND_RAISE
+                     ? sinks.Raise(webview_id)
+                     : sinks.Lower(webview_id);
+    return known && RestackWindowOf(backend, webview_id);
+  }
+  return backend->WebViewCommand(webview_id, command);
+}
+
+static bool Backend_WebViewSetZOrder(void* data, uint32_t webview_id,
+                                     int32_t z_order) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  LaufeyBackend* backend = loader->GetBackend();
+  if (!backend ||
+      !(backend->WebViewCapabilities() & LAUFEY_WEBVIEW_CAP_Z_ORDER))
+    return false;
+  return laufey_common::WebViewSinks::Instance().SetZOrder(webview_id,
+                                                           z_order) &&
+         RestackWindowOf(backend, webview_id);
 }
 
 static char* Backend_WebViewState(void* data, uint32_t webview_id) {
@@ -1394,6 +1425,7 @@ static void Backend_WebViewEvaluate(void* data, uint32_t webview_id,
 
 static void Backend_WebViewCapture(void* data, uint32_t webview_id,
                                    int32_t format, int32_t quality,
+                                   double scale,
                                    laufey_webview_capture_fn callback,
                                    void* user_data) {
   if (!callback)
@@ -1405,6 +1437,11 @@ static void Backend_WebViewCapture(void* data, uint32_t webview_id,
     return;
   }
   quality = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
+  // Non-finite or <= 0: device pixels; at most 4 output pixels per CSS px.
+  if (!(scale > 0))
+    scale = 0;
+  if (scale > 4)
+    scale = 4;
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   LaufeyBackend* backend = loader->GetBackend();
   if (!backend) {
@@ -1412,7 +1449,8 @@ static void Backend_WebViewCapture(void* data, uint32_t webview_id,
              "this backend has no web views");
     return;
   }
-  backend->WebViewCapture(webview_id, format, quality, callback, user_data);
+  backend->WebViewCapture(webview_id, format, quality, scale, callback,
+                          user_data);
 }
 
 static bool Backend_WebViewClose(void* data, uint32_t webview_id) {
@@ -1983,6 +2021,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_evaluate = Backend_WebViewEvaluate;
   backend_api_.webview_capture = Backend_WebViewCapture;
   backend_api_.webview_close = Backend_WebViewClose;
+  backend_api_.webview_set_z_order = Backend_WebViewSetZOrder;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

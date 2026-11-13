@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "laufey.h"
 #include "laufey_webview.h"
@@ -34,8 +35,11 @@ bool Command(uint32_t id, int32_t command);
 std::string State(uint32_t id);
 void Evaluate(uint32_t id, const std::string& script,
               laufey_webview_eval_fn callback, void* user_data);
-void Capture(uint32_t id, int32_t format, int32_t quality,
+// `scale`: output pixels per CSS pixel; 0: the display's device pixels.
+void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
              laufey_webview_capture_fn callback, void* user_data);
+// Orders the window's views bottom to top.
+bool Restack(const std::vector<uint32_t>& bottom_to_top);
 bool Close(uint32_t id);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);

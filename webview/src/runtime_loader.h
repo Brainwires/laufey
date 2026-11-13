@@ -11,6 +11,7 @@
 #include <mutex>
 #include <queue>
 #include <map>
+#include <vector>
 
 #include "laufey.h"
 #include "laufey_overlay.h"
@@ -881,13 +882,19 @@ class LaufeyBackend {
              "this backend has no web views");
   }
   virtual void WebViewCapture(uint32_t /*webview_id*/, int32_t /*format*/,
-                              int32_t /*quality*/,
+                              int32_t /*quality*/, double /*scale*/,
                               laufey_webview_capture_fn callback,
                               void* user_data) {
     callback(user_data, LAUFEY_WEBVIEW_UNSUPPORTED, nullptr, 0,
              "this backend has no web views");
   }
   virtual bool WebViewClose(uint32_t /*webview_id*/) {
+    return false;
+  }
+  // Puts the window's views in this order, bottom to top (WebViewSinks keeps
+  // the z orders; LAUFEY_WEBVIEW_CAP_Z_ORDER backends override it).
+  virtual bool WebViewRestack(uint32_t /*window_id*/,
+                              const std::vector<uint32_t>& /*bottom_to_top*/) {
     return false;
   }
   virtual bool SetWindowBackdrop(uint32_t /*window_id*/, int /*backdrop*/,

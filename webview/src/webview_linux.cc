@@ -1403,9 +1403,11 @@ class WebKitGTKBackend : public LaufeyBackend {
                        laufey_webview_eval_fn callback,
                        void* user_data) override;
   void WebViewCapture(uint32_t webview_id, int32_t format, int32_t quality,
-                      laufey_webview_capture_fn callback,
+                      double scale, laufey_webview_capture_fn callback,
                       void* user_data) override;
   bool WebViewClose(uint32_t webview_id) override;
+  bool WebViewRestack(uint32_t window_id,
+                      const std::vector<uint32_t>& bottom_to_top) override;
 
   void HandleJsMessage(uint32_t window_id, const char* json);
 
@@ -2326,13 +2328,21 @@ void WebKitGTKBackend::WebViewEvaluate(uint32_t webview_id,
     callback(user_data, LAUFEY_WEBVIEW_FAILED, "the event loop has ended");
 }
 
+bool WebKitGTKBackend::WebViewRestack(
+    uint32_t /*window_id*/, const std::vector<uint32_t>& bottom_to_top) {
+  bool ok = false;
+  gtk_invoke_sync(
+      [&] { ok = laufey_child_webview_linux::Restack(bottom_to_top); });
+  return ok;
+}
+
 void WebKitGTKBackend::WebViewCapture(uint32_t webview_id, int32_t format,
-                                      int32_t quality,
+                                      int32_t quality, double scale,
                                       laufey_webview_capture_fn callback,
                                       void* user_data) {
   bool ran = gtk_invoke_sync([&] {
-    laufey_child_webview_linux::Capture(webview_id, format, quality, callback,
-                                        user_data);
+    laufey_child_webview_linux::Capture(webview_id, format, quality, scale,
+                                        callback, user_data);
   });
   if (!ran)
     callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr, 0,

@@ -3592,11 +3592,46 @@ static int32_t Backend_WebViewNavigate(void* /*data*/, uint32_t webview_id,
   return status;
 }
 
+// Applies the registry's order to the view's window (z-order changes).
+static bool CefRestackWindowOf(uint32_t webview_id) {
+  auto& sinks = laufey_common::WebViewSinks::Instance();
+  uint32_t window_id = sinks.WindowOf(webview_id);
+  if (!window_id)
+    return false;
+  std::vector<uint32_t> order = sinks.StackOrder(window_id);
+  bool ok = false;
+  cef_invoke_sync(
+      [&] { ok = laufey_cef_child_webview::Restack(window_id, order); });
+  return ok;
+}
+
+static bool CefHasZOrder() {
+  return (laufey_cef_child_webview::Capabilities() &
+          LAUFEY_WEBVIEW_CAP_Z_ORDER) != 0;
+}
+
+static bool Backend_WebViewSetZOrder(void* /*data*/, uint32_t webview_id,
+                                     int32_t z_order) {
+  return CefHasZOrder() &&
+         laufey_common::WebViewSinks::Instance().SetZOrder(webview_id,
+                                                           z_order) &&
+         CefRestackWindowOf(webview_id);
+}
+
 static bool Backend_WebViewCommand(void* /*data*/, uint32_t webview_id,
                                    int32_t command) {
   if (command < LAUFEY_WEBVIEW_COMMAND_BACK ||
-      command > LAUFEY_WEBVIEW_COMMAND_FOCUS)
+      command > LAUFEY_WEBVIEW_COMMAND_LOWER)
     return false;
+  if (command == LAUFEY_WEBVIEW_COMMAND_RAISE ||
+      command == LAUFEY_WEBVIEW_COMMAND_LOWER) {
+    auto& sinks = laufey_common::WebViewSinks::Instance();
+    return CefHasZOrder() &&
+           (command == LAUFEY_WEBVIEW_COMMAND_RAISE
+                ? sinks.Raise(webview_id)
+                : sinks.Lower(webview_id)) &&
+           CefRestackWindowOf(webview_id);
+  }
   bool ok = false;
   cef_invoke_sync(
       [&] { ok = laufey_cef_child_webview::Command(webview_id, command); });
@@ -3637,6 +3672,7 @@ static void Backend_WebViewEvaluate(void* /*data*/, uint32_t webview_id,
 
 static void Backend_WebViewCapture(void* /*data*/, uint32_t webview_id,
                                    int32_t format, int32_t quality,
+                                   double scale,
                                    laufey_webview_capture_fn callback,
                                    void* user_data) {
   if (!callback)
@@ -3648,12 +3684,18 @@ static void Backend_WebViewCapture(void* /*data*/, uint32_t webview_id,
     return;
   }
   quality = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
+  if (!(scale > 0))
+    scale = 0;
+  if (scale > 4)
+    scale = 4;
   bool posted = CefPostTask(
       TID_UI,
       base::BindOnce(
-          [](uint32_t id, int32_t f, int32_t q, laufey_webview_capture_fn cb,
-             void* ud) { laufey_cef_child_webview::Capture(id, f, q, cb, ud); },
-          webview_id, format, quality, callback, user_data));
+          [](uint32_t id, int32_t f, int32_t q, double sc,
+             laufey_webview_capture_fn cb, void* ud) {
+            laufey_cef_child_webview::Capture(id, f, q, sc, cb, ud);
+          },
+          webview_id, format, quality, scale, callback, user_data));
   if (!posted)
     callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr, 0,
              "the UI thread is gone");
@@ -3902,6 +3944,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_evaluate = Backend_WebViewEvaluate;
   backend_api_.webview_capture = Backend_WebViewCapture;
   backend_api_.webview_close = Backend_WebViewClose;
+  backend_api_.webview_set_z_order = Backend_WebViewSetZOrder;
   backend_api_.set_window_traffic_light_position =
       Backend_SetWindowTrafficLightPosition;
   backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;

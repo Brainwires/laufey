@@ -60,6 +60,11 @@ impl WebViewCapabilities {
   pub fn permission_prompts(&self) -> bool {
     self.has(ffi::LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS)
   }
+  /// [`WebView::set_z_order`], [`WebView::raise`] and [`WebView::lower`]
+  /// restack the window's views.
+  pub fn z_order(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_Z_ORDER)
+  }
   /// The engine, `None` when unsupported.
   pub fn engine(&self) -> Option<WebViewEngine> {
     let raw = (self.0 & ffi::LAUFEY_WEBVIEW_ENGINE_MASK)
@@ -535,6 +540,26 @@ impl WebView {
     self.command(ffi::LAUFEY_WEBVIEW_COMMAND_FOCUS)
   }
 
+  /// Above every other web view of its window.
+  pub fn raise(&self) -> bool {
+    self.command(ffi::LAUFEY_WEBVIEW_COMMAND_RAISE)
+  }
+
+  /// Below every other web view of its window.
+  pub fn lower(&self) -> bool {
+    self.command(ffi::LAUFEY_WEBVIEW_COMMAND_LOWER)
+  }
+
+  /// Its place among the window's web views (higher is above; equal ones
+  /// keep their creation order). False where unsupported or closed.
+  pub fn set_z_order(&self, z_order: i32) -> bool {
+    let api = api();
+    match api.webview_set_z_order {
+      Some(f) => unsafe { f(api.backend_data, self.id, z_order) },
+      None => false,
+    }
+  }
+
   /// Its state as JSON (`webview_state` in laufey.h); `None` when closed.
   pub fn state(&self) -> Option<String> {
     let api = api();
@@ -552,11 +577,17 @@ impl WebView {
   }
 
   /// Capture what it shows; `callback` gets the image, exactly once.
-  pub fn capture<F>(&self, format: CaptureFormat, quality: u8, callback: F)
-  where
+  /// `scale` is output pixels per CSS pixel (`None`: device pixels).
+  pub fn capture<F>(
+    &self,
+    format: CaptureFormat,
+    quality: u8,
+    scale: Option<f64>,
+    callback: F,
+  ) where
     F: FnOnce(Result<Vec<u8>, WebViewFailure>) + Send + 'static,
   {
-    capture_with(api(), self.id, format, quality, callback)
+    capture_with(api(), self.id, format, quality, scale, callback)
   }
 
   /// Close it ([`WebViewEventKind::Closed`] follows). False when already
@@ -624,6 +655,7 @@ fn capture_with<F>(
   id: u32,
   format: CaptureFormat,
   quality: u8,
+  scale: Option<f64>,
   callback: F,
 ) where
   F: FnOnce(Result<Vec<u8>, WebViewFailure>) + Send + 'static,
@@ -646,6 +678,7 @@ fn capture_with<F>(
       id,
       format as i32,
       quality.min(100) as i32,
+      scale.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(0.0),
       Some(capture_trampoline),
       Box::into_raw(boxed) as *mut c_void,
     )
@@ -714,7 +747,8 @@ mod tests {
     );
     assert!(caps.supported() && caps.capture());
     assert!(!caps.evaluate() && !caps.permission_prompts());
-    assert!(caps.persistent_partitions());
+    assert!(caps.persistent_partitions() && !caps.z_order());
+    assert!(WebViewCapabilities(ffi::LAUFEY_WEBVIEW_CAP_Z_ORDER).z_order());
     assert_eq!(caps.engine(), Some(WebViewEngine::WebView2));
     assert_eq!(caps.engine().unwrap().name(), "webview2");
     // The header's numbers are the ABI.
@@ -877,6 +911,7 @@ mod tests {
     id: u32,
     format: i32,
     quality: i32,
+    scale: f64,
     cb: Option<
       unsafe extern "C" fn(*mut c_void, i32, *const u8, usize, *const c_char),
     >,
@@ -895,7 +930,7 @@ mod tests {
       };
       return;
     }
-    let bytes = [format as u8, quality as u8];
+    let bytes = [format as u8, quality as u8, scale as u8];
     unsafe {
       cb.unwrap()(
         ud,
@@ -913,11 +948,16 @@ mod tests {
     api.webview_capture = Some(fake_capture);
     let (tx, rx) = mpsc::channel();
     let t = tx.clone();
-    capture_with(&api, 1, CaptureFormat::Jpeg, 250, move |r| {
+    capture_with(&api, 1, CaptureFormat::Jpeg, 250, Some(2.0), move |r| {
       let _ = t.send(r);
     });
-    assert_eq!(rx.recv().unwrap(), Ok(vec![1, 100]));
-    capture_with(&api, 0, CaptureFormat::Png, 0, move |r| {
+    assert_eq!(rx.recv().unwrap(), Ok(vec![1, 100, 2]));
+    let t = tx.clone();
+    capture_with(&api, 1, CaptureFormat::Png, 0, Some(f64::NAN), move |r| {
+      let _ = t.send(r);
+    });
+    assert_eq!(rx.recv().unwrap(), Ok(vec![0, 0, 0]));
+    capture_with(&api, 0, CaptureFormat::Png, 0, None, move |r| {
       let _ = tx.send(r);
     });
     let err = rx.recv().unwrap().unwrap_err();

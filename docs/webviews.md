@@ -108,6 +108,22 @@ the visible region).
 
 ## Stacking
 
-A web view is native and draws above the window's page. A page that shows a menu
-or dialog over it hides the view (`webview_set_visible(false)`), or captures it
-into an image shown in its place first.
+A web view is native and draws above the window's page; among the views of one
+window, a higher z order is above a lower one (`webview_set_z_order`;
+`LAUFEY_WEBVIEW_COMMAND_RAISE` / `LOWER` put a view above / below all the
+others; equal ones keep their creation order). A new view starts on top.
+`webview_state` reports `zOrder`. Engines without `LAUFEY_WEBVIEW_CAP_Z_ORDER`
+keep the creation order and refuse the calls: CEF on Windows and Linux, whose
+Views overlays are Aura windows CEF can't reorder (on macOS they are child
+`NSWindow`s, reordered with `addChildWindow:ordered:`). WKWebView reorders the
+subviews of the page view, WebView2 the host windows (`SetWindowPos`), WebKitGTK
+the `GtkOverlay` children (`gtk_overlay_reorder_overlay`).
+
+HTML can't draw over a web view. A page that shows a menu, dialog or another
+element over one captures it (`webview_capture` with `scale` 1 and JPEG is the
+cheapest), shows the image in its place, and hides the view
+(`webview_set_visible(false)`) until the element is gone. On WKWebView the
+capture takes what is on screen without waiting for a new frame
+(`afterScreenUpdates = NO`) and encodes through ImageIO; CEF and WebView2 clip
+`Page.captureScreenshot` to the visual viewport at the requested scale;
+WebKitGTK resamples the snapshot with cairo.

@@ -504,9 +504,11 @@ class WebView2Backend : public LaufeyBackend {
                        laufey_webview_eval_fn callback,
                        void* user_data) override;
   void WebViewCapture(uint32_t webview_id, int32_t format, int32_t quality,
-                      laufey_webview_capture_fn callback,
+                      double scale, laufey_webview_capture_fn callback,
                       void* user_data) override;
   bool WebViewClose(uint32_t webview_id) override;
+  bool WebViewRestack(uint32_t window_id,
+                      const std::vector<uint32_t>& bottom_to_top) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
   bool GetWindowNormalBounds(uint32_t window_id, int* x, int* y, int* width,
@@ -3387,18 +3389,26 @@ void WebView2Backend::WebViewEvaluate(uint32_t webview_id,
 }
 
 void WebView2Backend::WebViewCapture(uint32_t webview_id, int32_t format,
-                                     int32_t quality,
+                                     int32_t quality, double scale,
                                      laufey_webview_capture_fn callback,
                                      void* user_data) {
-  RunOnUiThread([webview_id, format, quality, callback, user_data] {
-    laufey_child_webview_win::Capture(webview_id, format, quality, callback,
-                                      user_data);
+  RunOnUiThread([webview_id, format, quality, scale, callback, user_data] {
+    laufey_child_webview_win::Capture(webview_id, format, quality, scale,
+                                      callback, user_data);
   });
 }
 
 bool WebView2Backend::WebViewClose(uint32_t webview_id) {
   bool ok = false;
   RunOnUiThreadSync([&] { ok = laufey_child_webview_win::Close(webview_id); });
+  return ok;
+}
+
+bool WebView2Backend::WebViewRestack(
+    uint32_t /*window_id*/, const std::vector<uint32_t>& bottom_to_top) {
+  bool ok = false;
+  RunOnUiThreadSync(
+      [&] { ok = laufey_child_webview_win::Restack(bottom_to_top); });
   return ok;
 }
 

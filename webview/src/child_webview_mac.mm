@@ -13,10 +13,12 @@
 // view's delegate and never see it.
 
 #import <Cocoa/Cocoa.h>
+#import <ImageIO/ImageIO.h>
 #import <WebKit/WebKit.h>
 
 #include "child_webview_mac.h"
 
+#include <algorithm>
 #include <chrono>
 #include <map>
 #include <string>
@@ -225,6 +227,25 @@ WKWebsiteDataStore* StoreFor(const std::string& partition) {
     store = [WKWebsiteDataStore nonPersistentDataStore];
   Stores()[key] = store;
   return store;
+}
+
+// PNG / JPEG through ImageIO (no NSBitmapImageRep copy of the pixels).
+NSData* EncodeImage(CGImageRef image, bool jpeg, int32_t quality) {
+  NSMutableData* data = [NSMutableData data];
+  CFStringRef type = jpeg ? CFSTR("public.jpeg") : CFSTR("public.png");
+  CGImageDestinationRef dest = CGImageDestinationCreateWithData(
+      (__bridge CFMutableDataRef)data, type, 1, nullptr);
+  if (!dest)
+    return nil;
+  NSDictionary* props = jpeg ? @{
+    (__bridge NSString*)
+    kCGImageDestinationLossyCompressionQuality : @(quality / 100.0)
+  }
+                             : @{};
+  CGImageDestinationAddImage(dest, image, (__bridge CFDictionaryRef)props);
+  bool ok = CGImageDestinationFinalize(dest);
+  CFRelease(dest);
+  return ok ? data : nil;
 }
 
 NSRect FrameFor(NSView* parent, const laufey_common::WebViewBounds& b) {
@@ -625,6 +646,7 @@ namespace laufey_child_webview_mac {
 uint32_t Capabilities() {
   uint32_t caps =
       LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_CAPTURE |
+      LAUFEY_WEBVIEW_CAP_Z_ORDER |
       (LAUFEY_WEBVIEW_ENGINE_WKWEBVIEW << LAUFEY_WEBVIEW_ENGINE_SHIFT);
   if (@available(macOS 11.0, *))
     caps |= LAUFEY_WEBVIEW_CAP_EVALUATE;
@@ -769,6 +791,7 @@ std::string State(uint32_t id) {
   s.can_go_forward = v->view.canGoForward;
   s.visible = v->visible;
   s.bounds = v->bounds;
+  s.z_order = WebViewSinks::Instance().ZOrderOf(id);
   return laufey_common::WebViewStateJson(s);
 }
 
@@ -807,7 +830,7 @@ void Evaluate(uint32_t view_id, const std::string& script,
            "evaluate needs macOS 11 or later");
 }
 
-void Capture(uint32_t id, int32_t format, int32_t quality,
+void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
              laufey_webview_capture_fn callback, void* user_data) {
   ChildView* v = Find(id);
   if (!v) {
@@ -816,46 +839,62 @@ void Capture(uint32_t id, int32_t format, int32_t quality,
     return;
   }
   WKSnapshotConfiguration* config = [[WKSnapshotConfiguration alloc] init];
-  [v->view
-      takeSnapshotWithConfiguration:config
-                  completionHandler:^(NSImage* image, NSError* error) {
-                    if (!image) {
-                      std::string message =
-                          error ? Utf8(error.localizedDescription)
-                                : std::string("nothing to capture");
-                      callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr, 0,
-                               message.c_str());
-                      return;
-                    }
-                    CGImageRef cg = [image CGImageForProposedRect:nullptr
-                                                          context:nil
-                                                            hints:nil];
-                    NSData* data = nil;
-                    if (cg) {
-                      NSBitmapImageRep* rep =
-                          [[NSBitmapImageRep alloc] initWithCGImage:cg];
-                      if (format == LAUFEY_WEBVIEW_CAPTURE_JPEG) {
-                        data = [rep
-                            representationUsingType:NSBitmapImageFileTypeJPEG
-                                         properties:@{
-                                           NSImageCompressionFactor :
-                                               @(quality / 100.0)
-                                         }];
-                      } else {
-                        data = [rep
-                            representationUsingType:NSBitmapImageFileTypePNG
-                                         properties:@{}];
-                      }
-                    }
-                    if (!data) {
-                      callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr, 0,
-                               "the image could not be encoded");
-                      return;
-                    }
-                    callback(user_data, LAUFEY_WEBVIEW_OK,
-                             static_cast<const uint8_t*>(data.bytes),
-                             data.length, nullptr);
-                  }];
+  // What is on screen now: no wait for the next layer commit (the snapshot
+  // pattern swaps an image in while HTML covers the view; it must be fast).
+  config.afterScreenUpdates = NO;
+  if (scale > 0) {
+    // snapshotWidth is in points; the image is backing-scale times that.
+    CGFloat backing = v->view.window ? v->view.window.backingScaleFactor : 1;
+    config.snapshotWidth = @(std::max(1.0, v->bounds.width * scale / backing));
+  }
+  bool jpeg = format == LAUFEY_WEBVIEW_CAPTURE_JPEG;
+  [v->view takeSnapshotWithConfiguration:config
+                       completionHandler:^(NSImage* image, NSError* error) {
+                         if (!image) {
+                           std::string message =
+                               error ? Utf8(error.localizedDescription)
+                                     : std::string("nothing to capture");
+                           callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr,
+                                    0, message.c_str());
+                           return;
+                         }
+                         CGImageRef cg = [image CGImageForProposedRect:nullptr
+                                                               context:nil
+                                                                 hints:nil];
+                         NSData* data =
+                             cg ? EncodeImage(cg, jpeg, quality) : nil;
+                         if (!data) {
+                           callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr,
+                                    0, "the image could not be encoded");
+                           return;
+                         }
+                         callback(user_data, LAUFEY_WEBVIEW_OK,
+                                  static_cast<const uint8_t*>(data.bytes),
+                                  data.length, nullptr);
+                       }];
+}
+
+bool Restack(const std::vector<uint32_t>& bottom_to_top) {
+  NSWindow* window = nil;
+  NSResponder* responder = nil;
+  for (uint32_t id : bottom_to_top) {
+    ChildView* v = Find(id);
+    if (!v || !v->view.superview)
+      continue;
+    if (!window) {
+      window = v->view.window;
+      responder = window.firstResponder;
+    }
+    // Re-adding a subview moves it to the top of its siblings, above the
+    // page's own WKWebView content and the views added before it.
+    [v->view.superview addSubview:v->view
+                       positioned:NSWindowAbove
+                       relativeTo:nil];
+  }
+  // Moving the focused view out and back drops its first responder status.
+  if (window && responder && window.firstResponder != responder)
+    [window makeFirstResponder:responder];
+  return true;
 }
 
 bool Close(uint32_t id) {

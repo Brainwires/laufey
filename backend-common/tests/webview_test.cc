@@ -232,7 +232,7 @@ static void TestEventJson() {
   EXPECT(WebViewStateJson(s) ==
          R"({"url":"https://a/","title":"T","load":"interactive",)"
          R"("canGoBack":true,"canGoForward":false,"visible":false,)"
-         R"("bounds":{"x":1,"y":2,"width":3,"height":4}})");
+         R"("bounds":{"x":1,"y":2,"width":3,"height":4},"zOrder":0})");
 }
 
 static void TestEvalEnvelope() {
@@ -311,6 +311,35 @@ static void TestRegistry() {
   EXPECT(r.Add(1, Record, &g_events) == LAUFEY_WEBVIEW_MAX_PER_WINDOW + 2);
 }
 
+static void TestStacking() {
+  WebViewSinks& r = WebViewSinks::Instance();
+  r.ResetForTest();
+  uint32_t a = r.Add(1, Record, &g_events);
+  uint32_t b = r.Add(1, Record, &g_events);
+  uint32_t c = r.Add(1, Record, &g_events);
+  uint32_t other = r.Add(2, Record, &g_events);
+  // New views start on top, per window.
+  EXPECT(r.ZOrderOf(a) == 0 && r.ZOrderOf(b) == 1 && r.ZOrderOf(c) == 2);
+  EXPECT(r.ZOrderOf(other) == 0);
+  EXPECT((r.StackOrder(1) == std::vector<uint32_t>{a, b, c}));
+  EXPECT(r.Raise(a));
+  EXPECT(r.ZOrderOf(a) == 3);
+  EXPECT((r.StackOrder(1) == std::vector<uint32_t>{b, c, a}));
+  EXPECT(r.Lower(c));
+  EXPECT(r.ZOrderOf(c) == 0);
+  EXPECT((r.StackOrder(1) == std::vector<uint32_t>{c, b, a}));
+  // Equal z keeps creation order.
+  EXPECT(r.SetZOrder(a, 1) && r.SetZOrder(c, 1));
+  EXPECT((r.StackOrder(1) == std::vector<uint32_t>{a, b, c}));
+  EXPECT(!r.SetZOrder(999, 1) && !r.Raise(999) && !r.Lower(999));
+  // Raising the only view (or the top one) keeps it on top.
+  EXPECT(r.Raise(other) && r.ZOrderOf(other) == 0);
+  WebViewStateFields s;
+  s.z_order = -3;
+  EXPECT(WebViewStateJson(s).find(R"("zOrder":-3})") != std::string::npos);
+  r.ResetForTest();
+}
+
 int main() {
   TestAbiNumbers();
   TestOptionsDefaults();
@@ -321,6 +350,7 @@ int main() {
   TestEventJson();
   TestEvalEnvelope();
   TestRegistry();
+  TestStacking();
   std::printf("webview_test: ok\n");
   return 0;
 }

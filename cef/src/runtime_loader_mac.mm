@@ -3,6 +3,7 @@
 // helpers.
 
 #include "runtime_loader.h"
+#include "child_webview.h"
 #include "laufey_overlay.h"
 #include "laufey_window.h"
 #include "laufey_backend_common.h"
@@ -890,3 +891,37 @@ void Backend_SetTrayDoubleClickHandler_Mac(void* /*data*/, uint32_t tray_id,
 
 // Notifications and permissions: runtime_loader.cc over
 // laufey_notifications.h, the same on every platform.
+
+// Child web views (API 58; child_webview.cc): CEF Views hosts each overlay in
+// a child NSWindow of the window, ordered by when it was added. Re-adding the
+// child windows bottom to top restacks them. An overlay drawn inside the
+// window's own NSWindow (older CEF) is restacked as a subview instead.
+bool LaufeyCefRestackOverlaysMac(uint32_t window_id,
+                                 const std::vector<void*>& browser_views) {
+  NSWindow* parent = (__bridge NSWindow*)RuntimeLoader::GetInstance()
+                         ->GetNSWindowForLaufeyId(window_id);
+  if (!parent)
+    return false;
+  bool all = true;
+  for (void* handle : browser_views) {
+    NSView* view = (__bridge NSView*)handle;
+    NSWindow* host = view.window;
+    if (!host) {
+      all = false;
+    } else if (host == parent) {
+      NSView* top = view;
+      while (top.superview && top.superview != parent.contentView)
+        top = top.superview;
+      if (top.superview)
+        [top.superview addSubview:top positioned:NSWindowAbove relativeTo:nil];
+      else
+        all = false;
+    } else if (host.parentWindow == parent) {
+      [parent removeChildWindow:host];
+      [parent addChildWindow:host ordered:NSWindowAbove];
+    } else {
+      all = false;
+    }
+  }
+  return all;
+}

@@ -421,9 +421,11 @@ class WKWebViewBackend : public LaufeyBackend {
                        laufey_webview_eval_fn callback,
                        void* user_data) override;
   void WebViewCapture(uint32_t webview_id, int32_t format, int32_t quality,
-                      laufey_webview_capture_fn callback,
+                      double scale, laufey_webview_capture_fn callback,
                       void* user_data) override;
   bool WebViewClose(uint32_t webview_id) override;
+  bool WebViewRestack(uint32_t window_id,
+                      const std::vector<uint32_t>& bottom_to_top) override;
   bool SetWindowTrafficLightPosition(uint32_t window_id, int x, int y) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
@@ -2490,13 +2492,23 @@ void WKWebViewBackend::WebViewEvaluate(uint32_t webview_id,
 }
 
 void WKWebViewBackend::WebViewCapture(uint32_t webview_id, int32_t format,
-                                      int32_t quality,
+                                      int32_t quality, double scale,
                                       laufey_webview_capture_fn callback,
                                       void* user_data) {
   dispatch_async(dispatch_get_main_queue(), ^{
-    laufey_child_webview_mac::Capture(webview_id, format, quality, callback,
-                                      user_data);
+    laufey_child_webview_mac::Capture(webview_id, format, quality, scale,
+                                      callback, user_data);
   });
+}
+
+bool WKWebViewBackend::WebViewRestack(
+    uint32_t /*window_id*/, const std::vector<uint32_t>& bottom_to_top) {
+  __block bool ok = false;
+  std::vector<uint32_t> order = bottom_to_top;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::Restack(order);
+  });
+  return ok;
 }
 
 bool WKWebViewBackend::WebViewClose(uint32_t webview_id) {

@@ -1076,7 +1076,7 @@ uint32_t Capabilities() {
   if (!supported)
     return 0;
   return LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_CAPTURE |
-         LAUFEY_WEBVIEW_CAP_EVALUATE |
+         LAUFEY_WEBVIEW_CAP_EVALUATE | LAUFEY_WEBVIEW_CAP_Z_ORDER |
          LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS |
          LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
          (LAUFEY_WEBVIEW_ENGINE_WEBVIEW2 << LAUFEY_WEBVIEW_ENGINE_SHIFT);
@@ -1283,6 +1283,7 @@ std::string State(uint32_t id) {
   }
   s.visible = v->visible;
   s.bounds = v->bounds;
+  s.z_order = laufey_common::WebViewSinks::Instance().ZOrderOf(id);
   return laufey_common::WebViewStateJson(s);
 }
 
@@ -1346,18 +1347,31 @@ void Evaluate(uint32_t id, const std::string& script,
       });
 }
 
-void Capture(uint32_t id, int32_t format, int32_t quality,
-             laufey_webview_capture_fn callback, void* user_data) {
-  if (!Find(id)) {
-    callback(user_data, LAUFEY_WEBVIEW_CLOSED, nullptr, 0,
-             "the web view is closed");
-    return;
+namespace {
+
+double NumberField(const laufey::ValuePtr& dict, const char* key) {
+  laufey::ValuePtr v = Field(dict, key);
+  if (v && v->IsDouble() && std::isfinite(v->GetDouble()))
+    return v->GetDouble();
+  if (v && v->IsInt())
+    return static_cast<double>(v->GetInt());
+  return 0;
+}
+
+std::string JsonNumber(double d) {
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.6f", d);
+  for (char* p = buf; *p; ++p) {
+    if (*p == ',')
+      *p = '.';
   }
-  bool jpeg = format == LAUFEY_WEBVIEW_CAPTURE_JPEG;
-  std::string params = std::string("{\"format\":\"") + (jpeg ? "jpeg" : "png") +
-                       "\"" +
-                       (jpeg ? ",\"quality\":" + std::to_string(quality) : "") +
-                       ",\"fromSurface\":true}";
+  return buf;
+}
+
+// `params` is captureScreenshot's JSON object without its closing brace.
+void CaptureWith(uint32_t id, std::string params,
+                 laufey_webview_capture_fn callback, void* user_data) {
+  params += "}";
   SendDevTools(
       id, "Page.captureScreenshot", params,
       [id, callback, user_data](bool ok, laufey::ValuePtr r) {
@@ -1379,6 +1393,61 @@ void Capture(uint32_t id, int32_t format, int32_t quality,
         callback(user_data, LAUFEY_WEBVIEW_OK, data.data(), data.size(),
                  nullptr);
       });
+}
+
+}  // namespace
+
+void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
+             laufey_webview_capture_fn callback, void* user_data) {
+  if (!Find(id)) {
+    callback(user_data, LAUFEY_WEBVIEW_CLOSED, nullptr, 0,
+             "the web view is closed");
+    return;
+  }
+  bool jpeg = format == LAUFEY_WEBVIEW_CAPTURE_JPEG;
+  std::string params = std::string("{\"format\":\"") + (jpeg ? "jpeg" : "png") +
+                       "\"" +
+                       (jpeg ? ",\"quality\":" + std::to_string(quality) : "") +
+                       ",\"fromSurface\":true";
+  if (!(scale > 0)) {
+    CaptureWith(id, params, callback, user_data);
+    return;
+  }
+  // A scale: clip to the visual viewport at scale / devicePixelRatio (the
+  // screenshot's pixels are clip CSS px x clip.scale x the device scale).
+  SendDevTools(
+      id, "Page.getLayoutMetrics", "{}",
+      [id, params, scale, callback, user_data](bool ok, laufey::ValuePtr r) {
+        std::string p = params;
+        laufey::ValuePtr css = ok ? Field(r, "cssVisualViewport") : nullptr;
+        laufey::ValuePtr device = ok ? Field(r, "visualViewport") : nullptr;
+        double w = NumberField(css, "clientWidth");
+        double h = NumberField(css, "clientHeight");
+        if (w > 0 && h > 0) {
+          double dpr = NumberField(device, "clientWidth") / w;
+          double clip_scale = dpr > 0 ? scale / dpr : scale;
+          p += ",\"clip\":{\"x\":" + JsonNumber(NumberField(css, "pageX")) +
+               ",\"y\":" + JsonNumber(NumberField(css, "pageY")) +
+               ",\"width\":" + JsonNumber(w) + ",\"height\":" + JsonNumber(h) +
+               ",\"scale\":" + JsonNumber(clip_scale) + "}";
+        }
+        CaptureWith(id, p, callback, user_data);
+      });
+}
+
+bool Restack(const std::vector<uint32_t>& bottom_to_top) {
+  bool all = true;
+  for (uint32_t id : bottom_to_top) {
+    ChildView* v = Find(id);
+    if (!v || !v->host) {
+      all = false;
+      continue;
+    }
+    // Each in turn to the top of its siblings: the last one ends up highest.
+    SetWindowPos(v->host, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
+  return all;
 }
 
 bool Close(uint32_t id) {

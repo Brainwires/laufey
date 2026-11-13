@@ -118,6 +118,7 @@ struct WebViewStateFields {
   bool can_go_forward = false;
   bool visible = true;
   WebViewBounds bounds;
+  int32_t z_order = 0;
 };
 std::string WebViewStateJson(const WebViewStateFields& s);
 
@@ -169,6 +170,15 @@ class WebViewSinks {
   // Drops an id without an event (a creation that failed after Add).
   void Abandon(uint32_t webview_id);
 
+  // Stacking among a window's views (webview_set_z_order): Add gives one
+  // more than the window's highest. False for an unknown id.
+  bool SetZOrder(uint32_t webview_id, int32_t z_order);
+  bool Raise(uint32_t webview_id);  // one more than the window's highest
+  bool Lower(uint32_t webview_id);  // one less than the window's lowest
+  int32_t ZOrderOf(uint32_t webview_id);
+  // The window's views bottom to top (z order, then creation order).
+  std::vector<uint32_t> StackOrder(uint32_t window_id);
+
   // Test-only.
   void ResetForTest();
 
@@ -177,6 +187,7 @@ class WebViewSinks {
     uint32_t window_id;
     laufey_webview_event_fn fn;
     void* user_data;
+    int32_t z_order;
   };
   std::recursive_mutex mu_;
   std::map<uint32_t, Sink> sinks_;

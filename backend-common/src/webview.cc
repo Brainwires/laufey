@@ -4,6 +4,8 @@
 
 #include "laufey_webview.h"
 
+#include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 
@@ -395,7 +397,8 @@ std::string WebViewStateJson(const WebViewStateFields& s) {
          ",\"bounds\":{\"x\":" + Number(s.bounds.x) +
          ",\"y\":" + Number(s.bounds.y) +
          ",\"width\":" + Number(s.bounds.width) +
-         ",\"height\":" + Number(s.bounds.height) + "}}";
+         ",\"height\":" + Number(s.bounds.height) +
+         "},\"zOrder\":" + std::to_string(s.z_order) + "}";
 }
 
 // --- Evaluate ---------------------------------------------------------------
@@ -497,16 +500,20 @@ uint32_t WebViewSinks::Add(uint32_t window_id, laufey_webview_event_fn fn,
                            void* user_data) {
   std::lock_guard<std::recursive_mutex> lock(mu_);
   size_t count = 0;
+  int32_t top = 0;
   for (const auto& kv : sinks_) {
-    if (kv.second.window_id == window_id)
+    if (kv.second.window_id == window_id) {
+      if (count == 0 || kv.second.z_order > top)
+        top = kv.second.z_order;
       ++count;
+    }
   }
   if (count >= LAUFEY_WEBVIEW_MAX_PER_WINDOW)
     return 0;
   uint32_t id = next_id_++;
   if (next_id_ == 0)
     next_id_ = 1;
-  sinks_[id] = Sink{window_id, fn, user_data};
+  sinks_[id] = Sink{window_id, fn, user_data, count == 0 ? 0 : top + 1};
   return id;
 }
 
@@ -563,6 +570,69 @@ bool WebViewSinks::Close(uint32_t webview_id) {
 void WebViewSinks::Abandon(uint32_t webview_id) {
   std::lock_guard<std::recursive_mutex> lock(mu_);
   sinks_.erase(webview_id);
+}
+
+bool WebViewSinks::SetZOrder(uint32_t webview_id, int32_t z_order) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
+  auto it = sinks_.find(webview_id);
+  if (it == sinks_.end())
+    return false;
+  it->second.z_order = z_order;
+  return true;
+}
+
+bool WebViewSinks::Raise(uint32_t webview_id) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
+  auto it = sinks_.find(webview_id);
+  if (it == sinks_.end())
+    return false;
+  int64_t top = it->second.z_order;
+  for (const auto& kv : sinks_) {
+    if (kv.first != webview_id && kv.second.window_id == it->second.window_id &&
+        kv.second.z_order + int64_t{1} > top)
+      top = kv.second.z_order + int64_t{1};
+  }
+  it->second.z_order = static_cast<int32_t>(top > INT32_MAX ? INT32_MAX : top);
+  return true;
+}
+
+bool WebViewSinks::Lower(uint32_t webview_id) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
+  auto it = sinks_.find(webview_id);
+  if (it == sinks_.end())
+    return false;
+  int64_t bottom = it->second.z_order;
+  for (const auto& kv : sinks_) {
+    if (kv.first != webview_id && kv.second.window_id == it->second.window_id &&
+        kv.second.z_order - int64_t{1} < bottom)
+      bottom = kv.second.z_order - int64_t{1};
+  }
+  it->second.z_order =
+      static_cast<int32_t>(bottom < INT32_MIN ? INT32_MIN : bottom);
+  return true;
+}
+
+int32_t WebViewSinks::ZOrderOf(uint32_t webview_id) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
+  auto it = sinks_.find(webview_id);
+  return it == sinks_.end() ? 0 : it->second.z_order;
+}
+
+std::vector<uint32_t> WebViewSinks::StackOrder(uint32_t window_id) {
+  std::vector<std::pair<int32_t, uint32_t>> views;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    for (const auto& kv : sinks_) {
+      if (kv.second.window_id == window_id)
+        views.emplace_back(kv.second.z_order, kv.first);
+    }
+  }
+  // Ids grow with creation, so (z, id) is z order then creation order.
+  std::sort(views.begin(), views.end());
+  std::vector<uint32_t> out;
+  for (const auto& v : views)
+    out.push_back(v.second);
+  return out;
 }
 
 void WebViewSinks::ResetForTest() {

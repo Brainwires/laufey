@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "include/cef_browser.h"
 #include "include/views/cef_browser_view.h"
@@ -45,8 +46,11 @@ bool Command(uint32_t id, int32_t command);
 std::string State(uint32_t id);
 void Evaluate(uint32_t id, const std::string& script,
               laufey_webview_eval_fn callback, void* user_data);
-void Capture(uint32_t id, int32_t format, int32_t quality,
+// `scale`: output pixels per CSS pixel; 0: the display's device pixels.
+void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
              laufey_webview_capture_fn callback, void* user_data);
+// Orders the window's views bottom to top (macOS only; false elsewhere).
+bool Restack(uint32_t window_id, const std::vector<uint32_t>& bottom_to_top);
 bool Close(uint32_t id);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
@@ -58,5 +62,12 @@ void CloseAllForWindow(uint32_t window_id);
 uint32_t LaufeyShowMessageDialogForWindow(
     uint32_t window_id, const laufey_message_dialog_options_t* options,
     laufey_message_dialog_result_fn callback, void* user_data);
+
+#if defined(__APPLE__)
+// runtime_loader_mac.mm: orders the overlay windows holding `browser_views`
+// (each a browser's NSView) above the window `window_id`, bottom to top.
+bool LaufeyCefRestackOverlaysMac(uint32_t window_id,
+                                 const std::vector<void*>& browser_views);
+#endif
 
 #endif  // LAUFEY_CEF_CHILD_WEBVIEW_H_

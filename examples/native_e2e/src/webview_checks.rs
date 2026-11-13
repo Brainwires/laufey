@@ -317,14 +317,82 @@ pub async fn run(w: &Window) {
 
   if caps.capture() {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    view.capture(CaptureFormat::Png, 0, move |r| {
+    view.capture(CaptureFormat::Png, 0, None, move |r| {
       let _ = tx.send(r);
     });
     let png = tokio::time::timeout(Duration::from_secs(20), rx).await;
     let ok = matches!(&png, Ok(Ok(Ok(bytes))) if bytes.starts_with(b"\x89PNG"));
     check("capture returns a PNG", ok);
+    // Timing for the snapshot pattern (an <img> swapped in while HTML
+    // covers the view): reported, not gated, as runners vary.
+    for (label, format, scale) in [
+      ("png device", CaptureFormat::Png, None),
+      ("jpeg device", CaptureFormat::Jpeg, None),
+      ("jpeg 1x", CaptureFormat::Jpeg, Some(1.0)),
+      ("png 1x", CaptureFormat::Png, Some(1.0)),
+    ] {
+      let started = std::time::Instant::now();
+      let (tx, rx) = tokio::sync::oneshot::channel();
+      view.capture(format, 80, scale, move |r| {
+        let _ = tx.send(r.map(|b| b.len()));
+      });
+      let got = tokio::time::timeout(Duration::from_secs(20), rx).await;
+      eprintln!(
+        "[e2e] INFO capture {label}: {:?} in {} ms",
+        got.ok().and_then(|r| r.ok()),
+        started.elapsed().as_millis()
+      );
+    }
   } else {
     na("capture (not supported by this backend)");
+  }
+
+  // Stacking among the window's views.
+  {
+    let (_, sink) = recorder();
+    if let Ok(top) = laufey::create_webview(
+      w.id(),
+      &WebViewOptions {
+        url: format!("{base}/b"),
+        bounds: bounds(40.0, 40.0, 100.0, 100.0),
+        partition: Some("ephemeral:e2e".into()),
+        ..Default::default()
+      },
+      sink,
+    ) {
+      let z = |v: laufey::WebView| {
+        v.state()
+          .and_then(|s| {
+            s.split("\"zOrder\":")
+              .nth(1)
+              .map(|t| t.trim_end_matches('}').to_string())
+          })
+          .and_then(|t| t.parse::<i32>().ok())
+      };
+      check(
+        "a new web view starts above the window's others",
+        z(top).unwrap_or(i32::MIN) > z(view).unwrap_or(i32::MAX),
+      );
+      if caps.z_order() {
+        check("raise()", view.raise());
+        check(
+          "raise() puts a view above the others",
+          z(view).unwrap_or(i32::MIN) > z(top).unwrap_or(i32::MAX),
+        );
+        check("lower()", view.lower());
+        check(
+          "lower() puts it below",
+          z(view).unwrap_or(i32::MAX) < z(top).unwrap_or(i32::MIN),
+        );
+        check("set_z_order(7)", view.set_z_order(7) && z(view) == Some(7));
+      } else {
+        check(
+          "stacking is refused where not reported",
+          !view.raise() && !view.lower() && !view.set_z_order(1),
+        );
+      }
+      top.close();
+    }
   }
 
   // The per-window limit.

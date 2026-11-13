@@ -811,7 +811,30 @@ uint32_t Capabilities() {
          LAUFEY_WEBVIEW_CAP_EVALUATE | LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
          (RootCachePath().empty() ? 0u
                                   : LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS) |
+#if defined(__APPLE__)
+         // Overlays are child NSWindows there (Restack); Aura's on Windows
+         // and Linux can't be reordered through CEF.
+         LAUFEY_WEBVIEW_CAP_Z_ORDER |
+#endif
          (LAUFEY_WEBVIEW_ENGINE_CEF << LAUFEY_WEBVIEW_ENGINE_SHIFT);
+}
+
+bool Restack(uint32_t window_id, const std::vector<uint32_t>& bottom_to_top) {
+  CEF_REQUIRE_UI_THREAD();
+#if defined(__APPLE__)
+  std::vector<void*> views;
+  for (uint32_t id : bottom_to_top) {
+    ChildView* v = Find(id);
+    if (v && v->browser)
+      views.push_back(
+          reinterpret_cast<void*>(v->browser->GetHost()->GetWindowHandle()));
+  }
+  return LaufeyCefRestackOverlaysMac(window_id, views);
+#else
+  (void)window_id;
+  (void)bottom_to_top;
+  return false;
+#endif
 }
 
 uint32_t Create(uint32_t window_id, CefRefPtr<CefWindow> window,
@@ -949,6 +972,7 @@ std::string State(uint32_t id) {
   s.can_go_forward = v->browser && v->browser->CanGoForward();
   s.visible = v->visible;
   s.bounds = v->bounds;
+  s.z_order = WebViewSinks::Instance().ZOrderOf(id);
   return laufey_common::WebViewStateJson(s);
 }
 
@@ -1022,20 +1046,9 @@ void Evaluate(uint32_t id, const std::string& script,
       });
 }
 
-void Capture(uint32_t id, int32_t format, int32_t quality,
-             laufey_webview_capture_fn callback, void* user_data) {
-  CEF_REQUIRE_UI_THREAD();
-  if (!Find(id)) {
-    callback(user_data, LAUFEY_WEBVIEW_CLOSED, nullptr, 0,
-             "the web view is closed");
-    return;
-  }
-  CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
-  bool jpeg = format == LAUFEY_WEBVIEW_CAPTURE_JPEG;
-  params->SetString("format", jpeg ? "jpeg" : "png");
-  if (jpeg)
-    params->SetInt("quality", quality);
-  params->SetBool("fromSurface", true);
+namespace {
+void CaptureWith(uint32_t id, CefRefPtr<CefDictionaryValue> params,
+                 laufey_webview_capture_fn callback, void* user_data) {
   SendDevTools(
       id, "Page.captureScreenshot", params,
       [id, callback, user_data](bool ok, CefRefPtr<CefDictionaryValue> r) {
@@ -1058,6 +1071,63 @@ void Capture(uint32_t id, int32_t format, int32_t quality,
         bytes->GetData(data.data(), size, 0);
         callback(user_data, LAUFEY_WEBVIEW_OK, data.data(), data.size(),
                  nullptr);
+      });
+}
+}  // namespace
+
+void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
+             laufey_webview_capture_fn callback, void* user_data) {
+  CEF_REQUIRE_UI_THREAD();
+  if (!Find(id)) {
+    callback(user_data, LAUFEY_WEBVIEW_CLOSED, nullptr, 0,
+             "the web view is closed");
+    return;
+  }
+  CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
+  bool jpeg = format == LAUFEY_WEBVIEW_CAPTURE_JPEG;
+  params->SetString("format", jpeg ? "jpeg" : "png");
+  if (jpeg)
+    params->SetInt("quality", quality);
+  params->SetBool("fromSurface", true);
+  if (!(scale > 0)) {
+    CaptureWith(id, params, callback, user_data);
+    return;
+  }
+  // A scale: clip to the visual viewport at scale / devicePixelRatio (the
+  // screenshot's pixels are clip CSS px x clip.scale x the device scale).
+  SendDevTools(
+      id, "Page.getLayoutMetrics", CefDictionaryValue::Create(),
+      [id, params, scale, callback, user_data](
+          bool ok, CefRefPtr<CefDictionaryValue> r) {
+        auto viewport = [&](const char* key) {
+          return ok && r->GetType(key) == VTYPE_DICTIONARY
+                     ? r->GetDictionary(key)
+                     : nullptr;
+        };
+        auto number = [](CefRefPtr<CefDictionaryValue> d, const char* key) {
+          if (!d)
+            return 0.0;
+          if (d->GetType(key) == VTYPE_DOUBLE)
+            return d->GetDouble(key);
+          if (d->GetType(key) == VTYPE_INT)
+            return static_cast<double>(d->GetInt(key));
+          return 0.0;
+        };
+        CefRefPtr<CefDictionaryValue> css = viewport("cssVisualViewport");
+        CefRefPtr<CefDictionaryValue> device = viewport("visualViewport");
+        double css_width = number(css, "clientWidth");
+        double dpr =
+            css_width > 0 ? number(device, "clientWidth") / css_width : 0;
+        if (css && css_width > 0 && number(css, "clientHeight") > 0) {
+          CefRefPtr<CefDictionaryValue> clip = CefDictionaryValue::Create();
+          clip->SetDouble("x", number(css, "pageX"));
+          clip->SetDouble("y", number(css, "pageY"));
+          clip->SetDouble("width", css_width);
+          clip->SetDouble("height", number(css, "clientHeight"));
+          clip->SetDouble("scale", dpr > 0 ? scale / dpr : scale);
+          params->SetDictionary("clip", clip);
+        }
+        CaptureWith(id, params, callback, user_data);
       });
 }
 

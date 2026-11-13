@@ -1207,6 +1207,9 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 #define LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS (1u << 3)
 // "permissions": "ask" prompts the user (else it behaves as "deny").
 #define LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS (1u << 4)
+// webview_set_z_order and the RAISE / LOWER commands restack the window's
+// views (else the order stays the creation order and they return false).
+#define LAUFEY_WEBVIEW_CAP_Z_ORDER (1u << 5)
 // Bits 24..27: the engine (LAUFEY_WEBVIEW_ENGINE_*), 0 when unsupported.
 #define LAUFEY_WEBVIEW_ENGINE_SHIFT 24
 #define LAUFEY_WEBVIEW_ENGINE_MASK (0xfu << 24)
@@ -1238,6 +1241,9 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 #define LAUFEY_WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE 4
 #define LAUFEY_WEBVIEW_COMMAND_STOP 5
 #define LAUFEY_WEBVIEW_COMMAND_FOCUS 6  // give the view the keyboard focus
+// Above / below every other web view of its window (LAUFEY_WEBVIEW_CAP_Z_ORDER).
+#define LAUFEY_WEBVIEW_COMMAND_RAISE 7
+#define LAUFEY_WEBVIEW_COMMAND_LOWER 8
 
 // Event kinds (laufey_webview_event_fn `kind`) and their `detail_json`:
 //   TITLE       {"title": string}
@@ -3122,7 +3128,7 @@ struct laufey_backend_api {
 
   // The view's state as JSON: {"url", "title", "load" (the last LOAD state),
   // "canGoBack", "canGoForward", "visible", "bounds": {"x", "y", "width",
-  // "height"}}. Free with string_free; NULL for an unknown id. Any thread.
+  // "height"}, "zOrder" (see webview_set_z_order)}. Free with string_free; NULL for an unknown id. Any thread.
   char* (*webview_state)(void* backend_data, uint32_t webview_id);
 
   // Run `script` as a classic script in an isolated world of the view's main
@@ -3134,15 +3140,26 @@ struct laufey_backend_api {
                            const char* script, laufey_webview_eval_fn callback,
                            void* user_data);
 
-  // Capture what the view shows, in device pixels, as LAUFEY_WEBVIEW_CAPTURE_*
-  // (`quality` 0..100 for JPEG). `callback` fires exactly once. Any thread.
+  // Capture what the view shows as LAUFEY_WEBVIEW_CAPTURE_* (`quality` 0..100
+  // for JPEG). `scale` is output pixels per CSS pixel (0 < scale <= 4); 0 or
+  // less: the display's device pixels. `callback` fires exactly once. Any
+  // thread.
   void (*webview_capture)(void* backend_data, uint32_t webview_id,
-                          int32_t format, int32_t quality,
+                          int32_t format, int32_t quality, double scale,
                           laufey_webview_capture_fn callback, void* user_data);
 
   // Close the view; its CLOSED event follows (maybe after this returns).
   // False for an unknown id. Closing a window closes its views. Any thread.
   bool (*webview_close)(void* backend_data, uint32_t webview_id);
+
+  // Stacking among the web views of one window (they all draw above the
+  // window's page): a higher `z_order` is above a lower one, equal ones keep
+  // their creation order. A new view gets one more than the highest of its
+  // window, so it starts on top; RAISE / LOWER (webview_command) give one
+  // more than the highest / one less than the lowest. False for an unknown id
+  // and where LAUFEY_WEBVIEW_CAP_Z_ORDER is not reported. Any thread.
+  bool (*webview_set_z_order)(void* backend_data, uint32_t webview_id,
+                              int32_t z_order);
 };
 
 #ifdef __cplusplus
