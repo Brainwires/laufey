@@ -44,6 +44,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
+#include "laufey_window.h"
 
 using laufey_common::WebViewOptions;
 using laufey_common::WebViewSinks;
@@ -1126,6 +1127,11 @@ bool Command(uint32_t id, int32_t command) {
     case LAUFEY_WEBVIEW_COMMAND_FOCUS:
       if (!v->visible || !v->view.window)
         return false;
+      // The keyboard goes to the key window of the active app: bring the
+      // window forward and key first (as a window's focus() does), then
+      // make the view its first responder.
+      if (!v->view.window.isKeyWindow || !NSApp.isActive)
+        laufey_common::MacFocusWindow((__bridge void*)v->view.window);
       return [v->view.window makeFirstResponder:v->view];
   }
   return false;

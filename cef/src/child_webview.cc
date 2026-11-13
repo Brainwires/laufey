@@ -1217,6 +1217,12 @@ bool Command(uint32_t id, int32_t command) {
       }
       v->view->RequestFocus();
       b->GetHost()->SetFocus(true);
+#if defined(__APPLE__)
+      // The overlay is a child window of its own: the keyboard reaches it
+      // only once it is the key window (its parent stays in front).
+      LaufeyCefFocusOverlayMac(
+          reinterpret_cast<void*>(b->GetHost()->GetWindowHandle()));
+#endif
       return true;
   }
   return false;

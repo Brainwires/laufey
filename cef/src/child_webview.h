@@ -83,6 +83,9 @@ uint32_t LaufeyShowMessageDialogForWindow(
 #if defined(__APPLE__)
 // runtime_loader_mac.mm: orders the overlay windows holding `browser_views`
 // (each a browser's NSView) above the window `window_id`, bottom to top.
+// runtime_loader_mac.mm: makes the overlay window holding `browser_view` (a
+// browser's NSView) the key window, and the view its first responder.
+void LaufeyCefFocusOverlayMac(void* browser_view);
 bool LaufeyCefRestackOverlaysMac(uint32_t window_id,
                                  const std::vector<void*>& browser_views);
 // runtime_loader_mac.mm: [NSApp.mainMenu performKeyEquivalent:] for
