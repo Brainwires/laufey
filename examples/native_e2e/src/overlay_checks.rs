@@ -474,6 +474,8 @@ async fn mac_accessory_focus(w: &Window, title: &str) {
   );
 }
 
+// Only the macOS checks poll the UI thread.
+#[cfg(target_os = "macos")]
 async fn wait_for_ui(
   f: impl Fn() -> bool + Send + Sync + Clone + 'static,
 ) -> bool {
