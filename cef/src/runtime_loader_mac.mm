@@ -471,6 +471,17 @@ static bool IsChildWebViewOverlay(NSWindow* window) {
          LaufeyIdForNSWindow(window.parentWindow) != 0;
 }
 
+// The RenderWidgetHostViewCocoa under `view` (depth first), or nil.
+static NSView* FindRenderWidgetView(NSView* view) {
+  if ([NSStringFromClass([view class]) containsString:@"RenderWidgetHostView"])
+    return view;
+  for (NSView* child in view.subviews) {
+    if (NSView* found = FindRenderWidgetView(child))
+      return found;
+  }
+  return nil;
+}
+
 static void MakeOverlayKey(NSWindow* overlay) {
   MakeOverlayKeyable(overlay);
   if (!overlay.isKeyWindow)
@@ -1011,7 +1022,11 @@ void LaufeyCefFocusOverlayMac(void* browser_view) {
   if (parent && !NSApp.isActive)
     laufey_common::MacFocusWindow((__bridge void*)parent);
   MakeOverlayKey(overlay);
-  [overlay makeFirstResponder:view];
+  // Chromium's own view takes the keys (RenderWidgetHostViewCocoa, inside
+  // the browser's container view); the container as first responder
+  // doesn't pass keyDown: on.
+  NSView* target = FindRenderWidgetView(view);
+  [overlay makeFirstResponder:target ? target : view];
   if (!overlay.isKeyWindow) {
     std::fprintf(stderr,
                  "laufey: a web view's overlay window did not become key "
