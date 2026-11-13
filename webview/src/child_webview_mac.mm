@@ -1431,4 +1431,15 @@ void CloseAllForWindow(uint32_t window_id) {
     Close(id);
 }
 
+bool OwnsResponder(void* responder_ptr) {
+  NSResponder* responder = (__bridge NSResponder*)responder_ptr;
+  if (![responder isKindOfClass:[NSView class]])
+    return false;
+  for (NSView* v = (NSView*)responder; v; v = v.superview) {
+    if ([v isKindOfClass:[LaufeyChildWebView class]])
+      return true;
+  }
+  return false;
+}
+
 }  // namespace laufey_child_webview_mac
