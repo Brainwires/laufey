@@ -935,3 +935,15 @@ bool LaufeyCefMainMenuKeyEquivalentMac(void* ns_event) {
     return false;
   return [[NSApp mainMenu] performKeyEquivalent:event];
 }
+
+void LaufeyCefFocusOverlayMac(void* browser_view) {
+  NSView* view = (__bridge NSView*)browser_view;
+  NSWindow* overlay = view.window;
+  if (!overlay)
+    return;
+  NSWindow* parent = overlay.parentWindow;
+  if (parent && !NSApp.isActive)
+    laufey_common::MacFocusWindow((__bridge void*)parent);
+  [overlay makeKeyWindow];
+  [overlay makeFirstResponder:view];
+}
