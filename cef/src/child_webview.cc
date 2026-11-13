@@ -1208,6 +1208,16 @@ bool Command(uint32_t id, int32_t command) {
     case LAUFEY_WEBVIEW_COMMAND_FOCUS:
       if (!v->visible || !v->view)
         return false;
+      v->view->RequestFocus();
+#if defined(__APPLE__)
+      // The overlay is a child window of its own: the keyboard reaches it
+      // only once it is the key window. No CefWindow::Activate() here: the
+      // host reads as inactive while its overlay is key, and activating it
+      // made the host key again after the overlay (the overlay path brings
+      // the parent forward itself when the app is inactive).
+      LaufeyCefFocusOverlayMac(
+          reinterpret_cast<void*>(b->GetHost()->GetWindowHandle()));
+#else
       // A focus request in an inactive window doesn't stick: activate it
       // first (the app asked for the keyboard to go to the view).
       if (CefRefPtr<CefWindow> window =
@@ -1215,14 +1225,8 @@ bool Command(uint32_t id, int32_t command) {
         if (!window->IsActive())
           window->Activate();
       }
-      v->view->RequestFocus();
-      b->GetHost()->SetFocus(true);
-#if defined(__APPLE__)
-      // The overlay is a child window of its own: the keyboard reaches it
-      // only once it is the key window (its parent stays in front).
-      LaufeyCefFocusOverlayMac(
-          reinterpret_cast<void*>(b->GetHost()->GetWindowHandle()));
 #endif
+      b->GetHost()->SetFocus(true);
       return true;
   }
   return false;
