@@ -19,6 +19,7 @@
 #include "include/wrapper/cef_helpers.h"
 
 #include "app.h"
+#include "child_webview.h"
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_cef_profile_lock.h"
@@ -241,6 +242,11 @@ static bool ResolveWindow(XIDeviceEvent* dev, uint32_t* out_wid, double* out_x,
   }
 
   if (wid == 0)
+    return false;
+  // Over a child web view the input is its page's (API 58), never the
+  // window's mouse events.
+  if (laufey_cef_child_webview::CoversScreenPixel(
+          static_cast<int>(dev->root_x), static_cast<int>(dev->root_y)))
     return false;
 
   *out_wid = wid;

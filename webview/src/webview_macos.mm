@@ -1929,6 +1929,13 @@ void WKWebViewBackend::InstallGlobalMonitors() {
                                      uint32_t wid = LaufeyIdForNSWindow(win);
                                      if (wid == 0)
                                        return event;
+                                     // Clicks, moves and scrolls inside a child
+                                     // web view are its page's (API 58), never
+                                     // the window's.
+                                     if (laufey_child_webview_mac::
+                                             OwnsEventLocation(
+                                                 (__bridge void*)event))
+                                       return event;
 
                                      int state;
                                      switch ([event type]) {
@@ -1976,6 +1983,13 @@ void WKWebViewBackend::InstallGlobalMonitors() {
                                      uint32_t wid = LaufeyIdForNSWindow(win);
                                      if (wid == 0)
                                        return event;
+                                     // Clicks, moves and scrolls inside a child
+                                     // web view are its page's (API 58), never
+                                     // the window's.
+                                     if (laufey_child_webview_mac::
+                                             OwnsEventLocation(
+                                                 (__bridge void*)event))
+                                       return event;
 
                                      uint32_t modifiers =
                                          NSModifierFlagsToLaufey(
@@ -2000,6 +2014,13 @@ void WKWebViewBackend::InstallGlobalMonitors() {
                                      NSWindow* win = [event window];
                                      uint32_t wid = LaufeyIdForNSWindow(win);
                                      if (wid == 0)
+                                       return event;
+                                     // Clicks, moves and scrolls inside a child
+                                     // web view are its page's (API 58), never
+                                     // the window's.
+                                     if (laufey_child_webview_mac::
+                                             OwnsEventLocation(
+                                                 (__bridge void*)event))
                                        return event;
 
                                      double delta_x = [event scrollingDeltaX];

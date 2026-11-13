@@ -58,6 +58,9 @@ void CloseAllForWindow(uint32_t window_id);
 // its keys belong to that view's page, never to the window's own keyboard
 // events (they may be a third-party page's passwords). Main thread.
 bool OwnsResponder(void* responder);
+// Whether a mouse event (an NSEvent*) lands on a child web view (or inside
+// one) of its window. Main thread.
+bool OwnsEventLocation(void* event);
 
 }  // namespace laufey_child_webview_mac
 

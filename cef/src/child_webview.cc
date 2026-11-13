@@ -49,6 +49,7 @@
 #include "include/cef_parser.h"
 #include "include/cef_request_context.h"
 #include "include/views/cef_browser_view_delegate.h"
+#include "include/views/cef_display.h"
 #include "include/views/cef_overlay_controller.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
@@ -1463,6 +1464,32 @@ bool Print(uint32_t id) {
     return false;
   v->browser->GetHost()->Print();  // the OS print dialog (Alloy style)
   return true;
+}
+
+bool CoversScreenPixel(int x, int y) {
+  if (Views().empty())
+    return false;
+  CefPoint pixel(x, y);
+#if defined(_WIN32)
+  CefPoint dip = CefDisplay::ConvertScreenPointFromPixels(pixel);
+#else
+  CefRefPtr<CefDisplay> display =
+      CefDisplay::GetDisplayNearestPoint(pixel, true);
+  float scale = display ? display->GetDeviceScaleFactor() : 1.0f;
+  if (!(scale > 0))
+    scale = 1.0f;
+  CefPoint dip(static_cast<int>(x / scale), static_cast<int>(y / scale));
+#endif
+  for (const auto& kv : Views()) {
+    const ChildView* v = kv.second.get();
+    if (v->closing || !v->visible || !v->overlay || !v->overlay->IsValid())
+      continue;
+    CefRect b = v->overlay->GetBoundsInScreen();
+    if (dip.x >= b.x && dip.y >= b.y && dip.x < b.x + b.width &&
+        dip.y < b.y + b.height)
+      return true;
+  }
+  return false;
 }
 
 }  // namespace laufey_cef_child_webview
