@@ -250,7 +250,19 @@ int64_t MacScreenForWindow(void* nswindow);
 // Starts forwarding NSApplicationDidChangeScreenParametersNotification to
 // NotifyDisplayChanged (idempotent).
 void MacInstallDisplayWatcher();
+// The title bar style, title visibility and toolbar style (API 57) are kept
+// per window and composed (laufey_title_options.h): each returns false and
+// changes nothing for an untitled (borderless) window or a combination
+// TitleOptionsCompatible refuses (a toolbar style under HIDDEN).
 bool MacSetTitlebarStyle(void* nswindow, int style);
+bool MacSetTitleVisibility(void* nswindow, int visibility);
+bool MacSetToolbarStyle(void* nswindow, int style);
+// Records the style a window was created with (HIDDEN for
+// LAUFEY_WINDOW_FLAG_TRANSPARENT_TITLEBAR) without changing the window, so
+// the setters above compose with it.
+void MacNoteTitlebarStyle(void* nswindow, int style);
+// NSWindow.toolbarStyle exists (macOS 11+). Any thread.
+bool MacToolbarStyleAvailable();
 bool MacSetTrafficLightPosition(void* nswindow, int x, int y);
 // Re-applies a custom traffic-light position (after a resize / fullscreen /
 // title change re-laid out the title bar). No-op without one.
@@ -314,6 +326,15 @@ uint32_t WinBackdropCapabilities();
 // the frame into the client area so the backdrop can show. Returns false for
 // a backdrop this build can't show (and changes nothing).
 bool WinSetBackdrop(void* hwnd, int backdrop);
+// Hides (LAUFEY_TITLE_HIDDEN) or shows the caption text and icon of a
+// captioned window through SetWindowThemeAttribute(WTA_NONCLIENT,
+// WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON) (API 57): the caption buttons,
+// the drag area and the window's text (taskbar, alt-tab) stay. False for a
+// window without WS_CAPTION, an unknown value, or when uxtheme lacks the
+// call.
+bool WinSetTitleVisibility(void* hwnd, int visibility);
+// SetWindowThemeAttribute is there. Any thread.
+bool WinTitleVisibilityAvailable();
 // Subclasses a window this code does not own (CEF's) to call
 // `on_change(window_id)` on WM_SIZE (minimize / maximize / restore).
 // Removed by WinUnsubclassForStateChanges (call it before the window is

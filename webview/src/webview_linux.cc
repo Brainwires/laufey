@@ -10,6 +10,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_media_capture.h"
 #include "laufey_will_navigate.h"
+#include "laufey_title_options.h"
 #include "laufey_io.h"
 #include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
@@ -1210,6 +1211,7 @@ class WebKitGTKBackend : public LaufeyBackend {
                       void* user_data) override;
   // KWin's blur (LAUFEY_BACKDROP_BLUR, and ACRYLIC as the same blur) where
   // the compositor offers it; see laufey_window_blur.h.
+  bool SetWindowTitleVisibility(uint32_t window_id, int visibility) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
   void SetWindowState(uint32_t window_id, int action) override;
@@ -2439,6 +2441,101 @@ void WebKitGTKBackend::GetWindowPosition(uint32_t window_id, int* x, int* y) {
 
 // --- Window state, constraints and screens (API >= 38) ---
 
+// --- Title visibility (API 57) ----------------------------------------------
+//
+// GTK3 draws a window's title bar itself (client-side decorations) on
+// Wayland unless the compositor prefers server-side ones (KWin's
+// server-decoration protocol), and on X11 only with GTK_CSD=1. Such a window
+// gets an internal GtkHeaderBar (style class "titlebar") when it is realized,
+// and GTK keeps that bar's title in step with gtk_window_set_title. Hiding the
+// title gives the bar an empty custom title widget: the buttons, the drag
+// area and the window's title (taskbar, alt-tab, the shell's window list)
+// stay. A window the window manager decorates has no such bar, and the
+// request is refused there (never faked by switching it to client-side
+// decorations, which would change its frame, buttons and shadow).
+
+static void LaufeyFindTitlebar(GtkWidget* widget, gpointer data) {
+  GtkWidget** found = static_cast<GtkWidget**>(data);
+  if (*found || !GTK_IS_HEADER_BAR(widget))
+    return;
+  if (gtk_style_context_has_class(gtk_widget_get_style_context(widget),
+                                  GTK_STYLE_CLASS_TITLEBAR))
+    *found = widget;
+}
+
+// The header bar GTK draws as `window`'s title bar, or NULL when the window
+// manager draws it (or the window is undecorated). GTK thread; `window` must
+// be realized.
+static GtkHeaderBar* LaufeyClientTitlebar(GtkWidget* window) {
+  if (!gtk_window_get_decorated(GTK_WINDOW(window)))
+    return nullptr;
+  GtkStyleContext* ctx = gtk_widget_get_style_context(window);
+  if (!gtk_style_context_has_class(ctx, "csd") &&
+      !gtk_style_context_has_class(ctx, "solid-csd"))
+    return nullptr;
+  GtkWidget* found = nullptr;
+  // Internal children included: GTK's own title bar is one.
+  gtk_container_forall(GTK_CONTAINER(window), LaufeyFindTitlebar, &found);
+  return found ? GTK_HEADER_BAR(found) : nullptr;
+}
+
+// Whether an ordinary window of this process gets a title bar GTK draws:
+// probed once on a window that is realized but never mapped (nothing is
+// shown). The decoration mode is the display's and does not change while the
+// app runs. GTK thread.
+static bool LaufeyClientTitlebarsProbe() {
+  static int probed = -1;
+  if (probed < 0) {
+    GtkWidget* probe = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_widget_realize(probe);
+    probed = LaufeyClientTitlebar(probe) != nullptr ? 1 : 0;
+    gtk_widget_destroy(probe);
+  }
+  return probed == 1;
+}
+
+bool WebKitGTKBackend::SetWindowTitleVisibility(uint32_t window_id,
+                                                int visibility) {
+  if (!laufey_common::IsTitleVisibility(visibility))
+    return false;
+  bool ok = false;
+  gtk_invoke_sync([&] {
+    GtkWidget* window = nullptr;
+    {
+      // Not held while GTK works: realizing emits signals whose handlers
+      // may look windows up. The window is destroyed on this thread only.
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (auto* state = GetWindow(window_id))
+        window = state->window;
+    }
+    if (!window)
+      return;
+    bool frameless = !gtk_window_get_decorated(GTK_WINDOW(window));
+    if (frameless)
+      return;
+    // GTK adds its title bar when the window is realized; realizing does
+    // not show the window.
+    if (!gtk_widget_get_realized(window))
+      gtk_widget_realize(window);
+    GtkHeaderBar* bar = LaufeyClientTitlebar(window);
+    if (visibility == LAUFEY_TITLE_VISIBLE) {
+      // The bar shows the window's title again; nothing to undo under the
+      // window manager's decorations.
+      if (bar)
+        gtk_header_bar_set_custom_title(bar, nullptr);
+      ok = true;
+      return;
+    }
+    if (!laufey_common::LinuxShouldTryHideTitle(bar != nullptr, frameless))
+      return;
+    GtkWidget* blank = gtk_label_new(nullptr);
+    gtk_widget_show(blank);
+    gtk_header_bar_set_custom_title(bar, blank);
+    ok = true;
+  });
+  return ok;
+}
+
 uint32_t WebKitGTKBackend::WindowCapabilities() {
   uint32_t caps = LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
                   LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS |
@@ -2466,6 +2563,11 @@ uint32_t WebKitGTKBackend::WindowCapabilities() {
   if (blur)
     caps |=
         LAUFEY_WINDOW_CAP_BACKDROP_BLUR | LAUFEY_WINDOW_CAP_BACKDROP_ACRYLIC;
+  // API 57: only where GTK draws the title bars (client-side decorations).
+  bool client_titlebars = false;
+  gtk_invoke_sync([&] { client_titlebars = LaufeyClientTitlebarsProbe(); });
+  if (client_titlebars)
+    caps |= LAUFEY_WINDOW_CAP_TITLE_HIDDEN;
   return caps;
 }
 

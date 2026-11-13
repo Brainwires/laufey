@@ -409,6 +409,66 @@ bool WinSetBackdrop(void* hwnd_ptr, int backdrop) {
   return true;
 }
 
+namespace {
+
+// uxtheme's SetWindowThemeAttribute, resolved once (uxtheme.dll is on every
+// supported Windows; loaded here so backend-common needs no uxtheme.lib).
+// WTA_OPTIONS and the WTNCA_* bits are spelled out so no SDK header is
+// needed either.
+struct LaufeyWtaOptions {
+  DWORD flags;
+  DWORD mask;
+};
+constexpr int kWtaNonClient = 1;            // WTA_NONCLIENT
+constexpr DWORD kWtncaNoDrawCaption = 0x1;  // WTNCA_NODRAWCAPTION
+constexpr DWORD kWtncaNoDrawIcon = 0x2;     // WTNCA_NODRAWICON
+using SetWindowThemeAttributeFn = HRESULT(WINAPI*)(HWND, int, PVOID, DWORD);
+
+SetWindowThemeAttributeFn ThemeAttributeFn() {
+  static SetWindowThemeAttributeFn fn = [] {
+    HMODULE uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr,
+                                     LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return uxtheme ? reinterpret_cast<SetWindowThemeAttributeFn>(
+                         GetProcAddress(uxtheme, "SetWindowThemeAttribute"))
+                   : nullptr;
+  }();
+  return fn;
+}
+
+}  // namespace
+
+bool WinTitleVisibilityAvailable() {
+  return ThemeAttributeFn() != nullptr;
+}
+
+bool WinSetTitleVisibility(void* hwnd_ptr, int visibility) {
+  HWND hwnd = static_cast<HWND>(hwnd_ptr);
+  if (!hwnd || !IsWindow(hwnd))
+    return false;
+  if (visibility != LAUFEY_TITLE_VISIBLE && visibility != LAUFEY_TITLE_HIDDEN)
+    return false;
+  // A window without a caption (frameless, WS_POPUP) has no title to hide.
+  if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION)
+    return false;
+  SetWindowThemeAttributeFn fn = ThemeAttributeFn();
+  if (!fn)
+    return false;
+  // The caption text and the icon go, the caption buttons and the drag area
+  // stay; the window's text is unchanged, so the taskbar, alt-tab and the
+  // task switcher still show it.
+  LaufeyWtaOptions options;
+  options.mask = kWtncaNoDrawCaption | kWtncaNoDrawIcon;
+  options.flags = visibility == LAUFEY_TITLE_HIDDEN ? options.mask : 0;
+  if (FAILED(fn(hwnd, kWtaNonClient, &options, sizeof(options))))
+    return false;
+  // Repaint the non-client area now.
+  SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+               SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                   SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+  RedrawWindow(hwnd, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE);
+  return true;
+}
+
 void WinSubclassForStateChanges(void* hwnd_ptr, uint32_t window_id,
                                 void (*on_change)(uint32_t window_id)) {
   HWND hwnd = static_cast<HWND>(hwnd_ptr);

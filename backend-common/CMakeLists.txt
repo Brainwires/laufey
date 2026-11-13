@@ -369,6 +369,12 @@ if(LAUFEY_BUILD_TESTS)
   target_link_libraries(laufey_will_navigate_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_will_navigate_test COMMAND laufey_will_navigate_test)
 
+  # Title visibility and toolbar style (API 57): the accepted combinations
+  # and the NSWindow chrome each gives (no OS API).
+  add_executable(laufey_title_options_test tests/title_options_test.cc)
+  target_link_libraries(laufey_title_options_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_title_options_test COMMAND laufey_title_options_test)
+
   add_executable(laufey_quit_request_test tests/quit_request_test.cc)
   target_link_libraries(laufey_quit_request_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_quit_request_test COMMAND laufey_quit_request_test)

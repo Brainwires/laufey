@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 56;
+pub const LAUFEY_API_VERSION: u32 = 57;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -1049,6 +1049,11 @@ pub struct LaufeyBackendApi {
       *mut c_void,
     ) -> bool,
   >,
+  // --- Title visibility and toolbar style (API >= 57)
+  pub set_window_title_visibility:
+    Option<unsafe extern "C" fn(*mut c_void, u32, c_int) -> bool>,
+  pub set_window_toolbar_style:
+    Option<unsafe extern "C" fn(*mut c_void, u32, c_int) -> bool>,
 }
 
 /// `laufey_rect_t` (API 50).
@@ -2021,6 +2026,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     set_will_navigate_handler: None,
     answer_will_navigate: None,
     set_app_menu: None,
+    set_window_title_visibility: None,
+    set_window_toolbar_style: None,
   }
 }
 

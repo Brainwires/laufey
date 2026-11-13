@@ -3161,11 +3161,21 @@ static uint32_t Backend_WindowCapabilities(void* /*data*/) {
           LAUFEY_WINDOW_CAP_TITLEBAR_HIDDEN_INSET |
           LAUFEY_WINDOW_CAP_TRAFFIC_LIGHT_POSITION |
           LAUFEY_WINDOW_CAP_SET_POSITION;
+  // API 57: NSWindow.titleVisibility; toolbarStyle on macOS 11+.
+  caps |= LAUFEY_WINDOW_CAP_TITLE_HIDDEN;
+  if (laufey_common::MacToolbarStyleAvailable())
+    caps |= LAUFEY_WINDOW_CAP_TOOLBAR_STYLE;
 #elif defined(_WIN32)
   // No Mica / Acrylic: the CEF browser view paints an opaque background in
   // windowed mode, so a DWM backdrop could never show through the page.
   caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
+  // API 57: the CefWindow's HWND keeps the native frame, whose caption text
+  // SetWindowThemeAttribute hides.
+  if (laufey_common::WinTitleVisibilityAvailable())
+    caps |= LAUFEY_WINDOW_CAP_TITLE_HIDDEN;
 #else
+  // Linux: no title visibility (API 57). Chromium draws its own windows,
+  // not GTK, so there is no client-side title bar of ours to change.
   // Ozone/Wayland (chosen when a Wayland display is there, see
   // main_linux.cc) can't place windows.
   if (laufey_common::DisplayBackend() != "wayland")
@@ -3443,6 +3453,52 @@ static bool Backend_SetWindowTitlebarStyle(void* /*data*/, uint32_t window_id,
 #endif
 }
 
+static bool Backend_SetWindowTitleVisibility(void* /*data*/,
+                                             uint32_t window_id,
+                                             int visibility) {
+#if defined(__APPLE__)
+  bool ok = false;
+  cef_invoke_sync([&] {
+    if (CefRefPtr<CefWindow> window = CefWindowForId(window_id)) {
+      ok = laufey_common::MacSetTitleVisibility(
+          NSWindowForCefHandle(window->GetWindowHandle()), visibility);
+    }
+  });
+  return ok;
+#elif defined(_WIN32)
+  bool ok = false;
+  cef_invoke_sync([&] {
+    if (CefRefPtr<CefWindow> window = CefWindowForId(window_id)) {
+      ok = laufey_common::WinSetTitleVisibility(window->GetWindowHandle(),
+                                                visibility);
+    }
+  });
+  return ok;
+#else
+  (void)window_id;
+  (void)visibility;
+  return false;
+#endif
+}
+
+static bool Backend_SetWindowToolbarStyle(void* /*data*/, uint32_t window_id,
+                                          int style) {
+#if defined(__APPLE__)
+  bool ok = false;
+  cef_invoke_sync([&] {
+    if (CefRefPtr<CefWindow> window = CefWindowForId(window_id)) {
+      ok = laufey_common::MacSetToolbarStyle(
+          NSWindowForCefHandle(window->GetWindowHandle()), style);
+    }
+  });
+  return ok;
+#else
+  (void)window_id;
+  (void)style;
+  return false;
+#endif
+}
+
 static bool Backend_SetWindowTrafficLightPosition(void* /*data*/,
                                                   uint32_t window_id, int x,
                                                   int y) {
@@ -3666,6 +3722,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_display_changed_handler = Backend_SetDisplayChangedHandler;
   backend_api_.window_capabilities = Backend_WindowCapabilities;
   backend_api_.set_window_titlebar_style = Backend_SetWindowTitlebarStyle;
+  // Title visibility and toolbar style (API 57).
+  backend_api_.set_window_title_visibility = Backend_SetWindowTitleVisibility;
+  backend_api_.set_window_toolbar_style = Backend_SetWindowToolbarStyle;
   backend_api_.set_window_traffic_light_position =
       Backend_SetWindowTrafficLightPosition;
   backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;

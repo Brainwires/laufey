@@ -2754,6 +2754,57 @@ async fn window_api_checks() {
     na("title bar styles (not supported by this backend)");
   }
 
+  // -- title visibility and toolbar style (API 57) -----------------------------
+  {
+    use laufey::{TitleVisibility, TitlebarStyle, ToolbarStyle};
+    let hid = w.set_title_visibility(TitleVisibility::Hidden);
+    check(
+      "set_title_visibility(Hidden) succeeds exactly when reported",
+      hid == caps.title_hidden(),
+    );
+    check(
+      "set_title_visibility(Visible) shows the title again",
+      w.set_title_visibility(TitleVisibility::Visible) || !caps.title_hidden(),
+    );
+    let unified = w.set_toolbar_style(ToolbarStyle::Unified);
+    check(
+      "set_toolbar_style(Unified) succeeds exactly when reported",
+      unified == caps.toolbar_style(),
+    );
+    if unified {
+      check(
+        "set_titlebar_style(Hidden) is refused while a toolbar style is set",
+        !w.set_titlebar_style(TitlebarStyle::Hidden),
+      );
+      check(
+        "set_titlebar_style(HiddenInset) keeps the toolbar style",
+        w.set_titlebar_style(TitlebarStyle::HiddenInset),
+      );
+      check(
+        "set_toolbar_style(UnifiedCompact) under HiddenInset",
+        w.set_toolbar_style(ToolbarStyle::UnifiedCompact),
+      );
+      check(
+        "set_toolbar_style(Automatic) removes it",
+        w.set_toolbar_style(ToolbarStyle::Automatic),
+      );
+      check(
+        "set_titlebar_style(Hidden) once the toolbar style is Automatic",
+        w.set_titlebar_style(TitlebarStyle::Hidden),
+      );
+      check(
+        "set_toolbar_style(Expanded) is refused under Hidden",
+        !w.set_toolbar_style(ToolbarStyle::Expanded),
+      );
+      check(
+        "set_titlebar_style(Default) after the toolbar styles",
+        w.set_titlebar_style(TitlebarStyle::Default),
+      );
+    } else {
+      na("toolbar styles (not supported by this backend)");
+    }
+  }
+
   // -- backdrops ----------------------------------------------------------------
   // KWin's blur (Linux, WebView): LAUFEY_E2E_EXPECT_BLUR=1 runs under KWin
   // with its Blur effect (a nested or headless kwin_wayland), =0 under any

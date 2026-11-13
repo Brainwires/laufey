@@ -482,6 +482,7 @@ class WebView2Backend : public LaufeyBackend {
   int64_t GetWindowScreen(uint32_t window_id) override;
   void SetDisplayChangedHandler(laufey_display_changed_fn handler,
                                 void* user_data) override;
+  bool SetWindowTitleVisibility(uint32_t window_id, int visibility) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
   bool GetWindowNormalBounds(uint32_t window_id, int* x, int* y, int* width,
@@ -2875,7 +2876,11 @@ uint32_t WebView2Backend::WindowCapabilities() {
          LAUFEY_WINDOW_CAP_FILE_DROP | LAUFEY_WINDOW_CAP_FILE_DRAG_OUT |
          LAUFEY_WINDOW_CAP_FILE_DIALOGS | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL |
          // API 54: TaskDialogIndirect, owned by the window or app-modal.
-         LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS;
+         LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS |
+         // API 57: SetWindowThemeAttribute hides the caption text.
+         (laufey_common::WinTitleVisibilityAvailable()
+              ? LAUFEY_WINDOW_CAP_TITLE_HIDDEN
+              : 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -3137,6 +3142,18 @@ void WebView2Backend::SetDisplayChangedHandler(
   laufey_common::SetDisplayChangedHandler(handler, user_data);
   if (handler)
     RunOnUiThread([] { laufey_common::WinInstallDisplayWatcher(); });
+}
+
+bool WebView2Backend::SetWindowTitleVisibility(uint32_t window_id,
+                                               int visibility) {
+  bool ok = false;
+  RunOnUiThreadSync([&] {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* state = GetWindow(window_id);
+    if (state)
+      ok = laufey_common::WinSetTitleVisibility(state->hwnd, visibility);
+  });
+  return ok;
 }
 
 bool WebView2Backend::SetWindowBackdrop(uint32_t window_id, int backdrop,

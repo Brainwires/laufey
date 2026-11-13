@@ -1271,6 +1271,22 @@ static bool Backend_SetWindowTitlebarStyle(void* data, uint32_t window_id,
   return false;
 }
 
+static bool Backend_SetWindowTitleVisibility(void* data, uint32_t window_id,
+                                             int visibility) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->SetWindowTitleVisibility(window_id, visibility);
+  return false;
+}
+
+static bool Backend_SetWindowToolbarStyle(void* data, uint32_t window_id,
+                                          int style) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->SetWindowToolbarStyle(window_id, style);
+  return false;
+}
+
 static bool Backend_SetWindowTrafficLightPosition(void* data,
                                                   uint32_t window_id, int x,
                                                   int y) {
@@ -1818,6 +1834,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.set_will_navigate_handler = Backend_SetWillNavigateHandler;
   backend_api_.answer_will_navigate = Backend_AnswerWillNavigate;
   backend_api_.set_app_menu = Backend_SetAppMenu;
+  // Title visibility and toolbar style (API 57).
+  backend_api_.set_window_title_visibility = Backend_SetWindowTitleVisibility;
+  backend_api_.set_window_toolbar_style = Backend_SetWindowToolbarStyle;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

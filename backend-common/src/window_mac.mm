@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 
+#include "laufey_title_options.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_window.h"
 
@@ -75,6 +76,9 @@ struct Watch {
   int fs_transition = 0;
   // An enter / leave requested during a transition, applied when it ends.
   int pending_fs_action = 0;
+  // The title bar style, title visibility and toolbar style (API 57), so
+  // each setter can compose the other two (laufey_title_options.h).
+  TitleOptions title;
 };
 
 std::mutex g_watch_mutex;
@@ -577,38 +581,96 @@ void MacInstallDisplayWatcher() {
   });
 }
 
+namespace {
+
+// The title options last applied to `w` (defaults for a window never styled).
+TitleOptions TitleOptionsOf(NSWindow* w) {
+  std::lock_guard<std::mutex> lock(g_watch_mutex);
+  Watch* watch = FindWatch(w);
+  return watch ? watch->title : TitleOptions();
+}
+
+// Applies compatible title options to a titled window and records them.
+void ApplyTitleOptions(NSWindow* w, const TitleOptions& options) {
+  MacTitleChrome chrome = MacTitleChromeFor(options);
+  if (chrome.full_size_content)
+    w.styleMask |= NSWindowStyleMaskFullSizeContentView;
+  else
+    w.styleMask &= ~NSWindowStyleMaskFullSizeContentView;
+  w.titlebarAppearsTransparent = chrome.transparent_titlebar ? YES : NO;
+  w.titleVisibility =
+      chrome.title_hidden ? NSWindowTitleHidden : NSWindowTitleVisible;
+  if (chrome.has_toolbar) {
+    // An empty toolbar: it only lays the title bar out (taller for
+    // HIDDEN_INSET, the title in the toolbar's bar for the toolbar styles).
+    // Kept across calls so AppKit doesn't re-lay the bar out for nothing.
+    if (!w.toolbar ||
+        ![w.toolbar.identifier isEqualToString:@"laufeyTitleToolbar"]) {
+      NSToolbar* toolbar =
+          [[NSToolbar alloc] initWithIdentifier:@"laufeyTitleToolbar"];
+      toolbar.showsBaselineSeparator = NO;
+      w.toolbar = toolbar;
+    }
+  } else {
+    w.toolbar = nil;
+  }
+  if (@available(macOS 11.0, *)) {
+    w.toolbarStyle = static_cast<NSWindowToolbarStyle>(chrome.ns_toolbar_style);
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_watch_mutex);
+    g_watches[(__bridge void*)w].title = options;
+  }
+  MacReapplyTrafficLightPosition((__bridge void*)w);
+}
+
+}  // namespace
+
 bool MacSetTitlebarStyle(void* nswindow, int style) {
   NSWindow* w = (__bridge NSWindow*)nswindow;
   if (!w || !(w.styleMask & NSWindowStyleMaskTitled))
     return false;
-  switch (style) {
-    case LAUFEY_TITLEBAR_DEFAULT:
-      w.toolbar = nil;
-      w.styleMask &= ~NSWindowStyleMaskFullSizeContentView;
-      w.titlebarAppearsTransparent = NO;
-      w.titleVisibility = NSWindowTitleVisible;
-      break;
-    case LAUFEY_TITLEBAR_HIDDEN:
-    case LAUFEY_TITLEBAR_HIDDEN_INSET: {
-      w.styleMask |= NSWindowStyleMaskFullSizeContentView;
-      w.titlebarAppearsTransparent = YES;
-      w.titleVisibility = NSWindowTitleHidden;
-      if (style == LAUFEY_TITLEBAR_HIDDEN_INSET) {
-        // An empty toolbar makes the title bar taller and insets the
-        // traffic lights (Electron's hiddenInset).
-        NSToolbar* toolbar =
-            [[NSToolbar alloc] initWithIdentifier:@"laufeyHiddenInset"];
-        toolbar.showsBaselineSeparator = NO;
-        w.toolbar = toolbar;
-      } else {
-        w.toolbar = nil;
-      }
-      break;
-    }
-    default:
-      return false;
-  }
-  MacReapplyTrafficLightPosition(nswindow);
+  TitleOptions next;
+  // HIDDEN is refused while a toolbar style is set (laufey.h, API 57).
+  if (!WithTitlebarStyle(TitleOptionsOf(w), style, &next))
+    return false;
+  ApplyTitleOptions(w, next);
+  return true;
+}
+
+void MacNoteTitlebarStyle(void* nswindow, int style) {
+  if (!nswindow || !IsTitlebarStyle(style))
+    return;
+  std::lock_guard<std::mutex> lock(g_watch_mutex);
+  g_watches[nswindow].title.titlebar_style = style;
+}
+
+bool MacToolbarStyleAvailable() {
+  if (@available(macOS 11.0, *))
+    return true;
+  return false;
+}
+
+bool MacSetTitleVisibility(void* nswindow, int visibility) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w || !(w.styleMask & NSWindowStyleMaskTitled))
+    return false;
+  TitleOptions next;
+  if (!WithTitleVisibility(TitleOptionsOf(w), visibility, &next))
+    return false;
+  ApplyTitleOptions(w, next);
+  return true;
+}
+
+bool MacSetToolbarStyle(void* nswindow, int style) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w || !(w.styleMask & NSWindowStyleMaskTitled) ||
+      !MacToolbarStyleAvailable())
+    return false;
+  TitleOptions next;
+  if (!WithToolbarStyle(TitleOptionsOf(w), style, &next))
+    return false;
+  ApplyTitleOptions(w, next);
   return true;
 }
 

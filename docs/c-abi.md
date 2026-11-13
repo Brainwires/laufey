@@ -110,7 +110,12 @@ The pointers group into:
   exit code, without waiting for the calling thread; see
   [backends.md](backends.md#how-an-app-ends)). See
   [window-management.md](window-management.md). API 39 adds the
-  `LAUFEY_WINDOW_CAP_FILE_*` bits for drag and drop and file dialogs.
+  `LAUFEY_WINDOW_CAP_FILE_*` bits for drag and drop and file dialogs. API 57
+  adds `set_window_title_visibility` (`LAUFEY_TITLE_*`: hide the title text,
+  keep the native title bar; macOS, Windows, Linux under client-side
+  decorations; `LAUFEY_WINDOW_CAP_TITLE_HIDDEN`) and `set_window_toolbar_style`
+  (`LAUFEY_TOOLBAR_STYLE_*`, macOS 11+; `LAUFEY_WINDOW_CAP_TOOLBAR_STYLE`),
+  `NULL` on Winit.
 - **Drag and drop** (API ≥ 39) — `set_file_drop_handler` (files dragged over and
   dropped on a window, with native paths; the page keeps its DOM drag events),
   `start_file_drag` (drag files out to other apps), and the

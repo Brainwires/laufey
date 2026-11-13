@@ -4,6 +4,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_overlay.h"
+#include "laufey_window.h"
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
 
@@ -138,6 +139,10 @@ void ConfigureNSWindowTransparentTitlebarForCefHandle(void* cef_handle) {
   nswindow.styleMask |= NSWindowStyleMaskFullSizeContentView;
   nswindow.titlebarAppearsTransparent = YES;
   nswindow.titleVisibility = NSWindowTitleHidden;
+  // So set_window_toolbar_style / set_window_title_visibility (API 57)
+  // compose with the style the window was created with.
+  laufey_common::MacNoteTitlebarStyle((__bridge void*)nswindow,
+                                      LAUFEY_TITLEBAR_HIDDEN);
 }
 
 void RegisterNSWindowForCefHandle(void* cef_handle, uint32_t window_id) {
