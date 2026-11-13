@@ -39,6 +39,17 @@ void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
 // Orders the window's views bottom to top (the registry's stack order).
 bool Restack(const std::vector<uint32_t>& bottom_to_top);
 bool Close(uint32_t id);
+// Page zoom (pageZoom); GetZoom answers 0 for an unknown id.
+bool SetZoom(uint32_t id, double factor);
+double GetZoom(uint32_t id);
+// Find in page (findString:withConfiguration:) with a FIND_RESULT event;
+// StopFindInPage clears the match.
+bool FindInPage(uint32_t id, const std::string& text, uint32_t flags);
+bool StopFindInPage(uint32_t id);
+// OK, NOT_ALLOWED (the app's DevTools are off), CLOSED or UNSUPPORTED.
+int32_t OpenDevTools(uint32_t id);
+// The OS print dialog, as a sheet on the window (returns once it started).
+bool Print(uint32_t id);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
 

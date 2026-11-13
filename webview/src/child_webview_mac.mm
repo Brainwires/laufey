@@ -11,6 +11,13 @@
 // page WKWebView, so it draws above the page and moves with the window; the
 // window's navigation guard and will-navigate handler belong to the page
 // view's delegate and never see it.
+//
+// Page-world scripts (WebKit tells the embedder neither): the console shim,
+// the context-menu listener ("contextMenu"; it calls preventDefault under
+// "app") and, unless both are allowed, the clipboard shim ("clipboardRead" /
+// "clipboardWrite"). The page can see, fake or get around them; see
+// docs/webviews.md. Find counts matches over document.body.innerText in a
+// content world of its own (WebKit's find answers only found / not found).
 
 #import <Cocoa/Cocoa.h>
 #import <ImageIO/ImageIO.h>
@@ -20,6 +27,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <string>
 #include <vector>
@@ -56,6 +64,14 @@ struct ChildView {
   // Console events this second (a page can't flood the embedder).
   int64_t console_second = 0;
   int console_count = 0;
+  int64_t context_second = 0;
+  int context_count = 0;
+  // Find: the last text (repeating it moves on), the active match as
+  // counted here, and a generation stop_find bumps so late answers drop.
+  std::string find_text;
+  bool find_match_case = false;
+  int find_active = 0;
+  uint64_t find_gen = 0;
 };
 
 // Main thread only.
@@ -106,6 +122,115 @@ NSString* const kConsoleShim =
      "{}"
      " });"
      "})();";
+
+constexpr int kContextMenuPerSecond = 20;
+constexpr size_t kContextFieldMaxBytes = 16 * 1024;
+NSString* const kContextMenuHandler = @"__laufeyWebViewContextMenu";
+
+// Page-world context-menu listener: a capture-phase `contextmenu` listener on
+// window, added before any page script, posts what was under the pointer;
+// called with `true` it also cancels the engine's menu ("contextMenu":
+// "app"). It runs in every frame (so "app" covers subframes) and posts from
+// the top frame only (a subframe's coordinates are not the view's). The page
+// can see the handler and post to it, and can cancel the menu itself.
+NSString* const kContextMenuShim =
+    @"((APP) => {"
+     " const h = window.webkit && window.webkit.messageHandlers &&"
+     "  window.webkit.messageHandlers.__laufeyWebViewContextMenu;"
+     " if (!h) return;"
+     " const post = h.postMessage.bind(h);"
+     " const plain = new Set(['button', 'checkbox', 'radio', 'submit',"
+     "  'reset', 'image', 'file', 'color', 'range', 'hidden']);"
+     " const media = { img: 'image', video: 'video', audio: 'audio',"
+     "  canvas: 'canvas', embed: 'plugin', object: 'plugin' };"
+     " window.addEventListener('contextmenu', (e) => {"
+     "  if (APP) e.preventDefault();"
+     "  if (!e.isTrusted || window !== window.top) return;"
+     "  try {"
+     "   const p = e.composedPath ? e.composedPath()[0] : e.target;"
+     "   const t = p instanceof Element ? p : (p && p.parentElement);"
+     "   const a = t ? t.closest('a[href]') : null;"
+     "   const m = t ? t.closest('img,video,audio,canvas,embed,object') : null;"
+     "   const tag = m ? m.localName : '';"
+     "   const input = t ? t.closest('input,textarea') : null;"
+     "   const field = !!input && (input.localName === 'textarea' ||"
+     "    !plain.has(input.type));"
+     "   let sel = window.getSelection ? String(window.getSelection()) : '';"
+     "   if (!sel && field && input.type !== 'password' &&"
+     "    typeof input.selectionStart === 'number')"
+     "    sel = input.value.slice(input.selectionStart, input.selectionEnd);"
+     "   post({ x: e.clientX, y: e.clientY,"
+     "    linkUrl: a && typeof a.href === 'string' ? a.href : '',"
+     "    imageUrl: tag === 'img' ? String(m.currentSrc || m.src || '') : '',"
+     "    selectionText: sel.slice(0, 16384),"
+     "    isEditable: field || !!(t && t.isContentEditable),"
+     "    mediaType: media[tag] || '' });"
+     "  } catch (_) {}"
+     " }, true);"
+     "})";
+
+// Page-world clipboard shim, in every frame, run with (canRead, canWrite):
+// refuses navigator.clipboard reads and / or writes, and for writes also
+// document.execCommand('copy' / 'cut') and the page's own copy / cut
+// handlers (the user's own copy of a selection still works). Best effort:
+// a frame the script does not reach (or a page that finds another way) is
+// not covered.
+NSString* const kClipboardShim =
+    @"((READ, WRITE) => {"
+     " const deny = function () { return Promise.reject(new DOMException("
+     "  'The web view does not allow this.', 'NotAllowedError')); };"
+     " const fix = (o, k, value) => { try { Object.defineProperty(o, k,"
+     "  { value, configurable: false, writable: false }); } catch (_) {} };"
+     " const C = window.Clipboard && window.Clipboard.prototype;"
+     " if (!READ && C) { fix(C, 'read', deny); fix(C, 'readText', deny); }"
+     " if (WRITE) return;"
+     " if (C) { fix(C, 'write', deny); fix(C, 'writeText', deny); }"
+     " const D = window.Document && window.Document.prototype;"
+     " const exec = D && D.execCommand;"
+     " if (exec) fix(D, 'execCommand', function (command, ...rest) {"
+     "  const c = String(command).toLowerCase();"
+     "  if (c === 'copy' || c === 'cut') return false;"
+     "  return exec.call(this, command, ...rest); });"
+     " for (const type of ['copy', 'cut'])"
+     "  window.addEventListener(type, (e) => e.stopImmediatePropagation(),"
+     "   true);"
+     "})";
+
+// Counts `text` in the page's visible text (an approximation of WebKit's
+// find; see docs/webviews.md). callAsyncJavaScript's arguments: text,
+// matchCase.
+NSString* const kFindCountScript =
+    @"const body = document.body;"
+     " if (!body) return 0;"
+     " let hay = String(body.innerText || ''), needle = String(text);"
+     " if (!matchCase) { hay = hay.toLowerCase(); needle ="
+     " needle.toLowerCase(); }"
+     " if (!needle) return 0;"
+     " let n = 0;"
+     " for (let i = hay.indexOf(needle); i !== -1 && n < 1000000;"
+     "  i = hay.indexOf(needle, i + needle.length)) n++;"
+     " return n;";
+
+// The first `max` bytes of `s`, cut at a UTF-8 character boundary.
+std::string Truncated(std::string s, size_t max) {
+  if (s.size() <= max)
+    return s;
+  size_t end = max;
+  while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80)
+    --end;
+  s.resize(end);
+  return s;
+}
+
+// The view's _WKInspector (private; what Safari's Develop menu drives), or
+// nil.
+id InspectorOf(WKWebView* webview) {
+  @try {
+    return [webview valueForKey:@"_inspector"];
+  } @catch (NSException*) {
+    return nil;
+  }
+}
 
 void Emit(uint32_t id, int32_t kind, const std::string& detail) {
   WebViewSinks::Instance().Emit(id, kind, detail);
@@ -614,6 +739,10 @@ API_AVAILABLE(macos(11.3))
   if (!v || !message.frameInfo.isMainFrame ||
       ![message.body isKindOfClass:[NSDictionary class]])
     return;
+  if ([message.name isEqualToString:kContextMenuHandler]) {
+    [self contextMenu:v body:message.body];
+    return;
+  }
   int64_t second = std::chrono::duration_cast<std::chrono::seconds>(
                        std::chrono::steady_clock::now().time_since_epoch())
                        .count();
@@ -639,6 +768,62 @@ API_AVAILABLE(macos(11.3))
                                          line_number));
 }
 
+// --- Context-menu listener ---
+
+// The listener's message, checked field by field (the page can post to the
+// handler too: anything malformed is dropped).
+- (void)contextMenu:(ChildView*)v body:(NSDictionary*)body {
+  int64_t second = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                       .count();
+  if (second != v->context_second) {
+    v->context_second = second;
+    v->context_count = 0;
+  }
+  if (++v->context_count > kContextMenuPerSecond)
+    return;
+  id x = body[@"x"];
+  id y = body[@"y"];
+  id editable = body[@"isEditable"];
+  if (![x isKindOfClass:[NSNumber class]] ||
+      ![y isKindOfClass:[NSNumber class]] ||
+      ![editable isKindOfClass:[NSNumber class]] ||
+      !std::isfinite([x doubleValue]) || !std::isfinite([y doubleValue]))
+    return;
+  bool ok = true;
+  auto str = [&](NSString* key) {
+    id value = body[key];
+    if (value && ![value isKindOfClass:[NSString class]]) {
+      ok = false;
+      return std::string();
+    }
+    return Truncated(Utf8(value), kContextFieldMaxBytes);
+  };
+  laufey_common::WebViewContextMenuFields f;
+  // clientX / clientY are CSS px of the zoomed page: the view's own CSS px
+  // are those times the page zoom.
+  double zoom = 1;
+  if (@available(macOS 11.0, *))
+    zoom = v->view.pageZoom;
+  f.x = [x doubleValue] * zoom;
+  f.y = [y doubleValue] * zoom;
+  f.link_url = str(@"linkUrl");
+  f.image_url = str(@"imageUrl");
+  f.selection_text = str(@"selectionText");
+  f.is_editable = [editable boolValue];
+  std::string media = str(@"mediaType");
+  if (!ok)
+    return;
+  for (const char* known : {"image", "video", "audio", "canvas", "plugin"}) {
+    if (media == known)
+      f.media_type = known;
+  }
+  if (!media.empty() && !f.media_type)
+    return;
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU,
+       laufey_common::WebViewContextMenuJson(f));
+}
+
 @end
 
 namespace laufey_child_webview_mac {
@@ -648,8 +833,15 @@ uint32_t Capabilities() {
       LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_CAPTURE |
       LAUFEY_WEBVIEW_CAP_Z_ORDER |
       (LAUFEY_WEBVIEW_ENGINE_WKWEBVIEW << LAUFEY_WEBVIEW_ENGINE_SHIFT);
-  if (@available(macOS 11.0, *))
-    caps |= LAUFEY_WEBVIEW_CAP_EVALUATE;
+  // Page-world scripts (the context-menu listener, the clipboard shim).
+  caps |= LAUFEY_WEBVIEW_CAP_CONTEXT_MENU | LAUFEY_WEBVIEW_CAP_CLIPBOARD;
+  if (@available(macOS 11.0, *)) {
+    caps |= LAUFEY_WEBVIEW_CAP_EVALUATE | LAUFEY_WEBVIEW_CAP_ZOOM |
+            LAUFEY_WEBVIEW_CAP_FIND | LAUFEY_WEBVIEW_CAP_PRINT;
+  }
+  if ([WKWebView
+          instancesRespondToSelector:NSSelectorFromString(@"_inspector")])
+    caps |= LAUFEY_WEBVIEW_CAP_DEVTOOLS;
   if (HasPersistentStores())
     caps |= LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS;
   if (@available(macOS 12.0, *))
@@ -683,6 +875,47 @@ uint32_t Create(uint32_t window_id, void* page_view_ptr,
     [config.userContentController addUserScript:shim];
     [config.userContentController addScriptMessageHandler:delegate
                                                      name:kConsoleHandler];
+    NSString* menu = [kContextMenuShim
+        stringByAppendingString:options.app_context_menu ? @"(true);"
+                                                         : @"(false);"];
+    [config.userContentController
+        addUserScript:
+            [[WKUserScript alloc]
+                  initWithSource:menu
+                   injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                forMainFrameOnly:NO]];
+    [config.userContentController addScriptMessageHandler:delegate
+                                                     name:kContextMenuHandler];
+    if (!options.clipboard_read || !options.clipboard_write) {
+      NSString* clip = [kClipboardShim
+          stringByAppendingFormat:@"(%@, %@);",
+                                  options.clipboard_read ? @"true" : @"false",
+                                  options.clipboard_write ? @"true" : @"false"];
+      [config.userContentController
+          addUserScript:
+              [[WKUserScript alloc]
+                    initWithSource:clip
+                     injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                  forMainFrameOnly:NO]];
+    }
+    if (options.clipboard_read) {
+      // Reads without WebKit's Paste callout (the private preferences wry
+      // sets too; absent ones are skipped).
+      for (NSString* key in
+           @[ @"javaScriptCanAccessClipboard", @"DOMPasteAllowed" ]) {
+        @try {
+          [config.preferences setValue:@YES forKey:key];
+        } @catch (NSException*) {
+        }
+      }
+    }
+    // Web Inspector before macOS 13.3 (`inspectable` below after it), as for
+    // the window's page.
+    @try {
+      [config.preferences setValue:@(laufey_common::LaunchInspectable())
+                            forKey:@"developerExtrasEnabled"];
+    } @catch (NSException*) {
+    }
 
     LaufeyChildWebView* view =
         [[LaufeyChildWebView alloc] initWithFrame:NSZeroRect
@@ -908,6 +1141,8 @@ bool Close(uint32_t id) {
       [v.view removeObserver:v.delegate forKeyPath:key];
     [v.view.configuration.userContentController
         removeScriptMessageHandlerForName:kConsoleHandler];
+    [v.view.configuration.userContentController
+        removeScriptMessageHandlerForName:kContextMenuHandler];
     [v.view stopLoading];
     v.view.navigationDelegate = nil;
     v.view.UIDelegate = nil;
@@ -917,6 +1152,152 @@ bool Close(uint32_t id) {
   }
   WebViewSinks::Instance().Close(id);
   return true;
+}
+
+bool SetZoom(uint32_t view_id, double factor) {
+  ChildView* v = Find(view_id);
+  if (!v)
+    return false;
+  if (@available(macOS 11.0, *)) {
+    v->view.pageZoom = factor;
+    return true;
+  }
+  return false;
+}
+
+double GetZoom(uint32_t view_id) {
+  ChildView* v = Find(view_id);
+  if (!v)
+    return 0;
+  if (@available(macOS 11.0, *))
+    return v->view.pageZoom;
+  return 0;
+}
+
+bool FindInPage(uint32_t view_id, const std::string& text, uint32_t flags) {
+  ChildView* v = Find(view_id);
+  if (!v)
+    return false;
+  if (@available(macOS 11.0, *)) {
+    bool forward = (flags & LAUFEY_WEBVIEW_FIND_FORWARD) != 0;
+    bool match_case = (flags & LAUFEY_WEBVIEW_FIND_MATCH_CASE) != 0;
+    bool same = text == v->find_text && match_case == v->find_match_case;
+    v->find_text = text;
+    v->find_match_case = match_case;
+    uint64_t gen = v->find_gen;
+    NSString* needle = NS(text);
+    WKFindConfiguration* config = [[WKFindConfiguration alloc] init];
+    config.backwards = !forward;
+    config.caseSensitive = match_case;
+    config.wraps = YES;
+    // WebKit selects the match and scrolls to it, and says only whether
+    // there was one; the count comes from the page's text, and the active
+    // match from the calls (completion handlers run in call order).
+    [v->view findString:needle
+        withConfiguration:config
+        completionHandler:^(WKFindResult* result) {
+          ChildView* view = Find(view_id);
+          if (!view || view->find_gen != gen)
+            return;
+          if (!result.matchFound) {
+            view->find_active = 0;
+            Emit(view_id, LAUFEY_WEBVIEW_EVENT_FIND_RESULT,
+                 laufey_common::WebViewFindResultJson(0, 0));
+            return;
+          }
+          [view->view callAsyncJavaScript:kFindCountScript
+              arguments:@{
+                @"text" : needle,
+                @"matchCase" : @(match_case)
+              }
+              inFrame:nil
+              inContentWorld:[WKContentWorld
+                                 worldWithName:@"laufey-webview-find"]
+              completionHandler:^(id count, NSError*) {
+                ChildView* cv = Find(view_id);
+                if (!cv || cv->find_gen != gen)
+                  return;
+                // WebKit found one: at least one, whatever innerText shows.
+                int matches = [count isKindOfClass:[NSNumber class]]
+                                  ? std::max(1, [count intValue])
+                                  : 1;
+                int active = cv->find_active;
+                if (!same || active < 1)
+                  active = forward ? 1 : matches;
+                else if (forward)
+                  active = active >= matches ? 1 : active + 1;
+                else
+                  active = active <= 1 ? matches : active - 1;
+                cv->find_active = std::min(active, matches);
+                Emit(view_id, LAUFEY_WEBVIEW_EVENT_FIND_RESULT,
+                     laufey_common::WebViewFindResultJson(matches,
+                                                          cv->find_active));
+              }];
+        }];
+    return true;
+  }
+  return false;
+}
+
+bool StopFindInPage(uint32_t view_id) {
+  ChildView* v = Find(view_id);
+  if (!v)
+    return false;
+  if (@available(macOS 11.0, *)) {
+    v->find_text.clear();
+    v->find_active = 0;
+    ++v->find_gen;
+    // The match is the page's selection: clearing it clears the highlight.
+    [v->view
+        evaluateJavaScript:@"window.getSelection().removeAllRanges()"
+                   inFrame:nil
+            inContentWorld:[WKContentWorld worldWithName:@"laufey-webview-find"]
+         completionHandler:nil];
+    return true;
+  }
+  return false;
+}
+
+int32_t OpenDevTools(uint32_t view_id) {
+  ChildView* v = Find(view_id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  // The app's DevTools are off (LAUFEY_INSPECTABLE=0 / "inspectable":
+  // false): `inspectable` is off on the view too.
+  if (!laufey_common::LaunchInspectable())
+    return LAUFEY_WEBVIEW_NOT_ALLOWED;
+  // What the window's open_devtools does (WKWebViewBackend::OpenDevTools).
+  id inspector = InspectorOf(v->view);
+  if (!inspector || ![inspector respondsToSelector:@selector(show)])
+    return LAUFEY_WEBVIEW_UNSUPPORTED;
+  [inspector performSelector:@selector(show)];
+  return LAUFEY_WEBVIEW_OK;
+}
+
+bool Print(uint32_t view_id) {
+  ChildView* v = Find(view_id);
+  if (!v)
+    return false;
+  if (@available(macOS 11.0, *)) {
+    NSWindow* window = v->view.window;
+    if (!window || window.attachedSheet)
+      return false;
+    NSPrintInfo* info = [[NSPrintInfo sharedPrintInfo] copy];
+    NSPrintOperation* op = [v->view printOperationWithPrintInfo:info];
+    if (!op)
+      return false;
+    op.showsPrintPanel = YES;
+    op.showsProgressPanel = YES;
+    // WebKit's print view prints blank pages without a frame.
+    op.view.frame = v->view.bounds;
+    // A sheet on the window: returns at once, the dialog runs on its own.
+    [op runOperationModalForWindow:window
+                          delegate:nil
+                    didRunSelector:nil
+                       contextInfo:nullptr];
+    return true;
+  }
+  return false;
 }
 
 void CloseAllForWindow(uint32_t window_id) {

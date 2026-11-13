@@ -424,6 +424,13 @@ class WKWebViewBackend : public LaufeyBackend {
                       double scale, laufey_webview_capture_fn callback,
                       void* user_data) override;
   bool WebViewClose(uint32_t webview_id) override;
+  bool WebViewSetZoom(uint32_t webview_id, double factor) override;
+  double WebViewGetZoom(uint32_t webview_id) override;
+  bool WebViewFind(uint32_t webview_id, const std::string& text,
+                   uint32_t flags) override;
+  bool WebViewStopFind(uint32_t webview_id) override;
+  int32_t WebViewOpenDevTools(uint32_t webview_id) override;
+  bool WebViewPrint(uint32_t webview_id) override;
   bool WebViewRestack(uint32_t window_id,
                       const std::vector<uint32_t>& bottom_to_top) override;
   bool SetWindowTrafficLightPosition(uint32_t window_id, int x, int y) override;
@@ -2515,6 +2522,56 @@ bool WKWebViewBackend::WebViewClose(uint32_t webview_id) {
   __block bool ok = false;
   laufey_common::RunOnMainSync(^{
     ok = laufey_child_webview_mac::Close(webview_id);
+  });
+  return ok;
+}
+
+bool WKWebViewBackend::WebViewSetZoom(uint32_t webview_id, double factor) {
+  __block bool ok = false;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::SetZoom(webview_id, factor);
+  });
+  return ok;
+}
+
+double WKWebViewBackend::WebViewGetZoom(uint32_t webview_id) {
+  __block double zoom = 0;
+  laufey_common::RunOnMainSync(^{
+    zoom = laufey_child_webview_mac::GetZoom(webview_id);
+  });
+  return zoom;
+}
+
+bool WKWebViewBackend::WebViewFind(uint32_t webview_id, const std::string& text,
+                                   uint32_t flags) {
+  __block bool ok = false;
+  std::string copy = text;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::FindInPage(webview_id, copy, flags);
+  });
+  return ok;
+}
+
+bool WKWebViewBackend::WebViewStopFind(uint32_t webview_id) {
+  __block bool ok = false;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::StopFindInPage(webview_id);
+  });
+  return ok;
+}
+
+int32_t WKWebViewBackend::WebViewOpenDevTools(uint32_t webview_id) {
+  __block int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  laufey_common::RunOnMainSync(^{
+    status = laufey_child_webview_mac::OpenDevTools(webview_id);
+  });
+  return status;
+}
+
+bool WKWebViewBackend::WebViewPrint(uint32_t webview_id) {
+  __block bool ok = false;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::Print(webview_id);
   });
   return ok;
 }

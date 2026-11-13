@@ -5,6 +5,9 @@
 //! forward, report its state, evaluate in an isolated world without the
 //! page's bridge, capture, refuse non-http(s) URLs, hold at most
 //! LAUFEY_WEBVIEW_MAX_PER_WINDOW views per window, and fire CLOSED once.
+//! Where reported: zoom round trips, find reports a FIND_RESULT, and
+//! open_devtools answers NOT_ALLOWED with the app's DevTools off (it is not
+//! called with them on: it would open a window mid-battery; print never is).
 //! A backend without web views (Winit) must say so and refuse to create one.
 
 use std::io::{BufRead, BufReader, Write};
@@ -87,6 +90,26 @@ async fn saw(
       .iter()
       .any(|e| e.kind == kind && e.detail_json.contains(needle))
     {
+      return true;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  false
+}
+
+/// Waits (up to `secs`) for a FIND_RESULT whose `matches` passes `pred`.
+async fn saw_find(events: &Events, pred: fn(u64) -> bool, secs: u64) -> bool {
+  for _ in 0..secs * 20 {
+    if events.lock().unwrap().iter().any(|e| {
+      e.kind == WebViewEventKind::FindResult
+        && e
+          .detail_json
+          .split("\"matches\":")
+          .nth(1)
+          .and_then(|t| t.split(',').next())
+          .and_then(|t| t.parse::<u64>().ok())
+          .is_some_and(pred)
+    }) {
       return true;
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -347,6 +370,100 @@ pub async fn run(w: &Window) {
     na("capture (not supported by this backend)");
   }
 
+  // Zoom, find, DevTools (API 58, where reported).
+  if caps.zoom() {
+    check("set_zoom(1.5)", view.set_zoom(1.5));
+    let zoom = view.zoom();
+    check(
+      &format!("zoom() reads set_zoom back ({zoom:?})"),
+      zoom.is_some_and(|z| (z - 1.5).abs() < 0.01),
+    );
+    check(
+      "set_zoom refuses a factor outside 0.25..5",
+      !view.set_zoom(10.0) && !view.set_zoom(0.1) && !view.set_zoom(f64::NAN),
+    );
+    check("set_zoom(1)", view.set_zoom(1.0));
+  } else {
+    check(
+      "zoom is refused where not reported",
+      !view.set_zoom(1.5) && view.zoom().is_none(),
+    );
+  }
+  if caps.find() {
+    // Page A's text holds "next" (its link).
+    check("find(\"next\")", view.find("next", true, false));
+    check(
+      "find reports a FIND_RESULT with a match on page A",
+      saw_find(&events, |m| m >= 1, 20).await,
+    );
+    check(
+      "find reports no match for text page A lacks",
+      view.find("zq-not-on-the-page", true, false)
+        && saw_find(&events, |m| m == 0, 20).await,
+    );
+    check("stop_find()", view.stop_find());
+  } else {
+    check(
+      "find is refused where not reported",
+      !view.find("next", true, false),
+    );
+  }
+  if caps.devtools() {
+    if laufey::devtools_enabled() {
+      na("web view open_devtools (would open a window mid-battery)");
+    } else {
+      check(
+        "open_devtools is NOT_ALLOWED with the app's DevTools off",
+        view.open_devtools() == Err(WebViewError::NotAllowed),
+      );
+    }
+  } else {
+    check(
+      "open_devtools is refused where not reported",
+      view.open_devtools().is_err(),
+    );
+  }
+
+  // contextMenu / clipboard options are accepted (and checked).
+  for (label, options) in [
+    (
+      "contextMenu \"app\" with the clipboard options",
+      WebViewOptions {
+        context_menu: Some("app".into()),
+        clipboard_read: Some(true),
+        clipboard_write: Some(false),
+        ..bad(&format!("{base}/b"))
+      },
+    ),
+    (
+      "contextMenu \"native\"",
+      WebViewOptions {
+        context_menu: Some("native".into()),
+        ..bad(&format!("{base}/b"))
+      },
+    ),
+  ] {
+    let created = laufey::create_webview(w.id(), &options, |_| {});
+    check(
+      &format!("create_webview accepts {label} ({created:?})"),
+      created.is_ok(),
+    );
+    if let Ok(v) = created {
+      v.close();
+    }
+  }
+  check(
+    "create_webview refuses an unknown contextMenu",
+    laufey::create_webview(
+      w.id(),
+      &WebViewOptions {
+        context_menu: Some("none".into()),
+        ..bad(&format!("{base}/b"))
+      },
+      |_| {},
+    ) == Err(WebViewError::Invalid),
+  );
+
   // Stacking among the window's views.
   {
     let (_, sink) = recorder();
@@ -471,4 +588,43 @@ pub async fn run(w: &Window) {
     check("a second window's web view", false);
     w2.close();
   }
+}
+
+/// LAUFEY_E2E_ONLY=devtools-off: with the app's DevTools off a web view's
+/// open_devtools is NOT_ALLOWED (and nothing opens).
+pub async fn devtools_off() {
+  let caps = laufey::webview_capabilities();
+  if !caps.devtools() {
+    na("web view open_devtools (not supported by this backend)");
+    return;
+  }
+  let Some(base) = serve() else {
+    check("web view DevTools checks: a loopback server", false);
+    return;
+  };
+  let w = Window::new(320, 240).title("native-e2e-webview-devtools-off");
+  w.show();
+  tokio::time::sleep(Duration::from_millis(500)).await;
+  match laufey::create_webview(
+    w.id(),
+    &WebViewOptions {
+      url: format!("{base}/a"),
+      bounds: bounds(0.0, 0.0, 200.0, 150.0),
+      partition: Some("ephemeral:e2e-devtools".into()),
+      ..Default::default()
+    },
+    |_| {},
+  ) {
+    Ok(view) => {
+      check(
+        "a web view's open_devtools is NOT_ALLOWED under LAUFEY_INSPECTABLE=0",
+        view.open_devtools() == Err(WebViewError::NotAllowed),
+      );
+      view.close();
+    }
+    Err(e) => {
+      check(&format!("a web view for the DevTools check ({e:?})"), false)
+    }
+  }
+  w.close();
 }

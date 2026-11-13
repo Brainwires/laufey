@@ -24,13 +24,13 @@ view.navigate("https://github.com/denoland")?;
 
 ## Engines
 
-| Backend                     | Engine                                                                                  | Capabilities                                                                                                         |
-| --------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| CEF                         | An Alloy-style `CefBrowserView` added with `CefWindow::AddOverlayView` (custom docking) | everything; persistent partitions when the app's profile is on disk                                                  |
-| WebView, macOS              | A second `WKWebView`, a subview of the window's page view                               | everything; persistent partitions on macOS 14+ (`WKWebsiteDataStore` per partition), permission prompts on macOS 12+ |
-| WebView, Windows (WebView2) | A second `ICoreWebView2Controller` in a host window above the page's controller         | everything, on a runtime with profiles (`ICoreWebView2Environment10`; else `webview_capabilities` is 0)              |
-| WebView, Linux (WebKitGTK)  | A second `WebKitWebView`, a child of the `GtkOverlay` that holds the window's page view | everything; persistent partitions when the app has a data directory, evaluate on WebKitGTK 2.40+                     |
-| Winit                       | None (the entry points are NULL)                                                        |                                                                                                                      |
+| Backend                     | Engine                                                                                  | Capabilities                                                                                                                                                                |
+| --------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CEF                         | An Alloy-style `CefBrowserView` added with `CefWindow::AddOverlayView` (custom docking) | everything; persistent partitions when the app's profile is on disk                                                                                                         |
+| WebView, macOS              | A second `WKWebView`, a subview of the window's page view                               | everything; persistent partitions on macOS 14+ (`WKWebsiteDataStore` per partition), permission prompts on macOS 12+                                                        |
+| WebView, Windows (WebView2) | A second `ICoreWebView2Controller` in a host window above the page's controller         | everything but zoom, find, DevTools, context menu, print and clipboard (below), on a runtime with profiles (`ICoreWebView2Environment10`; else `webview_capabilities` is 0) |
+| WebView, Linux (WebKitGTK)  | A second `WebKitWebView`, a child of the `GtkOverlay` that holds the window's page view | everything but zoom, find, DevTools, context menu, print and clipboard (below); persistent partitions when the app has a data directory, evaluate on WebKitGTK 2.40+        |
+| Winit                       | None (the entry points are NULL)                                                        |                                                                                                                                                                             |
 
 `webview_capabilities` reports `LAUFEY_WEBVIEW_CAP_*` and the engine (bits
 24–27). On a backend without web views `create_webview` answers
@@ -127,3 +127,65 @@ capture takes what is on screen without waiting for a new frame
 (`afterScreenUpdates = NO`) and encodes through ImageIO; CEF and WebView2 clip
 `Page.captureScreenshot` to the visual viewport at the requested scale;
 WebKitGTK resamples the snapshot with cairo.
+
+## Zoom, find, DevTools, context menu, print and clipboard
+
+Each is behind its `LAUFEY_WEBVIEW_CAP_*` bit; where it is not reported the call
+returns false / `LAUFEY_WEBVIEW_UNSUPPORTED`. WebView2 and WebKitGTK report none
+of them yet.
+
+| Feature                       | CEF                                                            | WKWebView                                                                                |
+| ----------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Zoom (`ZOOM`)                 | `SetZoomLevel(log(factor) / log(1.2))`                         | `pageZoom` (macOS 11+)                                                                   |
+| Find (`FIND`)                 | `CefBrowserHost::Find` + `CefFindHandler` (Chromium's count)   | `findString:withConfiguration:` (macOS 11+); count and active match approximated (below) |
+| DevTools (`DEVTOOLS`)         | `ShowDevTools` (a DevTools window of its own)                  | the view's Web Inspector (`_inspector` `show`, as the window's `open_devtools`)          |
+| Context menu (`CONTEXT_MENU`) | `OnBeforeContextMenu` (`model->Clear()` under `"app"`)         | a page-world `contextmenu` listener (`preventDefault` under `"app"`)                     |
+| Print (`PRINT`)               | `CefBrowserHost::Print` (the OS dialog)                        | `printOperationWithPrintInfo:` as a sheet on the window (macOS 11+)                      |
+| Clipboard (`CLIPBOARD`)       | `clipboardRead` answers Chromium's clipboard permission prompt | a page-world shim; `clipboardRead` also sets WebKit's clipboard preferences              |
+
+- **Zoom.** On CEF the level is Chromium's, which follows the host within a
+  request context: views of one partition showing the same host share it, and a
+  navigation to another host takes that host's level. The view puts its own
+  factor back after each main-frame navigation, so it keeps the factor it was
+  given; another view of the partition on the same host changes with it.
+- **Find.** CEF reports Chromium's own count and active match (the final update
+  of each search). WKWebView's find says only whether there was a match; laufey
+  counts the case-folded (or, with `MATCH_CASE`, exact) occurrences of the text
+  in `document.body.innerText` in a content world of its own, and tracks the
+  active match from the calls: a new text starts at 1 (forward) or the last
+  match (backward), the same text again moves one on and wraps. Text WebKit
+  finds that `innerText` doesn't show (hidden text, frames, shadow roots) or
+  folds differently (WebKit also folds some characters, such as quote marks)
+  makes the count and index approximate; a match WebKit found is always reported
+  as at least one. `stop_find` clears the page's selection (the match WebKit
+  selected).
+- **DevTools.** `webview_open_devtools` answers `LAUFEY_WEBVIEW_NOT_ALLOWED`
+  whenever the app's DevTools are off (`LAUFEY_INSPECTABLE=0` /
+  `"inspectable": false`); WKWebView's `inspectable` (and
+  `developerExtrasEnabled` before macOS 13.3) follow the same switch. On CEF a
+  call before the browser exists opens them once it does.
+- **Context menu.** `CONTEXT_MENU` fires for every request in both modes; `x` /
+  `y` are in the view's CSS pixels (WKWebView: the event's `clientX` / `clientY`
+  times `pageZoom`). On WKWebView the page-world listener runs before the page's
+  scripts, ignores untrusted events and posts to a message handler that only the
+  main frame's messages reach, checked field by field and capped at 20 a second;
+  still, the page can see it, post a fake request to the handler, or cancel a
+  native menu itself. A `contextmenu` in a subframe is not reported (`"app"`
+  still suppresses its menu). CEF's comes from the browser process: the page
+  can't fake one, but it can still cancel it (and then nothing is reported), as
+  in any browser.
+- **Print** returns once the dialog started; the dialog runs on its own.
+- **Clipboard.** CEF: `clipboardRead` decides Chromium's clipboard permission
+  prompt (`CEF_PERMISSION_TYPE_CLIPBOARD`, accepted only with it, never shown);
+  `clipboardWrite: false` is **not applied**, as CEF has no switch for it: a
+  page may write on a user gesture, as in Chrome. WKWebView: unless
+  `clipboardRead`, a script in every frame replaces `navigator.clipboard`'s
+  `read` / `readText` with ones that reject (`NotAllowedError`); with
+  `clipboardWrite: false` it does the same to `write` / `writeText`, makes
+  `document.execCommand('copy' | 'cut')` return false and stops the page's own
+  `copy` / `cut` handlers (the user's own copy of a selection still copies it).
+  With `clipboardRead` the view also sets WebKit's
+  `javaScriptCanAccessClipboard` / `DOMPasteAllowed` preferences, so reads work
+  without WebKit's Paste callout. The shim is best effort: a frame it does not
+  reach, or a page that finds another realm's untouched clipboard, gets around
+  it.

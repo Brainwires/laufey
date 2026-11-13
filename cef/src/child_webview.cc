@@ -14,10 +14,18 @@
 // Evaluate and capture go through the browser's DevTools protocol
 // (ExecuteDevToolsMethod): Runtime.evaluate in an isolated world made with
 // Page.createIsolatedWorld (no page CSP applies), and Page.captureScreenshot.
+//
+// Zoom is the browser's zoom level (factor = 1.2^level); Chromium keeps it
+// per host within a request context, so the view's own factor is applied
+// again after each main-frame navigation. Find is CefBrowserHost::Find with
+// a CefFindHandler; the context menu is reported from OnBeforeContextMenu
+// (and emptied under "contextMenu": "app"); "clipboardRead" answers the
+// clipboard permission prompt.
 
 #include "child_webview.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -27,6 +35,7 @@
 #include "app.h"
 #include "include/base/cef_callback.h"
 #include "include/cef_devtools_message_observer.h"
+#include "include/cef_find_handler.h"
 #include "include/cef_parser.h"
 #include "include/cef_request_context.h"
 #include "include/views/cef_browser_view_delegate.h"
@@ -78,6 +87,13 @@ struct ChildView {
   int64_t console_second = 0;
   int console_count = 0;
   std::map<int, DevToolsCallback> pending;
+  // webview_set_zoom's factor (0: never set), applied again after each
+  // main-frame navigation, as Chromium's zoom follows the host.
+  double zoom = 0;
+  // The last find (findNext repeats it); empty after stop_find.
+  std::string find_text;
+  bool find_match_case = false;
+  bool devtools_on_create = false;  // open_devtools before the browser
 };
 
 // UI thread only.
@@ -211,6 +227,46 @@ const char* LoadErrorCode(int code) {
       code == ERR_NETWORK_CHANGED || code == ERR_ADDRESS_UNREACHABLE)
     return "network";
   return "failed";
+}
+
+double ZoomLevel(double factor) {
+  return std::log(factor) / std::log(1.2);
+}
+
+// Puts the view's own zoom back when the page's host brought another level.
+void ReapplyZoom(ChildView* v) {
+  if (!v->browser || !(v->zoom > 0))
+    return;
+  double level = ZoomLevel(v->zoom);
+  CefRefPtr<CefBrowserHost> host = v->browser->GetHost();
+  if (std::fabs(host->GetZoomLevel() - level) > 1e-6)
+    host->SetZoomLevel(level);
+}
+
+void ShowDevToolsFor(CefRefPtr<CefBrowser> browser) {
+  CefWindowInfo window_info;
+#if defined(_WIN32)
+  window_info.SetAsPopup(nullptr, "DevTools");
+#endif
+  browser->GetHost()->ShowDevTools(window_info, nullptr, CefBrowserSettings(),
+                                   CefPoint());
+}
+
+const char* ContextMediaType(cef_context_menu_media_type_t type) {
+  switch (type) {
+    case CM_MEDIATYPE_IMAGE:
+      return "image";
+    case CM_MEDIATYPE_VIDEO:
+      return "video";
+    case CM_MEDIATYPE_AUDIO:
+      return "audio";
+    case CM_MEDIATYPE_CANVAS:
+      return "canvas";
+    case CM_MEDIATYPE_PLUGIN:
+      return "plugin";
+    default:
+      return nullptr;
+  }
 }
 
 void NoteFocus(uint32_t id, bool focused) {
@@ -388,6 +444,7 @@ class ChildClient : public CefClient,
                     public CefDownloadHandler,
                     public CefPermissionHandler,
                     public CefContextMenuHandler,
+                    public CefFindHandler,
                     public CefDevToolsMessageObserver {
  public:
   explicit ChildClient(uint32_t id) : id_(id) {}
@@ -411,6 +468,9 @@ class ChildClient : public CefClient,
     return this;
   }
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
+    return this;
+  }
+  CefRefPtr<CefFindHandler> GetFindHandler() override {
     return this;
   }
 
@@ -437,6 +497,11 @@ class ChildClient : public CefClient,
       return;
     }
     v->devtools = browser->GetHost()->AddDevToolsMessageObserver(this);
+    if (v->zoom > 0)
+      browser->GetHost()->SetZoomLevel(ZoomLevel(v->zoom));
+    if (v->devtools_on_create && laufey_common::LaunchInspectable())
+      ShowDevToolsFor(browser);
+    v->devtools_on_create = false;
     uint32_t id = id_;
     auto load_first = [id](bool, CefRefPtr<CefDictionaryValue>) {
       ChildView* view = Find(id);
@@ -548,6 +613,7 @@ class ChildClient : public CefClient,
     std::string url = frame->GetURL().ToString();
     if (url == "about:blank" && !v->url_sent)
       return;  // the blank page every browser starts on
+    ReapplyZoom(v);
     SetLoad(v, "interactive", url);
   }
 
@@ -559,6 +625,7 @@ class ChildClient : public CefClient,
     std::string url = frame->GetURL().ToString();
     if (url == "about:blank" && !v->url_sent)
       return;
+    ReapplyZoom(v);
     SetLoad(v, "complete", url);
   }
 
@@ -669,8 +736,25 @@ class ChildClient : public CefClient,
       uint32_t requested_permissions,
       CefRefPtr<CefPermissionPromptCallback> callback) override {
     ChildView* v = Find(id_);
-    if (!v ||
-        v->options.permissions != laufey_common::WebViewPermissions::kAsk) {
+    if (!v) {
+      callback->Continue(CEF_PERMISSION_RESULT_DENY);
+      return true;
+    }
+    // The clipboard (navigator.clipboard.read / readText; writes on a user
+    // gesture need no prompt) follows "clipboardRead", never a prompt.
+    if (requested_permissions & CEF_PERMISSION_TYPE_CLIPBOARD) {
+      if (!v->options.clipboard_read) {
+        callback->Continue(CEF_PERMISSION_RESULT_DENY);
+        return true;
+      }
+      requested_permissions &=
+          ~static_cast<uint32_t>(CEF_PERMISSION_TYPE_CLIPBOARD);
+      if (!requested_permissions) {
+        callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+        return true;
+      }
+    }
+    if (v->options.permissions != laufey_common::WebViewPermissions::kAsk) {
       callback->Continue(CEF_PERMISSION_RESULT_DENY);
       return true;
     }
@@ -686,10 +770,39 @@ class ChildClient : public CefClient,
   // --- CefContextMenuHandler ---
 
   void OnBeforeContextMenu(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>,
-                           CefRefPtr<CefContextMenuParams>,
+                           CefRefPtr<CefContextMenuParams> params,
                            CefRefPtr<CefMenuModel> model) override {
     // view-source: is not an http(s) page this view may load.
     model->Remove(MENU_ID_VIEW_SOURCE);
+    ChildView* v = Find(id_);
+    if (!v)
+      return;
+    laufey_common::WebViewContextMenuFields f;
+    // View coordinates (DIP), which are the view's CSS px.
+    f.x = params->GetXCoord();
+    f.y = params->GetYCoord();
+    f.link_url = params->GetLinkUrl().ToString();
+    f.media_type = ContextMediaType(params->GetMediaType());
+    if (params->GetMediaType() == CM_MEDIATYPE_IMAGE)
+      f.image_url = params->GetSourceUrl().ToString();
+    f.selection_text = params->GetSelectionText().ToString();
+    f.is_editable = params->IsEditable();
+    Emit(id_, LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU,
+         laufey_common::WebViewContextMenuJson(f));
+    // "app": the app shows its own menu; an empty model shows none.
+    if (v->options.app_context_menu)
+      model->Clear();
+  }
+
+  // --- CefFindHandler ---
+
+  void OnFindResult(CefRefPtr<CefBrowser>, int, int count, const CefRect&,
+                    int active_match, bool final_update) override {
+    ChildView* v = Find(id_);
+    if (!v || !final_update || v->find_text.empty())
+      return;
+    Emit(id_, LAUFEY_WEBVIEW_EVENT_FIND_RESULT,
+         laufey_common::WebViewFindResultJson(count, active_match));
   }
 
   // --- CefDevToolsMessageObserver ---
@@ -809,6 +922,12 @@ void EvalSerialize(uint32_t id, int context_id,
 uint32_t Capabilities() {
   return LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_CAPTURE |
          LAUFEY_WEBVIEW_CAP_EVALUATE | LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
+         LAUFEY_WEBVIEW_CAP_ZOOM | LAUFEY_WEBVIEW_CAP_FIND |
+         LAUFEY_WEBVIEW_CAP_DEVTOOLS | LAUFEY_WEBVIEW_CAP_CONTEXT_MENU |
+         LAUFEY_WEBVIEW_CAP_PRINT |
+         // "clipboardRead" is applied; "clipboardWrite": false is not (no
+         // CEF switch: writes on a user gesture stay allowed).
+         LAUFEY_WEBVIEW_CAP_CLIPBOARD |
          (RootCachePath().empty() ? 0u
                                   : LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS) |
 #if defined(__APPLE__)
@@ -1165,24 +1284,80 @@ void CloseAllForWindow(uint32_t window_id) {
     Close(id);
 }
 
-// TODO(api58): zoom, find, DevTools and print (stubs until implemented).
-bool SetZoom(uint32_t, double) {
-  return false;
+bool SetZoom(uint32_t id, double factor) {
+  CEF_REQUIRE_UI_THREAD();
+  ChildView* v = Find(id);
+  if (!v)
+    return false;
+  v->zoom = factor;
+  if (v->browser)  // else OnAfterCreated applies it
+    v->browser->GetHost()->SetZoomLevel(ZoomLevel(factor));
+  return true;
 }
-double GetZoom(uint32_t) {
-  return 0;
+
+double GetZoom(uint32_t id) {
+  CEF_REQUIRE_UI_THREAD();
+  ChildView* v = Find(id);
+  if (!v)
+    return 0;
+  if (!v->browser)
+    return v->zoom > 0 ? v->zoom : 1;
+  double level = v->browser->GetHost()->GetZoomLevel();
+  // The factor as set, not 1.2^(log(factor) / log(1.2)) with rounding.
+  if (v->zoom > 0 && std::fabs(level - ZoomLevel(v->zoom)) < 1e-6)
+    return v->zoom;
+  return std::pow(1.2, level);
 }
-bool Find(uint32_t, const std::string&, uint32_t) {
-  return false;
+
+bool Find(uint32_t id, const std::string& text, uint32_t flags) {
+  CEF_REQUIRE_UI_THREAD();
+  ChildView* v = Find(id);
+  if (!v || !v->browser)
+    return false;
+  bool match_case = (flags & LAUFEY_WEBVIEW_FIND_MATCH_CASE) != 0;
+  bool find_next = text == v->find_text && match_case == v->find_match_case;
+  v->find_text = text;
+  v->find_match_case = match_case;
+  v->browser->GetHost()->Find(text, (flags & LAUFEY_WEBVIEW_FIND_FORWARD) != 0,
+                              match_case, find_next);
+  return true;
 }
-bool StopFind(uint32_t) {
-  return false;
+
+bool StopFind(uint32_t id) {
+  CEF_REQUIRE_UI_THREAD();
+  ChildView* v = Find(id);
+  if (!v)
+    return false;
+  v->find_text.clear();
+  if (v->browser)
+    v->browser->GetHost()->StopFinding(true);
+  return true;
 }
-int32_t OpenDevTools(uint32_t) {
-  return LAUFEY_WEBVIEW_UNSUPPORTED;
+
+int32_t OpenDevTools(uint32_t id) {
+  CEF_REQUIRE_UI_THREAD();
+  ChildView* v = Find(id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  // The app's DevTools are off (LAUFEY_INSPECTABLE=0 / "inspectable":
+  // false): no view's open either.
+  if (!laufey_common::LaunchInspectable())
+    return LAUFEY_WEBVIEW_NOT_ALLOWED;
+  if (!v->browser) {
+    v->devtools_on_create = true;  // OnAfterCreated opens them
+    return LAUFEY_WEBVIEW_OK;
+  }
+  ShowDevToolsFor(v->browser);
+  return LAUFEY_WEBVIEW_OK;
 }
-bool Print(uint32_t) {
-  return false;
+
+bool Print(uint32_t id) {
+  CEF_REQUIRE_UI_THREAD();
+  ChildView* v = Find(id);
+  if (!v || !v->browser)
+    return false;
+  v->browser->GetHost()->Print();  // the OS print dialog (Alloy style)
+  return true;
 }
 
 }  // namespace laufey_cef_child_webview
