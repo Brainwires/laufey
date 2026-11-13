@@ -118,8 +118,12 @@ int CloseLiveWindowsForShutdown(bool even_closing) {
     const LiveCefWindow& live = entry.second;
     if (!even_closing && live.window->IsClosed())
       continue;
-    if (entry.first > 0)
+    if (entry.first > 0) {
       loader->MarkCloseAllowed(entry.first);
+      // Its child web views' browsers close too (API 58): none may outlive
+      // the loop, or CefShutdown waits on it.
+      laufey_cef_child_webview::CloseAllForWindow(entry.first);
+    }
     CefRefPtr<CefBrowser> browser =
         live.browser_view ? live.browser_view->GetBrowser() : nullptr;
     if (browser)
@@ -404,6 +408,14 @@ bool LaufeyWindowDelegate::CanClose(CefRefPtr<CefWindow> window) {
       !loader->DispatchCloseRequestedEvent(laufey_id_)) {
     // A registered handler defers the close: the app decides later, out of
     // band, by calling close_window().
+    return false;
+  }
+  // Child web views' browsers close before the page's (API 58); the window
+  // is closed again once the last one has, without a second negotiation.
+  if (laufey_id_ > 0 &&
+      laufey_cef_child_webview::CloseBeforeWindow(laufey_id_, window)) {
+    // The close is decided: the second attempt skips the negotiation.
+    loader->MarkCloseAllowed(laufey_id_);
     return false;
   }
   CefRefPtr<CefBrowser> browser = browser_view_->GetBrowser();

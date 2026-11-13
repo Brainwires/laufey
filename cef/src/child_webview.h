@@ -62,6 +62,11 @@ bool Print(uint32_t id);
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
+// The window is about to close (its CanClose, after the close-requested
+// negotiation): closes its views and returns true while any of their
+// browsers is still closing, in which case the window is closed again once
+// the last one has (CEF closes a window's browsers before the window).
+bool CloseBeforeWindow(uint32_t window_id, CefRefPtr<CefWindow> window);
 // Whether the screen point (`x`, `y` in pixels) is over a shown child web
 // view: the window's mouse monitors (main_windows.cc's hook, main_linux.cc's
 // XI2) leave such events to the view's page (API 58). UI thread.

@@ -737,6 +737,9 @@ void OnLoadChanged(WebKitWebView* web_view, WebKitLoadEvent event,
       break;
     case WEBKIT_LOAD_COMMITTED:
       SetLoad(v, "interactive", CurrentUrl(v));
+      // The back-forward list has the entry once the load commits: report
+      // the history edges again.
+      ScheduleUrlEvent(v->id);
       break;
     case WEBKIT_LOAD_FINISHED:
       if (v->load_ended) {
@@ -748,6 +751,7 @@ void OnLoadChanged(WebKitWebView* web_view, WebKitLoadEvent event,
         break;
       }
       SetLoad(v, "complete", CurrentUrl(v));
+      ScheduleUrlEvent(v->id);
       break;
   }
 }
@@ -1393,6 +1397,36 @@ void CloseAllForWindow(uint32_t window_id) {
 bool OwnsWidget(GtkWidget* widget) {
   for (GtkWidget* w = widget; w; w = gtk_widget_get_parent(w)) {
     if (FindByWidget(w))
+      return true;
+  }
+  return false;
+}
+
+bool OwnsPointerEvent(GtkWidget* window, void* event_ptr) {
+  GdkEvent* event = static_cast<GdkEvent*>(event_ptr);
+  double x = 0, y = 0;
+  if (!event || !gdk_event_get_coords(event, &x, &y))
+    return false;
+  // Into the toplevel's coordinates: the event's are its own GdkWindow's.
+  GdkWindow* top = gtk_widget_get_window(window);
+  for (GdkWindow* w = event->any.window; w && w != top;
+       w = gdk_window_get_parent(w)) {
+    double px = x, py = y;
+    gdk_window_coords_to_parent(w, x, y, &px, &py);
+    x = px;
+    y = py;
+  }
+  for (auto& kv : Views()) {
+    GtkWidget* view = GTK_WIDGET(kv.second.view);
+    if (!kv.second.visible || !gtk_widget_get_mapped(view) ||
+        gtk_widget_get_toplevel(view) != window)
+      continue;
+    int vx = 0, vy = 0;
+    if (!gtk_widget_translate_coordinates(window, view, static_cast<int>(x),
+                                          static_cast<int>(y), &vx, &vy))
+      continue;
+    if (vx >= 0 && vy >= 0 && vx < gtk_widget_get_allocated_width(view) &&
+        vy < gtk_widget_get_allocated_height(view))
       return true;
   }
   return false;

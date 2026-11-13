@@ -685,13 +685,19 @@ API_AVAILABLE(macos(11.3))
 }
 
 - (void)webView:(WKWebView*)webView didCommitNavigation:(WKNavigation*)nav {
-  if (ChildView* v = Find(self.viewId))
+  if (ChildView* v = Find(self.viewId)) {
     SetLoad(v, "interactive", Utf8(webView.URL.absoluteString));
+    // The history entry exists once the navigation commits: report the
+    // edges again (KVO's burst may have come before canGoBack moved).
+    ScheduleUrlEvent(v->id);
+  }
 }
 
 - (void)webView:(WKWebView*)webView didFinishNavigation:(WKNavigation*)nav {
-  if (ChildView* v = Find(self.viewId))
+  if (ChildView* v = Find(self.viewId)) {
     SetLoad(v, "complete", Utf8(webView.URL.absoluteString));
+    ScheduleUrlEvent(v->id);
+  }
 }
 
 - (void)failed:(WKWebView*)webView error:(NSError*)error {
