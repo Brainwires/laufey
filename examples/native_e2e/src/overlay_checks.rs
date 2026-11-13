@@ -15,7 +15,9 @@
 //!   window moves under a cursor at rest (no timer in between); with
 //!   LAUFEY_E2E_POST_CLICKS=1 (it needs the Post Event permission) a click
 //!   posted right after the move lands in the window or passes it by;
-//! - macOS: the activation policy switches to accessory and back;
+//! - macOS: the activation policy switches to accessory and back, and
+//!   focus() on an accessory app keeps it accessory (no Dock icon, so no
+//!   Dock recents tile later) while the window is ordered in and made key;
 //! - speech: the voice list is a JSON array, and a silent utterance ends
 //!   exactly once, DONE where the OS has an engine and UNSUPPORTED where it
 //!   has none.
@@ -202,6 +204,10 @@ pub async fn run(w: &Window, title: &str) {
     )
     .await;
     check("the activation policy reads back accessory", accessory);
+    #[cfg(target_os = "macos")]
+    if accessory {
+      mac_accessory_focus(w, title).await;
+    }
     laufey::set_activation_policy(laufey::LAUFEY_ACTIVATION_POLICY_REGULAR);
     let regular = wait_for(
       || {
@@ -428,6 +434,46 @@ async fn mac_region_follows_moves(w: &Window, title: &str) {
 }
 
 #[cfg(target_os = "macos")]
+/// focus() on an Accessory app activates it ignoring other apps, never
+/// through the activation policy: the policy stays Accessory (an app that
+/// was ever Regular gets a Dock recent-apps tile when its running tile goes
+/// away), the window is visible and, once the session lets the app be
+/// active, it is the key window. A session that never activates a
+/// background test app (no foreground rights) leaves the key check N/A.
+#[cfg(target_os = "macos")]
+async fn mac_accessory_focus(w: &Window, title: &str) {
+  w.focus();
+  let t = title.to_string();
+  let visible =
+    wait_for_ui(move || mac::window_flag(&t, c"isVisible") == Some(true)).await;
+  check(
+    "macOS: focus() on an accessory app shows the window",
+    visible,
+  );
+  let t = title.to_string();
+  let key = wait_for_ui(move || {
+    mac::app_active() && mac::window_flag(&t, c"isKeyWindow") == Some(true)
+  })
+  .await;
+  let active = key
+    || laufey::spawn_on_ui_thread(mac::app_active)
+      .await
+      .unwrap_or(false);
+  if active {
+    check(
+      "macOS: focus() on an accessory app makes the window key",
+      key,
+    );
+  } else {
+    na("macOS: accessory focus makes the window key (the session declined the activation)");
+  }
+  check(
+    "macOS: focus() leaves the activation policy accessory",
+    laufey::activation_policy()
+      == Some(laufey::LAUFEY_ACTIVATION_POLICY_ACCESSORY),
+  );
+}
+
 async fn wait_for_ui(
   f: impl Fn() -> bool + Send + Sync + Clone + 'static,
 ) -> bool {
@@ -550,6 +596,24 @@ mod mac {
         }
       }
       None
+    }
+  }
+
+  /// A BOOL getter (`isVisible`, `isKeyWindow`) of the window titled
+  /// `title`.
+  pub fn window_flag(title: &str, getter: &CStr) -> Option<bool> {
+    let window = window_titled(title)?;
+    Some(unsafe { send_bool(window, getter) })
+  }
+
+  /// `-[NSApplication isActive]`.
+  pub fn app_active() -> bool {
+    unsafe {
+      let app = send0(
+        objc_getClass(c"NSApplication".as_ptr()),
+        c"sharedApplication",
+      );
+      send_bool(app, c"isActive")
     }
   }
 

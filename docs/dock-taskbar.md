@@ -45,9 +45,9 @@ app never shows a Dock icon. Before API 50 the hosts forced Regular at launch,
 which undid `LSUIElement`.
 
 ```rust
-// Open a full window: show the Dock icon and the menu bar while it is open.
+// A regular app with a Dock icon and a menu bar.
 laufey::set_activation_policy(laufey::LAUFEY_ACTIVATION_POLICY_REGULAR);
-// Back to a tray app.
+// A tray app.
 laufey::set_activation_policy(laufey::LAUFEY_ACTIVATION_POLICY_ACCESSORY);
 assert_eq!(laufey::activation_policy(), Some(1));
 ```
@@ -58,3 +58,20 @@ to the front. An Accessory app keeps running when its last window closes (see
 app-level policy (`activation_policy()` is `None`); keep windows off the taskbar
 with `set_skip_taskbar` instead
 ([Overlay windows](window-management.md#overlay-windows-api--50)).
+
+### Tray apps and the Dock's recent apps
+
+When an app that is not kept in the Dock loses its running Dock tile, macOS adds
+it to the Dock's recent-apps section (when "Show suggested and recent apps in
+Dock" is on). The tile goes away when the app quits, and also when a Regular app
+switches back to Accessory. So a tray app that switches to Regular while a
+window is open lands in the recents for good, even after the user removes it,
+and macOS offers no opt-out. An app that is Accessory from launch to quit never
+gets a running tile, so it never appears there.
+
+Keep a tray app Accessory at all times (the launch configuration's
+`"activationPolicy": "accessory"`, or `LSUIElement`) and bring its windows up
+with `focus()`, which activates the app ignoring other apps without changing the
+policy ([Focusing a window](window-management.md#focusing-a-window)). An
+Accessory app has no menu bar, so the standard menu shortcuts (Cmd+C, Cmd+V,
+Cmd+W, Cmd+Q) reach the window only when the app handles them itself.

@@ -593,6 +593,22 @@ returns. On CEF the size and the show reach the window even when its browser is
 slow to start and creation stopped waiting for it, so such a window is not left
 hidden.
 
+## Focusing a window
+
+`focus()` brings the window to the front and makes it key. On macOS it activates
+the app ignoring other apps (`activateIgnoringOtherApps:`), makes the window key
+and orders it in front of other apps' windows even when the system declines the
+activation. It never changes the activation policy, so an Accessory (tray /
+menu-bar) app's window comes to the front with no Dock icon. The cooperative
+`-[NSApp activate]` of macOS 14 and later often leaves an Accessory app's window
+behind the active app's, which is why `focus()` keeps the older call. A
+non-activating panel is made key and ordered front without activating the app.
+On Windows and Linux `focus()` is unchanged.
+
+A tray app should stay Accessory for good and open its windows with `focus()`,
+never by switching to Regular first: see
+[Tray apps and the Dock's recent apps](dock-taskbar.md#tray-apps-and-the-docks-recent-apps).
+
 ## Keeping a tray app alive; quitting (API ≥ 38)
 
 By default the event loop ends when the last window closes. A tray / menu-bar

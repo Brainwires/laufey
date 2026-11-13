@@ -3385,8 +3385,9 @@ void WKWebViewBackend::Focus(uint32_t window_id) {
         }
       }
       if (win) {
-        [NSApp activateIgnoringOtherApps:YES];
-        [win makeKeyAndOrderFront:nil];
+        // Activates ignoring other apps without touching the activation
+        // policy: an Accessory app's window comes to the front and is key.
+        laufey_common::MacFocusWindow((__bridge void*)win);
         if (web)
           [win makeFirstResponder:web];
       }
