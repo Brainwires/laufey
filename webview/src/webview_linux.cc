@@ -29,6 +29,7 @@
 #include "laufey_ui_tasks.h"
 #include "laufey_passkey.h"
 #include "init_script.h"
+#include "child_webview_linux.h"
 #include "scheme_download.h"
 #include <webkit2/webkit2.h>
 #include <JavaScriptCore/JavaScript.h>
@@ -199,6 +200,9 @@ struct LinuxWindowState {
   uint32_t window_id;
   GtkWidget* window;
   GtkWidget* vbox;      // container for menu bar + webview
+  // Holds the page webview (its main child) and the window's child web views
+  // (API 58), laid over the page.
+  GtkWidget* overlay = nullptr;
   GtkWidget* menu_bar;  // per-window menu bar (nullptr = none)
   // The menu bar's accelerators, bound on the window (nullptr = none).
   GtkAccelGroup* accel_group = nullptr;
@@ -1382,6 +1386,26 @@ class WebKitGTKBackend : public LaufeyBackend {
   }
   bool TestTriggerMenuAccelerator(uint32_t window_id,
                                   const char* accelerator) override;
+  // Child web views (API 58): child_webview_linux.cc, on the GTK thread.
+  uint32_t WebViewCapabilities() override {
+    return laufey_child_webview_linux::Capabilities();
+  }
+  uint32_t CreateWebView(uint32_t window_id, const std::string& options_json,
+                         laufey_webview_event_fn on_event, void* user_data,
+                         int32_t* status_out) override;
+  bool WebViewSetBounds(uint32_t webview_id, double x, double y, double width,
+                        double height) override;
+  bool WebViewSetVisible(uint32_t webview_id, bool visible) override;
+  int32_t WebViewNavigate(uint32_t webview_id, const std::string& url) override;
+  bool WebViewCommand(uint32_t webview_id, int32_t command) override;
+  std::string WebViewState(uint32_t webview_id) override;
+  void WebViewEvaluate(uint32_t webview_id, const std::string& script,
+                       laufey_webview_eval_fn callback,
+                       void* user_data) override;
+  void WebViewCapture(uint32_t webview_id, int32_t format, int32_t quality,
+                      laufey_webview_capture_fn callback,
+                      void* user_data) override;
+  bool WebViewClose(uint32_t webview_id) override;
 
   void HandleJsMessage(uint32_t window_id, const char* json);
 
@@ -1482,6 +1506,9 @@ static void on_window_destroy(GtkWidget* widget, gpointer user_data) {
   laufey_common::PasskeyWindowClosing(widget);
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid > 0) {
+    // Its child web views close with it (each fires CLOSED), while their
+    // widgets still exist.
+    laufey_child_webview_linux::CloseAllForWindow(wid);
     // Lock order windows_mutex_ -> g_widget_mutex: the two are taken one
     // after the other here, never nested.
     if (g_gtk_backend)
@@ -2164,12 +2191,17 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     GtkWidget* vbox =
         static_cast<GtkWidget*>(laufey_common::LinuxNewContentBox());
     gtk_container_add(GTK_CONTAINER(window), vbox);
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(webview), TRUE, TRUE, 0);
+    // The page is the overlay's main child (its size request is the page's);
+    // child web views (API 58) are overlay children above it.
+    GtkWidget* overlay = gtk_overlay_new();
+    gtk_container_add(GTK_CONTAINER(overlay), GTK_WIDGET(webview));
+    gtk_box_pack_start(GTK_BOX(vbox), overlay, TRUE, TRUE, 0);
 
     LinuxWindowState state;
     state.window_id = window_id;
     state.window = window;
     state.vbox = vbox;
+    state.overlay = overlay;
     state.menu_bar = nullptr;
     state.webview = webview;
     state.content_manager = content_manager;
@@ -2192,6 +2224,8 @@ void WebKitGTKBackend::CreateWindowEx(uint32_t window_id, int width, int height,
 
 void WebKitGTKBackend::CloseWindow(uint32_t window_id) {
   gtk_invoke_sync([&] {
+    // Its child web views close first (each fires CLOSED), outside the lock.
+    laufey_child_webview_linux::CloseAllForWindow(window_id);
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
@@ -2204,6 +2238,111 @@ void WebKitGTKBackend::CloseWindow(uint32_t window_id) {
       windows_.erase(window_id);
     }
   });
+}
+
+// --- Child web views (API 58) ---
+
+uint32_t WebKitGTKBackend::CreateWebView(uint32_t window_id,
+                                         const std::string& options_json,
+                                         laufey_webview_event_fn on_event,
+                                         void* user_data, int32_t* status_out) {
+  laufey_common::WebViewOptions options;
+  std::string error;
+  int32_t status =
+      laufey_common::ParseWebViewOptions(options_json, &options, &error);
+  if (status != LAUFEY_WEBVIEW_OK) {
+    *status_out = status;
+    return 0;
+  }
+  uint32_t id = 0;
+  int32_t result = LAUFEY_WEBVIEW_NO_WINDOW;
+  bool ran = gtk_invoke_sync([&] {
+    GtkWidget* overlay = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (LinuxWindowState* state = GetWindow(window_id))
+        overlay = state->overlay;
+    }
+    if (!overlay) {
+      result = LAUFEY_WEBVIEW_NO_WINDOW;
+      return;
+    }
+    id = laufey_child_webview_linux::Create(window_id, overlay, options,
+                                            on_event, user_data, &result);
+  });
+  *status_out = ran ? result : LAUFEY_WEBVIEW_FAILED;
+  return ran ? id : 0;
+}
+
+bool WebKitGTKBackend::WebViewSetBounds(uint32_t webview_id, double x, double y,
+                                        double width, double height) {
+  bool ok = false;
+  gtk_invoke_sync([&] {
+    ok = laufey_child_webview_linux::SetBounds(webview_id, x, y, width, height);
+  });
+  return ok;
+}
+
+bool WebKitGTKBackend::WebViewSetVisible(uint32_t webview_id, bool visible) {
+  bool ok = false;
+  gtk_invoke_sync([&] {
+    ok = laufey_child_webview_linux::SetVisible(webview_id, visible);
+  });
+  return ok;
+}
+
+int32_t WebKitGTKBackend::WebViewNavigate(uint32_t webview_id,
+                                          const std::string& url) {
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  gtk_invoke_sync(
+      [&] { status = laufey_child_webview_linux::Navigate(webview_id, url); });
+  return status;
+}
+
+bool WebKitGTKBackend::WebViewCommand(uint32_t webview_id, int32_t command) {
+  bool ok = false;
+  gtk_invoke_sync(
+      [&] { ok = laufey_child_webview_linux::Command(webview_id, command); });
+  return ok;
+}
+
+std::string WebKitGTKBackend::WebViewState(uint32_t webview_id) {
+  std::string state;
+  gtk_invoke_sync(
+      [&] { state = laufey_child_webview_linux::State(webview_id); });
+  return state;
+}
+
+void WebKitGTKBackend::WebViewEvaluate(uint32_t webview_id,
+                                       const std::string& script,
+                                       laufey_webview_eval_fn callback,
+                                       void* user_data) {
+  // Starts it on the GTK thread; the callback fires once, from there.
+  bool ran = gtk_invoke_sync([&] {
+    laufey_child_webview_linux::Evaluate(webview_id, script, callback,
+                                         user_data);
+  });
+  if (!ran)
+    callback(user_data, LAUFEY_WEBVIEW_FAILED, "the event loop has ended");
+}
+
+void WebKitGTKBackend::WebViewCapture(uint32_t webview_id, int32_t format,
+                                      int32_t quality,
+                                      laufey_webview_capture_fn callback,
+                                      void* user_data) {
+  bool ran = gtk_invoke_sync([&] {
+    laufey_child_webview_linux::Capture(webview_id, format, quality, callback,
+                                        user_data);
+  });
+  if (!ran)
+    callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr, 0,
+             "the event loop has ended");
+}
+
+bool WebKitGTKBackend::WebViewClose(uint32_t webview_id) {
+  bool ok = false;
+  gtk_invoke_sync([&] { ok = laufey_child_webview_linux::Close(webview_id); });
+  return ok;
 }
 
 void WebKitGTKBackend::Navigate(uint32_t window_id, const std::string& url) {

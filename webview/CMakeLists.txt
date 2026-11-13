@@ -74,6 +74,7 @@ elseif(PLATFORM_MACOS)
 elseif(PLATFORM_LINUX)
   set(LAUFEY_SRCS_PLATFORM
     src/webview_linux.cc
+    src/child_webview_linux.cc
     src/main_linux.cc
   )
 elseif(PLATFORM_WINDOWS)
