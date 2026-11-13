@@ -9,6 +9,7 @@
 #include <clocale>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -372,7 +373,7 @@ static void TestHandleAdditions() {
   EXPECT(IsValidWebViewZoom(1) && IsValidWebViewZoom(0.25) &&
          IsValidWebViewZoom(5));
   EXPECT(!IsValidWebViewZoom(0.2) && !IsValidWebViewZoom(5.1) &&
-         !IsValidWebViewZoom(0.0 / 0.0));
+         !IsValidWebViewZoom(std::numeric_limits<double>::quiet_NaN()));
   EXPECT(LAUFEY_WEBVIEW_NOT_ALLOWED == 10);
   EXPECT(LAUFEY_WEBVIEW_EVENT_FIND_RESULT == 8);
   EXPECT(LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU == 9);
