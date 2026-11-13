@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 
+#include "laufey_launch_config.h"
 #include "laufey_title_options.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_window.h"
@@ -792,6 +793,12 @@ void MacRevealWindowAtLaunch(void* nswindow) {
     return;
   }
   revealed = true;
+  // A headless launch never takes the focus: the window comes forward
+  // without the app's activation.
+  if (LaunchHeadless()) {
+    [w orderFrontRegardless];
+    return;
+  }
   if (@available(macOS 14.0, *)) {
     [NSApp activate];
   } else {

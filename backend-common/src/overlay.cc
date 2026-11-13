@@ -103,6 +103,10 @@ int32_t LaunchActivationPolicy(const std::string& launch_value,
                        : LAUFEY_ACTIVATION_POLICY_REGULAR;
 }
 
+bool LaunchShouldActivateApp(int32_t policy, bool headless) {
+  return !headless && policy == LAUFEY_ACTIVATION_POLICY_REGULAR;
+}
+
 // --- Text to speech ---------------------------------------------------------
 
 namespace {

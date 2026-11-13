@@ -704,6 +704,15 @@ bool IsValidActivationPolicyName(const std::string& name) {
   return name == "regular" || name == "accessory" || name == "prohibited";
 }
 
+bool IsHeadlessValue(const std::string& value) {
+  return value == "1" || value == "true";
+}
+
+bool LaunchHeadless() {
+  static const bool headless = IsHeadlessValue(GetEnvUtf8("LAUFEY_HEADLESS"));
+  return headless;
+}
+
 std::string LaunchActivationPolicyName() {
   const LaunchConfig& file = ProcessLaunchConfig();
   std::string env = GetEnvUtf8("LAUFEY_ACTIVATION_POLICY");

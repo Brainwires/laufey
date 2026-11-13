@@ -56,6 +56,12 @@ Every key is optional, and each key but `passkeyRpIds`, `bridgeOrigins`,
 | `mediaCapture`     | none (file only)           | `{ "microphone": [origins], "camera": [origins] }` (exact)        |
 | `strictPolicy`     | none (file only)           | `true` / `false`                                                  |
 
+`LAUFEY_HEADLESS=1` (environment only) starts a headless run, an embedder's
+self-tests: no window shows unless the embedder shows it (CEF creates every
+window hidden, the first one included), and the app never takes the focus, at
+launch or when a window is shown. On macOS the host also leaves the focus alone
+at launch when the activation policy is not `"regular"`.
+
 Values follow the same rules as the environment variables, and each key does
 what its variable does:
 

@@ -358,7 +358,11 @@ int main(int argc, char* argv[]) {
     EnsureEditMenu(menubar);
     [NSApp setMainMenu:menubar];
 
-    [NSApp activateIgnoringOtherApps:YES];
+    // Only a regular app takes the focus at launch: an accessory app (a
+    // tray app) or a headless one (LAUFEY_HEADLESS, an embedder's
+    // self-tests) leaves the active app in front.
+    if (laufey_common::MacLaunchShouldActivateApp())
+      [NSApp activateIgnoringOtherApps:YES];
     [NSApp run];
 
     // quit() ends the loop with -stop:, which returns here without

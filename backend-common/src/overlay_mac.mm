@@ -387,14 +387,20 @@ int32_t MacGetActivationPolicy() {
   return result;
 }
 
-void MacApplyLaunchActivationPolicy() {
+static int32_t MacLaunchPolicy() {
   id ui_element =
       [[NSBundle mainBundle] objectForInfoDictionaryKey:@"LSUIElement"];
   bool ls_ui_element = [ui_element respondsToSelector:@selector(boolValue)] &&
                        [ui_element boolValue];
-  int32_t policy =
-      LaunchActivationPolicy(LaunchActivationPolicyName(), ls_ui_element);
-  [NSApp setActivationPolicy:NativePolicy(policy)];
+  return LaunchActivationPolicy(LaunchActivationPolicyName(), ls_ui_element);
+}
+
+void MacApplyLaunchActivationPolicy() {
+  [NSApp setActivationPolicy:NativePolicy(MacLaunchPolicy())];
+}
+
+bool MacLaunchShouldActivateApp() {
+  return LaunchShouldActivateApp(MacLaunchPolicy(), LaunchHeadless());
 }
 
 }  // namespace laufey_common

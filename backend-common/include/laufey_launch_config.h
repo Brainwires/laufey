@@ -273,6 +273,13 @@ bool IsValidActivationPolicyName(const std::string& name);
 // An invalid environment value is reported on stderr and ignored.
 std::string LaunchActivationPolicyName();
 
+// Whether an LAUFEY_HEADLESS value asks for a headless launch: "1" or
+// "true". A headless launch (an embedder's self-tests) shows no window the
+// embedder didn't show itself and never activates the app.
+bool IsHeadlessValue(const std::string& value);
+// LAUFEY_HEADLESS read once (IsHeadlessValue).
+bool LaunchHeadless();
+
 }  // namespace laufey_common
 
 #endif  // LAUFEY_LAUNCH_CONFIG_H_

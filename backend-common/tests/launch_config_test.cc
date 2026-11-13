@@ -660,7 +660,14 @@ static void TestStrictPolicy() {
   }
 }
 
+static void TestHeadless() {
+  EXPECT(IsHeadlessValue("1") && IsHeadlessValue("true"));
+  EXPECT(!IsHeadlessValue("") && !IsHeadlessValue("0") &&
+         !IsHeadlessValue("false") && !IsHeadlessValue("yes"));
+}
+
 int main() {
+  TestHeadless();
   TestValid();
   TestMalformed();
   TestSchema();

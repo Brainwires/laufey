@@ -179,6 +179,11 @@ static void TestLevelsAndPolicy() {
   EXPECT(ParseActivationPolicy("prohibited") ==
          LAUFEY_ACTIVATION_POLICY_PROHIBITED);
   EXPECT(ParseActivationPolicy("Accessory") == -1);
+  // Only a regular app outside a headless launch takes the focus at launch.
+  EXPECT(LaunchShouldActivateApp(LAUFEY_ACTIVATION_POLICY_REGULAR, false));
+  EXPECT(!LaunchShouldActivateApp(LAUFEY_ACTIVATION_POLICY_REGULAR, true));
+  EXPECT(!LaunchShouldActivateApp(LAUFEY_ACTIVATION_POLICY_ACCESSORY, false));
+  EXPECT(!LaunchShouldActivateApp(LAUFEY_ACTIVATION_POLICY_PROHIBITED, false));
   EXPECT(ParseActivationPolicy("") == -1);
   // The launch key wins over LSUIElement, LSUIElement over the default.
   EXPECT(LaunchActivationPolicy("", false) == LAUFEY_ACTIVATION_POLICY_REGULAR);
