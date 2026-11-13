@@ -29,7 +29,7 @@ view.navigate("https://github.com/denoland")?;
 | CEF                         | An Alloy-style `CefBrowserView` added with `CefWindow::AddOverlayView` (custom docking) | everything; persistent partitions when the app's profile is on disk                                                  |
 | WebView, macOS              | A second `WKWebView`, a subview of the window's page view                               | everything; persistent partitions on macOS 14+ (`WKWebsiteDataStore` per partition), permission prompts on macOS 12+ |
 | WebView, Windows (WebView2) | A second `ICoreWebView2Controller` in a host window above the page's controller         | everything, on a runtime with profiles (`ICoreWebView2Environment10`; else `webview_capabilities` is 0)              |
-| WebView, Linux (WebKitGTK)  | Not yet                                                                                 |                                                                                                                      |
+| WebView, Linux (WebKitGTK)  | A second `WebKitWebView`, a child of the `GtkOverlay` that holds the window's page view | everything; persistent partitions when the app has a data directory, evaluate on WebKitGTK 2.40+                     |
 | Winit                       | None (the entry points are NULL)                                                        |                                                                                                                      |
 
 `webview_capabilities` reports `LAUFEY_WEBVIEW_CAP_*` and the engine (bits
@@ -55,10 +55,13 @@ A web view is a browsing context of its own:
   from the name on macOS 14+ (`PartitionUuid`), a WebView2 profile in the app's
   user data folder (`wv~<name with ':' as '~'>`, or `wvh~<hash>` for a name with
   upper case, over 61 characters or a final `.`, as profile names ignore case
-  and stop at 64) on Windows, InPrivate for an ephemeral one. `"ephemeral"` or
+  and stop at 64) on Windows, InPrivate for an ephemeral one, a
+  `WebKitWebContext` over a `WebKitWebsiteDataManager` under
+  `<app data dir>/WebViews/<name>` on WebKitGTK. `"ephemeral"` or
   `"ephemeral:<name>"` is kept in memory; so is every partition where
   `LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS` is not reported (macOS before 14, a
-  CEF app with an in-memory profile). The default is `"webview:default"`.
+  CEF app with an in-memory profile, a WebKitGTK app without a data directory:
+  no `LAUFEY_DATA_DIR` / `LAUFEY_APP_ID`). The default is `"webview:default"`.
 - **None of the window's navigation rules.** The window's navigation guard and
   will-navigate handler never see the view; its main frame may load http(s)
   pages and `about:blank`, and any other scheme (`file:`, `data:`,
@@ -70,7 +73,7 @@ A web view is a browsing context of its own:
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `allowPopups` | `"same-view"` (default): the popup's URL loads in the view. `"browser"`: it opens in the OS browser. `"deny"`: nothing opens and a `NEW_WINDOW` event says what was asked. |
 | `downloads`   | `"deny"` (default), `"ask"` (a save panel; WebView2's own download UI), `"browser"` (the URL opens in the OS browser).                                                     |
-| `permissions` | `"deny"` (default: refused without a prompt), `"ask"` (the engine's prompt, or a message dialog naming the origin on CEF).                                                 |
+| `permissions` | `"deny"` (default: refused without a prompt), `"ask"` (the engine's prompt, or a message dialog naming the origin on CEF and WebKitGTK).                                   |
 
 No second view is ever created for a popup: the page's `window.open()` returns
 `null`.
@@ -80,8 +83,11 @@ No second view is ever created for a popup: the page's `window.open()` returns
 Every event carries a JSON object; `CLOSED` is the last one and fires exactly
 once, after `webview_close` or when the window closes. See the event kinds in
 `laufey.h`. `CONSOLE` events are capped at 200 per second per view; on WKWebView
-they come from a page-world script (WebKit reports no console messages to the
-embedder), which the page could also post to.
+and WebKitGTK they come from a page-world script (WebKit reports no console
+messages to the embedder), which the page could also post to. On WebKitGTK that
+script also tells a refused popup's `NEW_WINDOW` disposition (`"popup"` when
+`window.open()` was given a size or position), since WebKitGTK reports window
+features only to a view it would create.
 
 ## Evaluate and capture
 
@@ -91,11 +97,14 @@ JSON. CEF and WebView2 use DevTools (`Page.createIsolatedWorld`,
 `Runtime.evaluate`; `CallDevToolsProtocolMethod` on WebView2), which no page
 Content-Security-Policy restricts. WKWebView runs it in a `WKContentWorld`
 through an indirect `eval`, which a page CSP without `'unsafe-eval'` may refuse
-(the call then fails with `SCRIPT_ERROR`).
+(the call then fails with `SCRIPT_ERROR`). WebKitGTK does the same in a script
+world named `laufey-webview` (`webkit_web_view_call_async_javascript_function`,
+WebKitGTK 2.40+; older versions report no `LAUFEY_WEBVIEW_CAP_EVALUATE`).
 
 `webview_capture` encodes what the view shows as PNG or JPEG, in device pixels
 (CEF and WebView2: `Page.captureScreenshot`; WKWebView:
-`takeSnapshotWithConfiguration`).
+`takeSnapshotWithConfiguration`; WebKitGTK: `webkit_web_view_get_snapshot` of
+the visible region).
 
 ## Stacking
 
