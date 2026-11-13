@@ -100,6 +100,11 @@ int32_t ParseActivationPolicy(const std::string& value);
 int32_t LaunchActivationPolicy(const std::string& launch_value,
                                bool ls_ui_element);
 
+// Whether the host activates the app at launch: only a regular app outside a
+// headless launch (an accessory or prohibited app, or one started for
+// self-tests, must not take the focus from the active app).
+bool LaunchShouldActivateApp(int32_t policy, bool headless);
+
 // --- Text to speech ---------------------------------------------------------
 
 struct SpeechRequest {
@@ -181,6 +186,9 @@ int32_t MacGetActivationPolicy();
 // and the main bundle's LSUIElement). Call it where the host used to force
 // NSApplicationActivationPolicyRegular.
 void MacApplyLaunchActivationPolicy();
+// LaunchShouldActivateApp for this launch (its policy as
+// MacApplyLaunchActivationPolicy sets it, and LAUFEY_HEADLESS). Main thread.
+bool MacLaunchShouldActivateApp();
 #endif
 
 #if defined(_WIN32)

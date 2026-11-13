@@ -231,10 +231,14 @@ void LaufeyWindowDelegate::OnWindowCreated(CefRefPtr<CefWindow> window) {
   // capi also creates a window the app wants shown hidden, sizes it, then
   // shows it: a Wayland window's first size is the one it maps at, and a size
   // set after it maps races the compositor's first configure.
-  if ((flags_ & LAUFEY_WINDOW_FLAG_HIDDEN) == 0) {
+  // A headless launch (LAUFEY_HEADLESS, an embedder's self-tests) creates
+  // every window hidden, the host's first one included, and a later show()
+  // never activates the app.
+  const bool headless = laufey_common::LaunchHeadless();
+  if ((flags_ & LAUFEY_WINDOW_FLAG_HIDDEN) == 0 && !headless) {
     RevealCefWindow(window, no_activate);
   } else if (laufey_id_ > 0) {
-    g_unrevealed_hidden_windows[laufey_id_] = no_activate;
+    g_unrevealed_hidden_windows[laufey_id_] = no_activate || headless;
   }
   InstallNativeMouseMonitor();
   if (laufey_id_ > 0)

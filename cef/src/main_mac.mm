@@ -586,7 +586,11 @@ int main(int argc, char* argv[]) {
     laufey_common::DisableArgvOpenEventsMac();
     LaufeyInstallSecondInstanceHooks();
 
-    [NSApp activateIgnoringOtherApps:YES];
+    // Only a regular app takes the focus at launch: an accessory app (a
+    // tray app) or a headless one (LAUFEY_HEADLESS, an embedder's
+    // self-tests) leaves the active app in front.
+    if (laufey_common::MacLaunchShouldActivateApp())
+      [NSApp activateIgnoringOtherApps:YES];
 
     // Drive CEF from the main NSRunLoop (external_message_pump). Unlike
     // CefRunMessageLoop(), [NSApp run] also drains the libdispatch main queue.
