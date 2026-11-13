@@ -464,6 +464,50 @@ pub async fn run(w: &Window) {
     ) == Err(WebViewError::Invalid),
   );
 
+  // "forwardKeys" (the keys themselves need a real key press).
+  let forward = laufey::create_webview(
+    w.id(),
+    &WebViewOptions {
+      forward_keys: Some(vec!["CmdOrCtrl+1".into(), "Meta+Shift+L".into()]),
+      ..bad(&format!("{base}/b"))
+    },
+    |_| {},
+  );
+  check(
+    &format!("create_webview accepts forwardKeys ({forward:?})"),
+    forward.is_ok(),
+  );
+  if let Ok(v) = forward {
+    if caps.forward_keys() {
+      check(
+        "set_forward_keys replaces the keys",
+        v.set_forward_keys(&["F5".to_string(), "Alt+Up".to_string()]),
+      );
+      check("set_forward_keys([]) clears them", v.set_forward_keys(&[]));
+      check(
+        "set_forward_keys refuses an invalid accelerator",
+        !v.set_forward_keys(&["Ctrl+Nope".to_string()]),
+      );
+    } else {
+      check(
+        "set_forward_keys is refused where not reported",
+        !v.set_forward_keys(&["F5".to_string()]),
+      );
+    }
+    v.close();
+  }
+  check(
+    "create_webview refuses an invalid forwardKeys entry",
+    laufey::create_webview(
+      w.id(),
+      &WebViewOptions {
+        forward_keys: Some(vec!["Ctrl+A+B".into()]),
+        ..bad(&format!("{base}/b"))
+      },
+      |_| {},
+    ) == Err(WebViewError::Invalid),
+  );
+
   // Stacking among the window's views.
   {
     let (_, sink) = recorder();

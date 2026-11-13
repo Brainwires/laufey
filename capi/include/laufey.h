@@ -1218,6 +1218,14 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 // "clipboardRead" / "clipboardWrite" are applied (else the engine's default:
 // writes on a user gesture, reads as the engine decides).
 #define LAUFEY_WEBVIEW_CAP_CLIPBOARD (1u << 11)
+// KEY events with "forwarded": false for keydowns the page did not handle.
+#define LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS (1u << 12)
+// "forwardKeys" / webview_set_forward_keys: those keys skip the page and
+// come as KEY events with "forwarded": true.
+#define LAUFEY_WEBVIEW_CAP_FORWARD_KEYS (1u << 13)
+// The app menu's accelerators win over a focused view's page: the item
+// fires and the page never sees the key.
+#define LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS (1u << 14)
 // Bits 24..27: the engine (LAUFEY_WEBVIEW_ENGINE_*), 0 when unsupported.
 #define LAUFEY_WEBVIEW_ENGINE_SHIFT 24
 #define LAUFEY_WEBVIEW_ENGINE_MASK (0xfu << 24)
@@ -1288,6 +1296,14 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 //               none)
 #define LAUFEY_WEBVIEW_EVENT_FIND_RESULT 8
 #define LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU 9
+//   KEY         {"type": "keydown", "key", "code" (DOM KeyboardEvent names),
+//               "altKey", "ctrlKey", "metaKey", "shiftKey", "repeat",
+//               "forwarded": bool}: "forwarded" true for a key matching the
+//               view's "forwardKeys" (the page never got it), false for a
+//               keydown the page did not handle (where
+//               LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS is reported). "metaKey" is
+//               Command on macOS, the Windows / Super key elsewhere.
+#define LAUFEY_WEBVIEW_EVENT_KEY 10
 
 // webview_find flags.
 #define LAUFEY_WEBVIEW_FIND_FORWARD (1u << 0)
@@ -3126,6 +3142,12 @@ struct laufey_backend_api {
   //   "clipboardRead"  bool (default false): the page may read the clipboard
   //   "clipboardWrite" bool (default true): the page may write it on a user
   //                  gesture (false: never)
+  //   "forwardKeys"  array of accelerator strings ("CmdOrCtrl+1",
+  //                  "Meta+Shift+L"; the menu / global shortcut syntax, at
+  //                  most 64 entries of at most 64 characters): while the
+  //                  view has the focus, those keys skip the page and come as
+  //                  KEY events ("forwarded": true). The app menu's
+  //                  accelerators still win. LAUFEY_WEBVIEW_CAP_FORWARD_KEYS.
   // Returns the web view id (> 0), or 0 with `*status_out` set (OK on
   // success): UNSUPPORTED, INVALID, NOT_ALLOWED_URL, NO_WINDOW, LIMIT,
   // FAILED. `on_event` receives the view's events, starting after this call
@@ -3213,6 +3235,13 @@ struct laufey_backend_api {
   // Print the view's page with the OS print dialog (LAUFEY_WEBVIEW_CAP_PRINT).
   // False for an unknown id. Any thread.
   bool (*webview_print)(void* backend_data, uint32_t webview_id);
+
+  // Replace the view's "forwardKeys" (`keys_json`: a JSON array of
+  // accelerator strings, as in create_webview; [] clears them). False for an
+  // unknown id, invalid keys, or where LAUFEY_WEBVIEW_CAP_FORWARD_KEYS is not
+  // reported. Any thread.
+  bool (*webview_set_forward_keys)(void* backend_data, uint32_t webview_id,
+                                   const char* keys_json);
 };
 
 #ifdef __cplusplus

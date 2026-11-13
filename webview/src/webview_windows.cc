@@ -507,6 +507,8 @@ class WebView2Backend : public LaufeyBackend {
                       double scale, laufey_webview_capture_fn callback,
                       void* user_data) override;
   bool WebViewClose(uint32_t webview_id) override;
+  bool WebViewSetForwardKeys(uint32_t webview_id,
+                             const std::vector<std::string>& keys) override;
   bool WebViewRestack(uint32_t window_id,
                       const std::vector<uint32_t>& bottom_to_top) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
@@ -3401,6 +3403,14 @@ void WebView2Backend::WebViewCapture(uint32_t webview_id, int32_t format,
 bool WebView2Backend::WebViewClose(uint32_t webview_id) {
   bool ok = false;
   RunOnUiThreadSync([&] { ok = laufey_child_webview_win::Close(webview_id); });
+  return ok;
+}
+
+bool WebView2Backend::WebViewSetForwardKeys(
+    uint32_t webview_id, const std::vector<std::string>& keys) {
+  bool ok = false;
+  RunOnUiThreadSync(
+      [&] { ok = laufey_child_webview_win::SetForwardKeys(webview_id, keys); });
   return ok;
 }
 

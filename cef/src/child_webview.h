@@ -58,6 +58,8 @@ bool Find(uint32_t id, const std::string& text, uint32_t flags);
 bool StopFind(uint32_t id);
 int32_t OpenDevTools(uint32_t id);
 bool Print(uint32_t id);
+// Replaces the view's "forwardKeys" (canonical forms).
+bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
 
@@ -74,6 +76,9 @@ uint32_t LaufeyShowMessageDialogForWindow(
 // (each a browser's NSView) above the window `window_id`, bottom to top.
 bool LaufeyCefRestackOverlaysMac(uint32_t window_id,
                                  const std::vector<void*>& browser_views);
+// runtime_loader_mac.mm: [NSApp.mainMenu performKeyEquivalent:] for
+// `ns_event` (an NSEvent*); true when a menu item took it.
+bool LaufeyCefMainMenuKeyEquivalentMac(void* ns_event);
 #endif
 
 #endif  // LAUFEY_CEF_CHILD_WEBVIEW_H_

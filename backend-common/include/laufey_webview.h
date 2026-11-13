@@ -16,6 +16,9 @@
 //   - kWebViewEvalWrapper / WebViewEvalScript: the script engines without a
 //     protocol-level evaluate run (WKWebView, WebKitGTK), and
 //     ParseWebViewEvalEnvelope, which reads its answer back.
+//   - Keys: ParseWebViewForwardKeys ("forwardKeys", accelerator strings),
+//     WebViewKeyAccelerator / WebViewKeyMatches (a keydown, as DOM `code` and
+//     modifiers, against them) and the KEY event's JSON.
 //   - WebViewSinks: id allocation, each view's window and event sink, the
 //     per-window limit, and the exactly-once CLOSED.
 
@@ -30,6 +33,7 @@
 #include <vector>
 
 #include "laufey.h"
+#include "laufey_system.h"
 
 namespace laufey_common {
 
@@ -54,11 +58,27 @@ struct WebViewOptions {
   WebViewPopups popups = WebViewPopups::kSameView;
   WebViewDownloads downloads = WebViewDownloads::kDeny;
   WebViewPermissions permissions = WebViewPermissions::kDeny;
-  std::string user_agent;  // empty: the engine's own
+  std::string user_agent;         // empty: the engine's own
   bool app_context_menu = false;  // "contextMenu": "app"
   bool clipboard_read = false;
   bool clipboard_write = true;  // on a user gesture
+  // "forwardKeys", each in its canonical form (CanonicalAccelerator).
+  std::vector<std::string> forward_keys;
 };
+
+// "forwardKeys" limits: entries, and characters per entry.
+constexpr size_t kMaxWebViewForwardKeys = 64;
+constexpr size_t kMaxWebViewForwardKeyLength = 64;
+
+// Parses webview_set_forward_keys' JSON array of accelerator strings (the
+// menu / global shortcut syntax, ParseAccelerator; CmdOrCtrl is Command on
+// macOS, Ctrl elsewhere) into their canonical forms, duplicates dropped.
+// LAUFEY_WEBVIEW_OK or LAUFEY_WEBVIEW_INVALID (not an array of strings, more
+// than kMaxWebViewForwardKeys entries, one longer than
+// kMaxWebViewForwardKeyLength or not an accelerator; `error` says which).
+int32_t ParseWebViewForwardKeys(const std::string& json_array,
+                                std::vector<std::string>* out,
+                                std::string* error);
 
 // Parses and validates create_webview's options. Returns LAUFEY_WEBVIEW_OK,
 // LAUFEY_WEBVIEW_INVALID (bad JSON, a missing / mistyped / unknown-valued
@@ -125,6 +145,32 @@ struct WebViewContextMenuFields {
                                      // "plugin"; nullptr: left out
 };
 std::string WebViewContextMenuJson(const WebViewContextMenuFields& f);
+
+// The KEY event: a keydown matching "forwardKeys" (`forwarded`) or one the
+// page did not handle.
+struct WebViewKeyFields {
+  std::string key;   // DOM KeyboardEvent.key
+  std::string code;  // DOM KeyboardEvent.code
+  bool alt_key = false;
+  bool ctrl_key = false;
+  bool meta_key = false;  // Command on macOS, the Windows / Super key elsewhere
+  bool shift_key = false;
+  bool repeat = false;
+  bool forwarded = false;
+};
+std::string WebViewKeyJson(const WebViewKeyFields& f);
+
+// The accelerator a keydown is (its DOM `code` names the physical key, as
+// accelerators do; `meta` is kModSuper), or false when the code names no
+// accelerator key (a modifier, an unmapped key, "Unidentified").
+bool WebViewKeyAccelerator(const std::string& code, bool alt, bool ctrl,
+                           bool meta, bool shift, Accelerator* out);
+
+// Whether that keydown is one of `forward_keys` (canonical forms, as
+// ParseWebViewForwardKeys returns them).
+bool WebViewKeyMatches(const std::vector<std::string>& forward_keys,
+                       const std::string& code, bool alt, bool ctrl, bool meta,
+                       bool shift);
 
 // Zoom factors webview_set_zoom accepts.
 bool IsValidWebViewZoom(double factor);

@@ -41,6 +41,8 @@ void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
 // Orders the window's views bottom to top.
 bool Restack(const std::vector<uint32_t>& bottom_to_top);
 bool Close(uint32_t id);
+// Replaces the view's "forwardKeys" (canonical forms).
+bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
 

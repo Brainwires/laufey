@@ -379,6 +379,101 @@ static void TestHandleAdditions() {
   EXPECT(LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU == 9);
 }
 
+static void TestKeys() {
+  EXPECT(LAUFEY_WEBVIEW_EVENT_KEY == 10);
+  EXPECT(LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS == (1u << 12));
+  EXPECT(LAUFEY_WEBVIEW_CAP_FORWARD_KEYS == (1u << 13));
+  EXPECT(LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS == (1u << 14));
+  WebViewOptions o;
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1})",
+               &o) == LAUFEY_WEBVIEW_OK);
+  EXPECT(o.forward_keys.empty());
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1,)"
+               R"("forwardKeys":["ctrl+shift+l","Shift+Ctrl+L","F5",)"
+               R"("Meta+1","CmdOrCtrl+T"]})",
+               &o) == LAUFEY_WEBVIEW_OK);
+#ifdef __APPLE__
+  const char* cmd_t = "Super+T";
+#else
+  const char* cmd_t = "Ctrl+T";
+#endif
+  EXPECT((o.forward_keys ==
+          std::vector<std::string>{"Ctrl+Shift+L", "F5", "Super+1", cmd_t}));
+  for (const char* bad :
+       {R"("forwardKeys":"Ctrl+L")", R"("forwardKeys":[1])",
+        R"("forwardKeys":["Ctrl+Nope"])", R"("forwardKeys":["Ctrl+"])",
+        R"("forwardKeys":["Ctrl+A+B"])"}) {
+    std::string e;
+    EXPECT(Parse(std::string(R"({"url":"https://a/","x":0,"y":0,"width":1,)"
+                             R"("height":1,)") +
+                     bad + "}",
+                 &o, &e) == LAUFEY_WEBVIEW_INVALID);
+    EXPECT(!e.empty());
+  }
+  // At most 64 entries of at most 64 characters.
+  std::string many = "[";
+  for (int i = 0; i < 65; ++i)
+    many += std::string(i ? "," : "") + "\"Ctrl+A\"";
+  many += "]";
+  std::vector<std::string> keys;
+  std::string error;
+  EXPECT(ParseWebViewForwardKeys(many, &keys, &error) ==
+         LAUFEY_WEBVIEW_INVALID);
+  EXPECT(ParseWebViewForwardKeys("[\"Ctrl+" + std::string(60, ' ') + "A\"]",
+                                 &keys, &error) == LAUFEY_WEBVIEW_INVALID);
+  EXPECT(ParseWebViewForwardKeys("not json", &keys, &error) ==
+         LAUFEY_WEBVIEW_INVALID);
+  EXPECT(ParseWebViewForwardKeys(R"(["Alt+F4","Ctrl+Num5"])", &keys, &error) ==
+         LAUFEY_WEBVIEW_OK);
+  EXPECT((keys == std::vector<std::string>{"Alt+F4", "Ctrl+Num5"}));
+  EXPECT(ParseWebViewForwardKeys("[]", &keys, &error) == LAUFEY_WEBVIEW_OK);
+  EXPECT(keys.empty());
+
+  // A keydown (DOM code + modifiers) against the list.
+  std::vector<std::string> fk = {"Ctrl+Shift+L", "F5",     "Super+1",
+                                 "Ctrl+Num5",    "Ctrl+-", "Alt+Up"};
+  EXPECT(WebViewKeyMatches(fk, "KeyL", false, true, false, true));
+  EXPECT(!WebViewKeyMatches(fk, "KeyL", false, true, false, false));
+  EXPECT(!WebViewKeyMatches(fk, "KeyL", true, true, false, true));
+  EXPECT(WebViewKeyMatches(fk, "F5", false, false, false, false));
+  EXPECT(WebViewKeyMatches(fk, "Digit1", false, false, true, false));
+  EXPECT(!WebViewKeyMatches(fk, "Numpad1", false, false, true, false));
+  EXPECT(WebViewKeyMatches(fk, "Numpad5", false, true, false, false));
+  EXPECT(WebViewKeyMatches(fk, "Minus", false, true, false, false));
+  EXPECT(WebViewKeyMatches(fk, "ArrowUp", true, false, false, false));
+  EXPECT(!WebViewKeyMatches(fk, "ShiftLeft", false, true, false, true));
+  EXPECT(!WebViewKeyMatches(fk, "Unidentified", false, false, false, false));
+  EXPECT(!WebViewKeyMatches({}, "F5", false, false, false, false));
+  Accelerator a;
+  EXPECT(WebViewKeyAccelerator("F24", false, false, false, false, &a) &&
+         CanonicalAccelerator(a) == "F24");
+  EXPECT(!WebViewKeyAccelerator("F25", false, false, false, false, &a));
+  EXPECT(WebViewKeyAccelerator("NumpadEnter", false, false, false, false, &a) &&
+         CanonicalAccelerator(a) == "Enter");
+  EXPECT(WebViewKeyAccelerator("Backquote", true, true, true, true, &a) &&
+         CanonicalAccelerator(a) == "Ctrl+Alt+Shift+Super+`");
+  EXPECT(WebViewKeyAccelerator("AudioVolumeMute", false, false, false, false,
+                               &a) &&
+         CanonicalAccelerator(a) == "VolumeMute");
+
+  WebViewKeyFields k;
+  k.key = "L";
+  k.code = "KeyL";
+  k.ctrl_key = true;
+  k.shift_key = true;
+  k.forwarded = true;
+  EXPECT(WebViewKeyJson(k) ==
+         R"({"type":"keydown","key":"L","code":"KeyL","altKey":false,)"
+         R"("ctrlKey":true,"metaKey":false,"shiftKey":true,"repeat":false,)"
+         R"("forwarded":true})");
+  k.key = "\"";
+  k.forwarded = false;
+  k.repeat = true;
+  EXPECT(WebViewKeyJson(k).find(R"("key":"\"")") != std::string::npos);
+  EXPECT(WebViewKeyJson(k).find(R"("repeat":true,"forwarded":false})") !=
+         std::string::npos);
+}
+
 int main() {
   TestAbiNumbers();
   TestOptionsDefaults();
@@ -391,6 +486,7 @@ int main() {
   TestRegistry();
   TestStacking();
   TestHandleAdditions();
+  TestKeys();
   std::printf("webview_test: ok\n");
   return 0;
 }

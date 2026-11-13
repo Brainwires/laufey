@@ -906,6 +906,12 @@ class LaufeyBackend {
     return LAUFEY_WEBVIEW_UNSUPPORTED;
   }
   virtual bool WebViewPrint(uint32_t /*webview_id*/) { return false; }
+  // LAUFEY_WEBVIEW_CAP_FORWARD_KEYS: replaces the view's "forwardKeys"
+  // (canonical forms; the trampoline parsed them).
+  virtual bool WebViewSetForwardKeys(uint32_t /*webview_id*/,
+                                     const std::vector<std::string>& /*keys*/) {
+    return false;
+  }
   // Puts the window's views in this order, bottom to top (WebViewSinks keeps
   // the z orders; LAUFEY_WEBVIEW_CAP_Z_ORDER backends override it).
   virtual bool WebViewRestack(uint32_t /*window_id*/,

@@ -12,6 +12,17 @@
 // page, placed by the overlay's get-child-position at the view's bounds; the
 // window's navigation guard and will-navigate handler are the page view's
 // signal handlers and never see it.
+//
+// Keys: GtkWindow's own key-press-event activates the window's accelerators
+// (the menu bar's GtkAccelGroup) before it hands the key to the focus
+// widget, so the app menu's accelerators win over the view as over the page.
+// The view's key-press-event handler runs before WebKit's (connected, not
+// after) and takes "forwardKeys". A keydown the page did not handle comes
+// back from WebKit through gtk_main_do_event (PageClientImpl::
+// doneWithKeyEvent) as a copy of the same event (same time, keycode and
+// state); seeing it again is how an unhandled key is told. A button press
+// gives the view the focus (FOCUS) before WebKit's own handler sends the
+// click on.
 
 #include "child_webview_linux.h"
 
@@ -77,6 +88,17 @@ struct ChildView {
   bool open_popup = false;
   // Permission prompts this view has open (closed with it).
   std::vector<GtkWidget*> dialogs;
+  // The last keydown the view's handler saw (WebKit re-sends an unhandled
+  // one), whether it was reported as unhandled, and the key held down (a
+  // press of it again is a repeat).
+  guint32 key_time = 0;
+  guint key_keyval = 0;
+  guint16 key_keycode = 0;
+  guint key_state = 0;
+  bool key_seen = false;
+  bool key_reported = false;
+  bool key_repeat = false;
+  guint16 held_keycode = 0;
 };
 
 // GTK thread only.
@@ -794,6 +816,75 @@ gboolean OnFocusOut(GtkWidget* widget, GdkEventFocus*, gpointer data) {
   return FALSE;
 }
 
+laufey_common::WebViewKeyFields KeyFields(const GdkEventKey* event, bool repeat,
+                                          bool forwarded) {
+  laufey_common::WebViewKeyFields f;
+  f.key = laufey_common::GdkKeyvalToKey(event->keyval);
+  f.code = laufey_common::GdkKeycodeToCode(event->hardware_keycode);
+  f.shift_key = (event->state & GDK_SHIFT_MASK) != 0;
+  f.ctrl_key = (event->state & GDK_CONTROL_MASK) != 0;
+  f.alt_key = (event->state & GDK_MOD1_MASK) != 0;
+  f.meta_key = (event->state & (GDK_MOD4_MASK | GDK_SUPER_MASK)) != 0;
+  f.repeat = repeat;
+  f.forwarded = forwarded;
+  return f;
+}
+
+// Before WebKit's handler (the window's accelerators already had the key):
+// "forwardKeys", or WebKit's re-send of a keydown the page did not handle.
+gboolean OnKeyPress(GtkWidget*, GdkEventKey* event, gpointer data) {
+  ChildView* v = Find(DataId(data));
+  if (!v || event->type != GDK_KEY_PRESS)
+    return FALSE;
+  if (v->key_seen && event->time == v->key_time &&
+      event->keyval == v->key_keyval &&
+      event->hardware_keycode == v->key_keycode &&
+      event->state == v->key_state) {
+    if (!v->key_reported) {
+      v->key_reported = true;
+      Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY,
+           laufey_common::WebViewKeyJson(
+               KeyFields(event, v->key_repeat, false)));
+    }
+    return FALSE;
+  }
+  bool repeat = v->held_keycode == event->hardware_keycode;
+  v->held_keycode = event->hardware_keycode;
+  v->key_seen = true;
+  v->key_reported = false;
+  v->key_time = event->time;
+  v->key_keyval = event->keyval;
+  v->key_keycode = event->hardware_keycode;
+  v->key_state = event->state;
+  v->key_repeat = repeat;
+  laufey_common::WebViewKeyFields f = KeyFields(event, repeat, true);
+  if (!laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
+                                        f.alt_key, f.ctrl_key, f.meta_key,
+                                        f.shift_key))
+    return FALSE;
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+  return TRUE;
+}
+
+gboolean OnKeyRelease(GtkWidget*, GdkEventKey* event, gpointer data) {
+  ChildView* v = Find(DataId(data));
+  if (v && v->held_keycode == event->hardware_keycode)
+    v->held_keycode = 0;
+  return FALSE;
+}
+
+// Before WebKit's handler: the focus (and FOCUS) first, then the click.
+gboolean OnButtonPress(GtkWidget* widget, GdkEventButton* event,
+                       gpointer data) {
+  ChildView* v = Find(DataId(data));
+  if (!v || event->type != GDK_BUTTON_PRESS || v->focused)
+    return FALSE;
+  if (!gtk_widget_is_focus(widget))
+    gtk_widget_grab_focus(widget);
+  NoteFocus(v->id, true);
+  return FALSE;
+}
+
 // --- Console shim
 // -------------------------------------------------------------------
 
@@ -1026,6 +1117,9 @@ uint32_t Capabilities() {
 #if LAUFEY_CHILD_WEBVIEW_EVALUATE
   caps |= LAUFEY_WEBVIEW_CAP_EVALUATE;
 #endif
+  // The window's accelerators come first (GtkWindow); OnKeyPress.
+  caps |= LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
+          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS;
   if (HasPersistentRoot())
     caps |= LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS;
   return caps;
@@ -1088,6 +1182,9 @@ uint32_t Create(uint32_t window_id, void* overlay_ptr,
   g_signal_connect(view, "notify::uri", G_CALLBACK(OnUri), data);
   g_signal_connect(view, "focus-in-event", G_CALLBACK(OnFocusIn), data);
   g_signal_connect(view, "focus-out-event", G_CALLBACK(OnFocusOut), data);
+  g_signal_connect(view, "key-press-event", G_CALLBACK(OnKeyPress), data);
+  g_signal_connect(view, "key-release-event", G_CALLBACK(OnKeyRelease), data);
+  g_signal_connect(view, "button-press-event", G_CALLBACK(OnButtonPress), data);
   g_signal_connect(webkit_web_view_get_back_forward_list(view), "changed",
                    G_CALLBACK(OnBackForwardChanged), data);
 
@@ -1272,6 +1369,14 @@ bool Close(uint32_t id) {
   g_object_unref(v.content_manager);
   g_object_unref(v.overlay);
   WebViewSinks::Instance().Close(id);
+  return true;
+}
+
+bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
+  ChildView* v = Find(id);
+  if (!v)
+    return false;
+  v->options.forward_keys = keys;
   return true;
 }
 

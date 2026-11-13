@@ -1108,6 +1108,8 @@ pub struct LaufeyBackendApi {
   pub webview_open_devtools:
     Option<unsafe extern "C" fn(*mut c_void, u32) -> i32>,
   pub webview_print: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub webview_set_forward_keys:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char) -> bool>,
 }
 
 /// `laufey_webview_event_fn` (API 58).
@@ -2110,6 +2112,7 @@ pub fn create_api_base() -> LaufeyBackendApi {
     webview_stop_find: None,
     webview_open_devtools: None,
     webview_print: None,
+    webview_set_forward_keys: None,
   }
 }
 

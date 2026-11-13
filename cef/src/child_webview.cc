@@ -21,6 +21,14 @@
 // a CefFindHandler; the context menu is reported from OnBeforeContextMenu
 // (and emptied under "contextMenu": "app"); "clipboardRead" answers the
 // clipboard permission prompt.
+//
+// Keys (CefKeyboardHandler): OnPreKeyEvent, before the renderer has a
+// keydown, gives it to the app menu (macOS: [NSApp.mainMenu
+// performKeyEquivalent:] with the os_event; Windows / Linux: the window's Views
+// menu accelerators, views_menu.cc), then to "forwardKeys"; either consumes
+// it. OnKeyEvent hears the keydowns the page did not handle. Focus:
+// OnGotFocus (CefFocusHandler) as the render widget takes the focus, which
+// Chromium does on a mouse press before forwarding it to the renderer.
 
 #include "child_webview.h"
 
@@ -36,14 +44,20 @@
 #include "include/base/cef_callback.h"
 #include "include/cef_devtools_message_observer.h"
 #include "include/cef_find_handler.h"
+#include "include/cef_focus_handler.h"
+#include "include/cef_keyboard_handler.h"
 #include "include/cef_parser.h"
 #include "include/cef_request_context.h"
 #include "include/views/cef_browser_view_delegate.h"
 #include "include/views/cef_overlay_controller.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
+#include "laufey_backend_common.h"
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
+#if defined(_WIN32) || defined(__linux__)
+#include "views_menu.h"
+#endif
 
 namespace laufey_cef_child_webview {
 
@@ -278,6 +292,43 @@ void NoteFocus(uint32_t id, bool focused) {
        laufey_common::WebViewFocusJson(focused));
 }
 
+// A keydown as the KEY event's fields (CEF reports Windows virtual-key codes
+// on every platform: keymap_vk.cc, as the page's keyboard events).
+laufey_common::WebViewKeyFields KeyFields(const CefKeyEvent& event,
+                                          bool forwarded) {
+  laufey_common::WebViewKeyFields f;
+  f.shift_key = (event.modifiers & EVENTFLAG_SHIFT_DOWN) != 0;
+  f.ctrl_key = (event.modifiers & EVENTFLAG_CONTROL_DOWN) != 0;
+  f.alt_key = (event.modifiers & EVENTFLAG_ALT_DOWN) != 0;
+  f.meta_key = (event.modifiers & EVENTFLAG_COMMAND_DOWN) != 0;
+  f.key = laufey_common::VkToKey(event.windows_key_code, event.character,
+                                 f.shift_key, false);
+  f.code = laufey_common::VkToCode(event.windows_key_code, false, 0);
+  f.repeat = (event.modifiers & EVENTFLAG_IS_REPEAT) != 0;
+  f.forwarded = forwarded;
+  return f;
+}
+
+bool IsKeyDown(const CefKeyEvent& event) {
+  return event.type == KEYEVENT_RAWKEYDOWN || event.type == KEYEVENT_KEYDOWN;
+}
+
+// The app menu's accelerator for this keydown, fired; true when one was.
+bool RunMenuAccelerator(ChildView* v, const laufey_common::WebViewKeyFields& f,
+                        CefEventHandle os_event) {
+#if defined(__APPLE__)
+  (void)v;
+  (void)f;
+  return os_event && LaufeyCefMainMenuKeyEquivalentMac(os_event);
+#else
+  (void)os_event;
+  laufey_common::Accelerator accel;
+  return laufey_common::WebViewKeyAccelerator(
+             f.code, f.alt_key, f.ctrl_key, f.meta_key, f.shift_key, &accel) &&
+         laufey_cef_menu::RunAccelerator(v->window_id, accel);
+#endif
+}
+
 void FailPending(ChildView* v, const char* message) {
   auto pending = std::move(v->pending);
   v->pending.clear();
@@ -445,6 +496,8 @@ class ChildClient : public CefClient,
                     public CefPermissionHandler,
                     public CefContextMenuHandler,
                     public CefFindHandler,
+                    public CefKeyboardHandler,
+                    public CefFocusHandler,
                     public CefDevToolsMessageObserver {
  public:
   explicit ChildClient(uint32_t id) : id_(id) {}
@@ -471,6 +524,12 @@ class ChildClient : public CefClient,
     return this;
   }
   CefRefPtr<CefFindHandler> GetFindHandler() override {
+    return this;
+  }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override {
+    return this;
+  }
+  CefRefPtr<CefFocusHandler> GetFocusHandler() override {
     return this;
   }
 
@@ -805,6 +864,40 @@ class ChildClient : public CefClient,
          laufey_common::WebViewFindResultJson(count, active_match));
   }
 
+  // --- CefKeyboardHandler ---
+
+  // Before the renderer: the app menu, then "forwardKeys" (consumed).
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser>, const CefKeyEvent& event,
+                     CefEventHandle os_event, bool*) override {
+    ChildView* v = Find(id_);
+    if (!v || !IsKeyDown(event))
+      return false;
+    laufey_common::WebViewKeyFields f = KeyFields(event, true);
+    if (RunMenuAccelerator(v, f, os_event))
+      return true;
+    if (!laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
+                                          f.alt_key, f.ctrl_key, f.meta_key,
+                                          f.shift_key))
+      return false;
+    Emit(id_, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+    return true;
+  }
+
+  // A keydown the page did not handle (not prevented, no editor used it).
+  bool OnKeyEvent(CefRefPtr<CefBrowser>, const CefKeyEvent& event,
+                  CefEventHandle) override {
+    if (Find(id_) && IsKeyDown(event))
+      Emit(id_, LAUFEY_WEBVIEW_EVENT_KEY,
+           laufey_common::WebViewKeyJson(KeyFields(event, false)));
+    return false;
+  }
+
+  // --- CefFocusHandler ---
+
+  void OnGotFocus(CefRefPtr<CefBrowser>) override {
+    NoteFocus(id_, true);
+  }
+
   // --- CefDevToolsMessageObserver ---
 
   void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int message_id,
@@ -921,6 +1014,9 @@ void EvalSerialize(uint32_t id, int context_id,
 
 uint32_t Capabilities() {
   return LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_CAPTURE |
+         // CefKeyboardHandler (ChildClient).
+         LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
+         LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS |
          LAUFEY_WEBVIEW_CAP_EVALUATE | LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
          LAUFEY_WEBVIEW_CAP_ZOOM | LAUFEY_WEBVIEW_CAP_FIND |
          LAUFEY_WEBVIEW_CAP_DEVTOOLS | LAUFEY_WEBVIEW_CAP_CONTEXT_MENU |
@@ -1349,6 +1445,15 @@ int32_t OpenDevTools(uint32_t id) {
   }
   ShowDevToolsFor(v->browser);
   return LAUFEY_WEBVIEW_OK;
+}
+
+bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
+  CEF_REQUIRE_UI_THREAD();
+  ChildView* v = Find(id);
+  if (!v)
+    return false;
+  v->options.forward_keys = keys;
+  return true;
 }
 
 bool Print(uint32_t id) {

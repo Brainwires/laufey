@@ -89,6 +89,19 @@ impl WebViewCapabilities {
   pub fn clipboard(&self) -> bool {
     self.has(ffi::LAUFEY_WEBVIEW_CAP_CLIPBOARD)
   }
+  /// The app menu's accelerators win over a focused view's page.
+  pub fn menu_accelerators(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS)
+  }
+  /// [`WebViewEventKind::Key`] events with `"forwarded": false` for keydowns
+  /// the page did not handle.
+  pub fn unhandled_keys(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS)
+  }
+  /// `forward_keys` / [`WebView::set_forward_keys`].
+  pub fn forward_keys(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_FORWARD_KEYS)
+  }
   /// The engine, `None` when unsupported.
   pub fn engine(&self) -> Option<WebViewEngine> {
     let raw = (self.0 & ffi::LAUFEY_WEBVIEW_ENGINE_MASK)
@@ -152,6 +165,16 @@ pub struct WebViewOptions {
   pub clipboard_read: Option<bool>,
   /// Default `true` (on a user gesture).
   pub clipboard_write: Option<bool>,
+  /// Accelerators (`"CmdOrCtrl+1"`, `"Meta+Shift+L"`; at most 64 of at most
+  /// 64 characters) that skip the page and come as
+  /// [`WebViewEventKind::Key`] events (`"forwarded": true`).
+  pub forward_keys: Option<Vec<String>>,
+}
+
+/// A JSON array of strings.
+fn json_string_array(items: &[String]) -> String {
+  let items: Vec<String> = items.iter().map(|s| json_string(s)).collect();
+  format!("[{}]", items.join(","))
 }
 
 fn json_string(s: &str) -> String {
@@ -210,6 +233,9 @@ impl WebViewOptions {
         parts.push(format!("\"{key}\":{v}"));
       }
     }
+    if let Some(keys) = &self.forward_keys {
+      parts.push(format!("\"forwardKeys\":{}", json_string_array(keys)));
+    }
     format!("{{{}}}", parts.join(","))
   }
 }
@@ -226,6 +252,7 @@ pub enum WebViewEventKind {
   Closed,
   FindResult,
   ContextMenu,
+  Key,
 }
 
 impl WebViewEventKind {
@@ -240,12 +267,14 @@ impl WebViewEventKind {
       ffi::LAUFEY_WEBVIEW_EVENT_CLOSED => WebViewEventKind::Closed,
       ffi::LAUFEY_WEBVIEW_EVENT_FIND_RESULT => WebViewEventKind::FindResult,
       ffi::LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU => WebViewEventKind::ContextMenu,
+      ffi::LAUFEY_WEBVIEW_EVENT_KEY => WebViewEventKind::Key,
       _ => return None,
     })
   }
 
   /// `"title"`, `"url"`, `"load"`, `"console"`, `"focus-change"`,
-  /// `"new-window"`, `"closed"`, `"find-result"` or `"context-menu"`.
+  /// `"new-window"`, `"closed"`, `"find-result"`, `"context-menu"` or
+  /// `"key"`.
   pub fn name(&self) -> &'static str {
     match self {
       WebViewEventKind::Title => "title",
@@ -257,6 +286,7 @@ impl WebViewEventKind {
       WebViewEventKind::Closed => "closed",
       WebViewEventKind::FindResult => "find-result",
       WebViewEventKind::ContextMenu => "context-menu",
+      WebViewEventKind::Key => "key",
     }
   }
 }
@@ -672,6 +702,12 @@ impl WebView {
     }
   }
 
+  /// Replace the view's forward keys (`forward_keys`; empty clears them).
+  /// False where unsupported, closed, or for an invalid accelerator.
+  pub fn set_forward_keys(&self, keys: &[String]) -> bool {
+    set_forward_keys_with(api(), self.id, keys)
+  }
+
   /// Its state as JSON (`webview_state` in laufey.h); `None` when closed.
   pub fn state(&self) -> Option<String> {
     let api = api();
@@ -711,6 +747,20 @@ impl WebView {
       None => false,
     }
   }
+}
+
+fn set_forward_keys_with(
+  api: &LaufeyBackendApi,
+  id: u32,
+  keys: &[String],
+) -> bool {
+  let (Some(f), Ok(json)) = (
+    api.webview_set_forward_keys,
+    CString::new(json_string_array(keys)),
+  ) else {
+    return false;
+  };
+  unsafe { f(api.backend_data, id, json.as_ptr()) }
 }
 
 fn navigate_with(
@@ -888,10 +938,42 @@ mod tests {
       context_menu: Some("app".into()),
       clipboard_read: Some(true),
       clipboard_write: None,
+      forward_keys: Some(vec!["CmdOrCtrl+1".into(), "Meta+\"".into()]),
     };
     assert_eq!(
       opts.to_json(),
-      r#"{"url":"https://a.example/\"q\"","x":1,"y":2.5,"width":300,"height":null,"partition":"ephemeral:x","allowPopups":"deny","permissions":"ask","userAgent":"UA","contextMenu":"app","visible":false,"clipboardRead":true}"#
+      r#"{"url":"https://a.example/\"q\"","x":1,"y":2.5,"width":300,"height":null,"partition":"ephemeral:x","allowPopups":"deny","permissions":"ask","userAgent":"UA","contextMenu":"app","visible":false,"clipboardRead":true,"forwardKeys":["CmdOrCtrl+1","Meta+\""]}"#
+    );
+  }
+
+  unsafe extern "C" fn fake_set_forward_keys(
+    _: *mut c_void,
+    id: u32,
+    keys: *const c_char,
+  ) -> bool {
+    let keys = unsafe { CStr::from_ptr(keys) }.to_str().unwrap();
+    id == 4 && keys == r#"["Ctrl+L","F5"]"#
+  }
+
+  #[test]
+  fn set_forward_keys_sends_a_json_array() {
+    let mut api: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    let keys = vec!["Ctrl+L".to_string(), "F5".to_string()];
+    assert!(!set_forward_keys_with(&api, 4, &keys), "unsupported");
+    api.webview_set_forward_keys = Some(fake_set_forward_keys);
+    assert!(set_forward_keys_with(&api, 4, &keys));
+    assert!(!set_forward_keys_with(&api, 5, &keys));
+    assert!(!set_forward_keys_with(&api, 4, &["Ctrl+\0".to_string()]));
+    let caps = WebViewCapabilities(
+      ffi::LAUFEY_WEBVIEW_CAP_FORWARD_KEYS
+        | ffi::LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS,
+    );
+    assert!(caps.forward_keys() && caps.menu_accelerators());
+    assert!(!caps.unhandled_keys());
+    assert_eq!(
+      WebViewEventKind::from_raw(ffi::LAUFEY_WEBVIEW_EVENT_KEY as i32)
+        .map(|k| k.name()),
+      Some("key")
     );
   }
 

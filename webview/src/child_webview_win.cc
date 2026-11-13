@@ -23,6 +23,17 @@
 // world made with Page.createIsolatedWorld (no page CSP applies), and
 // Page.captureScreenshot. Console messages come from Runtime.consoleAPICalled
 // and Runtime.exceptionThrown.
+//
+// Keys: the controller's AcceleratorKeyPressed gives the app menu's
+// accelerators the key first (win32_menu::HandleAcceleratorKey, as the page's
+// controller does), then "forwardKeys"; either marks it handled. WebView2
+// raises it only for "accelerator" keys (Ctrl or Alt held, a key that types no
+// character, Escape), so a forward key that types a character with no Ctrl /
+// Alt (Shift+L, Meta+L) reaches the page. WebView2 tells nothing of the keys
+// the page did not handle (no LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS). Focus: a
+// mouse button pressed in the view's windows notifies its host
+// (WM_PARENTNOTIFY) as the press is dispatched, which reports FOCUS ahead of
+// the controller's GotFocus.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -51,6 +62,7 @@
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_notifications.h"
+#include <win32_menu.h>
 
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
@@ -573,6 +585,20 @@ void EvalSerialize(uint32_t id, int context_id, const laufey::ValuePtr& remote,
 
 LRESULT CALLBACK HostWindowProc(HWND hwnd, UINT msg, WPARAM wParam,
                                 LPARAM lParam) {
+  // A button pressed in the web view's windows: the view takes the focus
+  // with the press, so FOCUS goes out before the page has the click.
+  if (msg == WM_PARENTNOTIFY) {
+    UINT event = LOWORD(wParam);
+    if (event == WM_LBUTTONDOWN || event == WM_MBUTTONDOWN ||
+        event == WM_RBUTTONDOWN || event == WM_XBUTTONDOWN) {
+      for (auto& kv : Views()) {
+        if (kv.second->host == hwnd) {
+          NoteFocus(kv.first, true);
+          break;
+        }
+      }
+    }
+  }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
@@ -712,6 +738,45 @@ void SubscribeConsole(ChildView* v) {
             .Get(),
         &v->exception_token);
   }
+}
+
+// The controller's AcceleratorKeyPressed: the app menu, then "forwardKeys".
+void OnAcceleratorKey(uint32_t id,
+                      ICoreWebView2AcceleratorKeyPressedEventArgs* args) {
+  ChildView* v = Find(id);
+  COREWEBVIEW2_KEY_EVENT_KIND kind;
+  UINT key = 0;
+  if (!v || FAILED(args->get_KeyEventKind(&kind)) ||
+      FAILED(args->get_VirtualKey(&key)))
+    return;
+  if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN &&
+      kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+    return;
+  if (win32_menu::HandleAcceleratorKey(GetAncestor(v->parent, GA_ROOT), key)) {
+    args->put_Handled(TRUE);
+    return;
+  }
+  if (v->options.forward_keys.empty())
+    return;
+  COREWEBVIEW2_PHYSICAL_KEY_STATUS status = {};
+  args->get_PhysicalKeyStatus(&status);
+  laufey_common::WebViewKeyFields f;
+  f.shift_key = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+  f.ctrl_key = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+  f.alt_key = (GetKeyState(VK_MENU) & 0x8000) != 0;
+  f.meta_key = ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) != 0;
+  f.key = laufey_common::VkToKey(static_cast<int>(key), 0, f.shift_key,
+                                 (GetKeyState(VK_CAPITAL) & 1) != 0);
+  f.code = laufey_common::VkToCode(
+      static_cast<int>(key), status.IsExtendedKey != FALSE, status.ScanCode);
+  f.repeat = status.WasKeyDown != FALSE;
+  f.forwarded = true;
+  if (!laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
+                                        f.alt_key, f.ctrl_key, f.meta_key,
+                                        f.shift_key))
+    return;
+  args->put_Handled(TRUE);
+  Emit(id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
 }
 
 // The view's settings and event handlers, before its first navigation.
@@ -981,6 +1046,15 @@ void Configure(ChildView* view) {
           .Get(),
       nullptr);
 
+  view->controller->add_AcceleratorKeyPressed(
+      Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+          [id](ICoreWebView2Controller*,
+               ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+            OnAcceleratorKey(id, args);
+            return S_OK;
+          })
+          .Get(),
+      nullptr);
   view->controller->add_GotFocus(
       Callback<ICoreWebView2FocusChangedEventHandler>(
           [id](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
@@ -1077,6 +1151,9 @@ uint32_t Capabilities() {
     return 0;
   return LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_CAPTURE |
          LAUFEY_WEBVIEW_CAP_EVALUATE | LAUFEY_WEBVIEW_CAP_Z_ORDER |
+         // AcceleratorKeyPressed (OnAcceleratorKey).
+         LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
+         LAUFEY_WEBVIEW_CAP_FORWARD_KEYS |
          LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS |
          LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
          (LAUFEY_WEBVIEW_ENGINE_WEBVIEW2 << LAUFEY_WEBVIEW_ENGINE_SHIFT);
@@ -1469,6 +1546,14 @@ bool Close(uint32_t id) {
   if (v->host)
     DestroyWindow(v->host);
   WebViewSinks::Instance().Close(id);
+  return true;
+}
+
+bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
+  ChildView* v = Find(id);
+  if (!v)
+    return false;
+  v->options.forward_keys = keys;
   return true;
 }
 

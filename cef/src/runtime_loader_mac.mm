@@ -925,3 +925,13 @@ bool LaufeyCefRestackOverlaysMac(uint32_t window_id,
   }
   return all;
 }
+
+// A child web view's keydown (child_webview.cc OnPreKeyEvent): the app's main
+// menu sees it before the page, as a key equivalent.
+bool LaufeyCefMainMenuKeyEquivalentMac(void* ns_event) {
+  NSEvent* event = (__bridge NSEvent*)ns_event;
+  if (![event isKindOfClass:[NSEvent class]] ||
+      event.type != NSEventTypeKeyDown)
+    return false;
+  return [[NSApp mainMenu] performKeyEquivalent:event];
+}

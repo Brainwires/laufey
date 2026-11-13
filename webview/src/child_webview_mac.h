@@ -50,6 +50,8 @@ bool StopFindInPage(uint32_t id);
 int32_t OpenDevTools(uint32_t id);
 // The OS print dialog, as a sheet on the window (returns once it started).
 bool Print(uint32_t id);
+// Replaces the view's "forwardKeys" (canonical forms).
+bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
 

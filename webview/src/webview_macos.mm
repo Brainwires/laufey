@@ -431,6 +431,8 @@ class WKWebViewBackend : public LaufeyBackend {
   bool WebViewStopFind(uint32_t webview_id) override;
   int32_t WebViewOpenDevTools(uint32_t webview_id) override;
   bool WebViewPrint(uint32_t webview_id) override;
+  bool WebViewSetForwardKeys(uint32_t webview_id,
+                             const std::vector<std::string>& keys) override;
   bool WebViewRestack(uint32_t window_id,
                       const std::vector<uint32_t>& bottom_to_top) override;
   bool SetWindowTrafficLightPosition(uint32_t window_id, int x, int y) override;
@@ -2572,6 +2574,16 @@ bool WKWebViewBackend::WebViewPrint(uint32_t webview_id) {
   __block bool ok = false;
   laufey_common::RunOnMainSync(^{
     ok = laufey_child_webview_mac::Print(webview_id);
+  });
+  return ok;
+}
+
+bool WKWebViewBackend::WebViewSetForwardKeys(
+    uint32_t webview_id, const std::vector<std::string>& keys) {
+  __block bool ok = false;
+  std::vector<std::string> copy = keys;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::SetForwardKeys(webview_id, copy);
   });
   return ok;
 }

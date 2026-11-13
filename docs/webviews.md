@@ -24,13 +24,13 @@ view.navigate("https://github.com/denoland")?;
 
 ## Engines
 
-| Backend                     | Engine                                                                                  | Capabilities                                                                                                                                                                |
-| --------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CEF                         | An Alloy-style `CefBrowserView` added with `CefWindow::AddOverlayView` (custom docking) | everything; persistent partitions when the app's profile is on disk                                                                                                         |
-| WebView, macOS              | A second `WKWebView`, a subview of the window's page view                               | everything; persistent partitions on macOS 14+ (`WKWebsiteDataStore` per partition), permission prompts on macOS 12+                                                        |
-| WebView, Windows (WebView2) | A second `ICoreWebView2Controller` in a host window above the page's controller         | everything but zoom, find, DevTools, context menu, print and clipboard (below), on a runtime with profiles (`ICoreWebView2Environment10`; else `webview_capabilities` is 0) |
-| WebView, Linux (WebKitGTK)  | A second `WebKitWebView`, a child of the `GtkOverlay` that holds the window's page view | everything but zoom, find, DevTools, context menu, print and clipboard (below); persistent partitions when the app has a data directory, evaluate on WebKitGTK 2.40+        |
-| Winit                       | None (the entry points are NULL)                                                        |                                                                                                                                                                             |
+| Backend                     | Engine                                                                                  | Capabilities                                                                                                                                                                                |
+| --------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CEF                         | An Alloy-style `CefBrowserView` added with `CefWindow::AddOverlayView` (custom docking) | everything; persistent partitions when the app's profile is on disk                                                                                                                         |
+| WebView, macOS              | A second `WKWebView`, a subview of the window's page view                               | everything; persistent partitions on macOS 14+ (`WKWebsiteDataStore` per partition), permission prompts on macOS 12+                                                                        |
+| WebView, Windows (WebView2) | A second `ICoreWebView2Controller` in a host window above the page's controller         | everything but zoom, find, DevTools, context menu, print, clipboard and unhandled keys (below), on a runtime with profiles (`ICoreWebView2Environment10`; else `webview_capabilities` is 0) |
+| WebView, Linux (WebKitGTK)  | A second `WebKitWebView`, a child of the `GtkOverlay` that holds the window's page view | everything but zoom, find, DevTools, context menu, print and clipboard (below); persistent partitions when the app has a data directory, evaluate on WebKitGTK 2.40+                        |
+| Winit                       | None (the entry points are NULL)                                                        |                                                                                                                                                                                             |
 
 `webview_capabilities` reports `LAUFEY_WEBVIEW_CAP_*` and the engine (bits
 24–27). On a backend without web views `create_webview` answers
@@ -189,3 +189,43 @@ of them yet.
   without WebKit's Paste callout. The shim is best effort: a frame it does not
   reach, or a page that finds another realm's untouched clipboard, gets around
   it.
+
+## Keys and focus
+
+While a web view has the keyboard focus, its keys go in this order:
+
+1. **The app menu's accelerators** (the app menu, the window's menu bar and its
+   Window items: ⌘W, ⌘T, ⌘N, ...). A key matching one fires the item and the
+   page never sees it, as in a browser (`LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS`).
+2. **`forwardKeys`**: accelerators in the menu / global shortcut syntax
+   (`"CmdOrCtrl+1"`, `"Meta+Shift+L"`; `CmdOrCtrl` is Command on macOS, Ctrl
+   elsewhere; at most 64 entries of at most 64 characters, an invalid one is
+   `LAUFEY_WEBVIEW_INVALID`), set at creation or with
+   `webview_set_forward_keys`. A matching keydown skips the page and comes as a
+   `KEY` event with `"forwarded": true` (`LAUFEY_WEBVIEW_CAP_FORWARD_KEYS`).
+   Keys are matched by the physical key (DOM `code`), as accelerators are.
+3. **The page.** A keydown it did not handle (not `preventDefault`ed, no
+   editable used it) comes afterwards as a `KEY` event with `"forwarded": false`
+   where `LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS` is reported.
+
+`KEY` carries DOM `KeyboardEvent` names (`key`, `code`) and `altKey` / `ctrlKey`
+/ `metaKey` (Command on macOS, the Windows / Super key elsewhere) / `shiftKey` /
+`repeat`, mapped by the same tables as the window's own keyboard events
+(keymap_mac.mm, keymap_vk.cc, keymap_gdk.cc).
+
+A mouse-down in a view that does not have the focus reports `FOCUS`
+`{"focused":true}` before the page has the click, and the click still reaches
+the page (no lost first click).
+
+| Engine    | Menu accelerators                                                                                                                         | `forwardKeys`                                                                                                                                                                                                                  | Unhandled keys                                                                                                                                            | Focus before the click                                                                                                                         |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| WKWebView | the view's `performKeyEquivalent:` / `keyDown:` ask `[NSApp.mainMenu performKeyEquivalent:]` first                                        | the same overrides, after the menu                                                                                                                                                                                             | WebKit re-sends a keydown the page did not handle as the same `NSEvent` through `NSApp`; the view seeing it again reports it                              | `mouseDown:` makes the view the first responder before WebKit has the click; `acceptsFirstMouse:` is YES                                       |
+| CEF       | `OnPreKeyEvent`: macOS `[NSApp.mainMenu performKeyEquivalent:]` with the `os_event`; Windows / Linux the window's Views menu accelerators | `OnPreKeyEvent`, after the menu                                                                                                                                                                                                | `OnKeyEvent` (Chromium's unhandled keyboard events)                                                                                                       | `OnGotFocus`: Chromium focuses the render widget on a press before forwarding it to the renderer                                               |
+| WebView2  | the child controller's `AcceleratorKeyPressed`, matched against the window's menu accelerators as the page's is                           | `AcceleratorKeyPressed`, which WebView2 raises only for Ctrl / Alt combinations, keys that type no character and Escape: a forward key that types a character without Ctrl or Alt (`Shift+L`, `Meta+L`) still reaches the page | not reported (WebView2 says nothing of the page's handling)                                                                                               | the host window's `WM_PARENTNOTIFY` for a button press in the web view's windows, as the press is dispatched; best effort (`GotFocus` follows) |
+| WebKitGTK | GtkWindow activates the window's accelerators (the menu bar's `GtkAccelGroup`) before the focus widget has the key                        | the view's `key-press-event` handler, run before WebKit's                                                                                                                                                                      | WebKit re-sends an unhandled keydown through `gtk_main_do_event` (a copy of the event: same time, keycode, state); the handler seeing it again reports it | the view's `button-press-event` handler, before WebKit's, takes the focus                                                                      |
+
+The unhandled-key paths on WKWebView and WebKitGTK rest on how WebKit hands an
+unhandled key back to the toolkit (WebKit's `doneWithKeyEvent`), which no API
+documents. On WebView2 the order of `FOCUS` and the page's click is not
+guaranteed: `WM_PARENTNOTIFY` only reaches the host when the web view's own
+windows let it, and `GotFocus` is raised asynchronously.

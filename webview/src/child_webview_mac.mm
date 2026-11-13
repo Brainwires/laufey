@@ -18,6 +18,15 @@
 // "clipboardWrite"). The page can see, fake or get around them; see
 // docs/webviews.md. Find counts matches over document.body.innerText in a
 // content world of its own (WebKit's find answers only found / not found).
+//
+// Keys (LaufeyChildWebView): while the view is the first responder, a key
+// event goes to the app's main menu first (performKeyEquivalent:), then to
+// "forwardKeys", then to the page. A keydown the page did not handle comes
+// back from WebKit as the same NSEvent, re-sent through NSApp (WebViewImpl::
+// doneWithKeyEvent); seeing it a second time is how an unhandled key is told.
+// A left mouse-down makes the view the first responder (FOCUS) before WebKit
+// gets the click, and acceptsFirstMouse: lets the click through to the page
+// in an inactive window.
 
 #import <Cocoa/Cocoa.h>
 #import <ImageIO/ImageIO.h>
@@ -32,6 +41,7 @@
 #include <string>
 #include <vector>
 
+#include "laufey_backend_common.h"
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
 
@@ -42,6 +52,10 @@ using laufey_common::WebViewSinks;
 
 @interface LaufeyChildWebView : WKWebView
 @property(nonatomic, assign) uint32_t laufeyViewId;
+// The last keydown seen (WebKit re-sends an unhandled one as this object)
+// and whether it was reported as unhandled.
+@property(nonatomic, strong) NSEvent* laufeyKeyEvent;
+@property(nonatomic, assign) BOOL laufeyKeyReported;
 @end
 
 namespace {
@@ -415,7 +429,103 @@ bool IsAttachment(NSURLResponse* response) {
 
 }  // namespace
 
+namespace {
+
+// The KEY event's fields for an NSEvent keydown.
+laufey_common::WebViewKeyFields KeyFields(NSEvent* event, bool forwarded) {
+  NSEventModifierFlags flags = event.modifierFlags;
+  laufey_common::WebViewKeyFields f;
+  f.key = laufey_common::NSEventKeyToKey((__bridge void*)event);
+  f.code = laufey_common::NSEventKeyToCode(event.keyCode);
+  f.alt_key = (flags & NSEventModifierFlagOption) != 0;
+  f.ctrl_key = (flags & NSEventModifierFlagControl) != 0;
+  f.meta_key = (flags & NSEventModifierFlagCommand) != 0;
+  f.shift_key = (flags & NSEventModifierFlagShift) != 0;
+  f.repeat = event.isARepeat;
+  f.forwarded = forwarded;
+  return f;
+}
+
+}  // namespace
+
 @implementation LaufeyChildWebView
+
+// Whether the view (or one of its subviews) is its window's first responder.
+- (BOOL)laufeyHasKeyFocus {
+  NSResponder* responder = self.window.firstResponder;
+  return [responder isKindOfClass:[NSView class]] &&
+         [(NSView*)responder isDescendantOf:self];
+}
+
+// A keydown before the page has it: the main menu's key equivalents, then
+// "forwardKeys". YES when one took it. The keydown WebKit took last
+// (laufeyKeyEvent) seen again is its re-send of one the page did not handle
+// (reported once).
+- (BOOL)laufeyPreKeyDown:(NSEvent*)event {
+  if (event.type != NSEventTypeKeyDown || ![self laufeyHasKeyFocus])
+    return NO;
+  if (event == self.laufeyKeyEvent) {
+    if (!self.laufeyKeyReported) {
+      self.laufeyKeyReported = YES;
+      Emit(self.laufeyViewId, LAUFEY_WEBVIEW_EVENT_KEY,
+           laufey_common::WebViewKeyJson(KeyFields(event, false)));
+    }
+    return NO;
+  }
+  if ([[NSApp mainMenu] performKeyEquivalent:event])
+    return YES;
+  ChildView* v = Find(self.laufeyViewId);
+  if (!v)
+    return NO;
+  laufey_common::WebViewKeyFields f = KeyFields(event, true);
+  if (!laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
+                                        f.alt_key, f.ctrl_key, f.meta_key,
+                                        f.shift_key))
+    return NO;
+  Emit(self.laufeyViewId, LAUFEY_WEBVIEW_EVENT_KEY,
+       laufey_common::WebViewKeyJson(f));
+  return YES;
+}
+
+// WebKit took `event` for the page (it answers later; an unhandled one comes
+// back as this same object).
+- (void)laufeyNoteKeyTaken:(NSEvent*)event {
+  if (event.type != NSEventTypeKeyDown || event == self.laufeyKeyEvent)
+    return;
+  self.laufeyKeyEvent = event;
+  self.laufeyKeyReported = NO;
+}
+
+- (BOOL)performKeyEquivalent:(NSEvent*)event {
+  if ([self laufeyPreKeyDown:event])
+    return YES;
+  BOOL handled = [super performKeyEquivalent:event];
+  // YES from WebKit for the first responder: the page has it.
+  if (handled && [self laufeyHasKeyFocus])
+    [self laufeyNoteKeyTaken:event];
+  return handled;
+}
+
+- (void)keyDown:(NSEvent*)event {
+  if ([self laufeyPreKeyDown:event])
+    return;
+  BOOL fresh = event != self.laufeyKeyEvent;
+  [super keyDown:event];
+  if (fresh && [self laufeyHasKeyFocus])
+    [self laufeyNoteKeyTaken:event];
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent*)event {
+  return YES;
+}
+
+- (void)mouseDown:(NSEvent*)event {
+  // The focus (and its FOCUS event) first, then the click goes on to the
+  // page.
+  if (![self laufeyHasKeyFocus])
+    [self.window makeFirstResponder:self];
+  [super mouseDown:event];
+}
 
 - (BOOL)becomeFirstResponder {
   BOOL ok = [super becomeFirstResponder];
@@ -842,6 +952,9 @@ uint32_t Capabilities() {
   if ([WKWebView
           instancesRespondToSelector:NSSelectorFromString(@"_inspector")])
     caps |= LAUFEY_WEBVIEW_CAP_DEVTOOLS;
+  // LaufeyChildWebView's key handling.
+  caps |= LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
+          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS;
   if (HasPersistentStores())
     caps |= LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS;
   if (@available(macOS 12.0, *))
@@ -1298,6 +1411,14 @@ bool Print(uint32_t view_id) {
     return true;
   }
   return false;
+}
+
+bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
+  ChildView* v = Find(id);
+  if (!v)
+    return false;
+  v->options.forward_keys = keys;
+  return true;
 }
 
 void CloseAllForWindow(uint32_t window_id) {

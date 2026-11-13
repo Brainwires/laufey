@@ -1417,6 +1417,19 @@ static bool Backend_WebViewPrint(void* data, uint32_t webview_id) {
   return backend && backend->WebViewPrint(webview_id);
 }
 
+static bool Backend_WebViewSetForwardKeys(void* data, uint32_t webview_id,
+                                          const char* keys_json) {
+  if (!keys_json)
+    return false;
+  std::vector<std::string> keys;
+  std::string error;
+  if (laufey_common::ParseWebViewForwardKeys(keys_json, &keys, &error) !=
+      LAUFEY_WEBVIEW_OK)
+    return false;
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend && backend->WebViewSetForwardKeys(webview_id, keys);
+}
+
 static bool Backend_WebViewSetZOrder(void* data, uint32_t webview_id,
                                      int32_t z_order) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
@@ -2068,6 +2081,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_stop_find = Backend_WebViewStopFind;
   backend_api_.webview_open_devtools = Backend_WebViewOpenDevTools;
   backend_api_.webview_print = Backend_WebViewPrint;
+  backend_api_.webview_set_forward_keys = Backend_WebViewSetForwardKeys;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

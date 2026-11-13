@@ -3660,6 +3660,21 @@ static bool Backend_WebViewPrint(void* /*data*/, uint32_t webview_id) {
   return ok;
 }
 
+static bool Backend_WebViewSetForwardKeys(void* /*data*/, uint32_t webview_id,
+                                          const char* keys_json) {
+  if (!keys_json)
+    return false;
+  std::vector<std::string> keys;
+  std::string error;
+  if (laufey_common::ParseWebViewForwardKeys(keys_json, &keys, &error) !=
+      LAUFEY_WEBVIEW_OK)
+    return false;
+  bool ok = false;
+  cef_invoke_sync(
+      [&] { ok = laufey_cef_child_webview::SetForwardKeys(webview_id, keys); });
+  return ok;
+}
+
 static bool Backend_WebViewSetZOrder(void* /*data*/, uint32_t webview_id,
                                      int32_t z_order) {
   return CefHasZOrder() &&
@@ -4001,6 +4016,7 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_stop_find = Backend_WebViewStopFind;
   backend_api_.webview_open_devtools = Backend_WebViewOpenDevTools;
   backend_api_.webview_print = Backend_WebViewPrint;
+  backend_api_.webview_set_forward_keys = Backend_WebViewSetForwardKeys;
   backend_api_.set_window_traffic_light_position =
       Backend_SetWindowTrafficLightPosition;
   backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;

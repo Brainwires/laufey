@@ -275,7 +275,8 @@ fn vtable_layout_matches_the_header() {
     webview_find,
     webview_stop_find,
     webview_open_devtools,
-    webview_print
+    webview_print,
+    webview_set_forward_keys
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

@@ -116,6 +116,144 @@ uint64_t Fnv1a64(const std::string& s, uint64_t seed) {
   return h;
 }
 
+#ifdef __APPLE__
+constexpr bool kForMac = true;
+#else
+constexpr bool kForMac = false;
+#endif
+
+// "forwardKeys" (an array of accelerator strings) into canonical forms.
+bool ReadForwardKeys(const JsonValue& value, std::vector<std::string>* out,
+                     std::string* error) {
+  if (value.type != JsonValue::Type::kArray) {
+    *error = "\"forwardKeys\" must be an array of strings";
+    return false;
+  }
+  if (value.array.size() > kMaxWebViewForwardKeys) {
+    *error = "\"forwardKeys\" must have at most " +
+             std::to_string(kMaxWebViewForwardKeys) + " entries";
+    return false;
+  }
+  std::vector<std::string> keys;
+  for (const JsonValue& entry : value.array) {
+    if (entry.type != JsonValue::Type::kString) {
+      *error = "\"forwardKeys\" must be an array of strings";
+      return false;
+    }
+    if (entry.string.size() > kMaxWebViewForwardKeyLength) {
+      *error = "a \"forwardKeys\" entry must be at most " +
+               std::to_string(kMaxWebViewForwardKeyLength) + " characters";
+      return false;
+    }
+    Accelerator accel;
+    std::string why;
+    if (!ParseAccelerator(entry.string, kForMac, &accel, &why)) {
+      *error = "\"forwardKeys\": " + why;
+      return false;
+    }
+    std::string canonical = CanonicalAccelerator(accel);
+    if (std::find(keys.begin(), keys.end(), canonical) == keys.end())
+      keys.push_back(std::move(canonical));
+  }
+  *out = std::move(keys);
+  return true;
+}
+
+// A DOM `code` as an accelerator key (KeyKind / NamedKey).
+bool KeyFromCode(const std::string& code, Accelerator* a) {
+  if (code.size() == 4 && StartsWith(code, "Key") && code[3] >= 'A' &&
+      code[3] <= 'Z') {
+    a->kind = KeyKind::kLetter;
+    a->ch = code[3];
+    return true;
+  }
+  if (code.size() == 6 && StartsWith(code, "Digit") && code[5] >= '0' &&
+      code[5] <= '9') {
+    a->kind = KeyKind::kDigit;
+    a->ch = code[5];
+    return true;
+  }
+  if (code.size() == 7 && StartsWith(code, "Numpad") && code[6] >= '0' &&
+      code[6] <= '9') {
+    a->kind = KeyKind::kNumpad;
+    a->number = code[6] - '0';
+    a->named = NamedKey::kNone;
+    return true;
+  }
+  if (code.size() >= 2 && code.size() <= 3 && code[0] == 'F' &&
+      code[1] >= '1' && code[1] <= '9') {
+    int n = code[1] - '0';
+    if (code.size() == 3) {
+      if (code[2] < '0' || code[2] > '9')
+        return false;
+      n = n * 10 + (code[2] - '0');
+    }
+    if (n > 24)
+      return false;
+    a->kind = KeyKind::kFunction;
+    a->number = n;
+    return true;
+  }
+  static const struct {
+    const char* code;
+    char ch;
+  } kPunct[] = {
+      {"Minus", '-'},        {"Equal", '='},      {"BracketLeft", '['},
+      {"BracketRight", ']'}, {"Backslash", '\\'}, {"Semicolon", ';'},
+      {"Quote", '\''},       {"Comma", ','},      {"Period", '.'},
+      {"Slash", '/'},        {"Backquote", '`'}};
+  for (const auto& p : kPunct) {
+    if (code == p.code) {
+      a->kind = KeyKind::kPunct;
+      a->ch = p.ch;
+      return true;
+    }
+  }
+  static const struct {
+    const char* code;
+    KeyKind kind;
+    NamedKey key;
+  } kNamed[] = {
+      {"Space", KeyKind::kNamed, NamedKey::kSpace},
+      {"Tab", KeyKind::kNamed, NamedKey::kTab},
+      {"Backspace", KeyKind::kNamed, NamedKey::kBackspace},
+      {"Delete", KeyKind::kNamed, NamedKey::kDelete},
+      {"Insert", KeyKind::kNamed, NamedKey::kInsert},
+      {"Enter", KeyKind::kNamed, NamedKey::kEnter},
+      {"NumpadEnter", KeyKind::kNamed, NamedKey::kEnter},
+      {"Escape", KeyKind::kNamed, NamedKey::kEscape},
+      {"ArrowUp", KeyKind::kNamed, NamedKey::kUp},
+      {"ArrowDown", KeyKind::kNamed, NamedKey::kDown},
+      {"ArrowLeft", KeyKind::kNamed, NamedKey::kLeft},
+      {"ArrowRight", KeyKind::kNamed, NamedKey::kRight},
+      {"Home", KeyKind::kNamed, NamedKey::kHome},
+      {"End", KeyKind::kNamed, NamedKey::kEnd},
+      {"PageUp", KeyKind::kNamed, NamedKey::kPageUp},
+      {"PageDown", KeyKind::kNamed, NamedKey::kPageDown},
+      {"PrintScreen", KeyKind::kNamed, NamedKey::kPrintScreen},
+      {"MediaPlayPause", KeyKind::kNamed, NamedKey::kMediaPlayPause},
+      {"MediaTrackNext", KeyKind::kNamed, NamedKey::kMediaNextTrack},
+      {"MediaTrackPrevious", KeyKind::kNamed, NamedKey::kMediaPreviousTrack},
+      {"MediaStop", KeyKind::kNamed, NamedKey::kMediaStop},
+      {"AudioVolumeUp", KeyKind::kNamed, NamedKey::kVolumeUp},
+      {"AudioVolumeDown", KeyKind::kNamed, NamedKey::kVolumeDown},
+      {"AudioVolumeMute", KeyKind::kNamed, NamedKey::kVolumeMute},
+      {"NumpadDecimal", KeyKind::kNumpad, NamedKey::kNumDecimal},
+      {"NumpadAdd", KeyKind::kNumpad, NamedKey::kNumAdd},
+      {"NumpadSubtract", KeyKind::kNumpad, NamedKey::kNumSubtract},
+      {"NumpadMultiply", KeyKind::kNumpad, NamedKey::kNumMultiply},
+      {"NumpadDivide", KeyKind::kNumpad, NamedKey::kNumDivide},
+  };
+  for (const auto& n : kNamed) {
+    if (code == n.code) {
+      a->kind = n.kind;
+      a->named = n.key;
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 bool IsValidWebViewBounds(double x, double y, double width, double height) {
@@ -294,9 +432,9 @@ int32_t ParseWebViewOptions(const std::string& text, WebViewOptions* out,
       return LAUFEY_WEBVIEW_INVALID;
     }
   }
-  for (auto [key, field] : {std::pair<const char*, bool*>{"clipboardRead",
-                                                          &o.clipboard_read},
-                            {"clipboardWrite", &o.clipboard_write}}) {
+  for (auto [key, field] :
+       {std::pair<const char*, bool*>{"clipboardRead", &o.clipboard_read},
+        {"clipboardWrite", &o.clipboard_write}}) {
     if (const JsonValue* v = Field(root, key)) {
       if (v->type != JsonValue::Type::kBool) {
         *error = std::string("\"") + key + "\" must be a boolean";
@@ -304,6 +442,11 @@ int32_t ParseWebViewOptions(const std::string& text, WebViewOptions* out,
       }
       *field = v->boolean;
     }
+  }
+  if (const JsonValue* v = Field(root, "forwardKeys")) {
+    if (v->type != JsonValue::Type::kNull &&
+        !ReadForwardKeys(*v, &o.forward_keys, error))
+      return LAUFEY_WEBVIEW_INVALID;
   }
   if (!ReadOptionalString(root, "userAgent", &o.user_agent, &present, error))
     return LAUFEY_WEBVIEW_INVALID;
@@ -430,6 +573,54 @@ std::string WebViewContextMenuJson(const WebViewContextMenuFields& f) {
   if (f.media_type)
     out += ",\"mediaType\":" + JsonQuote(f.media_type);
   return out + "}";
+}
+
+int32_t ParseWebViewForwardKeys(const std::string& text,
+                                std::vector<std::string>* out,
+                                std::string* error) {
+  JsonValue root;
+  std::string parse_error;
+  JsonReader reader(text);
+  if (!reader.ParseDocument(&root, &parse_error)) {
+    *error = "the keys are not JSON: " + parse_error;
+    return LAUFEY_WEBVIEW_INVALID;
+  }
+  return ReadForwardKeys(root, out, error) ? LAUFEY_WEBVIEW_OK
+                                           : LAUFEY_WEBVIEW_INVALID;
+}
+
+std::string WebViewKeyJson(const WebViewKeyFields& f) {
+  return "{\"type\":\"keydown\",\"key\":" + JsonQuote(f.key) +
+         ",\"code\":" + JsonQuote(f.code) + ",\"altKey\":" + Bool(f.alt_key) +
+         ",\"ctrlKey\":" + Bool(f.ctrl_key) +
+         ",\"metaKey\":" + Bool(f.meta_key) +
+         ",\"shiftKey\":" + Bool(f.shift_key) +
+         ",\"repeat\":" + Bool(f.repeat) +
+         ",\"forwarded\":" + Bool(f.forwarded) + "}";
+}
+
+bool WebViewKeyAccelerator(const std::string& code, bool alt, bool ctrl,
+                           bool meta, bool shift, Accelerator* out) {
+  Accelerator a;
+  if (!KeyFromCode(code, &a))
+    return false;
+  a.mods = (ctrl ? kModCtrl : 0u) | (alt ? kModAlt : 0u) |
+           (shift ? kModShift : 0u) | (meta ? kModSuper : 0u);
+  *out = a;
+  return true;
+}
+
+bool WebViewKeyMatches(const std::vector<std::string>& forward_keys,
+                       const std::string& code, bool alt, bool ctrl, bool meta,
+                       bool shift) {
+  if (forward_keys.empty())
+    return false;
+  Accelerator a;
+  if (!WebViewKeyAccelerator(code, alt, ctrl, meta, shift, &a))
+    return false;
+  const std::string canonical = CanonicalAccelerator(a);
+  return std::find(forward_keys.begin(), forward_keys.end(), canonical) !=
+         forward_keys.end();
 }
 
 bool IsValidWebViewZoom(double factor) {
