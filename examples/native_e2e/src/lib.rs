@@ -56,6 +56,7 @@ mod stream_checks;
 mod system_checks;
 mod title_bar_checks;
 mod tray_role_checks;
+mod webview_checks;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -2289,6 +2290,8 @@ async fn window_api_checks() {
   background_checks::run().await;
   // Focus / blur follow the window's activation (WebView2).
   focus_checks::run().await;
+  // Child web views (API 58).
+  webview_checks::run(&w).await;
   // --hidpi: the rest of this battery then runs at that scale too.
   if let Some(scale) = std::env::var("LAUFEY_E2E_EXPECT_SCALE")
     .ok()

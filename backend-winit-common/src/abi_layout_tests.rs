@@ -258,7 +258,17 @@ fn vtable_layout_matches_the_header() {
     answer_will_navigate,
     set_app_menu,
     set_window_title_visibility,
-    set_window_toolbar_style
+    set_window_toolbar_style,
+    webview_capabilities,
+    create_webview,
+    webview_set_bounds,
+    webview_set_visible,
+    webview_navigate,
+    webview_command,
+    webview_state,
+    webview_evaluate,
+    webview_capture,
+    webview_close
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

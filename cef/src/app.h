@@ -129,6 +129,8 @@ class LaufeyWindowDelegate : public CefWindowDelegate {
 
   void OnWindowCreated(CefRefPtr<CefWindow> window) override;
   void OnWindowDestroyed(CefRefPtr<CefWindow> window) override;
+  // Closes the window's child web views (API 58) as it closes.
+  void OnWindowClosing(CefRefPtr<CefWindow> window) override;
   bool CanClose(CefRefPtr<CefWindow> window) override;
   CefSize GetPreferredSize(CefRefPtr<CefView> view) override;
   // Size constraints (API 38): what set_window_size_constraints stored.

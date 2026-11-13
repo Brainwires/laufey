@@ -58,6 +58,7 @@ set(LAUFEY_COMMON_SRCS
   src/auth_session.cc
   src/platform_features.cc
   src/title_bar.cc
+  src/webview.cc
   src/overlay.cc
   src/quit_request.cc
   src/message_dialog.cc
@@ -374,6 +375,12 @@ if(LAUFEY_BUILD_TESTS)
   add_executable(laufey_title_options_test tests/title_options_test.cc)
   target_link_libraries(laufey_title_options_test PRIVATE laufey_backend_common)
   add_test(NAME laufey_title_options_test COMMAND laufey_title_options_test)
+
+  # Child web views (API 58): options, URL / partition rules, event JSON,
+  # the evaluate envelope and the registry (no OS API).
+  add_executable(laufey_webview_test tests/webview_test.cc)
+  target_link_libraries(laufey_webview_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_webview_test COMMAND laufey_webview_test)
 
   add_executable(laufey_quit_request_test tests/quit_request_test.cc)
   target_link_libraries(laufey_quit_request_test PRIVATE laufey_backend_common)

@@ -30,6 +30,7 @@
 #include "laufey_ui_tasks.h"
 #include "laufey_system.h"
 #include "laufey_window.h"
+#include "child_webview_mac.h"
 #include "init_script.h"
 #include "scheme_download.h"
 
@@ -403,6 +404,26 @@ class WKWebViewBackend : public LaufeyBackend {
   bool SetWindowTitlebarStyle(uint32_t window_id, int style) override;
   bool SetWindowTitleVisibility(uint32_t window_id, int visibility) override;
   bool SetWindowToolbarStyle(uint32_t window_id, int style) override;
+  // Child web views (API 58): child_webview_mac.mm, on the main thread.
+  uint32_t WebViewCapabilities() override {
+    return laufey_child_webview_mac::Capabilities();
+  }
+  uint32_t CreateWebView(uint32_t window_id, const std::string& options_json,
+                         laufey_webview_event_fn on_event, void* user_data,
+                         int32_t* status_out) override;
+  bool WebViewSetBounds(uint32_t webview_id, double x, double y, double width,
+                        double height) override;
+  bool WebViewSetVisible(uint32_t webview_id, bool visible) override;
+  int32_t WebViewNavigate(uint32_t webview_id, const std::string& url) override;
+  bool WebViewCommand(uint32_t webview_id, int32_t command) override;
+  std::string WebViewState(uint32_t webview_id) override;
+  void WebViewEvaluate(uint32_t webview_id, const std::string& script,
+                       laufey_webview_eval_fn callback,
+                       void* user_data) override;
+  void WebViewCapture(uint32_t webview_id, int32_t format, int32_t quality,
+                      laufey_webview_capture_fn callback,
+                      void* user_data) override;
+  bool WebViewClose(uint32_t webview_id) override;
   bool SetWindowTrafficLightPosition(uint32_t window_id, int x, int y) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
@@ -1767,6 +1788,9 @@ void WKWebViewBackend::RemoveWindowState(uint32_t window_id) {
   if (it == windows_.end())
     return;
 
+  // Its child web views close with it (each fires CLOSED).
+  laufey_child_webview_mac::CloseAllForWindow(window_id);
+
   auto& state = it->second;
   @autoreleasepool {
     if (state.focus_observer)
@@ -2375,6 +2399,112 @@ void WKWebViewBackend::CloseWindow(uint32_t window_id) {
       [win close];
     }
   });
+}
+
+// --- Child web views (API 58) ---
+
+uint32_t WKWebViewBackend::CreateWebView(uint32_t window_id,
+                                         const std::string& options_json,
+                                         laufey_webview_event_fn on_event,
+                                         void* user_data, int32_t* status_out) {
+  laufey_common::WebViewOptions options;
+  std::string error;
+  int32_t status =
+      laufey_common::ParseWebViewOptions(options_json, &options, &error);
+  if (status != LAUFEY_WEBVIEW_OK) {
+    *status_out = status;
+    return 0;
+  }
+  __block uint32_t id = 0;
+  __block int32_t result = LAUFEY_WEBVIEW_NO_WINDOW;
+  const laufey_common::WebViewOptions* opts = &options;
+  bool ran = laufey_common::RunOnMainSync(^{
+    WKWebView* page = nil;
+    {
+      std::lock_guard<std::mutex> lock(windows_mutex_);
+      if (MacWindowState* state = GetWindow(window_id))
+        page = state->webview;
+    }
+    if (!page) {
+      result = LAUFEY_WEBVIEW_NO_WINDOW;
+      return;
+    }
+    id = laufey_child_webview_mac::Create(window_id, (__bridge void*)page,
+                                          *opts, on_event, user_data, &result);
+  });
+  *status_out = ran ? result : LAUFEY_WEBVIEW_FAILED;
+  return ran ? id : 0;
+}
+
+bool WKWebViewBackend::WebViewSetBounds(uint32_t webview_id, double x, double y,
+                                        double width, double height) {
+  __block bool ok = false;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::SetBounds(webview_id, x, y, width, height);
+  });
+  return ok;
+}
+
+bool WKWebViewBackend::WebViewSetVisible(uint32_t webview_id, bool visible) {
+  __block bool ok = false;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::SetVisible(webview_id, visible);
+  });
+  return ok;
+}
+
+int32_t WKWebViewBackend::WebViewNavigate(uint32_t webview_id,
+                                          const std::string& url) {
+  __block int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  std::string copy = url;
+  laufey_common::RunOnMainSync(^{
+    status = laufey_child_webview_mac::Navigate(webview_id, copy);
+  });
+  return status;
+}
+
+bool WKWebViewBackend::WebViewCommand(uint32_t webview_id, int32_t command) {
+  __block bool ok = false;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::Command(webview_id, command);
+  });
+  return ok;
+}
+
+std::string WKWebViewBackend::WebViewState(uint32_t webview_id) {
+  __block std::string state;
+  laufey_common::RunOnMainSync(^{
+    state = laufey_child_webview_mac::State(webview_id);
+  });
+  return state;
+}
+
+void WKWebViewBackend::WebViewEvaluate(uint32_t webview_id,
+                                       const std::string& script,
+                                       laufey_webview_eval_fn callback,
+                                       void* user_data) {
+  std::string copy = script;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    laufey_child_webview_mac::Evaluate(webview_id, copy, callback, user_data);
+  });
+}
+
+void WKWebViewBackend::WebViewCapture(uint32_t webview_id, int32_t format,
+                                      int32_t quality,
+                                      laufey_webview_capture_fn callback,
+                                      void* user_data) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    laufey_child_webview_mac::Capture(webview_id, format, quality, callback,
+                                      user_data);
+  });
+}
+
+bool WKWebViewBackend::WebViewClose(uint32_t webview_id) {
+  __block bool ok = false;
+  laufey_common::RunOnMainSync(^{
+    ok = laufey_child_webview_mac::Close(webview_id);
+  });
+  return ok;
 }
 
 void WKWebViewBackend::OpenExternalURL(const std::string& url) {
@@ -4049,8 +4179,7 @@ bool WKWebViewBackend::SetWindowToolbarStyle(uint32_t window_id, int style) {
         window = state->window;
     }
     if (window)
-      result =
-          laufey_common::MacSetToolbarStyle((__bridge void*)window, style);
+      result = laufey_common::MacSetToolbarStyle((__bridge void*)window, style);
   });
   return result;
 }

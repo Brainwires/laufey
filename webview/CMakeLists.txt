@@ -62,10 +62,13 @@ if(PLATFORM_IOS)
     src/main_ios.mm
     # iOS doesn't link backend-common; pull in just the value marshalling.
     ${CMAKE_CURRENT_SOURCE_DIR}/../backend-common/src/laufey_value.cc
+    # The child web view rules runtime_loader.cc checks (no OS API).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../backend-common/src/webview.cc
   )
 elseif(PLATFORM_MACOS)
   set(LAUFEY_SRCS_PLATFORM
     src/webview_macos.mm
+    src/child_webview_mac.mm
     src/main_mac.mm
   )
 elseif(PLATFORM_LINUX)

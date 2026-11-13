@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 57
+#define LAUFEY_API_VERSION 58
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -1187,6 +1187,108 @@ typedef void (*laufey_scheme_cancel_fn)(void* user_data,
 typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
                                         uint64_t request_id, const char* url,
                                         const char* initiator, uint32_t kind);
+
+// --- Child web views (API >= 58) ---------------------------------------------
+//
+// A web view is a second, native browser view inside a window, laid over the
+// window's page at bounds the embedder sets (create_webview). It loads
+// http(s) sites, including ones that refuse to be framed, as a browsing
+// context of its own: no bridge (no injected script, no JS calls, no
+// bindings, no custom-scheme handlers), none of the app's storage (its own
+// partition), and none of the window's navigation guard / will-navigate
+// handler. It closes with its window. See docs/webviews.md.
+
+// Bits returned by webview_capabilities.
+#define LAUFEY_WEBVIEW_CAP_SUPPORTED (1u << 0)  // create_webview works
+#define LAUFEY_WEBVIEW_CAP_CAPTURE (1u << 1)    // webview_capture
+#define LAUFEY_WEBVIEW_CAP_EVALUATE (1u << 2)   // webview_evaluate
+// Persistent partitions keep their cookies / storage across launches (a
+// backend without them serves every partition in memory).
+#define LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS (1u << 3)
+// "permissions": "ask" prompts the user (else it behaves as "deny").
+#define LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS (1u << 4)
+// Bits 24..27: the engine (LAUFEY_WEBVIEW_ENGINE_*), 0 when unsupported.
+#define LAUFEY_WEBVIEW_ENGINE_SHIFT 24
+#define LAUFEY_WEBVIEW_ENGINE_MASK (0xfu << 24)
+#define LAUFEY_WEBVIEW_ENGINE_CEF 1
+#define LAUFEY_WEBVIEW_ENGINE_WKWEBVIEW 2
+#define LAUFEY_WEBVIEW_ENGINE_WEBVIEW2 3
+#define LAUFEY_WEBVIEW_ENGINE_WEBKITGTK 4
+
+// Statuses: create_webview's *status_out, webview_navigate's return value,
+// and the result callbacks' `status`.
+#define LAUFEY_WEBVIEW_OK 0
+#define LAUFEY_WEBVIEW_UNSUPPORTED 1      // no web views on this backend / OS
+#define LAUFEY_WEBVIEW_NOT_ALLOWED_URL 2  // not an http(s) URL with a host
+#define LAUFEY_WEBVIEW_LIMIT 3         // LAUFEY_WEBVIEW_MAX_PER_WINDOW reached
+#define LAUFEY_WEBVIEW_NO_WINDOW 4     // the window is unknown or closed
+#define LAUFEY_WEBVIEW_INVALID 5       // malformed options or argument
+#define LAUFEY_WEBVIEW_CLOSED 6        // the web view is unknown or closed
+#define LAUFEY_WEBVIEW_FAILED 7        // the engine failed
+#define LAUFEY_WEBVIEW_SCRIPT_ERROR 8  // evaluate: the script threw
+#define LAUFEY_WEBVIEW_NOT_SERIALIZABLE 9  // evaluate: no JSON for the value
+
+// The most web views one window holds at once.
+#define LAUFEY_WEBVIEW_MAX_PER_WINDOW 32
+
+// Commands for webview_command.
+#define LAUFEY_WEBVIEW_COMMAND_BACK 1
+#define LAUFEY_WEBVIEW_COMMAND_FORWARD 2
+#define LAUFEY_WEBVIEW_COMMAND_RELOAD 3
+#define LAUFEY_WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE 4
+#define LAUFEY_WEBVIEW_COMMAND_STOP 5
+#define LAUFEY_WEBVIEW_COMMAND_FOCUS 6  // give the view the keyboard focus
+
+// Event kinds (laufey_webview_event_fn `kind`) and their `detail_json`:
+//   TITLE       {"title": string}
+//   URL         {"url": string, "canGoBack": bool, "canGoForward": bool}
+//               (each main-frame URL change, same-document ones included)
+//   LOAD        {"state": "loading" | "interactive" | "complete" | "failed",
+//                "url": string, "error"?: {"code": string, "message": string}}
+//               "loading" when a main-frame navigation starts, "interactive"
+//               when its document commits, "complete" when it finishes,
+//               "failed" when it fails (never for a stop or a navigation
+//               replaced by another). error.code: "network", "dns", "tls",
+//               "blocked", "aborted" or "failed".
+//   CONSOLE     {"level": "log" | "info" | "warn" | "error" | "debug",
+//                "message": string, "source"?: string, "line"?: number}
+//   FOCUS       {"focused": bool}: the view gained / lost the keyboard focus
+//   NEW_WINDOW  {"url": string, "disposition": "popup" | "tab"}: a popup was
+//               refused (only under "allowPopups": "deny"); "popup" when the
+//               page asked for window features
+//   CLOSED      {}: the last event of the id
+#define LAUFEY_WEBVIEW_EVENT_TITLE 1
+#define LAUFEY_WEBVIEW_EVENT_URL 2
+#define LAUFEY_WEBVIEW_EVENT_LOAD 3
+#define LAUFEY_WEBVIEW_EVENT_CONSOLE 4
+#define LAUFEY_WEBVIEW_EVENT_FOCUS 5
+#define LAUFEY_WEBVIEW_EVENT_NEW_WINDOW 6
+#define LAUFEY_WEBVIEW_EVENT_CLOSED 7
+
+// Image formats for webview_capture.
+#define LAUFEY_WEBVIEW_CAPTURE_PNG 0
+#define LAUFEY_WEBVIEW_CAPTURE_JPEG 1
+
+// A web view's event. Fires on any thread (most on the UI thread);
+// `detail_json` (UTF-8 JSON, never NULL) is valid only during the call.
+// CLOSED is the last call for `webview_id`: after it the backend never uses
+// `user_data` again, so the embedder may free it there.
+typedef void (*laufey_webview_event_fn)(void* user_data, uint32_t webview_id,
+                                        int32_t kind, const char* detail_json);
+
+// webview_evaluate's result. Fires EXACTLY ONCE, on any thread. On
+// LAUFEY_WEBVIEW_OK `text` is the result as JSON (undefined becomes null);
+// otherwise `text` is a message. Never NULL; valid only during the call.
+typedef void (*laufey_webview_eval_fn)(void* user_data, int32_t status,
+                                       const char* text);
+
+// webview_capture's result. Fires EXACTLY ONCE, on any thread. On
+// LAUFEY_WEBVIEW_OK `data` / `len` hold the encoded image (owned by the
+// backend, valid only during the call) and `error` is NULL; otherwise `data`
+// is NULL, `len` 0 and `error` a message.
+typedef void (*laufey_webview_capture_fn)(void* user_data, int32_t status,
+                                          const uint8_t* data, size_t len,
+                                          const char* error);
 
 struct laufey_backend_api {
   uint32_t version;
@@ -2963,6 +3065,84 @@ struct laufey_backend_api {
   // returns false too. Any thread. NULL on Winit.
   bool (*set_window_toolbar_style)(void* backend_data, uint32_t window_id,
                                    int style);
+
+  // --- Child web views (API >= 58) -----------------------------------------
+  //
+  // LAUFEY_WEBVIEW_CAP_* bits plus the engine in bits 24..27. 0 where the
+  // backend has none. Any thread. NULL on Winit.
+  uint32_t (*webview_capabilities)(void* backend_data);
+
+  // Create a web view in `window_id`. `options_json` is a JSON object:
+  //   "url"          string, required: http(s) with a host
+  //   "x", "y", "width", "height"  numbers, required: CSS pixels relative to
+  //                  the top-left corner of the window's page area
+  //   "partition"    string (default "webview:default"): 1..64 characters
+  //                  of [A-Za-z0-9._:-], the first alphanumeric. Views with
+  //                  the same partition share cookies and storage, never the
+  //                  app's own. "ephemeral" or "ephemeral:<name>" is kept in
+  //                  memory; any other name persists (under the app data
+  //                  directory) where LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS
+  //                  is reported, else it is kept in memory too.
+  //   "visible"      bool (default true)
+  //   "allowPopups"  "same-view" (default: the popup's URL loads in this
+  //                  view), "browser" (it opens in the OS browser), "deny"
+  //                  (nothing opens; a NEW_WINDOW event fires)
+  //   "downloads"    "deny" (default), "ask" (a save panel), "browser" (the
+  //                  URL opens in the OS browser)
+  //   "permissions"  "deny" (default: camera, microphone, geolocation,
+  //                  notifications, ... are refused without a prompt), "ask"
+  //   "userAgent"    string: replaces the engine's user agent
+  // Returns the web view id (> 0), or 0 with `*status_out` set (OK on
+  // success): UNSUPPORTED, INVALID, NOT_ALLOWED_URL, NO_WINDOW, LIMIT,
+  // FAILED. `on_event` receives the view's events, starting after this call
+  // returns. Any thread (it waits for the UI thread). NULL on Winit.
+  uint32_t (*create_webview)(void* backend_data, uint32_t window_id,
+                             const char* options_json,
+                             laufey_webview_event_fn on_event, void* user_data,
+                             int32_t* status_out);
+
+  // Move / resize the view (CSS pixels, as in create_webview). False for an
+  // unknown id or a negative / non-finite value. Any thread.
+  bool (*webview_set_bounds)(void* backend_data, uint32_t webview_id, double x,
+                             double y, double width, double height);
+
+  // Show or hide the view; a hidden view keeps its page. Any thread.
+  bool (*webview_set_visible)(void* backend_data, uint32_t webview_id,
+                              bool visible);
+
+  // Load `url` (http(s) only). OK, NOT_ALLOWED_URL or CLOSED. Any thread.
+  int32_t (*webview_navigate)(void* backend_data, uint32_t webview_id,
+                              const char* url);
+
+  // LAUFEY_WEBVIEW_COMMAND_*: back / forward (no-ops at either end of the
+  // history), reload, reload bypassing the cache, stop, focus. False for an
+  // unknown id or command. Any thread.
+  bool (*webview_command)(void* backend_data, uint32_t webview_id,
+                          int32_t command);
+
+  // The view's state as JSON: {"url", "title", "load" (the last LOAD state),
+  // "canGoBack", "canGoForward", "visible", "bounds": {"x", "y", "width",
+  // "height"}}. Free with string_free; NULL for an unknown id. Any thread.
+  char* (*webview_state)(void* backend_data, uint32_t webview_id);
+
+  // Run `script` as a classic script in an isolated world of the view's main
+  // frame (it shares the DOM, not the page's globals). A promise completion
+  // value is awaited; the value is returned as JSON. `callback` fires
+  // exactly once: OK, SCRIPT_ERROR, NOT_SERIALIZABLE, CLOSED, UNSUPPORTED or
+  // FAILED. Any thread.
+  void (*webview_evaluate)(void* backend_data, uint32_t webview_id,
+                           const char* script, laufey_webview_eval_fn callback,
+                           void* user_data);
+
+  // Capture what the view shows, in device pixels, as LAUFEY_WEBVIEW_CAPTURE_*
+  // (`quality` 0..100 for JPEG). `callback` fires exactly once. Any thread.
+  void (*webview_capture)(void* backend_data, uint32_t webview_id,
+                          int32_t format, int32_t quality,
+                          laufey_webview_capture_fn callback, void* user_data);
+
+  // Close the view; its CLOSED event follows (maybe after this returns).
+  // False for an unknown id. Closing a window closes its views. Any thread.
+  bool (*webview_close)(void* backend_data, uint32_t webview_id);
 };
 
 #ifdef __cplusplus

@@ -35,6 +35,9 @@ struct JsonValue {
   // syntax-checked.
   bool is_integer = false;
   int64_t integer = 0;
+  // For kNumber: the value as a double (every number; computed without the
+  // C locale, so a GTK process's setlocale() can't change the decimal point).
+  double number = 0;
   std::string string;
   std::vector<JsonValue> array;
   std::vector<std::pair<std::string, JsonValue>> object;
@@ -333,6 +336,7 @@ class JsonReader {
       while (digit())
         ++pos_;
     }
+    out->number = LiteralToDouble(start, pos_);
     // Integer value of a plain integer literal (no fraction / exponent).
     size_t int_begin = start + (negative ? 1 : 0);
     bool plain = true;
@@ -351,6 +355,43 @@ class JsonReader {
       out->integer = negative ? -v : v;
     }
     return true;
+  }
+
+  // The value of the (already validated) number literal text_[begin, end).
+  double LiteralToDouble(size_t begin, size_t end) const {
+    size_t i = begin;
+    bool negative = text_[i] == '-';
+    if (negative)
+      ++i;
+    double mantissa = 0;
+    int exponent = 0;
+    for (; i < end && text_[i] >= '0' && text_[i] <= '9'; ++i)
+      mantissa = mantissa * 10 + (text_[i] - '0');
+    if (i < end && text_[i] == '.') {
+      for (++i; i < end && text_[i] >= '0' && text_[i] <= '9'; ++i) {
+        mantissa = mantissa * 10 + (text_[i] - '0');
+        --exponent;
+      }
+    }
+    if (i < end && (text_[i] == 'e' || text_[i] == 'E')) {
+      ++i;
+      bool exp_negative = false;
+      if (text_[i] == '+' || text_[i] == '-')
+        exp_negative = text_[i++] == '-';
+      int e = 0;
+      for (; i < end; ++i)
+        e = e < 100000 ? e * 10 + (text_[i] - '0') : e;
+      exponent += exp_negative ? -e : e;
+    }
+    double scale = 1;
+    double base = 10;
+    for (int n = exponent < 0 ? -exponent : exponent; n > 0; n >>= 1) {
+      if (n & 1)
+        scale *= base;
+      base *= base;
+    }
+    double v = exponent < 0 ? mantissa / scale : mantissa * scale;
+    return negative ? -v : v;
   }
 
   const std::string& text_;

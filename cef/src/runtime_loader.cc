@@ -1,6 +1,7 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
 #include "runtime_loader.h"
+#include "child_webview.h"
 
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
@@ -2934,6 +2935,13 @@ static uint32_t Backend_ShowMessageDialog(
 #endif
 }
 
+uint32_t LaufeyShowMessageDialogForWindow(
+    uint32_t window_id, const laufey_message_dialog_options_t* options,
+    laufey_message_dialog_result_fn callback, void* user_data) {
+  return Backend_ShowMessageDialog(RuntimeLoader::GetInstance(), window_id,
+                                   options, callback, user_data);
+}
+
 static bool Backend_CancelFileDialog(void* /*data*/, uint32_t dialog_id) {
 #if defined(__APPLE__)
   return laufey_common::CancelFileDialogMac(dialog_id);
@@ -3508,6 +3516,155 @@ static bool Backend_SetWindowToolbarStyle(void* /*data*/, uint32_t window_id,
 #endif
 }
 
+// --- Child web views (API 58; child_webview.cc) ---
+
+static uint32_t Backend_WebViewCapabilities(void* /*data*/) {
+  uint32_t caps = 0;
+  cef_invoke_sync([&] { caps = laufey_cef_child_webview::Capabilities(); });
+  return caps;
+}
+
+static uint32_t Backend_CreateWebView(void* data, uint32_t window_id,
+                                      const char* options_json,
+                                      laufey_webview_event_fn on_event,
+                                      void* user_data, int32_t* status_out) {
+  int32_t ignored = 0;
+  if (!status_out)
+    status_out = &ignored;
+  if (!options_json || !on_event) {
+    *status_out = LAUFEY_WEBVIEW_INVALID;
+    return 0;
+  }
+  laufey_common::WebViewOptions options;
+  std::string error;
+  int32_t status =
+      laufey_common::ParseWebViewOptions(options_json, &options, &error);
+  if (status != LAUFEY_WEBVIEW_OK) {
+    *status_out = status;
+    return 0;
+  }
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
+  if (!browser) {
+    *status_out = LAUFEY_WEBVIEW_NO_WINDOW;
+    return 0;
+  }
+  uint32_t id = 0;
+  int32_t result = LAUFEY_WEBVIEW_NO_WINDOW;
+  bool ran = cef_invoke_sync([&] {
+    CefRefPtr<CefBrowserView> page = CefBrowserView::GetForBrowser(browser);
+    CefRefPtr<CefWindow> window = page ? page->GetWindow() : nullptr;
+    id = laufey_cef_child_webview::Create(window_id, window, page, options,
+                                          on_event, user_data, &result);
+  });
+  *status_out = ran ? result : LAUFEY_WEBVIEW_FAILED;
+  return ran ? id : 0;
+}
+
+static bool Backend_WebViewSetBounds(void* /*data*/, uint32_t webview_id,
+                                     double x, double y, double width,
+                                     double height) {
+  if (!laufey_common::IsValidWebViewBounds(x, y, width, height))
+    return false;
+  bool ok = false;
+  cef_invoke_sync([&] {
+    ok = laufey_cef_child_webview::SetBounds(webview_id, x, y, width, height);
+  });
+  return ok;
+}
+
+static bool Backend_WebViewSetVisible(void* /*data*/, uint32_t webview_id,
+                                      bool visible) {
+  bool ok = false;
+  cef_invoke_sync(
+      [&] { ok = laufey_cef_child_webview::SetVisible(webview_id, visible); });
+  return ok;
+}
+
+static int32_t Backend_WebViewNavigate(void* /*data*/, uint32_t webview_id,
+                                       const char* url) {
+  if (!url || !laufey_common::IsAllowedWebViewUrl(url))
+    return LAUFEY_WEBVIEW_NOT_ALLOWED_URL;
+  std::string copy = url;
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  cef_invoke_sync(
+      [&] { status = laufey_cef_child_webview::Navigate(webview_id, copy); });
+  return status;
+}
+
+static bool Backend_WebViewCommand(void* /*data*/, uint32_t webview_id,
+                                   int32_t command) {
+  if (command < LAUFEY_WEBVIEW_COMMAND_BACK ||
+      command > LAUFEY_WEBVIEW_COMMAND_FOCUS)
+    return false;
+  bool ok = false;
+  cef_invoke_sync(
+      [&] { ok = laufey_cef_child_webview::Command(webview_id, command); });
+  return ok;
+}
+
+static char* Backend_WebViewState(void* /*data*/, uint32_t webview_id) {
+  std::string state;
+  cef_invoke_sync([&] { state = laufey_cef_child_webview::State(webview_id); });
+  if (state.empty())
+    return nullptr;
+  char* copy = static_cast<char*>(malloc(state.size() + 1));
+  if (copy)
+    memcpy(copy, state.c_str(), state.size() + 1);
+  return copy;
+}
+
+static void Backend_WebViewEvaluate(void* /*data*/, uint32_t webview_id,
+                                    const char* script,
+                                    laufey_webview_eval_fn callback,
+                                    void* user_data) {
+  if (!callback)
+    return;
+  if (!script) {
+    callback(user_data, LAUFEY_WEBVIEW_INVALID, "no script");
+    return;
+  }
+  bool posted = CefPostTask(
+      TID_UI,
+      base::BindOnce(
+          [](uint32_t id, std::string s, laufey_webview_eval_fn cb, void* ud) {
+            laufey_cef_child_webview::Evaluate(id, s, cb, ud);
+          },
+          webview_id, std::string(script), callback, user_data));
+  if (!posted)
+    callback(user_data, LAUFEY_WEBVIEW_FAILED, "the UI thread is gone");
+}
+
+static void Backend_WebViewCapture(void* /*data*/, uint32_t webview_id,
+                                   int32_t format, int32_t quality,
+                                   laufey_webview_capture_fn callback,
+                                   void* user_data) {
+  if (!callback)
+    return;
+  if (format != LAUFEY_WEBVIEW_CAPTURE_PNG &&
+      format != LAUFEY_WEBVIEW_CAPTURE_JPEG) {
+    callback(user_data, LAUFEY_WEBVIEW_INVALID, nullptr, 0,
+             "unknown image format");
+    return;
+  }
+  quality = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
+  bool posted = CefPostTask(
+      TID_UI,
+      base::BindOnce(
+          [](uint32_t id, int32_t f, int32_t q, laufey_webview_capture_fn cb,
+             void* ud) { laufey_cef_child_webview::Capture(id, f, q, cb, ud); },
+          webview_id, format, quality, callback, user_data));
+  if (!posted)
+    callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr, 0,
+             "the UI thread is gone");
+}
+
+static bool Backend_WebViewClose(void* /*data*/, uint32_t webview_id) {
+  bool ok = false;
+  cef_invoke_sync([&] { ok = laufey_cef_child_webview::Close(webview_id); });
+  return ok;
+}
+
 static bool Backend_SetWindowTrafficLightPosition(void* /*data*/,
                                                   uint32_t window_id, int x,
                                                   int y) {
@@ -3734,6 +3891,17 @@ void RuntimeLoader::InitializeBackendApi() {
   // Title visibility and toolbar style (API 57).
   backend_api_.set_window_title_visibility = Backend_SetWindowTitleVisibility;
   backend_api_.set_window_toolbar_style = Backend_SetWindowToolbarStyle;
+  // Child web views (API 58).
+  backend_api_.webview_capabilities = Backend_WebViewCapabilities;
+  backend_api_.create_webview = Backend_CreateWebView;
+  backend_api_.webview_set_bounds = Backend_WebViewSetBounds;
+  backend_api_.webview_set_visible = Backend_WebViewSetVisible;
+  backend_api_.webview_navigate = Backend_WebViewNavigate;
+  backend_api_.webview_command = Backend_WebViewCommand;
+  backend_api_.webview_state = Backend_WebViewState;
+  backend_api_.webview_evaluate = Backend_WebViewEvaluate;
+  backend_api_.webview_capture = Backend_WebViewCapture;
+  backend_api_.webview_close = Backend_WebViewClose;
   backend_api_.set_window_traffic_light_position =
       Backend_SetWindowTrafficLightPosition;
   backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;

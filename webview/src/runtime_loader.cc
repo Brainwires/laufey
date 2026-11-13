@@ -20,6 +20,7 @@
 #endif
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
+#include "laufey_webview.h"
 #include "laufey_window.h"
 
 #ifndef _WIN32
@@ -1287,6 +1288,140 @@ static bool Backend_SetWindowToolbarStyle(void* data, uint32_t window_id,
   return false;
 }
 
+// --- Child web views (API 58) ---
+
+static uint32_t Backend_WebViewCapabilities(void* data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->WebViewCapabilities();
+  return 0;
+}
+
+static uint32_t Backend_CreateWebView(void* data, uint32_t window_id,
+                                      const char* options_json,
+                                      laufey_webview_event_fn on_event,
+                                      void* user_data, int32_t* status_out) {
+  int32_t ignored = 0;
+  if (!status_out)
+    status_out = &ignored;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  LaufeyBackend* backend = loader->GetBackend();
+  if (!backend) {
+    *status_out = LAUFEY_WEBVIEW_UNSUPPORTED;
+    return 0;
+  }
+  if (!options_json || !on_event) {
+    *status_out = LAUFEY_WEBVIEW_INVALID;
+    return 0;
+  }
+  *status_out = LAUFEY_WEBVIEW_OK;
+  return backend->CreateWebView(window_id, options_json, on_event, user_data,
+                                status_out);
+}
+
+static bool Backend_WebViewSetBounds(void* data, uint32_t webview_id, double x,
+                                     double y, double width, double height) {
+  if (!laufey_common::IsValidWebViewBounds(x, y, width, height))
+    return false;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->WebViewSetBounds(webview_id, x, y, width, height);
+  return false;
+}
+
+static bool Backend_WebViewSetVisible(void* data, uint32_t webview_id,
+                                      bool visible) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->WebViewSetVisible(webview_id, visible);
+  return false;
+}
+
+static int32_t Backend_WebViewNavigate(void* data, uint32_t webview_id,
+                                       const char* url) {
+  if (!url || !laufey_common::IsAllowedWebViewUrl(url))
+    return LAUFEY_WEBVIEW_NOT_ALLOWED_URL;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->WebViewNavigate(webview_id, url);
+  return LAUFEY_WEBVIEW_UNSUPPORTED;
+}
+
+static bool Backend_WebViewCommand(void* data, uint32_t webview_id,
+                                   int32_t command) {
+  if (command < LAUFEY_WEBVIEW_COMMAND_BACK ||
+      command > LAUFEY_WEBVIEW_COMMAND_FOCUS)
+    return false;
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->WebViewCommand(webview_id, command);
+  return false;
+}
+
+static char* Backend_WebViewState(void* data, uint32_t webview_id) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  LaufeyBackend* backend = loader->GetBackend();
+  if (!backend)
+    return nullptr;
+  std::string state = backend->WebViewState(webview_id);
+  if (state.empty())
+    return nullptr;
+  char* copy = static_cast<char*>(malloc(state.size() + 1));
+  if (copy)
+    memcpy(copy, state.c_str(), state.size() + 1);
+  return copy;
+}
+
+static void Backend_WebViewEvaluate(void* data, uint32_t webview_id,
+                                    const char* script,
+                                    laufey_webview_eval_fn callback,
+                                    void* user_data) {
+  if (!callback)
+    return;
+  if (!script) {
+    callback(user_data, LAUFEY_WEBVIEW_INVALID, "no script");
+    return;
+  }
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  LaufeyBackend* backend = loader->GetBackend();
+  if (!backend) {
+    callback(user_data, LAUFEY_WEBVIEW_UNSUPPORTED,
+             "this backend has no web views");
+    return;
+  }
+  backend->WebViewEvaluate(webview_id, script, callback, user_data);
+}
+
+static void Backend_WebViewCapture(void* data, uint32_t webview_id,
+                                   int32_t format, int32_t quality,
+                                   laufey_webview_capture_fn callback,
+                                   void* user_data) {
+  if (!callback)
+    return;
+  if (format != LAUFEY_WEBVIEW_CAPTURE_PNG &&
+      format != LAUFEY_WEBVIEW_CAPTURE_JPEG) {
+    callback(user_data, LAUFEY_WEBVIEW_INVALID, nullptr, 0,
+             "unknown image format");
+    return;
+  }
+  quality = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  LaufeyBackend* backend = loader->GetBackend();
+  if (!backend) {
+    callback(user_data, LAUFEY_WEBVIEW_UNSUPPORTED, nullptr, 0,
+             "this backend has no web views");
+    return;
+  }
+  backend->WebViewCapture(webview_id, format, quality, callback, user_data);
+}
+
+static bool Backend_WebViewClose(void* data, uint32_t webview_id) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->WebViewClose(webview_id);
+  return false;
+}
+
 static bool Backend_SetWindowTrafficLightPosition(void* data,
                                                   uint32_t window_id, int x,
                                                   int y) {
@@ -1837,6 +1972,17 @@ void RuntimeLoader::InitializeBackendApi() {
   // Title visibility and toolbar style (API 57).
   backend_api_.set_window_title_visibility = Backend_SetWindowTitleVisibility;
   backend_api_.set_window_toolbar_style = Backend_SetWindowToolbarStyle;
+  // Child web views (API 58).
+  backend_api_.webview_capabilities = Backend_WebViewCapabilities;
+  backend_api_.create_webview = Backend_CreateWebView;
+  backend_api_.webview_set_bounds = Backend_WebViewSetBounds;
+  backend_api_.webview_set_visible = Backend_WebViewSetVisible;
+  backend_api_.webview_navigate = Backend_WebViewNavigate;
+  backend_api_.webview_command = Backend_WebViewCommand;
+  backend_api_.webview_state = Backend_WebViewState;
+  backend_api_.webview_evaluate = Backend_WebViewEvaluate;
+  backend_api_.webview_capture = Backend_WebViewCapture;
+  backend_api_.webview_close = Backend_WebViewClose;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

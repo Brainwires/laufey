@@ -200,6 +200,11 @@ LaufeyRenderProcessHandler::LaufeyRenderProcessHandler() {
 
 void LaufeyRenderProcessHandler::OnBrowserCreated(
     CefRefPtr<CefBrowser> browser, CefRefPtr<CefDictionaryValue> extra_info) {
+  // A child web view (API 58; child_webview.h) never gets the bridge.
+  if (extra_info && extra_info->HasKey("laufey_child_webview")) {
+    child_webviews_.insert(browser->GetIdentifier());
+    return;
+  }
   if (extra_info && extra_info->HasKey("laufey_js_namespace")) {
     browser_namespaces_[browser->GetIdentifier()] =
         extra_info->GetString("laufey_js_namespace").ToString();
@@ -226,6 +231,11 @@ void LaufeyRenderProcessHandler::OnContextCreated(
 #endif
     frame->SendProcessMessage(PID_BROWSER, msg);
   }
+
+  // A child web view's pages (API 58) are no app page: no bridge, no
+  // external-link interceptor.
+  if (child_webviews_.count(browser->GetIdentifier()))
+    return;
 
   // Only the main frame receives the bridge. Cross-origin (or any sub-) frames
   // must not inherit `window[ns]`; otherwise embedded content could invoke

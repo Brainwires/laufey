@@ -116,6 +116,13 @@ The pointers group into:
   decorations; `LAUFEY_WINDOW_CAP_TITLE_HIDDEN`) and `set_window_toolbar_style`
   (`LAUFEY_TOOLBAR_STYLE_*`, macOS 11+; `LAUFEY_WINDOW_CAP_TOOLBAR_STYLE`),
   `NULL` on Winit.
+- **Child web views** (API ≥ 58) — `webview_capabilities`, `create_webview` (a
+  native browser view over a window's page, options as JSON),
+  `webview_set_bounds`, `webview_set_visible`, `webview_navigate`,
+  `webview_command` (back, forward, reload, stop, focus), `webview_state`,
+  `webview_evaluate`, `webview_capture` and `webview_close`; events through one
+  `laufey_webview_event_fn` per view, `CLOSED` last. `NULL` on Winit. See
+  [webviews.md](webviews.md).
 - **Drag and drop** (API ≥ 39) — `set_file_drop_handler` (files dragged over and
   dropped on a window, with native paths; the page keeps its DOM drag events),
   `start_file_drag` (drag files out to other apps), and the
