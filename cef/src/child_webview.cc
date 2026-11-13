@@ -97,6 +97,11 @@ struct ChildView {
   bool closing = false;
   std::string sent_url;
   bool sent_back = false;
+  // The history edges OnLoadingStateChange last reported (fresher than
+  // CefBrowser::CanGoBack while a navigation commits).
+  bool history_known = false;
+  bool can_back = false;
+  bool can_forward = false;
   bool sent_forward = false;
   bool url_sent = false;
   int64_t console_second = 0;
@@ -185,8 +190,8 @@ void MaybeSendUrl(ChildView* v) {
   std::string url = CurrentUrl(v);
   if (url.empty() || url == "about:blank")
     return;
-  bool back = v->browser->CanGoBack();
-  bool forward = v->browser->CanGoForward();
+  bool back = v->history_known ? v->can_back : v->browser->CanGoBack();
+  bool forward = v->history_known ? v->can_forward : v->browser->CanGoForward();
   if (v->url_sent && url == v->sent_url && back == v->sent_back &&
       forward == v->sent_forward)
     return;
@@ -487,6 +492,33 @@ void AskPermission(uint32_t window_id, const std::string& origin,
   }
 }
 
+// Windows whose close waits for their child views' browsers to close
+// (CloseBeforeWindow). UI thread only.
+std::map<uint32_t, CefRefPtr<CefWindow>>& PendingWindowCloses() {
+  static auto* pending = new std::map<uint32_t, CefRefPtr<CefWindow>>();
+  return *pending;
+}
+
+// The last child browser of a closing window has closed: close the window
+// again (its CanClose now goes on to the page's own browser).
+void FinishWindowCloseIfReady(uint32_t window_id) {
+  auto it = PendingWindowCloses().find(window_id);
+  if (it == PendingWindowCloses().end())
+    return;
+  for (const auto& kv : Views()) {
+    if (kv.second->window_id == window_id)
+      return;
+  }
+  CefRefPtr<CefWindow> window = it->second;
+  PendingWindowCloses().erase(it);
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](CefRefPtr<CefWindow> w) {
+                            if (w && !w->IsClosed())
+                              w->Close();
+                          },
+                          window));
+}
+
 // Every browser of a child view shares this client type (one per view).
 class ChildClient : public CefClient,
                     public CefLifeSpanHandler,
@@ -604,11 +636,14 @@ class ChildClient : public CefClient,
     ChildView* v = it->second.get();
     FailPending(v, "the web view is closed");
     v->devtools = nullptr;
+    // The browser has closed: its view and overlay can go now.
     if (v->overlay && v->overlay->IsValid())
       v->overlay->Destroy();
     // Closed by the browser itself (not through Close): CLOSED now.
     WebViewSinks::Instance().Close(id_);
+    uint32_t window_id = v->window_id;
     Views().erase(it);
+    FinishWindowCloseIfReady(window_id);
   }
 
   // --- CefDisplayHandler ---
@@ -655,11 +690,16 @@ class ChildClient : public CefClient,
 
   // --- CefLoadHandler ---
 
-  void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool isLoading, bool,
-                            bool) override {
+  void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool isLoading,
+                            bool canGoBack, bool canGoForward) override {
     ChildView* v = Find(id_);
     if (!v)
       return;
+    // The URL event carries the history edges after the entry commits:
+    // OnAddressChange can come before CefBrowser::CanGoBack moves.
+    v->history_known = true;
+    v->can_back = canGoBack;
+    v->can_forward = canGoForward;
     MaybeSendUrl(v);
     if (!isLoading && strcmp(v->load, "loading") == 0)
       v->load = "complete";  // stopped
@@ -687,6 +727,7 @@ class ChildClient : public CefClient,
       return;
     ReapplyZoom(v);
     SetLoad(v, "complete", url);
+    MaybeSendUrl(v);
   }
 
   void OnLoadError(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
@@ -1167,6 +1208,13 @@ bool Command(uint32_t id, int32_t command) {
     case LAUFEY_WEBVIEW_COMMAND_FOCUS:
       if (!v->visible || !v->view)
         return false;
+      // A focus request in an inactive window doesn't stick: activate it
+      // first (the app asked for the keyboard to go to the view).
+      if (CefRefPtr<CefWindow> window =
+              v->page_view ? v->page_view->GetWindow() : nullptr) {
+        if (!window->IsActive())
+          window->Activate();
+      }
       v->view->RequestFocus();
       b->GetHost()->SetFocus(true);
       return true;
@@ -1355,19 +1403,36 @@ bool Close(uint32_t id) {
   v->closing = true;
   FailPending(v, "the web view is closed");
   WebViewSinks::Instance().Close(id);
-  // Dropping the overlay and the last reference to the browser view closes
-  // the browser (cefclient's overlay browser does the same); OnBeforeClose
-  // then forgets the record.
+  if (v->browser) {
+    // The browser closes first; OnBeforeClose then destroys its overlay and
+    // forgets the record. Destroying the view under a live browser left
+    // CEF (Linux) with a browser it never finished closing, so the app
+    // could not quit.
+    if (v->overlay && v->overlay->IsValid())
+      v->overlay->SetVisible(false);
+    v->browser->GetHost()->CloseBrowser(true);
+    return true;
+  }
+  // Never created: no OnBeforeClose will come.
   if (v->overlay && v->overlay->IsValid())
     v->overlay->Destroy();
-  v->overlay = nullptr;
-  v->page_view = nullptr;
-  if (v->browser)
-    v->browser->GetHost()->CloseBrowser(true);
-  v->view = nullptr;
-  if (!v->browser)
-    Views().erase(id);  // never created: no OnBeforeClose will come
+  uint32_t window_id = v->window_id;
+  Views().erase(id);
+  FinishWindowCloseIfReady(window_id);
   return true;
+}
+
+bool CloseBeforeWindow(uint32_t window_id, CefRefPtr<CefWindow> window) {
+  CEF_REQUIRE_UI_THREAD();
+  CloseAllForWindow(window_id);
+  bool pending = false;
+  for (const auto& kv : Views()) {
+    if (kv.second->window_id == window_id)
+      pending = true;  // closing, its OnBeforeClose still to come
+  }
+  if (pending)
+    PendingWindowCloses()[window_id] = window;
+  return pending;
 }
 
 void CloseAllForWindow(uint32_t window_id) {

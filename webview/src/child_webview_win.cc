@@ -844,6 +844,7 @@ void Configure(ChildView* view) {
             if (error_page || navigation != v->navigation)
               return S_OK;
             SetLoad(v, "interactive", CurrentUrl(v));
+            MaybeSendUrl(v);
             return S_OK;
           })
           .Get(),
@@ -864,6 +865,7 @@ void Configure(ChildView* view) {
             args->get_IsSuccess(&success);
             if (success) {
               SetLoad(v, "complete", CurrentUrl(v));
+              MaybeSendUrl(v);
               return S_OK;
             }
             COREWEBVIEW2_WEB_ERROR_STATUS status =
