@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 57;
+pub const LAUFEY_API_VERSION: u32 = 58;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -1054,7 +1054,74 @@ pub struct LaufeyBackendApi {
     Option<unsafe extern "C" fn(*mut c_void, u32, c_int) -> bool>,
   pub set_window_toolbar_style:
     Option<unsafe extern "C" fn(*mut c_void, u32, c_int) -> bool>,
+  // --- Child web views (API >= 58); NULL on Winit.
+  pub webview_capabilities: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub create_webview: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *const c_char,
+      WebViewEventFn,
+      *mut c_void,
+      *mut i32,
+    ) -> u32,
+  >,
+  pub webview_set_bounds:
+    Option<unsafe extern "C" fn(*mut c_void, u32, f64, f64, f64, f64) -> bool>,
+  pub webview_set_visible:
+    Option<unsafe extern "C" fn(*mut c_void, u32, bool) -> bool>,
+  pub webview_navigate:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char) -> i32>,
+  pub webview_command:
+    Option<unsafe extern "C" fn(*mut c_void, u32, i32) -> bool>,
+  pub webview_state:
+    Option<unsafe extern "C" fn(*mut c_void, u32) -> *mut c_char>,
+  pub webview_evaluate: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      *const c_char,
+      WebViewEvalFn,
+      *mut c_void,
+    ),
+  >,
+  pub webview_capture: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      u32,
+      i32,
+      i32,
+      f64,
+      WebViewCaptureFn,
+      *mut c_void,
+    ),
+  >,
+  pub webview_close: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub webview_set_z_order:
+    Option<unsafe extern "C" fn(*mut c_void, u32, i32) -> bool>,
+  pub webview_set_zoom:
+    Option<unsafe extern "C" fn(*mut c_void, u32, f64) -> bool>,
+  pub webview_get_zoom: Option<unsafe extern "C" fn(*mut c_void, u32) -> f64>,
+  pub webview_find:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char, u32) -> bool>,
+  pub webview_stop_find: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub webview_open_devtools:
+    Option<unsafe extern "C" fn(*mut c_void, u32) -> i32>,
+  pub webview_print: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub webview_set_forward_keys:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char) -> bool>,
 }
+
+/// `laufey_webview_event_fn` (API 58).
+pub type WebViewEventFn =
+  Option<unsafe extern "C" fn(*mut c_void, u32, i32, *const c_char)>;
+/// `laufey_webview_eval_fn` (API 58).
+pub type WebViewEvalFn =
+  Option<unsafe extern "C" fn(*mut c_void, i32, *const c_char)>;
+/// `laufey_webview_capture_fn` (API 58).
+pub type WebViewCaptureFn = Option<
+  unsafe extern "C" fn(*mut c_void, i32, *const u8, usize, *const c_char),
+>;
 
 /// `laufey_rect_t` (API 50).
 #[repr(C)]
@@ -2028,6 +2095,24 @@ pub fn create_api_base() -> LaufeyBackendApi {
     set_app_menu: None,
     set_window_title_visibility: None,
     set_window_toolbar_style: None,
+    webview_capabilities: None,
+    create_webview: None,
+    webview_set_bounds: None,
+    webview_set_visible: None,
+    webview_navigate: None,
+    webview_command: None,
+    webview_state: None,
+    webview_evaluate: None,
+    webview_capture: None,
+    webview_close: None,
+    webview_set_z_order: None,
+    webview_set_zoom: None,
+    webview_get_zoom: None,
+    webview_find: None,
+    webview_stop_find: None,
+    webview_open_devtools: None,
+    webview_print: None,
+    webview_set_forward_keys: None,
   }
 }
 

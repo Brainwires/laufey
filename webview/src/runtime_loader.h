@@ -11,6 +11,7 @@
 #include <mutex>
 #include <queue>
 #include <map>
+#include <vector>
 
 #include "laufey.h"
 #include "laufey_overlay.h"
@@ -839,6 +840,82 @@ class LaufeyBackend {
     return false;
   }
   virtual bool SetWindowToolbarStyle(uint32_t /*window_id*/, int /*style*/) {
+    return false;
+  }
+  // API 58 (laufey.h create_webview and the webview_* entry points; the
+  // option / URL / partition rules and the event JSON are in
+  // laufey_webview.h). The trampolines validate ids and arguments first.
+  virtual uint32_t WebViewCapabilities() {
+    return 0;
+  }
+  virtual uint32_t CreateWebView(uint32_t /*window_id*/,
+                                 const std::string& /*options_json*/,
+                                 laufey_webview_event_fn /*on_event*/,
+                                 void* /*user_data*/, int32_t* status_out) {
+    *status_out = LAUFEY_WEBVIEW_UNSUPPORTED;
+    return 0;
+  }
+  virtual bool WebViewSetBounds(uint32_t /*webview_id*/, double /*x*/,
+                                double /*y*/, double /*width*/,
+                                double /*height*/) {
+    return false;
+  }
+  virtual bool WebViewSetVisible(uint32_t /*webview_id*/, bool /*visible*/) {
+    return false;
+  }
+  virtual int32_t WebViewNavigate(uint32_t /*webview_id*/,
+                                  const std::string& /*url*/) {
+    return LAUFEY_WEBVIEW_CLOSED;
+  }
+  virtual bool WebViewCommand(uint32_t /*webview_id*/, int32_t /*command*/) {
+    return false;
+  }
+  // The state JSON, or empty for an unknown id.
+  virtual std::string WebViewState(uint32_t /*webview_id*/) {
+    return "";
+  }
+  virtual void WebViewEvaluate(uint32_t /*webview_id*/,
+                               const std::string& /*script*/,
+                               laufey_webview_eval_fn callback,
+                               void* user_data) {
+    callback(user_data, LAUFEY_WEBVIEW_UNSUPPORTED,
+             "this backend has no web views");
+  }
+  virtual void WebViewCapture(uint32_t /*webview_id*/, int32_t /*format*/,
+                              int32_t /*quality*/, double /*scale*/,
+                              laufey_webview_capture_fn callback,
+                              void* user_data) {
+    callback(user_data, LAUFEY_WEBVIEW_UNSUPPORTED, nullptr, 0,
+             "this backend has no web views");
+  }
+  virtual bool WebViewClose(uint32_t /*webview_id*/) {
+    return false;
+  }
+  // LAUFEY_WEBVIEW_CAP_ZOOM / FIND / DEVTOOLS / PRINT (laufey.h); the
+  // trampolines validate the zoom factor and the find text first.
+  virtual bool WebViewSetZoom(uint32_t /*webview_id*/, double /*factor*/) {
+    return false;
+  }
+  virtual double WebViewGetZoom(uint32_t /*webview_id*/) { return 0; }
+  virtual bool WebViewFind(uint32_t /*webview_id*/,
+                           const std::string& /*text*/, uint32_t /*flags*/) {
+    return false;
+  }
+  virtual bool WebViewStopFind(uint32_t /*webview_id*/) { return false; }
+  virtual int32_t WebViewOpenDevTools(uint32_t /*webview_id*/) {
+    return LAUFEY_WEBVIEW_UNSUPPORTED;
+  }
+  virtual bool WebViewPrint(uint32_t /*webview_id*/) { return false; }
+  // LAUFEY_WEBVIEW_CAP_FORWARD_KEYS: replaces the view's "forwardKeys"
+  // (canonical forms; the trampoline parsed them).
+  virtual bool WebViewSetForwardKeys(uint32_t /*webview_id*/,
+                                     const std::vector<std::string>& /*keys*/) {
+    return false;
+  }
+  // Puts the window's views in this order, bottom to top (WebViewSinks keeps
+  // the z orders; LAUFEY_WEBVIEW_CAP_Z_ORDER backends override it).
+  virtual bool WebViewRestack(uint32_t /*window_id*/,
+                              const std::vector<uint32_t>& /*bottom_to_top*/) {
     return false;
   }
   virtual bool SetWindowBackdrop(uint32_t /*window_id*/, int /*backdrop*/,

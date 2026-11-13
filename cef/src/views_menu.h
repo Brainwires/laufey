@@ -43,6 +43,12 @@ bool OnAccelerator(uint32_t window_id, int command_id);
 // through OnAccelerator as the window's accelerator would.
 bool TestTriggerAccelerator(uint32_t window_id, const char* accelerator);
 
+// The item of window `window_id`'s menu bound to `accel`, run as its
+// accelerator would; false when none is (a child web view's keys,
+// child_webview.cc).
+bool RunAccelerator(uint32_t window_id,
+                    const laufey_common::Accelerator& accel);
+
 // A context menu at (x, y) in the browser view's coordinates. Non-blocking;
 // `on_closed` fires once it closed (after the chosen item's click).
 void ShowContextMenu(CefRefPtr<CefWindow> window,

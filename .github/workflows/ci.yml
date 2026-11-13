@@ -236,6 +236,17 @@ jobs:
             backend-common/tests/title_options_test.cc \
             -o "$RUNNER_TEMP/title_options_test"
           "$RUNNER_TEMP/title_options_test"
+      # Child web views (API 58): create_webview's options, the URL and
+      # partition rules, the event / state JSON, the evaluate envelope, the
+      # registry and "forwardKeys" (accelerators: shortcuts.cc).
+      - name: backend-common webview_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/webview_test.cc backend-common/src/webview.cc \
+            backend-common/src/shortcuts.cc \
+            -pthread -o "$RUNNER_TEMP/webview_test"
+          "$RUNNER_TEMP/webview_test"
       # Page-triggered downloads: the file name the save dialog proposes, the
       # origins a window may download from, the prompt budget.
       - name: backend-common downloads_test

@@ -79,6 +79,8 @@ if(OS_MAC)
     src/scheme_handler.cc
     src/scheme_handler.h
     src/runtime_loader.cc
+    src/child_webview.cc
+    src/child_webview.h
     src/runtime_loader_mac.mm
     src/runtime_loader.h
   )
@@ -224,6 +226,8 @@ elseif(OS_WINDOWS)
     src/scheme_handler.cc
     src/scheme_handler.h
     src/runtime_loader.cc
+    src/child_webview.cc
+    src/child_webview.h
     src/views_menu.cc
     src/runtime_loader.h
   )
@@ -322,6 +326,8 @@ elseif(OS_LINUX)
     src/scheme_handler.cc
     src/scheme_handler.h
     src/runtime_loader.cc
+    src/child_webview.cc
+    src/child_webview.h
     src/views_menu.cc
     src/runtime_loader.h
   )

@@ -86,6 +86,8 @@ pub async fn run() {
 pub async fn devtools_off() {
   let caps = laufey::system_capabilities();
   devtools_checks(&caps, false, "").await;
+  // A child web view's open_devtools follows the same switch (API 58).
+  super::webview_checks::devtools_off().await;
 }
 
 // ---------------------------------------------------------------------------

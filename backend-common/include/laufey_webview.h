@@ -1,0 +1,264 @@
+// Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
+//
+// Child web views (API 58): the rules every backend shares, with no OS API,
+// so they are tested once (webview_test.cc). See docs/webviews.md.
+//
+//   - ParseWebViewOptions: create_webview's options JSON, validated (status
+//     LAUFEY_WEBVIEW_INVALID / NOT_ALLOWED_URL with a message).
+//   - IsAllowedWebViewUrl / IsAllowedWebViewNavigation: what a web view may
+//     load (http(s) with a host; the view's own navigations may also be
+//     about:blank).
+//   - Partitions: IsValidPartitionName, IsEphemeralPartition,
+//     PartitionDirName (a directory name under the app data directory),
+//     PartitionUuid (a stable UUID per name, for engines that key stores by
+//     UUID: WKWebsiteDataStore).
+//   - The JSON of each event and of webview_state.
+//   - kWebViewEvalWrapper / WebViewEvalScript: the script engines without a
+//     protocol-level evaluate run (WKWebView, WebKitGTK), and
+//     ParseWebViewEvalEnvelope, which reads its answer back.
+//   - Keys: ParseWebViewForwardKeys ("forwardKeys", accelerator strings),
+//     WebViewKeyAccelerator / WebViewKeyMatches (a keydown, as DOM `code` and
+//     modifiers, against them) and the KEY event's JSON.
+//   - WebViewSinks: id allocation, each view's window and event sink, the
+//     per-window limit, and the exactly-once CLOSED.
+
+#ifndef LAUFEY_WEBVIEW_H_
+#define LAUFEY_WEBVIEW_H_
+
+#include <array>
+#include <cstdint>
+#include <map>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "laufey.h"
+#include "laufey_system.h"
+
+namespace laufey_common {
+
+enum class WebViewPopups { kSameView, kBrowser, kDeny };
+enum class WebViewDownloads { kDeny, kAsk, kBrowser };
+enum class WebViewPermissions { kDeny, kAsk };
+
+constexpr const char* kDefaultWebViewPartition = "webview:default";
+
+struct WebViewBounds {
+  double x = 0;
+  double y = 0;
+  double width = 0;
+  double height = 0;
+};
+
+struct WebViewOptions {
+  std::string url;
+  WebViewBounds bounds;
+  std::string partition = kDefaultWebViewPartition;
+  bool visible = true;
+  WebViewPopups popups = WebViewPopups::kSameView;
+  WebViewDownloads downloads = WebViewDownloads::kDeny;
+  WebViewPermissions permissions = WebViewPermissions::kDeny;
+  std::string user_agent;         // empty: the engine's own
+  bool app_context_menu = false;  // "contextMenu": "app"
+  bool clipboard_read = false;
+  bool clipboard_write = true;  // on a user gesture
+  // "forwardKeys", each in its canonical form (CanonicalAccelerator).
+  std::vector<std::string> forward_keys;
+};
+
+// "forwardKeys" limits: entries, and characters per entry.
+constexpr size_t kMaxWebViewForwardKeys = 64;
+constexpr size_t kMaxWebViewForwardKeyLength = 64;
+
+// Parses webview_set_forward_keys' JSON array of accelerator strings (the
+// menu / global shortcut syntax, ParseAccelerator; CmdOrCtrl is Command on
+// macOS, Ctrl elsewhere) into their canonical forms, duplicates dropped.
+// LAUFEY_WEBVIEW_OK or LAUFEY_WEBVIEW_INVALID (not an array of strings, more
+// than kMaxWebViewForwardKeys entries, one longer than
+// kMaxWebViewForwardKeyLength or not an accelerator; `error` says which).
+int32_t ParseWebViewForwardKeys(const std::string& json_array,
+                                std::vector<std::string>* out,
+                                std::string* error);
+
+// Parses and validates create_webview's options. Returns LAUFEY_WEBVIEW_OK,
+// LAUFEY_WEBVIEW_INVALID (bad JSON, a missing / mistyped / unknown-valued
+// field, bad bounds or partition; `error` says which) or
+// LAUFEY_WEBVIEW_NOT_ALLOWED_URL.
+int32_t ParseWebViewOptions(const std::string& json, WebViewOptions* out,
+                            std::string* error);
+
+// Finite, width / height >= 0, and every value within +-1e6 CSS pixels.
+bool IsValidWebViewBounds(double x, double y, double width, double height);
+
+// What create_webview / webview_navigate accept: an absolute http(s) URL
+// with a host, no whitespace or control characters
+// (IsAllowedExternalLinkUrl's rule).
+bool IsAllowedWebViewUrl(const std::string& url);
+
+// What the view's own navigations (links, scripts, redirects) may load:
+// IsAllowedWebViewUrl, plus about:blank / about:srcdoc. Anything else
+// (file:, data:, javascript:, the app's custom schemes, mailto:) is
+// cancelled.
+bool IsAllowedWebViewNavigation(const std::string& url);
+
+// 1..64 characters of [A-Za-z0-9._:-], the first alphanumeric.
+bool IsValidPartitionName(const std::string& name);
+
+// "ephemeral" or "ephemeral:<anything>": kept in memory only.
+bool IsEphemeralPartition(const std::string& name);
+
+// A directory name for a persistent partition (':' becomes '~', which a
+// valid name never contains, so distinct names never share a directory).
+std::string PartitionDirName(const std::string& name);
+
+// A stable, name-derived RFC 4122 version-5-shaped UUID (16 bytes).
+std::array<uint8_t, 16> PartitionUuid(const std::string& name);
+// The same as "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", upper case.
+std::string PartitionUuidString(const std::string& name);
+
+// --- Event and state JSON -------------------------------------------------
+
+std::string WebViewTitleJson(const std::string& title);
+std::string WebViewUrlJson(const std::string& url, bool can_go_back,
+                           bool can_go_forward);
+// `state` is one of "loading", "interactive", "complete", "failed"; the
+// error fields are written only for "failed".
+std::string WebViewLoadJson(const char* state, const std::string& url,
+                            const char* error_code = nullptr,
+                            const std::string& error_message = std::string());
+// `level` one of "log", "info", "warn", "error", "debug" (anything else is
+// written as "log"); `line` <= 0 and an empty `source` are left out.
+std::string WebViewConsoleJson(const char* level, const std::string& message,
+                               const std::string& source, int line);
+std::string WebViewFocusJson(bool focused);
+std::string WebViewNewWindowJson(const std::string& url, bool popup);
+std::string WebViewFindResultJson(int matches, int active_match);
+
+struct WebViewContextMenuFields {
+  double x = 0;
+  double y = 0;
+  std::string link_url;        // empty: left out
+  std::string image_url;       // empty: left out
+  std::string selection_text;  // empty: left out
+  bool is_editable = false;
+  const char* media_type = nullptr;  // "image", "video", "audio", "canvas",
+                                     // "plugin"; nullptr: left out
+};
+std::string WebViewContextMenuJson(const WebViewContextMenuFields& f);
+
+// The KEY event: a keydown matching "forwardKeys" (`forwarded`) or one the
+// page did not handle.
+struct WebViewKeyFields {
+  std::string key;   // DOM KeyboardEvent.key
+  std::string code;  // DOM KeyboardEvent.code
+  bool alt_key = false;
+  bool ctrl_key = false;
+  bool meta_key = false;  // Command on macOS, the Windows / Super key elsewhere
+  bool shift_key = false;
+  bool repeat = false;
+  bool forwarded = false;
+};
+std::string WebViewKeyJson(const WebViewKeyFields& f);
+
+// The accelerator a keydown is (its DOM `code` names the physical key, as
+// accelerators do; `meta` is kModSuper), or false when the code names no
+// accelerator key (a modifier, an unmapped key, "Unidentified").
+bool WebViewKeyAccelerator(const std::string& code, bool alt, bool ctrl,
+                           bool meta, bool shift, Accelerator* out);
+
+// Whether that keydown is one of `forward_keys` (canonical forms, as
+// ParseWebViewForwardKeys returns them).
+bool WebViewKeyMatches(const std::vector<std::string>& forward_keys,
+                       const std::string& code, bool alt, bool ctrl, bool meta,
+                       bool shift);
+
+// Zoom factors webview_set_zoom accepts.
+bool IsValidWebViewZoom(double factor);
+
+struct WebViewStateFields {
+  std::string url;
+  std::string title;
+  const char* load = "complete";
+  bool can_go_back = false;
+  bool can_go_forward = false;
+  bool visible = true;
+  WebViewBounds bounds;
+  int32_t z_order = 0;
+};
+std::string WebViewStateJson(const WebViewStateFields& s);
+
+// --- Evaluate ---------------------------------------------------------------
+//
+// For engines that run a function body with `await` but have no
+// protocol-level evaluate: WebViewEvalScript(script) is an async function
+// body that evaluates `script` (an indirect eval: the completion value of a
+// classic script), awaits it, serializes it, and returns an envelope string:
+//   {"ok":true,"json":"<the JSON>"}
+//   {"ok":false,"kind":"error"|"not_serializable","message":"..."}
+// The serializer refuses functions, symbols, bigints, DOM nodes, windows and
+// cycles (not_serializable); undefined becomes null.
+std::string WebViewEvalScript(const std::string& script);
+
+// The serializer alone: a JS function expression `(value) => string` that
+// throws a TypeError whose message starts with "not_serializable: " for a
+// value JSON can't hold. Protocol-level evaluates (DevTools'
+// Runtime.callFunctionOn) call it on the script's result.
+extern const char kWebViewSerializeFunction[];
+
+// Reads an envelope back: LAUFEY_WEBVIEW_OK with `text` the JSON, or
+// SCRIPT_ERROR / NOT_SERIALIZABLE with `text` the message, or FAILED when
+// `envelope` is not one.
+int32_t ParseWebViewEvalEnvelope(const std::string& envelope,
+                                 std::string* text);
+
+// --- Registry ---------------------------------------------------------------
+//
+// Ids are unique in the process and never reused. Emit and Close call the
+// sink with the registry's lock held (a recursive mutex: a sink may call back
+// into the registry), so a sink must not block; Close emits CLOSED exactly
+// once and forgets the id, after which Emit for it does nothing.
+class WebViewSinks {
+ public:
+  static WebViewSinks& Instance();
+
+  // Allocates an id for a view of `window_id` with this sink, or returns 0
+  // when the window already holds LAUFEY_WEBVIEW_MAX_PER_WINDOW views.
+  uint32_t Add(uint32_t window_id, laufey_webview_event_fn fn, void* user_data);
+  bool Has(uint32_t webview_id);
+  // The window of `webview_id`, or 0.
+  uint32_t WindowOf(uint32_t webview_id);
+  size_t CountForWindow(uint32_t window_id);
+  std::vector<uint32_t> ViewsOfWindow(uint32_t window_id);
+  void Emit(uint32_t webview_id, int32_t kind, const std::string& detail);
+  // Emits CLOSED and forgets the id. False when unknown (already closed).
+  bool Close(uint32_t webview_id);
+  // Drops an id without an event (a creation that failed after Add).
+  void Abandon(uint32_t webview_id);
+
+  // Stacking among a window's views (webview_set_z_order): Add gives one
+  // more than the window's highest. False for an unknown id.
+  bool SetZOrder(uint32_t webview_id, int32_t z_order);
+  bool Raise(uint32_t webview_id);  // one more than the window's highest
+  bool Lower(uint32_t webview_id);  // one less than the window's lowest
+  int32_t ZOrderOf(uint32_t webview_id);
+  // The window's views bottom to top (z order, then creation order).
+  std::vector<uint32_t> StackOrder(uint32_t window_id);
+
+  // Test-only.
+  void ResetForTest();
+
+ private:
+  struct Sink {
+    uint32_t window_id;
+    laufey_webview_event_fn fn;
+    void* user_data;
+    int32_t z_order;
+  };
+  std::recursive_mutex mu_;
+  std::map<uint32_t, Sink> sinks_;
+  uint32_t next_id_ = 1;
+};
+
+}  // namespace laufey_common
+
+#endif  // LAUFEY_WEBVIEW_H_

@@ -4,6 +4,7 @@
 #define LAUFEY_RENDER_PROCESS_HANDLER_H_
 
 #include <map>
+#include <set>
 #include <vector>
 #include <string>
 #include <atomic>
@@ -93,6 +94,8 @@ class LaufeyRenderProcessHandler : public CefRenderProcessHandler {
 
  private:
   std::map<int, std::string> browser_namespaces_;
+  // Browsers of child web views (API 58): never given the bridge.
+  std::set<int> child_webviews_;
   std::atomic<uint64_t> next_call_id_{1};
   std::atomic<uint64_t> next_callback_id_{1};
   std::map<uint64_t, CefRefPtr<PromiseResolver>> pending_calls_;

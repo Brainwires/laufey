@@ -80,6 +80,9 @@ pub use will_navigate::*;
 mod background;
 pub use background::*;
 
+mod webview;
+pub use webview::*;
+
 // build.rs's target decisions, tested here (a build script has no tests).
 #[cfg(test)]
 #[path = "../build_support.rs"]
@@ -92,7 +95,7 @@ mod build_support_tests;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 57;
+pub const LAUFEY_API_VERSION: u32 = 58;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.

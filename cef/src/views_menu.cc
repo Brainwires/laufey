@@ -346,6 +346,11 @@ bool TestTriggerAccelerator(uint32_t window_id, const char* accelerator) {
   laufey_common::Accelerator accel;
   if (!laufey_common::ParseAccelerator(accelerator, false, &accel, nullptr))
     return false;
+  return RunAccelerator(window_id, accel);
+}
+
+bool RunAccelerator(uint32_t window_id,
+                    const laufey_common::Accelerator& accel) {
   auto it = Menus().find(window_id);
   if (it == Menus().end())
     return false;

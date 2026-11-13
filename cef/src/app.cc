@@ -1,6 +1,7 @@
 // Copyright 2025 Divy Srivastava. All rights reserved. MIT license.
 
 #include "app.h"
+#include "child_webview.h"
 #include "custom_schemes.h"
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
@@ -315,7 +316,16 @@ bool LaufeyWindowDelegate::GetLinuxWindowProperties(
 }
 #endif
 
+void LaufeyWindowDelegate::OnWindowClosing(CefRefPtr<CefWindow> window) {
+  if (laufey_id_ > 0)
+    laufey_cef_child_webview::CloseAllForWindow(laufey_id_);
+}
+
 void LaufeyWindowDelegate::OnWindowDestroyed(CefRefPtr<CefWindow> window) {
+  // Normally done in OnWindowClosing; a window destroyed without closing
+  // (shutdown) must not leave views behind.
+  if (laufey_id_ > 0)
+    laufey_cef_child_webview::CloseAllForWindow(laufey_id_);
   g_live_windows.Remove(this);
   // Unregister native window
   CefWindowHandle handle = window->GetWindowHandle();
