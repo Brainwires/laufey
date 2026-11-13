@@ -69,6 +69,14 @@ A web view is a browsing context of its own:
   the last two as the view's KEY events. WKWebView's window-wide key monitor and
   WebKitGTK's window key handler skip a focused child view; CEF and WebView2
   give a child view's keys to its own browser only.
+- **None of the window's mouse events.** Clicks, moves and scrolls over a shown
+  view are its page's: the window's mouse handlers never see them. WKWebView's
+  window-wide monitors hit-test the event against the child views, WebKitGTK's
+  window handlers check the event's widget, and CEF's mouse monitors on Windows
+  (a thread hook) and Linux (XI2) skip points over a shown overlay
+  (`CoversScreenPixel`). On CEF for macOS each overlay is a window of its own,
+  and WebView2 delivers a view's input to its own window only. The view still
+  reports FOCUS before the first click reaches its page.
 - **None of the window's navigation rules.** The window's navigation guard and
   will-navigate handler never see the view; its main frame may load http(s)
   pages and `about:blank`, and any other scheme (`file:`, `data:`,

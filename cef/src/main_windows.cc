@@ -21,6 +21,7 @@
 #include "include/wrapper/cef_helpers.h"
 
 #include "app.h"
+#include "child_webview.h"
 #include "laufey_launch_args.h"
 #include "laufey_launch_config.h"
 #include "laufey_cef_proxy.h"
@@ -135,6 +136,11 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     HWND topLevel = mhs->hwnd ? GetAncestor(mhs->hwnd, GA_ROOT) : nullptr;
     uint32_t window_id =
         topLevel ? loader->GetLaufeyIdForNativeHandle((void*)topLevel) : 0;
+    // Over a child web view the input is its page's (API 58), never the
+    // window's mouse events.
+    if (window_id != 0 &&
+        laufey_cef_child_webview::CoversScreenPixel(mhs->pt.x, mhs->pt.y))
+      return CallNextHookEx(g_mouse_hook, nCode, wParam, lParam);
 
     POINT pt = mhs->pt;
     if (mhs->hwnd) {

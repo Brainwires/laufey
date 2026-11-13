@@ -1442,4 +1442,18 @@ bool OwnsResponder(void* responder_ptr) {
   return false;
 }
 
+bool OwnsEventLocation(void* event_ptr) {
+  NSEvent* event = (__bridge NSEvent*)event_ptr;
+  NSView* content = event.window.contentView;
+  if (!content)
+    return false;
+  // hitTest: takes a point in the receiver's superview's coordinates.
+  NSPoint point = content.superview
+                      ? [content.superview convertPoint:event.locationInWindow
+                                               fromView:nil]
+                      : event.locationInWindow;
+  NSView* hit = [content hitTest:point];
+  return hit && OwnsResponder((__bridge void*)hit);
+}
+
 }  // namespace laufey_child_webview_mac

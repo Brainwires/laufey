@@ -223,6 +223,11 @@ static gboolean on_button_event(GtkWidget* widget, GdkEventButton* event,
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid == 0)
     return FALSE;
+  // Clicks, moves, scrolls and crossings inside a child web view are its
+  // page's (API 58), never the window's.
+  if (laufey_child_webview_linux::OwnsWidget(
+          gtk_get_event_widget(reinterpret_cast<GdkEvent*>(event))))
+    return FALSE;
 
   int state;
   int32_t click_count;
@@ -286,6 +291,11 @@ static gboolean on_motion_event(GtkWidget* widget, GdkEventMotion* event,
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid == 0)
     return FALSE;
+  // Clicks, moves, scrolls and crossings inside a child web view are its
+  // page's (API 58), never the window's.
+  if (laufey_child_webview_linux::OwnsWidget(
+          gtk_get_event_widget(reinterpret_cast<GdkEvent*>(event))))
+    return FALSE;
   uint32_t modifiers = keyboard::GdkModifiersToLaufey(event->state);
   RuntimeLoader::GetInstance()->DispatchMouseMoveEvent(wid, event->x, event->y,
                                                        modifiers);
@@ -296,6 +306,11 @@ static gboolean on_scroll_event(GtkWidget* widget, GdkEventScroll* event,
                                 gpointer user_data) {
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid == 0)
+    return FALSE;
+  // Clicks, moves, scrolls and crossings inside a child web view are its
+  // page's (API 58), never the window's.
+  if (laufey_child_webview_linux::OwnsWidget(
+          gtk_get_event_widget(reinterpret_cast<GdkEvent*>(event))))
     return FALSE;
 
   double delta_x = 0, delta_y = 0;

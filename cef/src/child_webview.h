@@ -62,6 +62,10 @@ bool Print(uint32_t id);
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
+// Whether the screen point (`x`, `y` in pixels) is over a shown child web
+// view: the window's mouse monitors (main_windows.cc's hook, main_linux.cc's
+// XI2) leave such events to the view's page (API 58). UI thread.
+bool CoversScreenPixel(int x, int y);
 
 }  // namespace laufey_cef_child_webview
 
