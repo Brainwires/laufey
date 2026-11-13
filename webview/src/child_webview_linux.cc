@@ -1390,4 +1390,12 @@ void CloseAllForWindow(uint32_t window_id) {
     Close(id);
 }
 
+bool OwnsWidget(GtkWidget* widget) {
+  for (GtkWidget* w = widget; w; w = gtk_widget_get_parent(w)) {
+    if (FindByWidget(w))
+      return true;
+  }
+  return false;
+}
+
 }  // namespace laufey_child_webview_linux

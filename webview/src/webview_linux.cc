@@ -1052,6 +1052,12 @@ static gboolean on_key_event(GtkWidget* widget, GdkEventKey* event,
   uint32_t wid = LaufeyIdForWidget(widget);
   if (wid == 0)
     return FALSE;
+  // Keys typed into a child web view are its page's (API 58): never the
+  // window's keyboard events. Its forwarded / unhandled keys reach the
+  // embedder as the view's KEY events.
+  if (GTK_IS_WINDOW(widget) && laufey_child_webview_linux::OwnsWidget(
+                                   gtk_window_get_focus(GTK_WINDOW(widget))))
+    return FALSE;
 
   int state =
       (event->type == GDK_KEY_PRESS) ? LAUFEY_KEY_PRESSED : LAUFEY_KEY_RELEASED;

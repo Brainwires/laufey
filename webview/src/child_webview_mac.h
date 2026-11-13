@@ -54,6 +54,10 @@ bool Print(uint32_t id);
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
+// Whether `responder` (an NSResponder*) is a child web view or inside one:
+// its keys belong to that view's page, never to the window's own keyboard
+// events (they may be a third-party page's passwords). Main thread.
+bool OwnsResponder(void* responder);
 
 }  // namespace laufey_child_webview_mac
 

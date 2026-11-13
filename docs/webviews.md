@@ -62,6 +62,13 @@ A web view is a browsing context of its own:
   `LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS` is not reported (macOS before 14, a
   CEF app with an in-memory profile, a WebKitGTK app without a data directory:
   no `LAUFEY_DATA_DIR` / `LAUFEY_APP_ID`). The default is `"webview:default"`.
+- **None of the window's keyboard events.** Keys typed into a view are its
+  page's: they never reach the window's keyboard handler (they may be a
+  third-party page's passwords). Only the app menu's accelerators, the view's
+  `forwardKeys` matches and the keys its page didn't handle reach the embedder,
+  the last two as the view's KEY events. WKWebView's window-wide key monitor and
+  WebKitGTK's window key handler skip a focused child view; CEF and WebView2
+  give a child view's keys to its own browser only.
 - **None of the window's navigation rules.** The window's navigation guard and
   will-navigate handler never see the view; its main frame may load http(s)
   pages and `about:blank`, and any other scheme (`file:`, `data:`,

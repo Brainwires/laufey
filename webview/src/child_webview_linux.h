@@ -15,6 +15,9 @@
 #include "laufey.h"
 #include "laufey_webview.h"
 
+// GTK's own type, declared here so this header needs no GTK include.
+typedef struct _GtkWidget GtkWidget;
+
 namespace laufey_child_webview_linux {
 
 // LAUFEY_WEBVIEW_CAP_* plus the engine. Any thread.
@@ -45,6 +48,9 @@ bool Close(uint32_t id);
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
+// Whether `widget` is a child web view or inside one: its keys belong to that
+// view's page, never to the window's own keyboard events. GTK thread.
+bool OwnsWidget(GtkWidget* widget);
 
 }  // namespace laufey_child_webview_linux
 

@@ -1865,6 +1865,15 @@ void WKWebViewBackend::InstallGlobalMonitors() {
                                      uint32_t wid = LaufeyIdForNSWindow(win);
                                      if (wid == 0)
                                        return event;
+                                     // Keys typed into a child web view are
+                                     // its page's (API 58): never the
+                                     // window's keyboard events. Its
+                                     // forwarded / unhandled keys reach the
+                                     // embedder as the view's KEY events.
+                                     if (laufey_child_webview_mac::
+                                             OwnsResponder((__bridge void*)win
+                                                               .firstResponder))
+                                       return event;
 
                                      uint32_t modifiers =
                                          NSModifierFlagsToLaufey(
