@@ -891,6 +891,21 @@ class LaufeyBackend {
   virtual bool WebViewClose(uint32_t /*webview_id*/) {
     return false;
   }
+  // LAUFEY_WEBVIEW_CAP_ZOOM / FIND / DEVTOOLS / PRINT (laufey.h); the
+  // trampolines validate the zoom factor and the find text first.
+  virtual bool WebViewSetZoom(uint32_t /*webview_id*/, double /*factor*/) {
+    return false;
+  }
+  virtual double WebViewGetZoom(uint32_t /*webview_id*/) { return 0; }
+  virtual bool WebViewFind(uint32_t /*webview_id*/,
+                           const std::string& /*text*/, uint32_t /*flags*/) {
+    return false;
+  }
+  virtual bool WebViewStopFind(uint32_t /*webview_id*/) { return false; }
+  virtual int32_t WebViewOpenDevTools(uint32_t /*webview_id*/) {
+    return LAUFEY_WEBVIEW_UNSUPPORTED;
+  }
+  virtual bool WebViewPrint(uint32_t /*webview_id*/) { return false; }
   // Puts the window's views in this order, bottom to top (WebViewSinks keeps
   // the z orders; LAUFEY_WEBVIEW_CAP_Z_ORDER backends override it).
   virtual bool WebViewRestack(uint32_t /*window_id*/,

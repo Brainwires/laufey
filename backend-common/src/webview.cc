@@ -284,6 +284,27 @@ int32_t ParseWebViewOptions(const std::string& text, WebViewOptions* out,
       return LAUFEY_WEBVIEW_INVALID;
     }
   }
+  if (!ReadOptionalString(root, "contextMenu", &value, &present, error))
+    return LAUFEY_WEBVIEW_INVALID;
+  if (present) {
+    if (value == "app") {
+      o.app_context_menu = true;
+    } else if (value != "native") {
+      *error = "\"contextMenu\" must be \"native\" or \"app\"";
+      return LAUFEY_WEBVIEW_INVALID;
+    }
+  }
+  for (auto [key, field] : {std::pair<const char*, bool*>{"clipboardRead",
+                                                          &o.clipboard_read},
+                            {"clipboardWrite", &o.clipboard_write}}) {
+    if (const JsonValue* v = Field(root, key)) {
+      if (v->type != JsonValue::Type::kBool) {
+        *error = std::string("\"") + key + "\" must be a boolean";
+        return LAUFEY_WEBVIEW_INVALID;
+      }
+      *field = v->boolean;
+    }
+  }
   if (!ReadOptionalString(root, "userAgent", &o.user_agent, &present, error))
     return LAUFEY_WEBVIEW_INVALID;
   if (present) {
@@ -386,6 +407,33 @@ std::string WebViewFocusJson(bool focused) {
 std::string WebViewNewWindowJson(const std::string& url, bool popup) {
   return "{\"url\":" + JsonQuote(url) +
          ",\"disposition\":" + (popup ? "\"popup\"" : "\"tab\"") + "}";
+}
+
+std::string WebViewFindResultJson(int matches, int active_match) {
+  if (matches < 0)
+    matches = 0;
+  if (active_match < 0 || matches == 0)
+    active_match = 0;
+  return "{\"matches\":" + std::to_string(matches) +
+         ",\"activeMatch\":" + std::to_string(active_match) + "}";
+}
+
+std::string WebViewContextMenuJson(const WebViewContextMenuFields& f) {
+  std::string out = "{\"x\":" + Number(f.x) + ",\"y\":" + Number(f.y);
+  if (!f.link_url.empty())
+    out += ",\"linkUrl\":" + JsonQuote(f.link_url);
+  if (!f.image_url.empty())
+    out += ",\"imageUrl\":" + JsonQuote(f.image_url);
+  if (!f.selection_text.empty())
+    out += ",\"selectionText\":" + JsonQuote(f.selection_text);
+  out += std::string(",\"isEditable\":") + Bool(f.is_editable);
+  if (f.media_type)
+    out += ",\"mediaType\":" + JsonQuote(f.media_type);
+  return out + "}";
+}
+
+bool IsValidWebViewZoom(double factor) {
+  return std::isfinite(factor) && factor >= 0.25 && factor <= 5;
 }
 
 std::string WebViewStateJson(const WebViewStateFields& s) {

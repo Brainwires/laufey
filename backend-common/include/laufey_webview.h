@@ -55,6 +55,9 @@ struct WebViewOptions {
   WebViewDownloads downloads = WebViewDownloads::kDeny;
   WebViewPermissions permissions = WebViewPermissions::kDeny;
   std::string user_agent;  // empty: the engine's own
+  bool app_context_menu = false;  // "contextMenu": "app"
+  bool clipboard_read = false;
+  bool clipboard_write = true;  // on a user gesture
 };
 
 // Parses and validates create_webview's options. Returns LAUFEY_WEBVIEW_OK,
@@ -109,6 +112,22 @@ std::string WebViewConsoleJson(const char* level, const std::string& message,
                                const std::string& source, int line);
 std::string WebViewFocusJson(bool focused);
 std::string WebViewNewWindowJson(const std::string& url, bool popup);
+std::string WebViewFindResultJson(int matches, int active_match);
+
+struct WebViewContextMenuFields {
+  double x = 0;
+  double y = 0;
+  std::string link_url;        // empty: left out
+  std::string image_url;       // empty: left out
+  std::string selection_text;  // empty: left out
+  bool is_editable = false;
+  const char* media_type = nullptr;  // "image", "video", "audio", "canvas",
+                                     // "plugin"; nullptr: left out
+};
+std::string WebViewContextMenuJson(const WebViewContextMenuFields& f);
+
+// Zoom factors webview_set_zoom accepts.
+bool IsValidWebViewZoom(double factor);
 
 struct WebViewStateFields {
   std::string url;

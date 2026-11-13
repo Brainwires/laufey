@@ -65,6 +65,30 @@ impl WebViewCapabilities {
   pub fn z_order(&self) -> bool {
     self.has(ffi::LAUFEY_WEBVIEW_CAP_Z_ORDER)
   }
+  /// [`WebView::set_zoom`] / [`WebView::zoom`].
+  pub fn zoom(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_ZOOM)
+  }
+  /// [`WebView::find`] and [`WebViewEventKind::FindResult`].
+  pub fn find(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_FIND)
+  }
+  /// [`WebView::open_devtools`].
+  pub fn devtools(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_DEVTOOLS)
+  }
+  /// [`WebViewEventKind::ContextMenu`] and `context_menu: "app"`.
+  pub fn context_menu(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_CONTEXT_MENU)
+  }
+  /// [`WebView::print`].
+  pub fn print(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_PRINT)
+  }
+  /// `clipboard_read` / `clipboard_write` are applied.
+  pub fn clipboard(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_CLIPBOARD)
+  }
   /// The engine, `None` when unsupported.
   pub fn engine(&self) -> Option<WebViewEngine> {
     let raw = (self.0 & ffi::LAUFEY_WEBVIEW_ENGINE_MASK)
@@ -122,6 +146,12 @@ pub struct WebViewOptions {
   /// `"deny"` (default) or `"ask"`.
   pub permissions: Option<String>,
   pub user_agent: Option<String>,
+  /// `"native"` (default) or `"app"`.
+  pub context_menu: Option<String>,
+  /// Default `false`.
+  pub clipboard_read: Option<bool>,
+  /// Default `true` (on a user gesture).
+  pub clipboard_write: Option<bool>,
 }
 
 fn json_string(s: &str) -> String {
@@ -164,14 +194,21 @@ impl WebViewOptions {
       ("downloads", &self.downloads),
       ("permissions", &self.permissions),
       ("userAgent", &self.user_agent),
+      ("contextMenu", &self.context_menu),
     ];
     for (key, value) in strings {
       if let Some(v) = value {
         parts.push(format!("\"{key}\":{}", json_string(v)));
       }
     }
-    if let Some(v) = self.visible {
-      parts.push(format!("\"visible\":{v}"));
+    for (key, value) in [
+      ("visible", self.visible),
+      ("clipboardRead", self.clipboard_read),
+      ("clipboardWrite", self.clipboard_write),
+    ] {
+      if let Some(v) = value {
+        parts.push(format!("\"{key}\":{v}"));
+      }
     }
     format!("{{{}}}", parts.join(","))
   }
@@ -187,6 +224,8 @@ pub enum WebViewEventKind {
   FocusChange,
   NewWindow,
   Closed,
+  FindResult,
+  ContextMenu,
 }
 
 impl WebViewEventKind {
@@ -199,12 +238,14 @@ impl WebViewEventKind {
       ffi::LAUFEY_WEBVIEW_EVENT_FOCUS => WebViewEventKind::FocusChange,
       ffi::LAUFEY_WEBVIEW_EVENT_NEW_WINDOW => WebViewEventKind::NewWindow,
       ffi::LAUFEY_WEBVIEW_EVENT_CLOSED => WebViewEventKind::Closed,
+      ffi::LAUFEY_WEBVIEW_EVENT_FIND_RESULT => WebViewEventKind::FindResult,
+      ffi::LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU => WebViewEventKind::ContextMenu,
       _ => return None,
     })
   }
 
   /// `"title"`, `"url"`, `"load"`, `"console"`, `"focus-change"`,
-  /// `"new-window"` or `"closed"`.
+  /// `"new-window"`, `"closed"`, `"find-result"` or `"context-menu"`.
   pub fn name(&self) -> &'static str {
     match self {
       WebViewEventKind::Title => "title",
@@ -214,6 +255,8 @@ impl WebViewEventKind {
       WebViewEventKind::FocusChange => "focus-change",
       WebViewEventKind::NewWindow => "new-window",
       WebViewEventKind::Closed => "closed",
+      WebViewEventKind::FindResult => "find-result",
+      WebViewEventKind::ContextMenu => "context-menu",
     }
   }
 }
@@ -237,6 +280,7 @@ pub enum WebViewError {
   Invalid,
   Closed,
   Failed,
+  NotAllowed,
 }
 
 impl WebViewError {
@@ -248,12 +292,13 @@ impl WebViewError {
       ffi::LAUFEY_WEBVIEW_NO_WINDOW => WebViewError::NoWindow,
       ffi::LAUFEY_WEBVIEW_INVALID => WebViewError::Invalid,
       ffi::LAUFEY_WEBVIEW_CLOSED => WebViewError::Closed,
+      ffi::LAUFEY_WEBVIEW_NOT_ALLOWED => WebViewError::NotAllowed,
       _ => WebViewError::Failed,
     }
   }
 
   /// `"unsupported"`, `"not_allowed_url"`, `"limit"`, `"no_window"`,
-  /// `"invalid"`, `"closed"` or `"failed"`.
+  /// `"invalid"`, `"closed"`, `"failed"` or `"not_allowed"`.
   pub fn code(&self) -> &'static str {
     match self {
       WebViewError::Unsupported => "unsupported",
@@ -263,6 +308,7 @@ impl WebViewError {
       WebViewError::Invalid => "invalid",
       WebViewError::Closed => "closed",
       WebViewError::Failed => "failed",
+      WebViewError::NotAllowed => "not_allowed",
     }
   }
 }
@@ -560,6 +606,72 @@ impl WebView {
     }
   }
 
+  /// Page zoom (1 = 100%, 0.25..5). False where unsupported or closed.
+  pub fn set_zoom(&self, factor: f64) -> bool {
+    let api = api();
+    match api.webview_set_zoom {
+      Some(f) => unsafe { f(api.backend_data, self.id, factor) },
+      None => false,
+    }
+  }
+
+  /// The page zoom, `None` when closed or unsupported.
+  pub fn zoom(&self) -> Option<f64> {
+    let api = api();
+    let f = api.webview_get_zoom?;
+    let z = unsafe { f(api.backend_data, self.id) };
+    (z > 0.0).then_some(z)
+  }
+
+  /// Highlight the next (`forward`) or previous match of `text`; a
+  /// [`WebViewEventKind::FindResult`] event reports the count.
+  pub fn find(&self, text: &str, forward: bool, match_case: bool) -> bool {
+    let api = api();
+    let (Some(f), Ok(text)) = (api.webview_find, CString::new(text)) else {
+      return false;
+    };
+    let mut flags = 0;
+    if forward {
+      flags |= ffi::LAUFEY_WEBVIEW_FIND_FORWARD;
+    }
+    if match_case {
+      flags |= ffi::LAUFEY_WEBVIEW_FIND_MATCH_CASE;
+    }
+    unsafe { f(api.backend_data, self.id, text.as_ptr(), flags) }
+  }
+
+  /// Clear the find highlight.
+  pub fn stop_find(&self) -> bool {
+    let api = api();
+    match api.webview_stop_find {
+      Some(f) => unsafe { f(api.backend_data, self.id) },
+      None => false,
+    }
+  }
+
+  /// Open the engine's developer tools for this view.
+  pub fn open_devtools(&self) -> Result<(), WebViewError> {
+    let api = api();
+    let Some(f) = api.webview_open_devtools else {
+      return Err(WebViewError::Unsupported);
+    };
+    let status = unsafe { f(api.backend_data, self.id) };
+    if status == ffi::LAUFEY_WEBVIEW_OK as i32 {
+      Ok(())
+    } else {
+      Err(WebViewError::from_status(status))
+    }
+  }
+
+  /// Print the page with the OS print dialog.
+  pub fn print(&self) -> bool {
+    let api = api();
+    match api.webview_print {
+      Some(f) => unsafe { f(api.backend_data, self.id) },
+      None => false,
+    }
+  }
+
   /// Its state as JSON (`webview_state` in laufey.h); `None` when closed.
   pub fn state(&self) -> Option<String> {
     let api = api();
@@ -773,10 +885,13 @@ mod tests {
       downloads: None,
       permissions: Some("ask".into()),
       user_agent: Some("UA".into()),
+      context_menu: Some("app".into()),
+      clipboard_read: Some(true),
+      clipboard_write: None,
     };
     assert_eq!(
       opts.to_json(),
-      r#"{"url":"https://a.example/\"q\"","x":1,"y":2.5,"width":300,"height":null,"partition":"ephemeral:x","allowPopups":"deny","permissions":"ask","userAgent":"UA","visible":false}"#
+      r#"{"url":"https://a.example/\"q\"","x":1,"y":2.5,"width":300,"height":null,"partition":"ephemeral:x","allowPopups":"deny","permissions":"ask","userAgent":"UA","contextMenu":"app","visible":false,"clipboardRead":true}"#
     );
   }
 
@@ -980,6 +1095,17 @@ mod tests {
     assert_eq!(WebViewError::from_status(3).code(), "limit");
     assert_eq!(WebViewError::from_status(2).code(), "not_allowed_url");
     assert_eq!(WebViewError::from_status(42).code(), "failed");
+    assert_eq!(WebViewError::from_status(10).code(), "not_allowed");
+    assert_eq!(
+      WebViewEventKind::from_raw(ffi::LAUFEY_WEBVIEW_EVENT_FIND_RESULT as i32)
+        .map(|k| k.name()),
+      Some("find-result")
+    );
+    assert_eq!(
+      WebViewEventKind::from_raw(ffi::LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU as i32)
+        .map(|k| k.name()),
+      Some("context-menu")
+    );
     assert_eq!(failure_code(8), "error");
     assert_eq!(failure_code(6), "closed");
   }

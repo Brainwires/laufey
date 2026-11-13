@@ -1210,6 +1210,14 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 // webview_set_z_order and the RAISE / LOWER commands restack the window's
 // views (else the order stays the creation order and they return false).
 #define LAUFEY_WEBVIEW_CAP_Z_ORDER (1u << 5)
+#define LAUFEY_WEBVIEW_CAP_ZOOM (1u << 6)          // webview_set_zoom / _get_zoom
+#define LAUFEY_WEBVIEW_CAP_FIND (1u << 7)          // webview_find + FIND_RESULT
+#define LAUFEY_WEBVIEW_CAP_DEVTOOLS (1u << 8)      // webview_open_devtools
+#define LAUFEY_WEBVIEW_CAP_CONTEXT_MENU (1u << 9)  // CONTEXT_MENU, "app" menus
+#define LAUFEY_WEBVIEW_CAP_PRINT (1u << 10)        // webview_print
+// "clipboardRead" / "clipboardWrite" are applied (else the engine's default:
+// writes on a user gesture, reads as the engine decides).
+#define LAUFEY_WEBVIEW_CAP_CLIPBOARD (1u << 11)
 // Bits 24..27: the engine (LAUFEY_WEBVIEW_ENGINE_*), 0 when unsupported.
 #define LAUFEY_WEBVIEW_ENGINE_SHIFT 24
 #define LAUFEY_WEBVIEW_ENGINE_MASK (0xfu << 24)
@@ -1230,6 +1238,7 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 #define LAUFEY_WEBVIEW_FAILED 7        // the engine failed
 #define LAUFEY_WEBVIEW_SCRIPT_ERROR 8  // evaluate: the script threw
 #define LAUFEY_WEBVIEW_NOT_SERIALIZABLE 9  // evaluate: no JSON for the value
+#define LAUFEY_WEBVIEW_NOT_ALLOWED 10  // open_devtools: the app's DevTools are off
 
 // The most web views one window holds at once.
 #define LAUFEY_WEBVIEW_MAX_PER_WINDOW 32
@@ -1270,6 +1279,19 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 #define LAUFEY_WEBVIEW_EVENT_FOCUS 5
 #define LAUFEY_WEBVIEW_EVENT_NEW_WINDOW 6
 #define LAUFEY_WEBVIEW_EVENT_CLOSED 7
+//   FIND_RESULT {"matches": number, "activeMatch": number} (1-based; 0 with
+//               no match), after webview_find
+//   CONTEXT_MENU {"x", "y" (CSS px in the view), "linkUrl"?, "imageUrl"?,
+//               "selectionText"?, "isEditable": bool, "mediaType"?: "image" |
+//               "video" | "audio" | "canvas" | "plugin"}: the user asked for
+//               a context menu (under "contextMenu": "app" the engine shows
+//               none)
+#define LAUFEY_WEBVIEW_EVENT_FIND_RESULT 8
+#define LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU 9
+
+// webview_find flags.
+#define LAUFEY_WEBVIEW_FIND_FORWARD (1u << 0)
+#define LAUFEY_WEBVIEW_FIND_MATCH_CASE (1u << 1)
 
 // Image formats for webview_capture.
 #define LAUFEY_WEBVIEW_CAPTURE_PNG 0
@@ -3098,6 +3120,12 @@ struct laufey_backend_api {
   //   "permissions"  "deny" (default: camera, microphone, geolocation,
   //                  notifications, ... are refused without a prompt), "ask"
   //   "userAgent"    string: replaces the engine's user agent
+  //   "contextMenu"  "native" (default: the engine's menu) or "app" (no
+  //                  engine menu; the CONTEXT_MENU event lets the app show
+  //                  its own)
+  //   "clipboardRead"  bool (default false): the page may read the clipboard
+  //   "clipboardWrite" bool (default true): the page may write it on a user
+  //                  gesture (false: never)
   // Returns the web view id (> 0), or 0 with `*status_out` set (OK on
   // success): UNSUPPORTED, INVALID, NOT_ALLOWED_URL, NO_WINDOW, LIMIT,
   // FAILED. `on_event` receives the view's events, starting after this call
@@ -3160,6 +3188,31 @@ struct laufey_backend_api {
   // and where LAUFEY_WEBVIEW_CAP_Z_ORDER is not reported. Any thread.
   bool (*webview_set_z_order)(void* backend_data, uint32_t webview_id,
                               int32_t z_order);
+
+  // Page zoom (LAUFEY_WEBVIEW_CAP_ZOOM): `factor` 0.25..5 (1 = 100%).
+  // set: false for an unknown id or value. get: the factor, 0 for an unknown
+  // id. Any thread.
+  bool (*webview_set_zoom)(void* backend_data, uint32_t webview_id,
+                           double factor);
+  double (*webview_get_zoom)(void* backend_data, uint32_t webview_id);
+
+  // Find in page (LAUFEY_WEBVIEW_CAP_FIND): highlights the next / previous
+  // (LAUFEY_WEBVIEW_FIND_FORWARD) match of `text` (non-empty UTF-8; MATCH_CASE
+  // for case-sensitive), the same text again moving on; a FIND_RESULT event
+  // reports the count. stop_find clears the highlight. Any thread.
+  bool (*webview_find)(void* backend_data, uint32_t webview_id,
+                       const char* text, uint32_t flags);
+  bool (*webview_stop_find)(void* backend_data, uint32_t webview_id);
+
+  // Open the engine's developer tools for the view
+  // (LAUFEY_WEBVIEW_CAP_DEVTOOLS): OK, NOT_ALLOWED (the app's DevTools are
+  // off: launch config "inspectable": false / LAUFEY_INSPECTABLE=0), CLOSED,
+  // UNSUPPORTED. Any thread.
+  int32_t (*webview_open_devtools)(void* backend_data, uint32_t webview_id);
+
+  // Print the view's page with the OS print dialog (LAUFEY_WEBVIEW_CAP_PRINT).
+  // False for an unknown id. Any thread.
+  bool (*webview_print)(void* backend_data, uint32_t webview_id);
 };
 
 #ifdef __cplusplus

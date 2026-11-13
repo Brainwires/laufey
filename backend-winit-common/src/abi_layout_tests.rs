@@ -269,7 +269,13 @@ fn vtable_layout_matches_the_header() {
     webview_evaluate,
     webview_capture,
     webview_close,
-    webview_set_z_order
+    webview_set_z_order,
+    webview_set_zoom,
+    webview_get_zoom,
+    webview_find,
+    webview_stop_find,
+    webview_open_devtools,
+    webview_print
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

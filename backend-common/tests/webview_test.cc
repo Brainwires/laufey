@@ -340,6 +340,44 @@ static void TestStacking() {
   r.ResetForTest();
 }
 
+static void TestHandleAdditions() {
+  WebViewOptions o;
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1})",
+               &o) == LAUFEY_WEBVIEW_OK);
+  EXPECT(!o.app_context_menu && !o.clipboard_read && o.clipboard_write);
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1,)"
+               R"("contextMenu":"app","clipboardRead":true,)"
+               R"("clipboardWrite":false})",
+               &o) == LAUFEY_WEBVIEW_OK);
+  EXPECT(o.app_context_menu && o.clipboard_read && !o.clipboard_write);
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1,)"
+               R"("contextMenu":"custom"})",
+               &o) == LAUFEY_WEBVIEW_INVALID);
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1,)"
+               R"("clipboardRead":"yes"})",
+               &o) == LAUFEY_WEBVIEW_INVALID);
+  EXPECT(WebViewFindResultJson(3, 2) == R"({"matches":3,"activeMatch":2})");
+  EXPECT(WebViewFindResultJson(0, 5) == R"({"matches":0,"activeMatch":0})");
+  WebViewContextMenuFields f;
+  f.x = 10.5;
+  f.y = 20;
+  f.link_url = "https://a/";
+  f.is_editable = true;
+  f.media_type = "image";
+  EXPECT(WebViewContextMenuJson(f) ==
+         R"({"x":10.5,"y":20,"linkUrl":"https://a/","isEditable":true,)"
+         R"("mediaType":"image"})");
+  EXPECT(WebViewContextMenuJson(WebViewContextMenuFields{}) ==
+         R"({"x":0,"y":0,"isEditable":false})");
+  EXPECT(IsValidWebViewZoom(1) && IsValidWebViewZoom(0.25) &&
+         IsValidWebViewZoom(5));
+  EXPECT(!IsValidWebViewZoom(0.2) && !IsValidWebViewZoom(5.1) &&
+         !IsValidWebViewZoom(0.0 / 0.0));
+  EXPECT(LAUFEY_WEBVIEW_NOT_ALLOWED == 10);
+  EXPECT(LAUFEY_WEBVIEW_EVENT_FIND_RESULT == 8);
+  EXPECT(LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU == 9);
+}
+
 int main() {
   TestAbiNumbers();
   TestOptionsDefaults();
@@ -351,6 +389,7 @@ int main() {
   TestEvalEnvelope();
   TestRegistry();
   TestStacking();
+  TestHandleAdditions();
   std::printf("webview_test: ok\n");
   return 0;
 }

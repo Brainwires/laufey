@@ -1377,6 +1377,46 @@ static bool Backend_WebViewCommand(void* data, uint32_t webview_id,
   return backend->WebViewCommand(webview_id, command);
 }
 
+static bool Backend_WebViewSetZoom(void* data, uint32_t webview_id,
+                                   double factor) {
+  if (!laufey_common::IsValidWebViewZoom(factor))
+    return false;
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend && backend->WebViewSetZoom(webview_id, factor);
+}
+
+static double Backend_WebViewGetZoom(void* data, uint32_t webview_id) {
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend ? backend->WebViewGetZoom(webview_id) : 0;
+}
+
+static bool Backend_WebViewFind(void* data, uint32_t webview_id,
+                                const char* text, uint32_t flags) {
+  if (!text || !*text)
+    return false;
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend &&
+         backend->WebViewFind(webview_id, text,
+                              flags & (LAUFEY_WEBVIEW_FIND_FORWARD |
+                                       LAUFEY_WEBVIEW_FIND_MATCH_CASE));
+}
+
+static bool Backend_WebViewStopFind(void* data, uint32_t webview_id) {
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend && backend->WebViewStopFind(webview_id);
+}
+
+static int32_t Backend_WebViewOpenDevTools(void* data, uint32_t webview_id) {
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend ? backend->WebViewOpenDevTools(webview_id)
+                 : LAUFEY_WEBVIEW_UNSUPPORTED;
+}
+
+static bool Backend_WebViewPrint(void* data, uint32_t webview_id) {
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend && backend->WebViewPrint(webview_id);
+}
+
 static bool Backend_WebViewSetZOrder(void* data, uint32_t webview_id,
                                      int32_t z_order) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
@@ -2022,6 +2062,12 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_capture = Backend_WebViewCapture;
   backend_api_.webview_close = Backend_WebViewClose;
   backend_api_.webview_set_z_order = Backend_WebViewSetZOrder;
+  backend_api_.webview_set_zoom = Backend_WebViewSetZoom;
+  backend_api_.webview_get_zoom = Backend_WebViewGetZoom;
+  backend_api_.webview_find = Backend_WebViewFind;
+  backend_api_.webview_stop_find = Backend_WebViewStopFind;
+  backend_api_.webview_open_devtools = Backend_WebViewOpenDevTools;
+  backend_api_.webview_print = Backend_WebViewPrint;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

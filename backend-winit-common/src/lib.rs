@@ -1099,6 +1099,15 @@ pub struct LaufeyBackendApi {
   pub webview_close: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
   pub webview_set_z_order:
     Option<unsafe extern "C" fn(*mut c_void, u32, i32) -> bool>,
+  pub webview_set_zoom:
+    Option<unsafe extern "C" fn(*mut c_void, u32, f64) -> bool>,
+  pub webview_get_zoom: Option<unsafe extern "C" fn(*mut c_void, u32) -> f64>,
+  pub webview_find:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char, u32) -> bool>,
+  pub webview_stop_find: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
+  pub webview_open_devtools:
+    Option<unsafe extern "C" fn(*mut c_void, u32) -> i32>,
+  pub webview_print: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
 }
 
 /// `laufey_webview_event_fn` (API 58).
@@ -2095,6 +2104,12 @@ pub fn create_api_base() -> LaufeyBackendApi {
     webview_capture: None,
     webview_close: None,
     webview_set_z_order: None,
+    webview_set_zoom: None,
+    webview_get_zoom: None,
+    webview_find: None,
+    webview_stop_find: None,
+    webview_open_devtools: None,
+    webview_print: None,
   }
 }
 

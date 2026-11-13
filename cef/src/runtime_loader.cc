@@ -3610,6 +3610,56 @@ static bool CefHasZOrder() {
           LAUFEY_WEBVIEW_CAP_Z_ORDER) != 0;
 }
 
+static bool Backend_WebViewSetZoom(void* /*data*/, uint32_t webview_id,
+                                   double factor) {
+  if (!laufey_common::IsValidWebViewZoom(factor))
+    return false;
+  bool ok = false;
+  cef_invoke_sync(
+      [&] { ok = laufey_cef_child_webview::SetZoom(webview_id, factor); });
+  return ok;
+}
+
+static double Backend_WebViewGetZoom(void* /*data*/, uint32_t webview_id) {
+  double zoom = 0;
+  cef_invoke_sync([&] { zoom = laufey_cef_child_webview::GetZoom(webview_id); });
+  return zoom;
+}
+
+static bool Backend_WebViewFind(void* /*data*/, uint32_t webview_id,
+                                const char* text, uint32_t flags) {
+  if (!text || !*text)
+    return false;
+  std::string copy = text;
+  bool ok = false;
+  cef_invoke_sync([&] {
+    ok = laufey_cef_child_webview::Find(
+        webview_id, copy,
+        flags & (LAUFEY_WEBVIEW_FIND_FORWARD | LAUFEY_WEBVIEW_FIND_MATCH_CASE));
+  });
+  return ok;
+}
+
+static bool Backend_WebViewStopFind(void* /*data*/, uint32_t webview_id) {
+  bool ok = false;
+  cef_invoke_sync([&] { ok = laufey_cef_child_webview::StopFind(webview_id); });
+  return ok;
+}
+
+static int32_t Backend_WebViewOpenDevTools(void* /*data*/,
+                                           uint32_t webview_id) {
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  cef_invoke_sync(
+      [&] { status = laufey_cef_child_webview::OpenDevTools(webview_id); });
+  return status;
+}
+
+static bool Backend_WebViewPrint(void* /*data*/, uint32_t webview_id) {
+  bool ok = false;
+  cef_invoke_sync([&] { ok = laufey_cef_child_webview::Print(webview_id); });
+  return ok;
+}
+
 static bool Backend_WebViewSetZOrder(void* /*data*/, uint32_t webview_id,
                                      int32_t z_order) {
   return CefHasZOrder() &&
@@ -3945,6 +3995,12 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_capture = Backend_WebViewCapture;
   backend_api_.webview_close = Backend_WebViewClose;
   backend_api_.webview_set_z_order = Backend_WebViewSetZOrder;
+  backend_api_.webview_set_zoom = Backend_WebViewSetZoom;
+  backend_api_.webview_get_zoom = Backend_WebViewGetZoom;
+  backend_api_.webview_find = Backend_WebViewFind;
+  backend_api_.webview_stop_find = Backend_WebViewStopFind;
+  backend_api_.webview_open_devtools = Backend_WebViewOpenDevTools;
+  backend_api_.webview_print = Backend_WebViewPrint;
   backend_api_.set_window_traffic_light_position =
       Backend_SetWindowTrafficLightPosition;
   backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;

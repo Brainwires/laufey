@@ -1165,4 +1165,24 @@ void CloseAllForWindow(uint32_t window_id) {
     Close(id);
 }
 
+// TODO(api58): zoom, find, DevTools and print (stubs until implemented).
+bool SetZoom(uint32_t, double) {
+  return false;
+}
+double GetZoom(uint32_t) {
+  return 0;
+}
+bool Find(uint32_t, const std::string&, uint32_t) {
+  return false;
+}
+bool StopFind(uint32_t) {
+  return false;
+}
+int32_t OpenDevTools(uint32_t) {
+  return LAUFEY_WEBVIEW_UNSUPPORTED;
+}
+bool Print(uint32_t) {
+  return false;
+}
+
 }  // namespace laufey_cef_child_webview

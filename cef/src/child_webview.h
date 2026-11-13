@@ -52,6 +52,12 @@ void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
 // Orders the window's views bottom to top (macOS only; false elsewhere).
 bool Restack(uint32_t window_id, const std::vector<uint32_t>& bottom_to_top);
 bool Close(uint32_t id);
+bool SetZoom(uint32_t id, double factor);
+double GetZoom(uint32_t id);  // 0: unknown id
+bool Find(uint32_t id, const std::string& text, uint32_t flags);
+bool StopFind(uint32_t id);
+int32_t OpenDevTools(uint32_t id);
+bool Print(uint32_t id);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
 
