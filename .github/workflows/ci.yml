@@ -66,9 +66,31 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# Self-hosted pools: only `release` (tags only) runs there. Every other job stays on GitHub's
-# images while this workflow's push runs on main / denext/integration, which the pools' vetting does not serve (laufey's default branch is development-denext), besides the gap each job names.
+# Self-hosted pools: the macOS arm64 legs (full runs) and `release` (tags only) pick their
+# runner in the `runners` job: our pool while it has a free slot, else the GitHub image at once
+# (fork pull requests: GitHub only). Every other job stays on GitHub's images, for the gap each
+# job names.
 jobs:
+  runners:
+    name: pick runners
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@2e093cef9ee71f64a75ea1c47aa2f923119050fa # pick-runners
+        with:
+          # Only the jobs this run has: the macOS arm64 legs on a full run unless a dispatch
+          # moved them to macos-15-intel, `release` on a v* tag.
+          jobs: >-
+            ${{ format('{0} {1}',
+            ((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && inputs.macos_runner != 'macos-15-intel') && 'e2e_macos_cef=macos-arm64@macos-15 e2e_macos_webview=macos-arm64@macos-15 e2e_macos_winit=macos-arm64@macos-15 cef_macos_arm64=macos-arm64@macos-15 webview_macos_arm64=macos-arm64@macos-15 winit_macos_arm64=macos-arm64@macos-15 winit_common_macos=macos-arm64@macos-15' || '',
+            startsWith(github.ref, 'refs/tags/v') && 'release=linux-x64' || '') }}
+          vars: ${{ toJSON(vars) }}
+
   lint:
     name: lint
     # Stays on GitHub-hosted: sudo apt-get (inert in the self-hosted Linux containers).
@@ -349,12 +371,14 @@ jobs:
   # display, but several are per-OS (cfg-gated), so every desktop OS runs them.
   test-winit-common:
     name: cargo test (backend-winit-common) / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # Linux x64 only unless the run is full (see the top of the file).
-        os: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '["ubuntu-22.04","macos-15-intel","windows-latest"]' || '["ubuntu-22.04","macos-15","windows-latest"]') || '["ubuntu-22.04"]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"os":"ubuntu-22.04"},{"os":"macos-15-intel"},{"os":"windows-latest"}]' || '[{"os":"ubuntu-22.04"},{"os":"macos-15","pick":"winit_common_macos"},{"os":"windows-latest"}]') || '[{"os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -561,14 +585,16 @@ jobs:
 
   build-winit:
     name: winit / ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
         # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15","pick":"winit_macos_arm64"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -637,7 +663,9 @@ jobs:
   #                      along (--scheme-body), plus the dedicated modes.
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     # Backstop; each e2e step below has its own, much shorter, timeout.
     timeout-minutes: 90
     # Linux: `make cef` / `make webview` build liblaufey_webauthn.so here
@@ -653,7 +681,7 @@ jobs:
         # and the request-body round trip run there). arm64: WebView2 on
         # Windows on Arm, CEF on Linux arm64.
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"os":"macos-15-intel","backend":"winit"},{"os":"macos-15-intel","backend":"webview"},{"os":"macos-15-intel","backend":"cef"},{"os":"windows-latest","backend":"winit"},{"os":"windows-latest","backend":"webview"},{"os":"windows-latest","backend":"cef"},{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true},{"os":"windows-11-arm","backend":"webview"},{"os":"ubuntu-22.04-arm","backend":"cef"}]' || '[{"os":"macos-15","backend":"winit"},{"os":"macos-15","backend":"webview"},{"os":"macos-15","backend":"cef"},{"os":"windows-latest","backend":"winit"},{"os":"windows-latest","backend":"webview"},{"os":"windows-latest","backend":"cef"},{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true},{"os":"windows-11-arm","backend":"webview"},{"os":"ubuntu-22.04-arm","backend":"cef"}]') || '[{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"os":"macos-15-intel","backend":"winit"},{"os":"macos-15-intel","backend":"webview"},{"os":"macos-15-intel","backend":"cef"},{"os":"windows-latest","backend":"winit"},{"os":"windows-latest","backend":"webview"},{"os":"windows-latest","backend":"cef"},{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true},{"os":"windows-11-arm","backend":"webview"},{"os":"ubuntu-22.04-arm","backend":"cef"}]' || '[{"os":"macos-15","backend":"winit","pick":"e2e_macos_winit"},{"os":"macos-15","backend":"webview","pick":"e2e_macos_webview"},{"os":"macos-15","backend":"cef","pick":"e2e_macos_cef"},{"os":"windows-latest","backend":"winit"},{"os":"windows-latest","backend":"webview"},{"os":"windows-latest","backend":"cef"},{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true},{"os":"windows-11-arm","backend":"webview"},{"os":"ubuntu-22.04-arm","backend":"cef"}]') || '[{"os":"ubuntu-22.04","backend":"cef"},{"os":"ubuntu-22.04","backend":"webview","layer0_excluded":true}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -1232,7 +1260,9 @@ jobs:
 
   build-webview:
     name: webview / ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     # Keep the macOS minimum in sync with LSMinimumSystemVersion in
     # webview/macos/Info.plist.in (denoland/deno#35764). Ignored on non-macOS
     # runners. The webview CMakeLists also pins this; setting it here guards
@@ -1245,7 +1275,7 @@ jobs:
         # 22.04 keeps the glibc/libstdc++ baseline low (glibc 2.35,
         # GLIBCXX_3.4.30) so binaries run on Debian 12 / Ubuntu 22.04+.
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15","pick":"webview_macos_arm64"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1489,7 +1519,9 @@ jobs:
 
   build-cef:
     name: cef / ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -1499,7 +1531,7 @@ jobs:
         # CEF-on-Windows-ARM64 needs the windowsarm64 dist + arch-matched MSVC
         # setup and is tracked as a separate follow-up (issue #42).
         # Linux x64 only unless the run is full (see the top of the file).
-        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"},{"target":"aarch64-apple-darwin","os":"macos-15","pick":"cef_macos_arm64"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1677,11 +1709,11 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
     # Every check gates the release, not only the builds whose artifacts it
     # publishes.
     needs:
       [
+        runners,
         lint,
         test,
         test-winit-common,
@@ -1693,8 +1725,20 @@ jobs:
         build-webview,
         build-cef,
       ]
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-latest (tag runs only).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-latest"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-latest'))) }}
+    if: >-
+      ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v')
+      && needs.lint.result == 'success'
+      && needs.test.result == 'success'
+      && needs.test-winit-common.result == 'success'
+      && needs.tsan.result == 'success'
+      && needs.passkeys-linux.result == 'success'
+      && needs.native-e2e.result == 'success'
+      && needs.e2e-cef-linux.result == 'success'
+      && needs.build-winit.result == 'success'
+      && needs.build-webview.result == 'success'
+      && needs.build-cef.result == 'success'
+      }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').release || 'ubuntu-latest' }}
     permissions:
       contents: write
     steps:
