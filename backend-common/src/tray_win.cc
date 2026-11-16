@@ -496,6 +496,13 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
         !api->value_get_bool(enabledVal)) {
       flags |= MF_GRAYED;
     }
+    // A checked item's checkmark (the window menus' win32_menu.h does the
+    // same); it was dropped here, so a tray menu showed every item unchecked.
+    OwnedValue checked{api, api->value_dict_get(itemVal, "checked")};
+    if (checked.v && api->value_is_bool(checked.v) &&
+        api->value_get_bool(checked.v)) {
+      flags |= MF_CHECKED;
+    }
     AppendMenuW(menu, flags, cmd, wlabel.c_str());
     if (!item_id.empty()) cmd_to_id[cmd] = item_id;
   }
