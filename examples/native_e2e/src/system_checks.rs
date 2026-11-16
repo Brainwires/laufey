@@ -267,7 +267,9 @@ async fn real_press_check(pressed: &Arc<Mutex<Vec<String>>>) {
     // on a locked or disconnected session it is dropped although SendInput
     // reports it sent.
     eprintln!("[e2e] real key press: {}", win_input::input_state());
-    if let Some(reason) = win_input::input_unreachable_reason() {
+    if let Some(reason) = win_input::input_unreachable_reason()
+      .or_else(win_input::foreground_blocks_injection)
+    {
       na(&format!("a real key press ({reason})"));
       return;
     }
@@ -477,6 +479,111 @@ mod win_input {
   fn utf16_text(buf: &[u16], len: i32) -> String {
     let len = (len.max(0) as usize).min(buf.len());
     String::from_utf16_lossy(&buf[..len])
+  }
+
+  #[link(name = "advapi32")]
+  extern "system" {
+    fn OpenProcessToken(
+      process: *mut c_void,
+      access: u32,
+      token: *mut *mut c_void,
+    ) -> i32;
+    fn GetTokenInformation(
+      token: *mut c_void,
+      class: i32,
+      info: *mut c_void,
+      len: u32,
+      ret_len: *mut u32,
+    ) -> i32;
+    fn GetSidSubAuthorityCount(sid: *mut c_void) -> *mut u8;
+    fn GetSidSubAuthority(sid: *mut c_void, index: u32) -> *mut u32;
+  }
+
+  extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn GetCurrentProcess() -> *mut c_void;
+    fn CloseHandle(h: *mut c_void) -> i32;
+  }
+
+  const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+  const TOKEN_QUERY: u32 = 0x0008;
+  const TOKEN_INTEGRITY_LEVEL: i32 = 25;
+
+  /// The mandatory integrity level (a RID: 0x2000 medium, 0x3000 high,
+  /// 0x4000 system) of `process`'s token, or None if it can't be read.
+  fn integrity_of(process: *mut c_void) -> Option<u32> {
+    let mut token: *mut c_void = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+      return None;
+    }
+    let mut buf = [0u8; 128];
+    let mut needed = 0u32;
+    let ok = unsafe {
+      GetTokenInformation(
+        token,
+        TOKEN_INTEGRITY_LEVEL,
+        buf.as_mut_ptr() as *mut c_void,
+        buf.len() as u32,
+        &mut needed,
+      )
+    };
+    unsafe { CloseHandle(token) };
+    if ok == 0 {
+      return None;
+    }
+    // TOKEN_MANDATORY_LABEL: SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }.
+    let sid = unsafe { *(buf.as_ptr() as *const *mut c_void) };
+    if sid.is_null() {
+      return None;
+    }
+    let count = unsafe { *GetSidSubAuthorityCount(sid) } as u32;
+    if count == 0 {
+      return None;
+    }
+    Some(unsafe { *GetSidSubAuthority(sid, count - 1) })
+  }
+
+  /// Why injected input can't reach the hotkey because of the foreground
+  /// window, if so: another process's secure dialog (the Windows Security
+  /// credential dialog) or a window of a process at a higher integrity level
+  /// than this one holds the foreground, and the system (UIPI, secure UI)
+  /// drops the injected keys there.
+  pub fn foreground_blocks_injection() -> Option<String> {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() {
+      return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+    if pid == 0 || pid == unsafe { GetCurrentProcessId() } {
+      return None;
+    }
+    let mut class = [0u16; 128];
+    let n =
+      unsafe { GetClassNameW(fg, class.as_mut_ptr(), class.len() as i32) };
+    let class = utf16_text(&class, n);
+    if class == "Credential Dialog Xaml Host" {
+      return Some(format!(
+        "the foreground is another process's Windows Security credential \
+         dialog (class {class:?}, pid {pid}), which takes no injected input"
+      ));
+    }
+    let ours = integrity_of(unsafe { GetCurrentProcess() })?;
+    let handle =
+      unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+      return None;
+    }
+    let theirs = integrity_of(handle);
+    unsafe { CloseHandle(handle) };
+    match theirs {
+      Some(level) if level > ours => Some(format!(
+        "the foreground window (class {class:?}, pid {pid}) runs at integrity \
+         level {level:#x}, above this process's {ours:#x}, so UIPI drops \
+         injected input"
+      )),
+      _ => None,
+    }
   }
 
   /// What injected input meets on this machine, for the log of the real key
