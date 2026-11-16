@@ -745,6 +745,12 @@ pub(crate) mod ole_input {
     }
   }
 
+  /// The top-level window `root`, for the log: title, class, and whether
+  /// it is this process's.
+  pub fn window_at_hwnd(root: Hwnd) -> String {
+    describe(root)
+  }
+
   /// The top-level window at (x, y), for the log: title, class, and
   /// whether it is this process's.
   pub fn window_at(x: i32, y: i32) -> String {
@@ -753,7 +759,12 @@ pub(crate) mod ole_input {
       if hwnd.is_null() {
         return "none".into();
       }
-      let root = GetAncestor(hwnd, 2); // GA_ROOT
+      describe(GetAncestor(hwnd, 2)) // GA_ROOT
+    }
+  }
+
+  fn describe(root: Hwnd) -> String {
+    unsafe {
       let mut title = [0u16; 128];
       let mut class = [0u16; 128];
       let n = GetWindowTextW(root, title.as_mut_ptr(), 128).max(0) as usize;

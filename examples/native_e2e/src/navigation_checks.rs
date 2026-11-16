@@ -501,6 +501,7 @@ async fn clicked_link(
   let label = format!("navigation (a clicked link, {answer})");
   let title = format!("native-e2e-click-{answer}");
   let win = Window::new(480, 320).title(&title).load(&start);
+  place_clear_of_popups(&win);
   let first = wait_url(&win, &start, 100).await;
   if first.as_deref() != Some(start.as_str()) {
     check(&format!("{label}: the page loads ({first:?})"), false);
@@ -564,6 +565,131 @@ async fn clicked_link(
   win.close();
 }
 
+/// Puts a clicked-link window at the bottom right of the primary display's
+/// work area (Windows): system sign-in prompts open in the middle of the
+/// screen, so a stray one doesn't sit on the click point.
+fn place_clear_of_popups(win: &Window) {
+  if !cfg!(windows) {
+    return;
+  }
+  let screens = laufey::screens();
+  let Some(screen) = screens.iter().find(|s| s.is_primary).or(screens.first())
+  else {
+    return;
+  };
+  let area = screen.work_area;
+  win.set_position(
+    (area.x + area.width - 480 - 24).max(area.x),
+    (area.y + area.height - 320 - 24).max(area.y),
+  );
+}
+
+/// Another process's window over the click point, on a CI runner only.
+#[cfg(windows)]
+mod covering {
+  use std::ffi::c_void;
+
+  #[link(name = "user32")]
+  extern "system" {
+    fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+    fn PostMessageW(hwnd: *mut c_void, msg: u32, wp: usize, lp: isize) -> i32;
+    fn IsWindow(hwnd: *mut c_void) -> i32;
+  }
+
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn CloseHandle(h: *mut c_void) -> i32;
+    fn QueryFullProcessImageNameW(
+      process: *mut c_void,
+      flags: u32,
+      name: *mut u16,
+      size: *mut u32,
+    ) -> i32;
+    fn TerminateProcess(process: *mut c_void, code: u32) -> i32;
+  }
+
+  const WM_CLOSE: u32 = 0x0010;
+  const PROCESS_TERMINATE: u32 = 0x0001;
+  const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+  /// Processes whose window over the test may be ended: the account /
+  /// credential brokers and settings hosts a runner image shows prompts
+  /// from. Matched on the executable's file name, any case.
+  const BROKERS: &[&str] = &[
+    "microsoft.aad.brokerplugin.exe",
+    "credentialuibroker.exe",
+    "systemsettings.exe",
+    "applicationframehost.exe",
+    "useroobebroker.exe",
+  ];
+
+  /// Only on a CI runner (GITHUB_ACTIONS) or when asked for
+  /// (LAUFEY_E2E_CLOSE_COVERING_WINDOWS=1): never on a developer's desktop.
+  pub fn allowed() -> bool {
+    std::env::var("LAUFEY_E2E_CLOSE_COVERING_WINDOWS").as_deref() == Ok("1")
+      || std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+  }
+
+  fn image_name(pid: u32) -> String {
+    unsafe {
+      let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+      if h.is_null() {
+        return String::new();
+      }
+      let mut buf = [0u16; 512];
+      let mut len = buf.len() as u32;
+      let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len);
+      CloseHandle(h);
+      if ok == 0 {
+        return String::new();
+      }
+      String::from_utf16_lossy(&buf[..len as usize])
+    }
+  }
+
+  /// Closes the top-level window `root` of another process; if it is still
+  /// there after a moment and its process is a known broker, ends that
+  /// process. Logs what it did.
+  pub fn clear(root: *mut c_void) {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(root, &mut pid) };
+    if pid == 0 || pid == std::process::id() {
+      return;
+    }
+    let image = image_name(pid);
+    eprintln!(
+      "[e2e] INFO closing {} of pid {pid} ({image}) over the test window",
+      crate::io_checks::ole_input::window_at_hwnd(root)
+    );
+    unsafe { PostMessageW(root, WM_CLOSE, 0, 0) };
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    if unsafe { IsWindow(root) } == 0 {
+      eprintln!("[e2e] INFO it closed");
+      return;
+    }
+    let file = image
+      .rsplit(['\\', '/'])
+      .next()
+      .unwrap_or("")
+      .to_ascii_lowercase();
+    if !BROKERS.contains(&file.as_str()) {
+      eprintln!("[e2e] INFO it stayed; {file:?} is not a known broker");
+      return;
+    }
+    let ended = unsafe {
+      let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+      let ok = !h.is_null() && TerminateProcess(h, 1) != 0;
+      if !h.is_null() {
+        CloseHandle(h);
+      }
+      ok
+    };
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    eprintln!("[e2e] INFO it stayed; ended {file} (pid {pid}): {ended}");
+  }
+}
+
 /// Clicks the middle of the window's content with real input; how, or
 /// `None` (reported) when this session can't.
 async fn real_click(win: &Window, title: &str) -> Option<String> {
@@ -619,7 +745,16 @@ async fn real_click(win: &Window, title: &str) -> Option<String> {
       }
       let topmost = win::set_topmost(hwnd, true);
       tokio::time::sleep(Duration::from_millis(300)).await;
-      let at = ole_input::root_at(cx, cy);
+      let mut at = ole_input::root_at(cx, cy);
+      if at != hwnd && !at.is_null() && covering::allowed() {
+        // A CI runner's own system window (GitHub's windows-11-arm image
+        // shows a Microsoft account sign-in window over everything): closed,
+        // and its broker process ended if it stays, then asked again.
+        covering::clear(at);
+        win::set_topmost(hwnd, true);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        at = ole_input::root_at(cx, cy);
+      }
       if at != hwnd {
         let covered_by = ole_input::window_at(cx, cy);
         win::set_topmost(hwnd, false);
