@@ -2277,7 +2277,9 @@ bool RuntimeLoader::Start() {
   running_ = true;
   runtime_thread_ = std::thread(&RuntimeLoader::RuntimeThread, this);
 
-  std::cerr << "Runtime started" << std::endl;
+  // One write: the runtime thread is already running and may write to
+  // stderr too, so a line written in parts can be split by its output.
+  std::cerr << "Runtime started\n" << std::flush;
   return true;
 }
 

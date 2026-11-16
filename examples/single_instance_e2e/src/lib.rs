@@ -49,8 +49,18 @@ use laufey::Window;
 static FAILED: AtomicBool = AtomicBool::new(false);
 static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Writes `line` and its newline to stderr in one write. eprintln! writes in
+/// parts, and the backend writes its own lines (`Runtime started`) from
+/// another thread, so a line could be split by one of them and miss the
+/// harness's `^\[e2e\] ...` greps.
+fn say(line: &str) {
+  let mut err = std::io::stderr().lock();
+  let _ = err.write_all(format!("{line}\n").as_bytes());
+  let _ = err.flush();
+}
+
 fn report(line: String) {
-  eprintln!("{line}");
+  say(&line);
   LINES.lock().unwrap().push(line);
 }
 
@@ -95,8 +105,7 @@ fn e2e_main() {
     .iter()
     .any(|name| std::env::var_os(name).is_some());
   if args.first().map(String::as_str) == Some("run") || forked {
-    eprintln!("[e2e] headless worker args={args:?}");
-    let _ = std::io::stderr().flush();
+    say(&format!("[e2e] headless worker args={args:?}"));
     return;
   }
 
@@ -117,10 +126,10 @@ fn e2e_main() {
     {
       let seen = seen.clone();
       laufey::on_second_instance(move |args, cwd| {
-        eprintln!(
+        say(&format!(
           "[e2e] second_instance after {} ms: args={args:?} cwd={cwd:?}",
           launched.elapsed().as_millis()
-        );
+        ));
         seen
           .lock()
           .unwrap()
@@ -131,7 +140,7 @@ fn e2e_main() {
     {
       let seen = seen.clone();
       laufey::on_open_url(move |url| {
-        eprintln!("[e2e] open_url {url:?}");
+        say(&format!("[e2e] open_url {url:?}"));
         seen.lock().unwrap().urls.push(url.to_string());
       });
     }
@@ -139,7 +148,10 @@ fn e2e_main() {
     let win = Window::new(360, 240).title("single-instance-e2e");
     // A beat for the window to appear before announcing readiness.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    eprintln!("[e2e] ready ({} ms)", launched.elapsed().as_millis());
+    say(&format!(
+      "[e2e] ready ({} ms)",
+      launched.elapsed().as_millis()
+    ));
     let _ = std::io::stderr().flush();
 
     let second_want = expected_args("LAUFEY_E2E_SI_SECOND");
@@ -235,7 +247,7 @@ fn e2e_main() {
       let mut text = LINES.lock().unwrap().join("\n");
       text.push('\n');
       if std::fs::write(&path, text).is_err() {
-        eprintln!("[e2e] could not write {path}");
+        say(&format!("[e2e] could not write {path}"));
       }
     }
 
@@ -243,7 +255,7 @@ fn e2e_main() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     laufey::quit();
     if let Some(ms) = env_num("LAUFEY_E2E_SI_LINGER_MS") {
-      eprintln!("[e2e] quitting; lingering {ms} ms");
+      say(&format!("[e2e] quitting; lingering {ms} ms"));
       let _ = std::io::stderr().flush();
       std::thread::sleep(Duration::from_millis(ms));
     }
