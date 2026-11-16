@@ -199,8 +199,14 @@ static void TestUrlsAndPartitions() {
   EXPECT(s.size() == 36 && s[8] == '-' && s[13] == '-' && s[14] == '5');
 }
 
+// Raw strings holding \" stay out of EXPECT's arguments: the macro
+// stringizes them, which MSVC rejects (C2017, illegal escape sequence).
+static const char kTitleJson[] = R"({"title":"a \"b\"\n"})";
+static const char kEvalOkEnvelope[] = R"({"ok":true,"json":"{\"a\":1}"})";
+static const char kQuoteKeyJson[] = R"("key":"\"")";
+
 static void TestEventJson() {
-  EXPECT(WebViewTitleJson("a \"b\"\n") == R"({"title":"a \"b\"\n"})");
+  EXPECT(WebViewTitleJson("a \"b\"\n") == kTitleJson);
   EXPECT(WebViewUrlJson("https://a/", true, false) ==
          R"({"url":"https://a/","canGoBack":true,"canGoForward":false})");
   EXPECT(WebViewLoadJson("loading", "https://a/") ==
@@ -242,8 +248,7 @@ static void TestEvalEnvelope() {
          std::string::npos);
   EXPECT(script.find("kind: 'not_serializable'") != std::string::npos);
   std::string text;
-  EXPECT(ParseWebViewEvalEnvelope(R"({"ok":true,"json":"{\"a\":1}"})", &text) ==
-         LAUFEY_WEBVIEW_OK);
+  EXPECT(ParseWebViewEvalEnvelope(kEvalOkEnvelope, &text) == LAUFEY_WEBVIEW_OK);
   EXPECT(text == R"({"a":1})");
   EXPECT(ParseWebViewEvalEnvelope(
              R"({"ok":false,"kind":"error","message":"Error: x"})", &text) ==
@@ -469,7 +474,7 @@ static void TestKeys() {
   k.key = "\"";
   k.forwarded = false;
   k.repeat = true;
-  EXPECT(WebViewKeyJson(k).find(R"("key":"\"")") != std::string::npos);
+  EXPECT(WebViewKeyJson(k).find(kQuoteKeyJson) != std::string::npos);
   EXPECT(WebViewKeyJson(k).find(R"("repeat":true,"forwarded":false})") !=
          std::string::npos);
 }

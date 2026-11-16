@@ -51,8 +51,11 @@ int main() {
   c.type = "com.example.view";
   c.title = "T\"q";
   c.user_info["k"] = "v";
-  EXPECT(UserActivityJson(c) ==
-         R"({"type":"com.example.view","title":"T\"q","url":null,"userInfo":{"k":"v"}})");
+  // Out of EXPECT's arguments: the macro stringizes them, and MSVC rejects a
+  // raw string holding \" there (C2017, illegal escape sequence).
+  static const char kActivityJson[] =
+      R"({"type":"com.example.view","title":"T\"q","url":null,"userInfo":{"k":"v"}})";
+  EXPECT(UserActivityJson(c) == kActivityJson);
 
   // Held until a handler registers, then delivered in order.
   DispatchContinuedUserActivity(c);
