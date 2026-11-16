@@ -85,9 +85,17 @@ pub async fn run() {
 
 pub async fn devtools_off() {
   let caps = laufey::system_capabilities();
+  // Open through both checks: devtools_checks closes its window, and closing
+  // the app's last window quits it, so the web view check's window would
+  // never get its page (create_webview answered NoWindow while the app shut
+  // down).
+  let anchor = Window::new(320, 240).title("native-e2e-devtools-off-anchor");
+  anchor.navigate("about:blank");
+  anchor.show();
   devtools_checks(&caps, false, "").await;
   // A child web view's open_devtools follows the same switch (API 58).
   super::webview_checks::devtools_off().await;
+  anchor.close();
 }
 
 // ---------------------------------------------------------------------------
