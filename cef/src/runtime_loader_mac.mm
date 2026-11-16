@@ -1014,6 +1014,59 @@ bool LaufeyCefMainMenuKeyEquivalentMac(void* ns_event) {
   return [[NSApp mainMenu] performKeyEquivalent:event];
 }
 
+void LaufeyCefBlurOverlayMac(void* browser_view) {
+  NSView* view = (__bridge NSView*)browser_view;
+  NSWindow* overlay = view.window;
+  if (!overlay)
+    return;
+  bool was_key = overlay.isKeyWindow;
+  [overlay makeFirstResponder:nil];
+  NSWindow* parent = overlay.parentWindow;
+  // makeKeyWindow never activates the app: an inactive app's parent becomes
+  // key once the user activates it.
+  if (was_key && parent && parent.canBecomeKeyWindow)
+    [parent makeKeyWindow];
+}
+
+void* LaufeyCefOverlayWindowMac(void* browser_view) {
+  NSView* view = (__bridge NSView*)browser_view;
+  return view ? (__bridge void*)view.window : nullptr;
+}
+
+void LaufeyCefEnsureKeyUpMonitorMac() {
+  static bool installed = false;
+  if (installed)
+    return;
+  installed = true;
+  [NSEvent
+      addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp
+                                   handler:^NSEvent*(NSEvent* event) {
+                                     NSEventModifierFlags m =
+                                         event.modifierFlags;
+                                     bool taken =
+                                         laufey_cef_child_webview::MacKeyUp(
+                                             (__bridge void*)event.window,
+                                             laufey_common::NSEventKeyToCode(
+                                                 event.keyCode),
+                                             (m & NSEventModifierFlagOption) !=
+                                                 0,
+                                             (m & NSEventModifierFlagControl) !=
+                                                 0,
+                                             (m & NSEventModifierFlagCommand) !=
+                                                 0,
+                                             (m & NSEventModifierFlagShift) !=
+                                                 0);
+                                     return taken ? nil : event;
+                                   }];
+  [[NSNotificationCenter defaultCenter]
+      addObserverForName:NSApplicationDidResignActiveNotification
+                  object:nil
+                   queue:[NSOperationQueue mainQueue]
+              usingBlock:^(NSNotification*) {
+                laufey_cef_child_webview::MacAppDeactivated();
+              }];
+}
+
 void LaufeyCefFocusOverlayMac(void* browser_view) {
   NSView* view = (__bridge NSView*)browser_view;
   NSWindow* overlay = view.window;

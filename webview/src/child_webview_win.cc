@@ -24,16 +24,23 @@
 // Page.captureScreenshot. Console messages come from Runtime.consoleAPICalled
 // and Runtime.exceptionThrown.
 //
-// Keys: the controller's AcceleratorKeyPressed gives the app menu's
-// accelerators the key first (win32_menu::HandleAcceleratorKey, as the page's
-// controller does), then "forwardKeys"; either marks it handled. WebView2
+// Keys: the controller's AcceleratorKeyPressed gives the "forwardKeys" marked
+// '!' the key first, then the app menu's accelerators
+// (win32_menu::HandleAcceleratorKey, as the page's controller does), then the
+// other "forwardKeys"; any of them marks it handled. A forwarded keydown's
+// keyup is the app's too: AcceleratorKeyPressed's KEY_UP when WebView2 raises
+// one, else the host's timer, which runs only while a forwarded key is held
+// and reads the key's state (GetAsyncKeyState) every kHeldKeyPollMs; a view
+// that loses the focus releases them all. WebView2
 // raises it only for "accelerator" keys (Ctrl or Alt held, a key that types no
 // character, Escape), so a forward key that types a character with no Ctrl /
 // Alt (Shift+L, Meta+L) reaches the page. WebView2 tells nothing of the keys
 // the page did not handle (no LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS). Focus: a
 // mouse button pressed in the view's windows notifies its host
 // (WM_PARENTNOTIFY) as the press is dispatched, which reports FOCUS ahead of
-// the controller's GotFocus.
+// the controller's GotFocus. Hiding a focused view (and BLUR) moves the focus
+// to the page's controller (MoveFocus, in the foreground window only: no
+// activation): FOCUS false with its "reason".
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -114,6 +121,12 @@ struct ChildView {
   laufey_common::WebViewBounds bounds;
   bool visible = true;
   bool focused = false;
+  // Why laufey is moving the focus out (kWebViewFocusHidden / Blur).
+  const char* focus_reason = nullptr;
+  // Forwarded keydowns whose keyup goes to the app too, with each one's
+  // virtual key (the host's timer polls it).
+  laufey_common::WebViewHeldKeys held_keys;
+  std::map<std::string, UINT> held_vk;
   std::string sent_url;
   bool sent_back = false;
   bool sent_forward = false;
@@ -364,13 +377,55 @@ const char* LoadErrorMessage(COREWEBVIEW2_WEB_ERROR_STATUS status) {
   }
 }
 
+// The held-key poll's timer id on the view's host window.
+constexpr UINT_PTR kHeldKeyTimer = 0x4c46;
+constexpr UINT kHeldKeyPollMs = 30;
+
+// The current modifiers, as a keyup's fields.
+void FillModifiers(laufey_common::WebViewKeyFields* f) {
+  f->shift_key = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+  f->ctrl_key = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+  f->alt_key = (GetKeyState(VK_MENU) & 0x8000) != 0;
+  f->meta_key = ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) != 0;
+}
+
+// The keyup of held key `code`: true when it was held (and is sent).
+bool SendKeyUp(ChildView* v, const std::string& code) {
+  std::string key;
+  if (!v->held_keys.Release(code, &key))
+    return false;
+  v->held_vk.erase(code);
+  if (v->held_keys.empty() && v->host)
+    KillTimer(v->host, kHeldKeyTimer);
+  laufey_common::WebViewKeyFields f;
+  f.type = "keyup";
+  f.key = key;
+  f.code = code;
+  FillModifiers(&f);
+  f.forwarded = true;
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+  return true;
+}
+
+// Sends the keyup of every forwarded key `v` still holds.
+void ReleaseHeldKeys(ChildView* v) {
+  v->held_vk.clear();
+  if (v->host)
+    KillTimer(v->host, kHeldKeyTimer);
+  for (const auto& f : v->held_keys.ReleaseAll())
+    Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+}
+
 void NoteFocus(uint32_t id, bool focused) {
   ChildView* v = Find(id);
   if (!v || v->focused == focused)
     return;
   v->focused = focused;
+  const char* reason = focused ? nullptr : v->focus_reason;
+  if (!focused)
+    ReleaseHeldKeys(v);
   Emit(id, LAUFEY_WEBVIEW_EVENT_FOCUS,
-       laufey_common::WebViewFocusJson(focused));
+       laufey_common::WebViewFocusJson(focused, reason));
 }
 
 bool ConsoleAllowed(ChildView* v) {
@@ -599,6 +654,26 @@ LRESULT CALLBACK HostWindowProc(HWND hwnd, UINT msg, WPARAM wParam,
       }
     }
   }
+  // A held forwarded key released while WebView2 raised no KEY_UP for it.
+  if (msg == WM_TIMER && wParam == kHeldKeyTimer) {
+    for (auto& kv : Views()) {
+      ChildView* v = kv.second.get();
+      if (v->host != hwnd)
+        continue;
+      std::vector<std::string> up;
+      for (const auto& held : v->held_vk) {
+        if (!(GetAsyncKeyState(static_cast<int>(held.second)) & 0x8000))
+          up.push_back(held.first);
+      }
+      for (const std::string& code : up)
+        SendKeyUp(v, code);
+      if (v->held_keys.empty())
+        KillTimer(hwnd, kHeldKeyTimer);
+      return 0;
+    }
+    KillTimer(hwnd, kHeldKeyTimer);
+    return 0;
+  }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
@@ -661,11 +736,25 @@ void ApplyVisible(ChildView* v) {
     v->controller->put_IsVisible(v->visible ? TRUE : FALSE);
 }
 
-// Gives the keyboard focus back to the window's page (the view is hidden or
-// closing while it has it).
-void ReturnFocus(ChildView* v) {
-  if (v->focused && v->page)
+// Gives the keyboard focus back to the window's page (the view is hidden,
+// blurred or closing while it has it), in the foreground window only (a
+// focus change never activates a window); FOCUS false with `reason`.
+void ReturnFocus(ChildView* v, const char* reason = nullptr) {
+  if (!v->focused)
+    return;
+  uint32_t id = v->id;
+  HWND root = v->parent ? GetAncestor(v->parent, GA_ROOT) : nullptr;
+  v->focus_reason = reason;
+  if (v->page && root && GetForegroundWindow() == root)
     v->page->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+  // LostFocus comes later (or not at all from an inactive window): report
+  // the change now, with its reason.
+  if (ChildView* still = Find(id)) {
+    if (still->focused)
+      NoteFocus(id, false);
+    if (ChildView* again = Find(id))
+      again->focus_reason = nullptr;
+  }
 }
 
 // --- Partitions --------------------------------------------------------------
@@ -749,16 +838,19 @@ void OnAcceleratorKey(uint32_t id,
   if (!v || FAILED(args->get_KeyEventKind(&kind)) ||
       FAILED(args->get_VirtualKey(&key)))
     return;
+  COREWEBVIEW2_PHYSICAL_KEY_STATUS status = {};
+  if (kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP ||
+      kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP) {
+    args->get_PhysicalKeyStatus(&status);
+    if (SendKeyUp(v, laufey_common::VkToCode(static_cast<int>(key),
+                                             status.IsExtendedKey != FALSE,
+                                             status.ScanCode)))
+      args->put_Handled(TRUE);
+    return;
+  }
   if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN &&
       kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
     return;
-  if (win32_menu::HandleAcceleratorKey(GetAncestor(v->parent, GA_ROOT), key)) {
-    args->put_Handled(TRUE);
-    return;
-  }
-  if (v->options.forward_keys.empty())
-    return;
-  COREWEBVIEW2_PHYSICAL_KEY_STATUS status = {};
   args->get_PhysicalKeyStatus(&status);
   laufey_common::WebViewKeyFields f;
   f.shift_key = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -771,11 +863,28 @@ void OnAcceleratorKey(uint32_t id,
       static_cast<int>(key), status.IsExtendedKey != FALSE, status.ScanCode);
   f.repeat = status.WasKeyDown != FALSE;
   f.forwarded = true;
-  if (!laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
-                                        f.alt_key, f.ctrl_key, f.meta_key,
-                                        f.shift_key))
-    return;
+  // '!' entries before the menu, the others after it.
+  if (!laufey_common::WebViewKeyMatchesBeforeMenu(v->options.forward_keys,
+                                                  f.code, f.alt_key, f.ctrl_key,
+                                                  f.meta_key, f.shift_key)) {
+    if (win32_menu::HandleAcceleratorKey(GetAncestor(v->parent, GA_ROOT),
+                                         key)) {
+      args->put_Handled(TRUE);
+      return;
+    }
+    v = Find(id);
+    if (!v || !laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
+                                                f.alt_key, f.ctrl_key,
+                                                f.meta_key, f.shift_key))
+      return;
+  }
   args->put_Handled(TRUE);
+  v->held_keys.Press(f.code, f.key);
+  if (!f.code.empty()) {
+    v->held_vk[f.code] = key;
+    if (v->host)
+      SetTimer(v->host, kHeldKeyTimer, kHeldKeyPollMs, nullptr);
+  }
   Emit(id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
 }
 
@@ -1156,6 +1265,8 @@ uint32_t Capabilities() {
          // AcceleratorKeyPressed (OnAcceleratorKey).
          LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS |
+         LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU |
+         LAUFEY_WEBVIEW_CAP_KEY_UP | LAUFEY_WEBVIEW_CAP_BLUR |
          LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS |
          LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
          (LAUFEY_WEBVIEW_ENGINE_WEBVIEW2 << LAUFEY_WEBVIEW_ENGINE_SHIFT);
@@ -1285,8 +1396,12 @@ bool SetVisible(uint32_t id, bool visible) {
   ChildView* v = Find(id);
   if (!v)
     return false;
-  if (!visible)
-    ReturnFocus(v);
+  if (!visible) {
+    ReturnFocus(v, laufey_common::kWebViewFocusHidden);
+    v = Find(id);
+    if (!v)
+      return false;
+  }
   v->visible = visible;
   ApplyVisible(v);
   return true;
@@ -1310,6 +1425,10 @@ bool Command(uint32_t id, int32_t command) {
   ChildView* v = Find(id);
   if (!v)
     return false;
+  if (command == LAUFEY_WEBVIEW_COMMAND_BLUR) {
+    ReturnFocus(v, laufey_common::kWebViewFocusBlur);
+    return true;
+  }
   if (!v->webview)
     return command != LAUFEY_WEBVIEW_COMMAND_FOCUS;
   ICoreWebView2* w = v->webview.Get();
@@ -1401,6 +1520,8 @@ void Evaluate(uint32_t id, const std::string& script,
                   "{\"expression\":" + Quote(script) +
                   ",\"contextId\":" + std::to_string(context_id) +
                   ",\"awaitPromise\":true,\"returnByValue\":false,"
+                  // DevTools' own default, stated: no page CSP refuses it.
+                  "\"allowUnsafeEvalBlockedByCSP\":true,"
                   "\"objectGroup\":" +
                   Quote(kEvalGroup) + "}";
               SendDevTools(

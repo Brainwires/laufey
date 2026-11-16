@@ -122,6 +122,9 @@ constexpr bool kForMac = true;
 constexpr bool kForMac = false;
 #endif
 
+// The mark of a "forwardKeys" entry that goes before the app menu.
+constexpr char kBeforeMenuMark = '!';
+
 // "forwardKeys" (an array of accelerator strings) into canonical forms.
 bool ReadForwardKeys(const JsonValue& value, std::vector<std::string>* out,
                      std::string* error) {
@@ -145,13 +148,20 @@ bool ReadForwardKeys(const JsonValue& value, std::vector<std::string>* out,
                std::to_string(kMaxWebViewForwardKeyLength) + " characters";
       return false;
     }
+    // A leading '!' ("!CmdOrCtrl+W"): before the app menu's accelerators.
+    // '!' is never a key of its own (keys are physical: "Shift+1").
+    const bool before_menu =
+        !entry.string.empty() && entry.string[0] == kBeforeMenuMark;
     Accelerator accel;
     std::string why;
-    if (!ParseAccelerator(entry.string, kForMac, &accel, &why)) {
+    if (!ParseAccelerator(before_menu ? entry.string.substr(1) : entry.string,
+                          kForMac, &accel, &why)) {
       *error = "\"forwardKeys\": " + why;
       return false;
     }
-    std::string canonical = CanonicalAccelerator(accel);
+    std::string canonical =
+        (before_menu ? std::string(1, kBeforeMenuMark) : std::string()) +
+        CanonicalAccelerator(accel);
     if (std::find(keys.begin(), keys.end(), canonical) == keys.end())
       keys.push_back(std::move(canonical));
   }
@@ -543,8 +553,11 @@ std::string WebViewConsoleJson(const char* level, const std::string& message,
   return out + "}";
 }
 
-std::string WebViewFocusJson(bool focused) {
-  return std::string("{\"focused\":") + Bool(focused) + "}";
+std::string WebViewFocusJson(bool focused, const char* reason) {
+  std::string out = std::string("{\"focused\":") + Bool(focused);
+  if (reason)
+    out += ",\"reason\":" + JsonQuote(reason);
+  return out + "}";
 }
 
 std::string WebViewNewWindowJson(const std::string& url, bool popup) {
@@ -590,9 +603,9 @@ int32_t ParseWebViewForwardKeys(const std::string& text,
 }
 
 std::string WebViewKeyJson(const WebViewKeyFields& f) {
-  return "{\"type\":\"keydown\",\"key\":" + JsonQuote(f.key) +
-         ",\"code\":" + JsonQuote(f.code) + ",\"altKey\":" + Bool(f.alt_key) +
-         ",\"ctrlKey\":" + Bool(f.ctrl_key) +
+  return "{\"type\":" + JsonQuote(f.type ? f.type : "keydown") +
+         ",\"key\":" + JsonQuote(f.key) + ",\"code\":" + JsonQuote(f.code) +
+         ",\"altKey\":" + Bool(f.alt_key) + ",\"ctrlKey\":" + Bool(f.ctrl_key) +
          ",\"metaKey\":" + Bool(f.meta_key) +
          ",\"shiftKey\":" + Bool(f.shift_key) +
          ",\"repeat\":" + Bool(f.repeat) +
@@ -610,17 +623,75 @@ bool WebViewKeyAccelerator(const std::string& code, bool alt, bool ctrl,
   return true;
 }
 
-bool WebViewKeyMatches(const std::vector<std::string>& forward_keys,
-                       const std::string& code, bool alt, bool ctrl, bool meta,
-                       bool shift) {
+namespace {
+
+// Whether `forward_keys` holds that keydown: any entry, or (`before_menu`)
+// only one marked '!'.
+bool KeyIn(const std::vector<std::string>& forward_keys,
+           const std::string& code, bool alt, bool ctrl, bool meta, bool shift,
+           bool before_menu) {
   if (forward_keys.empty())
     return false;
   Accelerator a;
   if (!WebViewKeyAccelerator(code, alt, ctrl, meta, shift, &a))
     return false;
   const std::string canonical = CanonicalAccelerator(a);
-  return std::find(forward_keys.begin(), forward_keys.end(), canonical) !=
-         forward_keys.end();
+  const std::string marked = std::string(1, kBeforeMenuMark) + canonical;
+  for (const std::string& k : forward_keys) {
+    if (k == marked || (!before_menu && k == canonical))
+      return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+bool WebViewKeyMatches(const std::vector<std::string>& forward_keys,
+                       const std::string& code, bool alt, bool ctrl, bool meta,
+                       bool shift) {
+  return KeyIn(forward_keys, code, alt, ctrl, meta, shift, false);
+}
+
+bool WebViewKeyMatchesBeforeMenu(const std::vector<std::string>& forward_keys,
+                                 const std::string& code, bool alt, bool ctrl,
+                                 bool meta, bool shift) {
+  return KeyIn(forward_keys, code, alt, ctrl, meta, shift, true);
+}
+
+void WebViewHeldKeys::Press(const std::string& code, const std::string& key) {
+  if (code.empty())
+    return;
+  for (const auto& k : keys_) {
+    if (k.first == code)
+      return;
+  }
+  keys_.emplace_back(code, key);
+}
+
+bool WebViewHeldKeys::Release(const std::string& code, std::string* key) {
+  for (auto it = keys_.begin(); it != keys_.end(); ++it) {
+    if (it->first == code) {
+      if (key)
+        *key = it->second;
+      keys_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<WebViewKeyFields> WebViewHeldKeys::ReleaseAll() {
+  std::vector<WebViewKeyFields> out;
+  for (const auto& k : keys_) {
+    WebViewKeyFields f;
+    f.type = "keyup";
+    f.code = k.first;
+    f.key = k.second;
+    f.forwarded = true;
+    out.push_back(std::move(f));
+  }
+  keys_.clear();
+  return out;
 }
 
 bool IsValidWebViewZoom(double factor) {
@@ -672,6 +743,12 @@ std::string WebViewEvalScript(const std::string& script) {
       "const __laufeyMessage = (e) => (e !== null && typeof e === 'object' && "
       "'message' in e) ? String(e.name || 'Error') + ': ' + String(e.message) "
       ": String(e);\n"
+      "try {\n"
+      "  (0, eval)('0');\n"
+      "} catch (e) {\n"
+      "  return JSON.stringify({ ok: false, kind: 'eval_blocked', message: "
+      "__laufeyMessage(e) });\n"
+      "}\n"
       "let __laufeyValue;\n"
       "try {\n"
       "  __laufeyValue = await (0, eval)(";
@@ -725,6 +802,9 @@ int32_t ParseWebViewEvalEnvelope(const std::string& envelope,
   if (kind && kind->type == JsonValue::Type::kString &&
       kind->string == "not_serializable")
     return LAUFEY_WEBVIEW_NOT_SERIALIZABLE;
+  if (kind && kind->type == JsonValue::Type::kString &&
+      kind->string == "eval_blocked")
+    return kWebViewEvalBlocked;
   return LAUFEY_WEBVIEW_SCRIPT_ERROR;
 }
 

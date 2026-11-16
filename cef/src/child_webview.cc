@@ -26,9 +26,15 @@
 // keydown, gives it to the app menu (macOS: [NSApp.mainMenu
 // performKeyEquivalent:] with the os_event; Windows / Linux: the window's Views
 // menu accelerators, views_menu.cc), then to "forwardKeys"; either consumes
-// it. OnKeyEvent hears the keydowns the page did not handle. Focus:
-// OnGotFocus (CefFocusHandler) as the render widget takes the focus, which
-// Chromium does on a mouse press before forwarding it to the renderer.
+// it; a "forwardKeys" entry marked '!' goes before the menu. A forwarded
+// keydown's keyup is the app's too: OnPreKeyEvent's KEYUP (on macOS a local
+// keyUp monitor, as AppKit sends no keyUp while Command is down), or a
+// release when the view loses the focus. OnKeyEvent hears the keydowns the
+// page did not handle. Focus: OnGotFocus (CefFocusHandler) as the render
+// widget takes the focus, which Chromium does on a mouse press before
+// forwarding it to the renderer. Hiding a focused view (and BLUR) gives the
+// focus to the page's browser view (on macOS the parent window is made key
+// again, without activating the app): FOCUS false with its "reason".
 
 #include "child_webview.h"
 
@@ -94,6 +100,10 @@ struct ChildView {
   laufey_common::WebViewBounds bounds;
   bool visible = true;
   bool focused = false;
+  // Why laufey is moving the focus out (kWebViewFocusHidden / Blur).
+  const char* focus_reason = nullptr;
+  // Forwarded keydowns whose keyup goes to the app too.
+  laufey_common::WebViewHeldKeys held_keys;
   bool closing = false;
   std::string sent_url;
   bool sent_back = false;
@@ -289,13 +299,47 @@ const char* ContextMediaType(cef_context_menu_media_type_t type) {
   }
 }
 
+// Sends the keyup of every forwarded key `v` still holds.
+void ReleaseHeldKeys(ChildView* v) {
+  for (const auto& f : v->held_keys.ReleaseAll())
+    Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+}
+
 void NoteFocus(uint32_t id, bool focused) {
   ChildView* v = Find(id);
   if (!v || v->focused == focused)
     return;
   v->focused = focused;
+  const char* reason = focused ? nullptr : v->focus_reason;
+  if (!focused)
+    ReleaseHeldKeys(v);
   Emit(id, LAUFEY_WEBVIEW_EVENT_FOCUS,
-       laufey_common::WebViewFocusJson(focused));
+       laufey_common::WebViewFocusJson(focused, reason));
+}
+
+// Gives the keyboard to the window's page if the view has it: FOCUS false
+// with `reason`. Never activates the window or the app.
+void ReturnFocusToPage(ChildView* v, const char* reason) {
+  if (!v->focused || !v->browser)
+    return;
+  uint32_t id = v->id;
+  v->focus_reason = reason;
+  v->browser->GetHost()->SetFocus(false);
+#if defined(__APPLE__)
+  LaufeyCefBlurOverlayMac(
+      reinterpret_cast<void*>(v->browser->GetHost()->GetWindowHandle()));
+#endif
+  if (v->page_view) {
+    v->page_view->RequestFocus();
+    if (CefRefPtr<CefBrowser> page = v->page_view->GetBrowser())
+      page->GetHost()->SetFocus(true);
+  }
+  if (ChildView* still = Find(id)) {
+    if (still->focused)
+      NoteFocus(id, false);
+    if (ChildView* again = Find(id))
+      again->focus_reason = nullptr;
+  }
 }
 
 // A keydown as the KEY event's fields (CEF reports Windows virtual-key codes
@@ -317,6 +361,21 @@ laufey_common::WebViewKeyFields KeyFields(const CefKeyEvent& event,
 
 bool IsKeyDown(const CefKeyEvent& event) {
   return event.type == KEYEVENT_RAWKEYDOWN || event.type == KEYEVENT_KEYDOWN;
+}
+
+// The keyup of a held forwarded key (its fields from `event`): true when one
+// was sent.
+bool SendKeyUp(ChildView* v, const laufey_common::WebViewKeyFields& up) {
+  std::string key;
+  if (!v->held_keys.Release(up.code, &key))
+    return false;
+  laufey_common::WebViewKeyFields f = up;
+  f.type = "keyup";
+  f.key = key;
+  f.repeat = false;
+  f.forwarded = true;
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+  return true;
 }
 
 // The app menu's accelerator for this keydown, fired; true when one was.
@@ -908,19 +967,33 @@ class ChildClient : public CefClient,
 
   // --- CefKeyboardHandler ---
 
-  // Before the renderer: the app menu, then "forwardKeys" (consumed).
+  // Before the renderer: "forwardKeys" marked '!', the app menu, then the
+  // other "forwardKeys" (consumed); a held forwarded key's keyup (consumed).
   bool OnPreKeyEvent(CefRefPtr<CefBrowser>, const CefKeyEvent& event,
                      CefEventHandle os_event, bool*) override {
     ChildView* v = Find(id_);
-    if (!v || !IsKeyDown(event))
+    if (!v)
       return false;
     laufey_common::WebViewKeyFields f = KeyFields(event, true);
-    if (RunMenuAccelerator(v, f, os_event))
-      return true;
-    if (!laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
-                                          f.alt_key, f.ctrl_key, f.meta_key,
-                                          f.shift_key))
+    if (event.type == KEYEVENT_KEYUP)
+      return SendKeyUp(v, f);
+    if (!IsKeyDown(event))
       return false;
+    if (!laufey_common::WebViewKeyMatchesBeforeMenu(
+            v->options.forward_keys, f.code, f.alt_key, f.ctrl_key, f.meta_key,
+            f.shift_key)) {
+      if (RunMenuAccelerator(v, f, os_event))
+        return true;
+      v = Find(id_);
+      if (!v || !laufey_common::WebViewKeyMatches(v->options.forward_keys,
+                                                  f.code, f.alt_key, f.ctrl_key,
+                                                  f.meta_key, f.shift_key))
+        return false;
+    }
+#if defined(__APPLE__)
+    LaufeyCefEnsureKeyUpMonitorMac();
+#endif
+    v->held_keys.Press(f.code, f.key);
     Emit(id_, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
     return true;
   }
@@ -1059,6 +1132,8 @@ uint32_t Capabilities() {
          // CefKeyboardHandler (ChildClient).
          LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS |
+         LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU |
+         LAUFEY_WEBVIEW_CAP_KEY_UP | LAUFEY_WEBVIEW_CAP_BLUR |
          LAUFEY_WEBVIEW_CAP_EVALUATE | LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
          LAUFEY_WEBVIEW_CAP_ZOOM | LAUFEY_WEBVIEW_CAP_FIND |
          LAUFEY_WEBVIEW_CAP_DEVTOOLS | LAUFEY_WEBVIEW_CAP_CONTEXT_MENU |
@@ -1163,6 +1238,12 @@ bool SetVisible(uint32_t id, bool visible) {
   if (!v)
     return false;
   v->visible = visible;
+  if (!visible) {
+    ReturnFocusToPage(v, laufey_common::kWebViewFocusHidden);
+    v = Find(id);
+    if (!v)
+      return false;
+  }
   if (v->overlay && v->overlay->IsValid())
     v->overlay->SetVisible(visible);
   return true;
@@ -1184,6 +1265,10 @@ bool Command(uint32_t id, int32_t command) {
   ChildView* v = Find(id);
   if (!v)
     return false;
+  if (command == LAUFEY_WEBVIEW_COMMAND_BLUR) {
+    ReturnFocusToPage(v, laufey_common::kWebViewFocusBlur);
+    return true;
+  }
   if (!v->browser)
     return command != LAUFEY_WEBVIEW_COMMAND_FOCUS;
   CefRefPtr<CefBrowser> b = v->browser;
@@ -1294,6 +1379,8 @@ void Evaluate(uint32_t id, const std::string& script,
               eval->SetString("expression", script);
               eval->SetInt("contextId", context_id);
               eval->SetBool("awaitPromise", true);
+              // DevTools' own default, stated: no page CSP refuses it.
+              eval->SetBool("allowUnsafeEvalBlockedByCSP", true);
               eval->SetBool("returnByValue", false);
               eval->SetString("objectGroup", "laufey-webview-eval");
               SendDevTools(
@@ -1404,6 +1491,35 @@ void Capture(uint32_t id, int32_t format, int32_t quality, double scale,
         CaptureWith(id, params, callback, user_data);
       });
 }
+
+#if defined(__APPLE__)
+bool MacKeyUp(void* ns_window, const std::string& code, bool alt, bool ctrl,
+              bool meta, bool shift) {
+  for (auto& kv : Views()) {
+    ChildView* v = kv.second.get();
+    if (v->closing || !v->browser || v->held_keys.empty() ||
+        LaufeyCefOverlayWindowMac(reinterpret_cast<void*>(
+            v->browser->GetHost()->GetWindowHandle())) != ns_window)
+      continue;
+    laufey_common::WebViewKeyFields f;
+    f.code = code;
+    f.alt_key = alt;
+    f.ctrl_key = ctrl;
+    f.meta_key = meta;
+    f.shift_key = shift;
+    if (SendKeyUp(v, f))
+      return true;
+  }
+  return false;
+}
+
+void MacAppDeactivated() {
+  for (auto& kv : Views()) {
+    if (!kv.second->closing)
+      ReleaseHeldKeys(kv.second.get());
+  }
+}
+#endif
 
 bool Close(uint32_t id) {
   CEF_REQUIRE_UI_THREAD();

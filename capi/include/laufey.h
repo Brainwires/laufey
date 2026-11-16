@@ -1237,6 +1237,14 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 // The app menu's accelerators win over a focused view's page: the item
 // fires and the page never sees the key.
 #define LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS (1u << 14)
+// webview_command BLUR hands the keyboard back to the window's page, without
+// activating the app or reordering windows.
+#define LAUFEY_WEBVIEW_CAP_BLUR (1u << 15)
+// KEY events with "type": "keyup" for the keyup of each forwarded keydown.
+#define LAUFEY_WEBVIEW_CAP_KEY_UP (1u << 16)
+// A "forwardKeys" entry with a leading '!' ("!CmdOrCtrl+W") is matched before
+// the app menu's accelerators (the others after them).
+#define LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU (1u << 17)
 // Bits 24..27: the engine (LAUFEY_WEBVIEW_ENGINE_*), 0 when unsupported.
 #define LAUFEY_WEBVIEW_ENGINE_SHIFT 24
 #define LAUFEY_WEBVIEW_ENGINE_MASK (0xfu << 24)
@@ -1273,6 +1281,11 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 // (LAUFEY_WEBVIEW_CAP_Z_ORDER).
 #define LAUFEY_WEBVIEW_COMMAND_RAISE 7
 #define LAUFEY_WEBVIEW_COMMAND_LOWER 8
+// Hand the keyboard focus back to the window's page if the view has it
+// (LAUFEY_WEBVIEW_CAP_BLUR): FOCUS {"focused": false, "reason": "blur"}. The
+// app is not activated and no window moves; true also when the view did not
+// have the focus.
+#define LAUFEY_WEBVIEW_COMMAND_BLUR 9
 
 // Event kinds (laufey_webview_event_fn `kind`) and their `detail_json`:
 //   TITLE       {"title": string}
@@ -1287,7 +1300,11 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 //               "blocked", "aborted" or "failed".
 //   CONSOLE     {"level": "log" | "info" | "warn" | "error" | "debug",
 //                "message": string, "source"?: string, "line"?: number}
-//   FOCUS       {"focused": bool}: the view gained / lost the keyboard focus
+//   FOCUS       {"focused": bool, "reason"?: "hidden" | "blur"}: the view
+//               gained / lost the keyboard focus. Hiding a focused view
+//               (webview_set_visible false) gives the focus back to the
+//               window's page, reported with "reason": "hidden"; BLUR with
+//               "reason": "blur". Any other change has no "reason".
 //   NEW_WINDOW  {"url": string, "disposition": "popup" | "tab"}: a popup was
 //               refused (only under "allowPopups": "deny"); "popup" when the
 //               page asked for window features
@@ -1308,13 +1325,17 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 //               none)
 #define LAUFEY_WEBVIEW_EVENT_FIND_RESULT 8
 #define LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU 9
-//   KEY         {"type": "keydown", "key", "code" (DOM KeyboardEvent names),
-//               "altKey", "ctrlKey", "metaKey", "shiftKey", "repeat",
-//               "forwarded": bool}: "forwarded" true for a key matching the
-//               view's "forwardKeys" (the page never got it), false for a
-//               keydown the page did not handle (where
-//               LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS is reported). "metaKey" is
-//               Command on macOS, the Windows / Super key elsewhere.
+//   KEY         {"type": "keydown" | "keyup", "key", "code" (DOM
+//               KeyboardEvent names), "altKey", "ctrlKey", "metaKey",
+//               "shiftKey", "repeat", "forwarded": bool}: "forwarded" true for
+//               a key matching the view's "forwardKeys" (the page never got
+//               it), false for a keydown the page did not handle (where
+//               LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS is reported). A forwarded
+//               keydown's keyup comes as "keyup" (LAUFEY_WEBVIEW_CAP_KEY_UP),
+//               matched by "code" whatever modifiers are down by then; when
+//               the view loses the focus (or the app is deactivated) with
+//               forwarded keys still down, their keyups come then. "metaKey"
+//               is Command on macOS, the Windows / Super key elsewhere.
 #define LAUFEY_WEBVIEW_EVENT_KEY 10
 
 // webview_find flags.

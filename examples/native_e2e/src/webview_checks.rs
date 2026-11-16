@@ -9,6 +9,9 @@
 //! open_devtools answers NOT_ALLOWED with the app's DevTools off (it is not
 //! called with them on: it would open a window mid-battery; print never is).
 //! A backend without web views (Winit) must say so and refuse to create one.
+//! Evaluate also runs on a page whose CSP refuses eval; BLUR and hiding a
+//! focused view hand the focus back with their FOCUS "reason"; "forwardKeys"
+//! entries marked '!' are accepted where reported.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -26,6 +29,10 @@ const PAGE_A: &str = "<!doctype html><title>webview-a</title>\
 <script>console.warn('webview-a says hi')</script>\
 <a id=next href=\"/b\">next</a>";
 const PAGE_B: &str = "<!doctype html><title>webview-b</title><p>b</p>";
+// Served with a CSP that refuses eval (and every script).
+const PAGE_CSP: &str = "<!doctype html><title>webview-csp</title><p>csp</p>";
+const CSP_HEADER: &str =
+  "Content-Security-Policy: default-src 'none'; script-src 'none'\r\n";
 
 fn serve() -> Option<String> {
   let listener = TcpListener::bind("127.0.0.1:0").ok()?;
@@ -50,13 +57,15 @@ fn serve() -> Option<String> {
           }
         }
         let path = line.split_whitespace().nth(1).unwrap_or("/");
-        let body = if path.starts_with("/b") {
-          PAGE_B
+        let (body, extra) = if path.starts_with("/b") {
+          (PAGE_B, "")
+        } else if path.starts_with("/csp") {
+          (PAGE_CSP, CSP_HEADER)
         } else {
-          PAGE_A
+          (PAGE_A, "")
         };
         let response = format!(
-          "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+          "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}",
           body.len()
         );
         let mut out = stream;
@@ -338,6 +347,12 @@ pub async fn run(w: &Window) {
     na("evaluate (not supported by this backend)");
   }
 
+  if caps.evaluate() {
+    csp_evaluate(w, &base).await;
+  }
+
+  focus_reasons(view, &events, caps).await;
+
   if caps.capture() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     view.capture(CaptureFormat::Png, 0, None, move |r| {
@@ -496,6 +511,32 @@ pub async fn run(w: &Window) {
     }
     v.close();
   }
+  if caps.forward_keys_before_menu() {
+    let (_, sink) = recorder();
+    let before = laufey::create_webview(
+      w.id(),
+      &WebViewOptions {
+        forward_keys: Some(vec!["!CmdOrCtrl+W".into(), "F6".into()]),
+        ..bad(&format!("{base}/b"))
+      },
+      sink,
+    );
+    check(
+      &format!("create_webview accepts a '!' forwardKeys entry ({before:?})"),
+      before.is_ok(),
+    );
+    if let Ok(v) = before {
+      check(
+        "set_forward_keys takes '!' entries and refuses a lone or doubled '!'",
+        v.set_forward_keys(&["!F5".to_string(), "Alt+Up".to_string()])
+          && !v.set_forward_keys(&["!".to_string()])
+          && !v.set_forward_keys(&["!!F5".to_string()]),
+      );
+      v.close();
+    }
+  } else {
+    na("forwardKeys before the app menu (not reported by this backend)");
+  }
   check(
     "create_webview refuses an invalid forwardKeys entry",
     laufey::create_webview(
@@ -632,6 +673,113 @@ pub async fn run(w: &Window) {
     check("a second window's web view", false);
     w2.close();
   }
+}
+
+/// A page whose CSP refuses eval: evaluate still runs (in its isolated
+/// world), reads the DOM and returns JSON.
+async fn csp_evaluate(w: &Window, base: &str) {
+  let (events, sink) = recorder();
+  let Ok(view) = laufey::create_webview(
+    w.id(),
+    &WebViewOptions {
+      url: format!("{base}/csp"),
+      bounds: bounds(20.0, 30.0, 200.0, 120.0),
+      partition: Some("ephemeral:e2e-csp".into()),
+      ..Default::default()
+    },
+    sink,
+  ) else {
+    check("a web view for the CSP evaluate check", false);
+    return;
+  };
+  check(
+    "the CSP page loads",
+    saw(&events, WebViewEventKind::Load, "\"complete\"", 20).await,
+  );
+  let title = evaluate(view, "document.title").await;
+  check(
+    &format!("evaluate runs under a CSP that refuses eval ({title:?})"),
+    title.as_deref() == Ok("\"webview-csp\""),
+  );
+  check(
+    "evaluate returns JSON under that CSP",
+    evaluate(view, "({ n: 1 + 2, s: [true, null] })")
+      .await
+      .as_deref()
+      == Ok("{\"n\":3,\"s\":[true,null]}")
+      && evaluate(view, "undefined").await.as_deref() == Ok("null"),
+  );
+  check(
+    "evaluate reports a throw under that CSP",
+    evaluate(view, "throw new Error('csp-boom')")
+      .await
+      .is_err_and(|f| f.code == "error" && f.message.contains("csp-boom")),
+  );
+  check(
+    "evaluate under that CSP still has no page bridge",
+    evaluate(view, "typeof globalThis.Laufey").await.as_deref()
+      == Ok("\"undefined\""),
+  );
+  // A promise is awaited where the engine's evaluate does (CEF, WebView2);
+  // WebKit's own evaluate returns the completion value as it is.
+  eprintln!(
+    "[e2e] INFO evaluate of a promise under a CSP: {:?}",
+    evaluate(view, "Promise.resolve(7)").await
+  );
+  view.close();
+}
+
+/// BLUR and hiding a focused view: FOCUS false with "reason" "blur" /
+/// "hidden". Needs the view to take the focus (a window that can be key).
+async fn focus_reasons(
+  view: laufey::WebView,
+  events: &Events,
+  caps: laufey::WebViewCapabilities,
+) {
+  if !caps.blur() {
+    check("blur() is refused where not reported", !view.blur());
+    return;
+  }
+  check("blur() without the focus is a no-op", view.blur());
+  let before = count(events, WebViewEventKind::FocusChange);
+  if !view.focus()
+    || !saw(events, WebViewEventKind::FocusChange, "\"focused\":true", 5).await
+  {
+    na("focus reasons (the view never took the keyboard focus here)");
+    return;
+  }
+  check("blur()", view.blur());
+  check(
+    "blur() reports FOCUS false with reason \"blur\"",
+    saw(
+      events,
+      WebViewEventKind::FocusChange,
+      "\"reason\":\"blur\"",
+      5,
+    )
+    .await,
+  );
+  view.focus();
+  tokio::time::sleep(Duration::from_millis(300)).await;
+  check(
+    "set_visible(false) on a focused view",
+    view.set_visible(false),
+  );
+  check(
+    "hiding a focused view reports FOCUS false with reason \"hidden\"",
+    saw(
+      events,
+      WebViewEventKind::FocusChange,
+      "\"reason\":\"hidden\"",
+      5,
+    )
+    .await,
+  );
+  view.set_visible(true);
+  eprintln!(
+    "[e2e] INFO focus events in the focus checks: {}",
+    count(events, WebViewEventKind::FocusChange) - before
+  );
 }
 
 /// LAUFEY_E2E_ONLY=devtools-off: with the app's DevTools off a web view's

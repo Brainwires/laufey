@@ -107,14 +107,27 @@ features only to a view it would create.
 ## Evaluate and capture
 
 `webview_evaluate` runs a classic script in an isolated world of the main frame
-(it shares the DOM, not the page's globals), awaits a promise result and returns
-JSON. CEF and WebView2 use DevTools (`Page.createIsolatedWorld`,
-`Runtime.evaluate`; `CallDevToolsProtocolMethod` on WebView2), which no page
-Content-Security-Policy restricts. WKWebView runs it in a `WKContentWorld`
-through an indirect `eval`, which a page CSP without `'unsafe-eval'` may refuse
-(the call then fails with `SCRIPT_ERROR`). WebKitGTK does the same in a script
-world named `laufey-webview` (`webkit_web_view_call_async_javascript_function`,
-WebKitGTK 2.40+; older versions report no `LAUFEY_WEBVIEW_CAP_EVALUATE`).
+named `laufey-webview`: it shares the DOM, not the page's globals (a page
+variable, a page function or a prototype the page patched is not seen). Its
+completion value comes back as JSON, a promise awaited. No page
+Content-Security-Policy refuses it:
+
+- **CEF and WebView2** use DevTools (`Page.createIsolatedWorld`,
+  `Runtime.evaluate` with `allowUnsafeEvalBlockedByCSP`;
+  `CallDevToolsProtocolMethod` on WebView2).
+- **WKWebView and WebKitGTK** run a wrapper through `callAsyncJavaScript` in a
+  `WKContentWorld` / `webkit_web_view_call_async_javascript_function` in a
+  script world (WebKitGTK 2.40+; older versions report no
+  `LAUFEY_WEBVIEW_CAP_EVALUATE`), which evaluates the script with an indirect
+  `eval`. WebKit applies the page's CSP to `eval` in every world, so the wrapper
+  first tries `eval('0')`: when the CSP refuses it, nothing of the script has
+  run, and the script runs again through the engine's own evaluate
+  (`evaluateJavaScript:inFrame:inContentWorld:`, macOS 11+;
+  `webkit_web_view_evaluate_javascript`), in the same world, which no page CSP
+  restricts. That path returns the completion value as it is: a promise is not
+  awaited (`NOT_SERIALIZABLE`), so under such a CSP end the script with a plain
+  value. A page with a CSP `report-uri` gets one report for the refused
+  `eval('0')` per call.
 
 `webview_capture` encodes what the view shows as PNG or JPEG, in device pixels
 (CEF and WebView2: `Page.captureScreenshot`; WKWebView:
@@ -209,19 +222,42 @@ of them yet.
 
 While a web view has the keyboard focus, its keys go in this order:
 
-1. **The app menu's accelerators** (the app menu, the window's menu bar and its
+1. **`forwardKeys` entries marked `!`** (`"!CmdOrCtrl+W"`;
+   `LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU`): a matching keydown skips the
+   menu and the page, as a forwarded `KEY` event. Use it for a key the view's
+   app means while the view has the keyboard (its own ⌘W, say), which the menu
+   would otherwise take.
+2. **The app menu's accelerators** (the app menu, the window's menu bar and its
    Window items: ⌘W, ⌘T, ⌘N, ...). A key matching one fires the item and the
    page never sees it, as in a browser (`LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS`).
-2. **`forwardKeys`**: accelerators in the menu / global shortcut syntax
+3. **`forwardKeys`**: accelerators in the menu / global shortcut syntax
    (`"CmdOrCtrl+1"`, `"Meta+Shift+L"`; `CmdOrCtrl` is Command on macOS, Ctrl
    elsewhere; at most 64 entries of at most 64 characters, an invalid one is
-   `LAUFEY_WEBVIEW_INVALID`), set at creation or with
-   `webview_set_forward_keys`. A matching keydown skips the page and comes as a
-   `KEY` event with `"forwarded": true` (`LAUFEY_WEBVIEW_CAP_FORWARD_KEYS`).
-   Keys are matched by the physical key (DOM `code`), as accelerators are.
-3. **The page.** A keydown it did not handle (not `preventDefault`ed, no
+   `LAUFEY_WEBVIEW_INVALID`; a leading `!` moves the entry to step 1), set at
+   creation or with `webview_set_forward_keys`. A matching keydown skips the
+   page and comes as a `KEY` event with `"forwarded": true`
+   (`LAUFEY_WEBVIEW_CAP_FORWARD_KEYS`). Keys are matched by the physical key
+   (DOM `code`), as accelerators are.
+4. **The page.** A keydown it did not handle (not `preventDefault`ed, no
    editable used it) comes afterwards as a `KEY` event with `"forwarded": false`
    where `LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS` is reported.
+
+**Keyups** (`LAUFEY_WEBVIEW_CAP_KEY_UP`): the keyup of a forwarded keydown comes
+as a `KEY` event with `"type": "keyup"` and `"forwarded": true`, matched by the
+physical key whatever modifiers are down by then (Ctrl released before the W of
+Ctrl+W still ends it), and the page never sees it. A held key's repeats are
+forwarded keydowns with `"repeat": true`. When the view loses the focus (a click
+elsewhere, `BLUR`, hiding it, the window or the app deactivated) with forwarded
+keys still down, their keyups come then, so a hold always ends. Keyups of keys
+that were not forwarded are the page's.
+
+**Giving the keyboard back.** `webview_command(BLUR)`
+(`LAUFEY_WEBVIEW_CAP_BLUR`) moves the focus from the view to the window's page
+if the view has it, and reports `FOCUS` `{"focused":false,"reason":"blur"}`; the
+app is not activated and no window is raised or reordered (`FOCUS` the command,
+by contrast, brings the window forward). Hiding a focused view
+(`webview_set_visible(false)`) does the same with `"reason":"hidden"`. A `FOCUS`
+change laufey did not make has no `"reason"`.
 
 `KEY` carries DOM `KeyboardEvent` names (`key`, `code`) and `altKey` / `ctrlKey`
 / `metaKey` (Command on macOS, the Windows / Super key elsewhere) / `shiftKey` /
@@ -238,6 +274,13 @@ the page (no lost first click).
 | CEF       | `OnPreKeyEvent`: macOS `[NSApp.mainMenu performKeyEquivalent:]` with the `os_event`; Windows / Linux the window's Views menu accelerators | `OnPreKeyEvent`, after the menu                                                                                                                                                                                                | `OnKeyEvent` (Chromium's unhandled keyboard events)                                                                                                       | `OnGotFocus`: Chromium focuses the render widget on a press before forwarding it to the renderer                                               |
 | WebView2  | the child controller's `AcceleratorKeyPressed`, matched against the window's menu accelerators as the page's is                           | `AcceleratorKeyPressed`, which WebView2 raises only for Ctrl / Alt combinations, keys that type no character and Escape: a forward key that types a character without Ctrl or Alt (`Shift+L`, `Meta+L`) still reaches the page | not reported (WebView2 says nothing of the page's handling)                                                                                               | the host window's `WM_PARENTNOTIFY` for a button press in the web view's windows, as the press is dispatched; best effort (`GotFocus` follows) |
 | WebKitGTK | GtkWindow activates the window's accelerators (the menu bar's `GtkAccelGroup`) before the focus widget has the key                        | the view's `key-press-event` handler, run before WebKit's                                                                                                                                                                      | WebKit re-sends an unhandled keydown through `gtk_main_do_event` (a copy of the event: same time, keycode, state); the handler seeing it again reports it | the view's `button-press-event` handler, before WebKit's, takes the focus                                                                      |
+
+| Engine    | `!` entries                                                                            | Keyups                                                                                                                                                       | `BLUR` / hiding                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| WKWebView | `performKeyEquivalent:` / `keyDown:`, before `[NSApp.mainMenu ...]`                    | a local `keyUp` monitor (AppKit sends no `keyUp:` while Command is down); the app's deactivation releases the rest                                           | the page view becomes the window's first responder (`makeFirstResponder:`; no `makeKeyWindow`)                              |
+| CEF       | `OnPreKeyEvent`, before the menu                                                       | `OnPreKeyEvent`'s `KEYEVENT_KEYUP`; on macOS a local `keyUp` monitor and the app's deactivation, as on WKWebView                                             | `SetFocus(false)`, the page's browser view `RequestFocus()`; on macOS the parent window made key again when the overlay was |
+| WebView2  | `AcceleratorKeyPressed`, before `HandleAcceleratorKey`                                 | `AcceleratorKeyPressed`'s `KEY_UP`, and, as WebView2 raises it only for accelerator keys, a host timer reading the key's state every 30 ms while one is held | the page controller's `MoveFocus`, in the foreground window only                                                            |
+| WebKitGTK | the window's own `key-press-event` handler, which runs before GtkWindow's accelerators | the view's `key-release-event` handler                                                                                                                       | `gtk_widget_grab_focus` on the page view (it never presents the window)                                                     |
 
 The unhandled-key paths on WKWebView and WebKitGTK rest on how WebKit hands an
 unhandled key back to the toolkit (WebKit's `doneWithKeyEvent`), which no API

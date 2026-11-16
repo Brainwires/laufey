@@ -20,13 +20,24 @@
 // content world of its own (WebKit's find answers only found / not found).
 //
 // Keys (LaufeyChildWebView): while the view is the first responder, a key
-// event goes to the app's main menu first (performKeyEquivalent:), then to
-// "forwardKeys", then to the page. A keydown the page did not handle comes
+// event goes to the "forwardKeys" entries marked '!' first, then to the app's
+// main menu (performKeyEquivalent:), then to the other "forwardKeys", then to
+// the page. A forwarded keydown's keyup is taken by a local keyUp monitor
+// (AppKit sends no keyUp: while Command is down, and the focus may have moved
+// by then), or released when the view loses the focus or the app is
+// deactivated. A keydown the page did not handle comes
 // back from WebKit as the same NSEvent, re-sent through NSApp (WebViewImpl::
 // doneWithKeyEvent); seeing it a second time is how an unhandled key is told.
 // A left mouse-down makes the view the first responder (FOCUS) before WebKit
 // gets the click, and acceptsFirstMouse: lets the click through to the page
-// in an inactive window.
+// in an inactive window. Hiding a focused view (and BLUR) makes the page view
+// the first responder: FOCUS false with its "reason", and no activation.
+//
+// Evaluate runs WebViewEvalScript through callAsyncJavaScript in a content
+// world of its own. A page whose CSP refuses eval (it does in every world)
+// answers eval_blocked before anything ran; the script then runs through
+// evaluateJavaScript:inFrame:inContentWorld:, which no page CSP restricts
+// and which returns a classic script's completion value (not awaited).
 
 #import <Cocoa/Cocoa.h>
 #import <ImageIO/ImageIO.h>
@@ -71,6 +82,11 @@ struct ChildView {
   laufey_common::WebViewBounds bounds;
   bool visible = true;
   bool focused = false;
+  // Why laufey is moving the focus out of the view (kWebViewFocusHidden /
+  // kWebViewFocusBlur), for the FOCUS event that follows; else nullptr.
+  const char* focus_reason = nullptr;
+  // Forwarded keydowns whose keyup goes to the app too.
+  laufey_common::WebViewHeldKeys held_keys;
   // The last URL event, so the KVO bursts of a navigation send it once.
   std::string sent_url;
   bool sent_back = false;
@@ -406,13 +422,101 @@ void ApplyFrame(ChildView* v) {
       (parent.isFlipped ? NSViewMaxYMargin : NSViewMinYMargin);
 }
 
+// Sends the keyup of every forwarded key `v` still holds.
+void ReleaseHeldKeys(ChildView* v) {
+  for (const auto& f : v->held_keys.ReleaseAll())
+    Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+}
+
 void NoteFocus(uint32_t id, bool focused) {
   ChildView* v = Find(id);
   if (!v || v->focused == focused)
     return;
   v->focused = focused;
+  const char* reason = focused ? nullptr : v->focus_reason;
+  if (!focused)
+    ReleaseHeldKeys(v);
   Emit(id, LAUFEY_WEBVIEW_EVENT_FOCUS,
-       laufey_common::WebViewFocusJson(focused));
+       laufey_common::WebViewFocusJson(focused, reason));
+}
+
+// The keyup monitor and the app-deactivation observer (once, process-wide):
+// a held forwarded key's keyup goes to its view's app, wherever the focus is
+// by then; a deactivated app releases them all (their keyups go elsewhere).
+void EnsureKeyUpMonitor() {
+  static bool installed = false;
+  if (installed)
+    return;
+  installed = true;
+  [NSEvent
+      addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp
+                                   handler:^NSEvent*(NSEvent* event) {
+                                     const std::string code =
+                                         laufey_common::NSEventKeyToCode(
+                                             event.keyCode);
+                                     for (auto& kv : Views()) {
+                                       ChildView& v = kv.second;
+                                       std::string key;
+                                       if (v.view.window != event.window ||
+                                           !v.held_keys.Release(code, &key))
+                                         continue;
+                                       laufey_common::WebViewKeyFields f;
+                                       NSEventModifierFlags flags =
+                                           event.modifierFlags;
+                                       f.type = "keyup";
+                                       f.key = key;
+                                       f.code = code;
+                                       f.alt_key =
+                                           (flags &
+                                            NSEventModifierFlagOption) != 0;
+                                       f.ctrl_key =
+                                           (flags &
+                                            NSEventModifierFlagControl) != 0;
+                                       f.meta_key =
+                                           (flags &
+                                            NSEventModifierFlagCommand) != 0;
+                                       f.shift_key =
+                                           (flags & NSEventModifierFlagShift) !=
+                                           0;
+                                       f.forwarded = true;
+                                       Emit(v.id, LAUFEY_WEBVIEW_EVENT_KEY,
+                                            laufey_common::WebViewKeyJson(f));
+                                       return nil;
+                                     }
+                                     return event;
+                                   }];
+  [[NSNotificationCenter defaultCenter]
+      addObserverForName:NSApplicationDidResignActiveNotification
+                  object:nil
+                   queue:[NSOperationQueue mainQueue]
+              usingBlock:^(NSNotification*) {
+                for (auto& kv : Views())
+                  ReleaseHeldKeys(&kv.second);
+              }];
+}
+
+// Gives the keyboard to the window's page (the view's superview) if the view
+// has it: FOCUS false with `reason`. Never activates the app or moves a
+// window.
+void ReturnFocusToPage(ChildView* v, const char* reason) {
+  NSResponder* responder = v->view.window.firstResponder;
+  if (![responder isKindOfClass:[NSView class]] ||
+      ![(NSView*)responder isDescendantOf:v->view])
+    return;
+  uint32_t id = v->id;
+  v->focus_reason = reason;
+  [v->view.window makeFirstResponder:v->view.superview];
+  // makeFirstResponder: may have closed the view (a sink); look it up again.
+  if (ChildView* still = Find(id)) {
+    still->focus_reason = nullptr;
+    // A responder inside the view resigned, not the view itself.
+    if (still->focused) {
+      still->focus_reason = reason;
+      NoteFocus(id, false);
+      if (ChildView* again = Find(id))
+        again->focus_reason = nullptr;
+    }
+  }
 }
 
 bool IsAttachment(NSURLResponse* response) {
@@ -473,16 +577,22 @@ laufey_common::WebViewKeyFields KeyFields(NSEvent* event, bool forwarded) {
     }
     return NO;
   }
-  if ([[NSApp mainMenu] performKeyEquivalent:event])
-    return YES;
-  ChildView* v = Find(self.laufeyViewId);
-  if (!v)
-    return NO;
   laufey_common::WebViewKeyFields f = KeyFields(event, true);
-  if (!laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
-                                        f.alt_key, f.ctrl_key, f.meta_key,
-                                        f.shift_key))
-    return NO;
+  ChildView* v = Find(self.laufeyViewId);
+  // '!' entries before the menu, the others after it.
+  if (!v || !laufey_common::WebViewKeyMatchesBeforeMenu(
+                v->options.forward_keys, f.code, f.alt_key, f.ctrl_key,
+                f.meta_key, f.shift_key)) {
+    if ([[NSApp mainMenu] performKeyEquivalent:event])
+      return YES;
+    v = Find(self.laufeyViewId);
+    if (!v || !laufey_common::WebViewKeyMatches(v->options.forward_keys, f.code,
+                                                f.alt_key, f.ctrl_key,
+                                                f.meta_key, f.shift_key))
+      return NO;
+  }
+  EnsureKeyUpMonitor();
+  v->held_keys.Press(f.code, f.key);
   Emit(self.laufeyViewId, LAUFEY_WEBVIEW_EVENT_KEY,
        laufey_common::WebViewKeyJson(f));
   return YES;
@@ -961,7 +1071,9 @@ uint32_t Capabilities() {
     caps |= LAUFEY_WEBVIEW_CAP_DEVTOOLS;
   // LaufeyChildWebView's key handling.
   caps |= LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
-          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS;
+          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS |
+          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU |
+          LAUFEY_WEBVIEW_CAP_KEY_UP | LAUFEY_WEBVIEW_CAP_BLUR;
   if (HasPersistentStores())
     caps |= LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS;
   if (@available(macOS 12.0, *))
@@ -1085,8 +1197,14 @@ bool SetVisible(uint32_t id, bool visible) {
   if (!v)
     return false;
   v->visible = visible;
-  if (!visible && v->view.window.firstResponder == v->view)
-    [v->view.window makeFirstResponder:v->view.superview];
+  if (!visible) {
+    // The keyboard goes back to the page (FOCUS "hidden"), not wherever
+    // AppKit would move a hidden first responder's focus.
+    ReturnFocusToPage(v, laufey_common::kWebViewFocusHidden);
+    v = Find(id);
+    if (!v)
+      return false;
+  }
   v->view.hidden = !visible;
   return true;
 }
@@ -1133,6 +1251,9 @@ bool Command(uint32_t id, int32_t command) {
       if (!v->view.window.isKeyWindow || !NSApp.isActive)
         laufey_common::MacFocusWindow((__bridge void*)v->view.window);
       return [v->view.window makeFirstResponder:v->view];
+    case LAUFEY_WEBVIEW_COMMAND_BLUR:
+      ReturnFocusToPage(v, laufey_common::kWebViewFocusBlur);
+      return true;
   }
   return false;
 }
@@ -1153,6 +1274,116 @@ std::string State(uint32_t id) {
   return laufey_common::WebViewStateJson(s);
 }
 
+namespace {
+
+// evaluateJavaScript's result as JSON.stringify writes it: NSNull / nil
+// null, a non-finite number null, a date its ISO string; false for anything
+// else WebKit hands back.
+API_AVAILABLE(macos(11.0))
+id JsonSafe(id value, int depth) {
+  if (depth > 256)
+    return nil;
+  if (!value || value == [NSNull null])
+    return [NSNull null];
+  if ([value isKindOfClass:[NSString class]])
+    return value;
+  if ([value isKindOfClass:[NSNumber class]]) {
+    NSNumber* n = value;
+    if (CFGetTypeID((__bridge CFTypeRef)n) == CFBooleanGetTypeID())
+      return n;
+    return std::isfinite(n.doubleValue) ? n : (id)[NSNull null];
+  }
+  if ([value isKindOfClass:[NSDate class]]) {
+    NSISO8601DateFormatter* f = [[NSISO8601DateFormatter alloc] init];
+    f.formatOptions = NSISO8601DateFormatWithInternetDateTime |
+                      NSISO8601DateFormatWithFractionalSeconds;
+    f.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    return [f stringFromDate:value];
+  }
+  if ([value isKindOfClass:[NSArray class]]) {
+    NSMutableArray* out = [NSMutableArray array];
+    for (id item in (NSArray*)value) {
+      id safe = JsonSafe(item, depth + 1);
+      if (!safe)
+        return nil;
+      [out addObject:safe];
+    }
+    return out;
+  }
+  if ([value isKindOfClass:[NSDictionary class]]) {
+    NSMutableDictionary* out = [NSMutableDictionary dictionary];
+    for (id key in (NSDictionary*)value) {
+      id safe = JsonSafe(((NSDictionary*)value)[key], depth + 1);
+      if (!safe)
+        return nil;
+      out[[key description]] = safe;
+    }
+    return out;
+  }
+  return nil;
+}
+
+// The script again, for a page whose CSP refuses eval: through
+// evaluateJavaScript:inFrame:inContentWorld:, which no page CSP restricts
+// (WebKit runs it as the embedder's script, not through eval). Its result is
+// the classic script's completion value; a promise is not awaited (WebKit
+// answers "unsupported type": NOT_SERIALIZABLE).
+API_AVAILABLE(macos(11.0))
+void EvaluateWithoutEval(uint32_t view_id, const std::string& script,
+                         WKContentWorld* world, laufey_webview_eval_fn callback,
+                         void* user_data) {
+  ChildView* v = Find(view_id);
+  if (!v) {
+    callback(user_data, LAUFEY_WEBVIEW_CLOSED, "the web view is closed");
+    return;
+  }
+  [v->view
+      evaluateJavaScript:NS(script)
+                 inFrame:nil
+          inContentWorld:world
+       completionHandler:^(id result, NSError* error) {
+         if (error) {
+           bool unsupported =
+               [error.domain isEqualToString:WKErrorDomain] &&
+               error.code == WKErrorJavaScriptResultTypeIsUnsupported;
+           NSString* message = error.userInfo[@"WKJavaScriptExceptionMessage"]
+                                   ?: error.localizedDescription;
+           std::string text =
+               unsupported ? std::string("the result has no JSON form (under "
+                                         "this page's Content-Security-Policy "
+                                         "a promise is not awaited)")
+                           : Utf8(message);
+           callback(user_data,
+                    unsupported ? LAUFEY_WEBVIEW_NOT_SERIALIZABLE
+                                : LAUFEY_WEBVIEW_SCRIPT_ERROR,
+                    text.c_str());
+           return;
+         }
+         id safe = JsonSafe(result, 0);
+         NSData* data = nil;
+         if (safe) {
+           @try {
+             data = [NSJSONSerialization
+                 dataWithJSONObject:safe
+                            options:NSJSONWritingFragmentsAllowed |
+                                    NSJSONWritingWithoutEscapingSlashes
+                              error:nil];
+           } @catch (NSException*) {
+             data = nil;
+           }
+         }
+         if (!data) {
+           callback(user_data, LAUFEY_WEBVIEW_NOT_SERIALIZABLE,
+                    "the result has no JSON form");
+           return;
+         }
+         std::string json(static_cast<const char*>(data.bytes), data.length);
+         callback(user_data, LAUFEY_WEBVIEW_OK, json.c_str());
+       }];
+}
+
+}  // namespace
+
 void Evaluate(uint32_t view_id, const std::string& script,
               laufey_webview_eval_fn callback, void* user_data) {
   ChildView* v = Find(view_id);
@@ -1163,6 +1394,8 @@ void Evaluate(uint32_t view_id, const std::string& script,
   if (@available(macOS 11.0, *)) {
     NSString* body = NS(laufey_common::WebViewEvalScript(script));
     WKContentWorld* world = [WKContentWorld worldWithName:@"laufey-webview"];
+    // The block outlives the caller's string.
+    std::string source = script;
     [v->view
         callAsyncJavaScript:body
                   arguments:nil
@@ -1180,6 +1413,10 @@ void Evaluate(uint32_t view_id, const std::string& script,
             std::string text;
             int32_t status =
                 laufey_common::ParseWebViewEvalEnvelope(Utf8(result), &text);
+            if (status == laufey_common::kWebViewEvalBlocked) {
+              EvaluateWithoutEval(view_id, source, world, callback, user_data);
+              return;
+            }
             callback(user_data, status, text.c_str());
           }];
     return;

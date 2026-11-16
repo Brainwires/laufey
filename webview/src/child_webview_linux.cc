@@ -16,13 +16,25 @@
 // Keys: GtkWindow's own key-press-event activates the window's accelerators
 // (the menu bar's GtkAccelGroup) before it hands the key to the focus
 // widget, so the app menu's accelerators win over the view as over the page.
-// The view's key-press-event handler runs before WebKit's (connected, not
-// after) and takes "forwardKeys". A keydown the page did not handle comes
-// back from WebKit through gtk_main_do_event (PageClientImpl::
+// The window's own key-press-event handler (webview_linux.cc), which runs
+// before GtkWindow's, hands a focused view's keys to TakeKeyBeforeMenu for
+// the "forwardKeys" marked '!'. The view's key-press-event handler runs
+// before WebKit's (connected, not after) and takes the other "forwardKeys";
+// its key-release-event handler takes a forwarded keydown's keyup, and a view
+// that loses the focus releases the rest. A keydown the page did not handle
+// comes back from WebKit through gtk_main_do_event (PageClientImpl::
 // doneWithKeyEvent) as a copy of the same event (same time, keycode and
 // state); seeing it again is how an unhandled key is told. A button press
 // gives the view the focus (FOCUS) before WebKit's own handler sends the
-// click on.
+// click on. Hiding a focused view (and BLUR) gives the window's focus to the
+// page view (no activation): FOCUS false with its "reason".
+//
+// Evaluate runs WebViewEvalScript (call_async_javascript_function, in the
+// script world kEvalWorld). A page whose CSP refuses eval answers
+// eval_blocked before anything ran; the script then runs through
+// webkit_web_view_evaluate_javascript in the same world, which no page CSP
+// restricts and which returns a classic script's completion value (not
+// awaited).
 
 #include "child_webview_linux.h"
 
@@ -73,6 +85,10 @@ struct ChildView {
   laufey_common::WebViewBounds bounds;
   bool visible = true;
   bool focused = false;
+  // Why laufey is moving the focus out (kWebViewFocusHidden / Blur).
+  const char* focus_reason = nullptr;
+  // Forwarded keydowns whose keyup goes to the app too.
+  laufey_common::WebViewHeldKeys held_keys;
   // The last URL event, so notify::uri and the back-forward list's changes
   // of one navigation send it once.
   std::string sent_url;
@@ -393,13 +409,39 @@ void HookOverlay(GtkWidget* overlay) {
                    G_CALLBACK(OnGetChildPosition), nullptr);
 }
 
+// Sends the keyup of every forwarded key `v` still holds.
+void ReleaseHeldKeys(ChildView* v) {
+  for (const auto& f : v->held_keys.ReleaseAll())
+    Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+}
+
 void NoteFocus(uint32_t id, bool focused) {
   ChildView* v = Find(id);
   if (!v || v->focused == focused)
     return;
   v->focused = focused;
+  const char* reason = focused ? nullptr : v->focus_reason;
+  if (!focused)
+    ReleaseHeldKeys(v);
   Emit(id, LAUFEY_WEBVIEW_EVENT_FOCUS,
-       laufey_common::WebViewFocusJson(focused));
+       laufey_common::WebViewFocusJson(focused, reason));
+}
+
+// Gives the window's focus to the page view if the view has it: FOCUS false
+// with `reason`. gtk_widget_grab_focus never presents the window.
+void ReturnFocusToPage(ChildView* v, const char* reason) {
+  if (!gtk_widget_is_focus(GTK_WIDGET(v->view)) && !v->focused)
+    return;
+  uint32_t id = v->id;
+  v->focus_reason = reason;
+  if (GtkWidget* page = gtk_bin_get_child(GTK_BIN(v->overlay)))
+    gtk_widget_grab_focus(page);
+  if (ChildView* still = Find(id)) {
+    if (still->focused)
+      NoteFocus(id, false);
+    if (ChildView* again = Find(id))
+      again->focus_reason = nullptr;
+  }
 }
 
 // --- Popups
@@ -866,15 +908,27 @@ gboolean OnKeyPress(GtkWidget*, GdkEventKey* event, gpointer data) {
                                         f.alt_key, f.ctrl_key, f.meta_key,
                                         f.shift_key))
     return FALSE;
+  v->held_keys.Press(f.code, f.key);
   Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
   return TRUE;
 }
 
+// A held forwarded key's keyup goes to the app (and not to the page, which
+// never saw the keydown).
 gboolean OnKeyRelease(GtkWidget*, GdkEventKey* event, gpointer data) {
   ChildView* v = Find(DataId(data));
-  if (v && v->held_keycode == event->hardware_keycode)
+  if (!v)
+    return FALSE;
+  if (v->held_keycode == event->hardware_keycode)
     v->held_keycode = 0;
-  return FALSE;
+  laufey_common::WebViewKeyFields f = KeyFields(event, false, true);
+  std::string key;
+  if (!v->held_keys.Release(f.code, &key))
+    return FALSE;
+  f.type = "keyup";
+  f.key = key;
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+  return TRUE;
 }
 
 // Before WebKit's handler: the focus (and FOCUS) first, then the click.
@@ -958,7 +1012,48 @@ bool IsCancelled(const GError* error) {
 struct EvalCall {
   laufey_webview_eval_fn callback;
   void* user_data;
+  uint32_t view_id;
+  std::string script;  // run again without eval under a CSP that refuses it
 };
+
+// webkit_web_view_evaluate_javascript's answer: the completion value as JSON
+// (undefined / null: null).
+void OnEvalWithoutEvalDone(GObject* source, GAsyncResult* res, gpointer data) {
+  auto* call = static_cast<EvalCall*>(data);
+  GError* error = nullptr;
+  JSCValue* value = webkit_web_view_evaluate_javascript_finish(
+      WEBKIT_WEB_VIEW(source), res, &error);
+  if (error) {
+    if (IsCancelled(error)) {
+      call->callback(call->user_data, LAUFEY_WEBVIEW_CLOSED,
+                     "the web view is closed");
+    } else if (g_error_matches(error, WEBKIT_JAVASCRIPT_ERROR,
+                               WEBKIT_JAVASCRIPT_ERROR_INVALID_RESULT)) {
+      call->callback(call->user_data, LAUFEY_WEBVIEW_NOT_SERIALIZABLE,
+                     "the result has no JSON form (under this page's "
+                     "Content-Security-Policy a promise is not awaited)");
+    } else {
+      call->callback(call->user_data, LAUFEY_WEBVIEW_SCRIPT_ERROR,
+                     error->message ? error->message : "the script failed");
+    }
+    g_error_free(error);
+  } else if (!value || jsc_value_is_undefined(value) ||
+             jsc_value_is_null(value)) {
+    call->callback(call->user_data, LAUFEY_WEBVIEW_OK, "null");
+  } else {
+    gchar* json = jsc_value_to_json(value, 0);
+    if (json) {
+      call->callback(call->user_data, LAUFEY_WEBVIEW_OK, json);
+      g_free(json);
+    } else {
+      call->callback(call->user_data, LAUFEY_WEBVIEW_NOT_SERIALIZABLE,
+                     "the result has no JSON form");
+    }
+  }
+  if (value)
+    g_object_unref(value);
+  delete call;
+}
 
 void OnEvalDone(GObject* source, GAsyncResult* res, gpointer data) {
   auto* call = static_cast<EvalCall*>(data);
@@ -983,6 +1078,20 @@ void OnEvalDone(GObject* source, GAsyncResult* res, gpointer data) {
     int32_t status =
         laufey_common::ParseWebViewEvalEnvelope(Str(envelope), &text);
     g_free(envelope);
+    ChildView* v = Find(call->view_id);
+    if (status == laufey_common::kWebViewEvalBlocked && v) {
+      // Nothing ran: the script again, through the engine's own evaluate.
+      g_object_unref(value);
+      webkit_web_view_evaluate_javascript(
+          v->view, call->script.c_str(),
+          static_cast<gssize>(call->script.size()), kEvalWorld, nullptr,
+          v->cancellable, OnEvalWithoutEvalDone, call);
+      return;
+    }
+    if (status == laufey_common::kWebViewEvalBlocked) {
+      status = LAUFEY_WEBVIEW_CLOSED;
+      text = "the web view is closed";
+    }
     call->callback(call->user_data, status, text.c_str());
   }
   if (value)
@@ -1123,7 +1232,9 @@ uint32_t Capabilities() {
 #endif
   // The window's accelerators come first (GtkWindow); OnKeyPress.
   caps |= LAUFEY_WEBVIEW_CAP_MENU_ACCELERATORS |
-          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS;
+          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS | LAUFEY_WEBVIEW_CAP_UNHANDLED_KEYS |
+          LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU |
+          LAUFEY_WEBVIEW_CAP_KEY_UP | LAUFEY_WEBVIEW_CAP_BLUR;
   if (HasPersistentRoot())
     caps |= LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS;
   return caps;
@@ -1229,10 +1340,12 @@ bool SetVisible(uint32_t id, bool visible) {
     return false;
   v->visible = visible;
   GtkWidget* widget = GTK_WIDGET(v->view);
-  if (!visible && gtk_widget_has_focus(widget)) {
-    // The keyboard focus goes back to the page.
-    if (GtkWidget* page = gtk_bin_get_child(GTK_BIN(v->overlay)))
-      gtk_widget_grab_focus(page);
+  if (!visible) {
+    // The keyboard focus goes back to the page (FOCUS "hidden").
+    ReturnFocusToPage(v, laufey_common::kWebViewFocusHidden);
+    v = Find(id);
+    if (!v)
+      return false;
   }
   gtk_widget_set_visible(widget, visible);
   return true;
@@ -1275,6 +1388,9 @@ bool Command(uint32_t id, int32_t command) {
       gtk_widget_grab_focus(widget);
       return true;
     }
+    case LAUFEY_WEBVIEW_COMMAND_BLUR:
+      ReturnFocusToPage(v, laufey_common::kWebViewFocusBlur);
+      return true;
   }
   return false;
 }
@@ -1307,7 +1423,7 @@ void Evaluate(uint32_t view_id, const std::string& script,
   webkit_web_view_call_async_javascript_function(
       v->view, body.c_str(), static_cast<gssize>(body.size()), nullptr,
       kEvalWorld, nullptr, v->cancellable, OnEvalDone,
-      new EvalCall{callback, user_data});
+      new EvalCall{callback, user_data, view_id, script});
 #else
   callback(user_data, LAUFEY_WEBVIEW_UNSUPPORTED,
            "evaluate needs WebKitGTK 2.40 or later");
@@ -1392,6 +1508,27 @@ void CloseAllForWindow(uint32_t window_id) {
   }
   for (uint32_t id : ids)
     Close(id);
+}
+
+bool TakeKeyBeforeMenu(GtkWidget* focus, void* event_ptr) {
+  auto* event = static_cast<GdkEventKey*>(event_ptr);
+  if (!event || event->type != GDK_KEY_PRESS)
+    return false;
+  ChildView* v = nullptr;
+  for (GtkWidget* w = focus; w && !v; w = gtk_widget_get_parent(w))
+    v = FindByWidget(w);
+  if (!v)
+    return false;
+  bool repeat = v->held_keycode == event->hardware_keycode;
+  laufey_common::WebViewKeyFields f = KeyFields(event, repeat, true);
+  if (!laufey_common::WebViewKeyMatchesBeforeMenu(v->options.forward_keys,
+                                                  f.code, f.alt_key, f.ctrl_key,
+                                                  f.meta_key, f.shift_key))
+    return false;
+  v->held_keycode = event->hardware_keycode;
+  v->held_keys.Press(f.code, f.key);
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
+  return true;
 }
 
 bool OwnsWidget(GtkWidget* widget) {

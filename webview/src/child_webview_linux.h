@@ -51,6 +51,12 @@ void CloseAllForWindow(uint32_t window_id);
 // Whether `widget` is a child web view or inside one: its keys belong to that
 // view's page, never to the window's own keyboard events. GTK thread.
 bool OwnsWidget(GtkWidget* widget);
+// The window's own key-press handler, before GtkWindow activates the
+// window's accelerators: a keydown (a GdkEventKey*) in the view that holds
+// `focus` (the window's focus widget) matching one of its "forwardKeys"
+// marked '!' goes to the app as a forwarded KEY (true: the event is
+// consumed). GTK thread.
+bool TakeKeyBeforeMenu(GtkWidget* focus, void* event);
 // Whether a pointer event (a GdkEvent*: button, motion, scroll) reaching
 // `window` lies over a shown child web view of it: an unhandled scroll or
 // click a view passes up arrives with the window as its widget. GTK thread.

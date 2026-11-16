@@ -1245,9 +1245,16 @@ static gboolean on_key_event(GtkWidget* widget, GdkEventKey* event,
   // Keys typed into a child web view are its page's (API 58): never the
   // window's keyboard events. Its forwarded / unhandled keys reach the
   // embedder as the view's KEY events.
-  if (GTK_IS_WINDOW(widget) && laufey_child_webview_linux::OwnsWidget(
-                                   gtk_window_get_focus(GTK_WINDOW(widget))))
-    return FALSE;
+  if (GTK_IS_WINDOW(widget)) {
+    GtkWidget* focus = gtk_window_get_focus(GTK_WINDOW(widget));
+    if (laufey_child_webview_linux::OwnsWidget(focus)) {
+      // A forwardKeys entry marked '!' goes before the window's
+      // accelerators, which GtkWindow activates after this handler.
+      return laufey_child_webview_linux::TakeKeyBeforeMenu(focus, event)
+                 ? TRUE
+                 : FALSE;
+    }
+  }
 
   int state =
       (event->type == GDK_KEY_PRESS) ? LAUFEY_KEY_PRESSED : LAUFEY_KEY_RELEASED;

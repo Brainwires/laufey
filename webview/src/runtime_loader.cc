@@ -1359,7 +1359,7 @@ static bool RestackWindowOf(LaufeyBackend* backend, uint32_t webview_id) {
 static bool Backend_WebViewCommand(void* data, uint32_t webview_id,
                                    int32_t command) {
   if (command < LAUFEY_WEBVIEW_COMMAND_BACK ||
-      command > LAUFEY_WEBVIEW_COMMAND_LOWER)
+      command > LAUFEY_WEBVIEW_COMMAND_BLUR)
     return false;
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   LaufeyBackend* backend = loader->GetBackend();

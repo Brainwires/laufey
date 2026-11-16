@@ -71,6 +71,15 @@ bool CloseBeforeWindow(uint32_t window_id, CefRefPtr<CefWindow> window);
 // view: the window's mouse monitors (main_windows.cc's hook, main_linux.cc's
 // XI2) leave such events to the view's page (API 58). UI thread.
 bool CoversScreenPixel(int x, int y);
+#if defined(__APPLE__)
+// runtime_loader_mac.mm's keyUp monitor: a keyup in `ns_window` (an
+// NSWindow*); true when it was a held forwarded key's (the event is then
+// dropped). Main (UI) thread.
+bool MacKeyUp(void* ns_window, const std::string& code, bool alt, bool ctrl,
+              bool meta, bool shift);
+// The app was deactivated: every held forwarded key is released.
+void MacAppDeactivated();
+#endif
 
 }  // namespace laufey_cef_child_webview
 
@@ -86,6 +95,15 @@ uint32_t LaufeyShowMessageDialogForWindow(
 // runtime_loader_mac.mm: makes the overlay window holding `browser_view` (a
 // browser's NSView) the key window, and the view its first responder.
 void LaufeyCefFocusOverlayMac(void* browser_view);
+// runtime_loader_mac.mm: the overlay window holding `browser_view` gives up
+// the keyboard; its parent (the laufey window) is made key again when the
+// overlay was, without activating the app.
+void LaufeyCefBlurOverlayMac(void* browser_view);
+// runtime_loader_mac.mm: the NSWindow* holding `browser_view`, or nullptr.
+void* LaufeyCefOverlayWindowMac(void* browser_view);
+// runtime_loader_mac.mm: installs (once) the keyUp monitor and the
+// app-deactivation observer that feed MacKeyUp / MacAppDeactivated.
+void LaufeyCefEnsureKeyUpMonitorMac();
 bool LaufeyCefRestackOverlaysMac(uint32_t window_id,
                                  const std::vector<void*>& browser_views);
 // runtime_loader_mac.mm: [NSApp.mainMenu performKeyEquivalent:] for

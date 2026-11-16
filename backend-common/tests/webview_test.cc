@@ -225,6 +225,10 @@ static void TestEventJson() {
   EXPECT(WebViewConsoleJson("verbose", "m", "", 0) ==
          R"({"level":"log","message":"m"})");
   EXPECT(WebViewFocusJson(true) == R"({"focused":true})");
+  EXPECT(WebViewFocusJson(false, kWebViewFocusHidden) ==
+         R"({"focused":false,"reason":"hidden"})");
+  EXPECT(WebViewFocusJson(false, kWebViewFocusBlur) ==
+         R"({"focused":false,"reason":"blur"})");
   EXPECT(WebViewNewWindowJson("https://a/", true) ==
          R"({"url":"https://a/","disposition":"popup"})");
   EXPECT(WebViewNewWindowJson("https://a/", false) ==
@@ -262,6 +266,13 @@ static void TestEvalEnvelope() {
   EXPECT(ParseWebViewEvalEnvelope(R"({"ok":true})", &text) ==
          LAUFEY_WEBVIEW_FAILED);
   EXPECT(std::string(kWebViewSerializeFunction).rfind("(value) =>", 0) == 0);
+  // The page's CSP refusing eval is told before the script runs.
+  EXPECT(script.find("(0, eval)('0');") < script.find("await (0, eval)("));
+  EXPECT(script.find("kind: 'eval_blocked'") != std::string::npos);
+  EXPECT(ParseWebViewEvalEnvelope(
+             R"({"ok":false,"kind":"eval_blocked","message":"EvalError: x"})",
+             &text) == kWebViewEvalBlocked);
+  EXPECT(text == "EvalError: x");
 }
 
 struct Recorded {
@@ -477,6 +488,66 @@ static void TestKeys() {
   EXPECT(WebViewKeyJson(k).find(kQuoteKeyJson) != std::string::npos);
   EXPECT(WebViewKeyJson(k).find(R"("repeat":true,"forwarded":false})") !=
          std::string::npos);
+  k.type = "keyup";
+  EXPECT(WebViewKeyJson(k).rfind(R"({"type":"keyup","key":)", 0) == 0);
+}
+
+static void TestKeysBeforeMenu() {
+  EXPECT(LAUFEY_WEBVIEW_CAP_BLUR == (1u << 15));
+  EXPECT(LAUFEY_WEBVIEW_CAP_KEY_UP == (1u << 16));
+  EXPECT(LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU == (1u << 17));
+  EXPECT(LAUFEY_WEBVIEW_COMMAND_BLUR == 9);
+  // A leading '!' is kept on the canonical form; the rest is the syntax.
+  std::vector<std::string> keys;
+  std::string error;
+  EXPECT(ParseWebViewForwardKeys(R"(["!ctrl+shift+w","Ctrl+Shift+W","!F5",)"
+                                 R"("!F5","F6"])",
+                                 &keys, &error) == LAUFEY_WEBVIEW_OK);
+  EXPECT((keys == std::vector<std::string>{"!Ctrl+Shift+W", "Ctrl+Shift+W",
+                                           "!F5", "F6"}));
+  for (const char* bad : {R"(["!"])", R"(["!!F5"])", R"(["!+F5"])",
+                          R"(["F5!"])", R"(["Ctrl+!"])"}) {
+    EXPECT(ParseWebViewForwardKeys(bad, &keys, &error) ==
+           LAUFEY_WEBVIEW_INVALID);
+  }
+  WebViewOptions o;
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1,)"
+               R"("forwardKeys":["!Alt+W"]})",
+               &o) == LAUFEY_WEBVIEW_OK);
+  EXPECT((o.forward_keys == std::vector<std::string>{"!Alt+W"}));
+
+  std::vector<std::string> fk = {"!Ctrl+W", "F6"};
+  // Both kinds forward; only the marked one goes before the menu.
+  EXPECT(WebViewKeyMatches(fk, "KeyW", false, true, false, false));
+  EXPECT(WebViewKeyMatches(fk, "F6", false, false, false, false));
+  EXPECT(WebViewKeyMatchesBeforeMenu(fk, "KeyW", false, true, false, false));
+  EXPECT(!WebViewKeyMatchesBeforeMenu(fk, "F6", false, false, false, false));
+  EXPECT(!WebViewKeyMatchesBeforeMenu(fk, "KeyW", false, true, false, true));
+  EXPECT(!WebViewKeyMatchesBeforeMenu({}, "KeyW", false, true, false, false));
+}
+
+static void TestHeldKeys() {
+  WebViewHeldKeys held;
+  EXPECT(held.empty());
+  held.Press("Space", " ");
+  held.Press("Space", " ");  // a repeat
+  held.Press("F13", "F13");
+  held.Press("", "x");  // no physical key: never held
+  std::string key;
+  EXPECT(!held.Release("KeyA", &key));
+  EXPECT(held.Release("Space", &key) && key == " ");
+  EXPECT(!held.Release("Space", &key));
+  held.Press("KeyW", "w");
+  std::vector<WebViewKeyFields> up = held.ReleaseAll();
+  EXPECT(up.size() == 2 && held.empty());
+  EXPECT(up[0].code == "F13" && up[1].code == "KeyW" && up[1].key == "w");
+  EXPECT(std::string(up[0].type) == "keyup" && up[0].forwarded &&
+         !up[0].ctrl_key && !up[0].repeat);
+  EXPECT(WebViewKeyJson(up[1]) ==
+         R"({"type":"keyup","key":"w","code":"KeyW","altKey":false,)"
+         R"("ctrlKey":false,"metaKey":false,"shiftKey":false,"repeat":false,)"
+         R"("forwarded":true})");
+  EXPECT(held.ReleaseAll().empty());
 }
 
 int main() {
@@ -492,6 +563,8 @@ int main() {
   TestStacking();
   TestHandleAdditions();
   TestKeys();
+  TestKeysBeforeMenu();
+  TestHeldKeys();
   std::printf("webview_test: ok\n");
   return 0;
 }

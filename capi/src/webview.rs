@@ -102,6 +102,20 @@ impl WebViewCapabilities {
   pub fn forward_keys(&self) -> bool {
     self.has(ffi::LAUFEY_WEBVIEW_CAP_FORWARD_KEYS)
   }
+  /// [`WebView::blur`] hands the keyboard back to the window's page.
+  pub fn blur(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_BLUR)
+  }
+  /// [`WebViewEventKind::Key`] events with `"type": "keyup"` for each
+  /// forwarded keydown's keyup.
+  pub fn key_up(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_KEY_UP)
+  }
+  /// A `forward_keys` entry with a leading `!` (`"!CmdOrCtrl+W"`) is matched
+  /// before the app menu's accelerators.
+  pub fn forward_keys_before_menu(&self) -> bool {
+    self.has(ffi::LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU)
+  }
   /// The engine, `None` when unsupported.
   pub fn engine(&self) -> Option<WebViewEngine> {
     let raw = (self.0 & ffi::LAUFEY_WEBVIEW_ENGINE_MASK)
@@ -167,7 +181,9 @@ pub struct WebViewOptions {
   pub clipboard_write: Option<bool>,
   /// Accelerators (`"CmdOrCtrl+1"`, `"Meta+Shift+L"`; at most 64 of at most
   /// 64 characters) that skip the page and come as
-  /// [`WebViewEventKind::Key`] events (`"forwarded": true`).
+  /// [`WebViewEventKind::Key`] events (`"forwarded": true`; the keyup too
+  /// where [`WebViewCapabilities::key_up`]). A leading `!` (`"!CmdOrCtrl+W"`)
+  /// matches the entry before the app menu's accelerators.
   pub forward_keys: Option<Vec<String>>,
 }
 
@@ -616,6 +632,13 @@ impl WebView {
     self.command(ffi::LAUFEY_WEBVIEW_COMMAND_FOCUS)
   }
 
+  /// Hand the keyboard focus back to the window's page, if the view has it,
+  /// without activating the app or reordering windows. False where
+  /// unsupported ([`WebViewCapabilities::blur`]) or closed.
+  pub fn blur(&self) -> bool {
+    self.command(ffi::LAUFEY_WEBVIEW_COMMAND_BLUR)
+  }
+
   /// Above every other web view of its window.
   pub fn raise(&self) -> bool {
     self.command(ffi::LAUFEY_WEBVIEW_COMMAND_RAISE)
@@ -970,6 +993,14 @@ mod tests {
     );
     assert!(caps.forward_keys() && caps.menu_accelerators());
     assert!(!caps.unhandled_keys());
+    assert!(!caps.blur() && !caps.key_up() && !caps.forward_keys_before_menu());
+    let caps = WebViewCapabilities(
+      ffi::LAUFEY_WEBVIEW_CAP_BLUR
+        | ffi::LAUFEY_WEBVIEW_CAP_KEY_UP
+        | ffi::LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU,
+    );
+    assert!(caps.blur() && caps.key_up() && caps.forward_keys_before_menu());
+    assert!(!caps.forward_keys());
     assert_eq!(
       WebViewEventKind::from_raw(ffi::LAUFEY_WEBVIEW_EVENT_KEY as i32)
         .map(|k| k.name()),

@@ -16,9 +16,12 @@
 //   - kWebViewEvalWrapper / WebViewEvalScript: the script engines without a
 //     protocol-level evaluate run (WKWebView, WebKitGTK), and
 //     ParseWebViewEvalEnvelope, which reads its answer back.
-//   - Keys: ParseWebViewForwardKeys ("forwardKeys", accelerator strings),
-//     WebViewKeyAccelerator / WebViewKeyMatches (a keydown, as DOM `code` and
-//     modifiers, against them) and the KEY event's JSON.
+//   - Keys: ParseWebViewForwardKeys ("forwardKeys", accelerator strings; a
+//     leading '!' puts an entry before the app menu's accelerators),
+//     WebViewKeyAccelerator / WebViewKeyMatches / WebViewKeyMatchesBeforeMenu
+//     (a keydown, as DOM `code` and modifiers, against them), the KEY event's
+//     JSON, and WebViewHeldKeys (the forwarded keydowns whose keyup is owed
+//     to the app).
 //   - WebViewSinks: id allocation, each view's window and event sink, the
 //     per-window limit, and the exactly-once CLOSED.
 
@@ -30,6 +33,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "laufey.h"
@@ -62,7 +66,8 @@ struct WebViewOptions {
   bool app_context_menu = false;  // "contextMenu": "app"
   bool clipboard_read = false;
   bool clipboard_write = true;  // on a user gesture
-  // "forwardKeys", each in its canonical form (CanonicalAccelerator).
+  // "forwardKeys", each in its canonical form (CanonicalAccelerator), with
+  // its leading '!' when it goes before the app menu's accelerators.
   std::vector<std::string> forward_keys;
 };
 
@@ -72,7 +77,9 @@ constexpr size_t kMaxWebViewForwardKeyLength = 64;
 
 // Parses webview_set_forward_keys' JSON array of accelerator strings (the
 // menu / global shortcut syntax, ParseAccelerator; CmdOrCtrl is Command on
-// macOS, Ctrl elsewhere) into their canonical forms, duplicates dropped.
+// macOS, Ctrl elsewhere) into their canonical forms, duplicates dropped. A
+// leading '!' ("!CmdOrCtrl+W") is kept on the canonical form: that entry is
+// matched before the app menu's accelerators (WebViewKeyMatchesBeforeMenu).
 // LAUFEY_WEBVIEW_OK or LAUFEY_WEBVIEW_INVALID (not an array of strings, more
 // than kMaxWebViewForwardKeys entries, one longer than
 // kMaxWebViewForwardKeyLength or not an accelerator; `error` says which).
@@ -130,7 +137,12 @@ std::string WebViewLoadJson(const char* state, const std::string& url,
 // written as "log"); `line` <= 0 and an empty `source` are left out.
 std::string WebViewConsoleJson(const char* level, const std::string& message,
                                const std::string& source, int line);
-std::string WebViewFocusJson(bool focused);
+// `reason` (nullptr: left out) says why laufey moved the focus itself:
+// kWebViewFocusHidden (the focused view was hidden) or kWebViewFocusBlur
+// (webview_command BLUR).
+std::string WebViewFocusJson(bool focused, const char* reason = nullptr);
+constexpr const char* kWebViewFocusHidden = "hidden";
+constexpr const char* kWebViewFocusBlur = "blur";
 std::string WebViewNewWindowJson(const std::string& url, bool popup);
 std::string WebViewFindResultJson(int matches, int active_match);
 
@@ -146,11 +158,13 @@ struct WebViewContextMenuFields {
 };
 std::string WebViewContextMenuJson(const WebViewContextMenuFields& f);
 
-// The KEY event: a keydown matching "forwardKeys" (`forwarded`) or one the
-// page did not handle.
+// The KEY event: a keydown matching "forwardKeys" (`forwarded`), the keyup
+// of such a keydown (`type` "keyup", `forwarded`), or a keydown the page did
+// not handle.
 struct WebViewKeyFields {
-  std::string key;   // DOM KeyboardEvent.key
-  std::string code;  // DOM KeyboardEvent.code
+  const char* type = "keydown";  // "keydown" or "keyup"
+  std::string key;               // DOM KeyboardEvent.key
+  std::string code;              // DOM KeyboardEvent.code
   bool alt_key = false;
   bool ctrl_key = false;
   bool meta_key = false;  // Command on macOS, the Windows / Super key elsewhere
@@ -167,10 +181,38 @@ bool WebViewKeyAccelerator(const std::string& code, bool alt, bool ctrl,
                            bool meta, bool shift, Accelerator* out);
 
 // Whether that keydown is one of `forward_keys` (canonical forms, as
-// ParseWebViewForwardKeys returns them).
+// ParseWebViewForwardKeys returns them, with or without the '!').
 bool WebViewKeyMatches(const std::vector<std::string>& forward_keys,
                        const std::string& code, bool alt, bool ctrl, bool meta,
                        bool shift);
+// Whether it is one of the entries with a leading '!': those are matched
+// before the app menu's accelerators (the others after them).
+bool WebViewKeyMatchesBeforeMenu(const std::vector<std::string>& forward_keys,
+                                 const std::string& code, bool alt, bool ctrl,
+                                 bool meta, bool shift);
+
+// The forwarded keydowns still held: each one's keyup goes to the app too
+// (its page never saw the keydown), matched by the physical key (`code`)
+// whatever modifiers are down by then. A view whose keyboard focus goes
+// (or whose app is deactivated) releases them all at once, so a keyup that
+// went elsewhere still ends the hold.
+class WebViewHeldKeys {
+ public:
+  // Notes a forwarded keydown (a repeat of a held key changes nothing).
+  void Press(const std::string& code, const std::string& key);
+  // The keyup of `code`: true (with the keydown's `key`) when it was held,
+  // and it no longer is.
+  bool Release(const std::string& code, std::string* key);
+  // The keyup fields of every held key (no modifiers, forwarded), oldest
+  // first; none is held afterwards.
+  std::vector<WebViewKeyFields> ReleaseAll();
+  bool empty() const {
+    return keys_.empty();
+  }
+
+ private:
+  std::vector<std::pair<std::string, std::string>> keys_;  // code, key
+};
 
 // Zoom factors webview_set_zoom accepts.
 bool IsValidWebViewZoom(double factor);
@@ -205,9 +247,18 @@ std::string WebViewEvalScript(const std::string& script);
 // Runtime.callFunctionOn) call it on the script's result.
 extern const char kWebViewSerializeFunction[];
 
+// Before it runs the script, WebViewEvalScript checks that the page lets
+// `eval` run (a Content-Security-Policy without 'unsafe-eval' refuses it in
+// every world): when it doesn't, the envelope is
+//   {"ok":false,"kind":"eval_blocked","message":"..."}
+// and nothing of the script ran, so the engine runs it again through its own
+// evaluate, which no page CSP restricts (WKWebView's evaluateJavaScript:
+// inFrame:inContentWorld:, WebKitGTK's webkit_web_view_evaluate_javascript).
+// Never an embedder status: ParseWebViewEvalEnvelope's answer for it only.
+constexpr int32_t kWebViewEvalBlocked = -1;
 // Reads an envelope back: LAUFEY_WEBVIEW_OK with `text` the JSON, or
-// SCRIPT_ERROR / NOT_SERIALIZABLE with `text` the message, or FAILED when
-// `envelope` is not one.
+// SCRIPT_ERROR / NOT_SERIALIZABLE with `text` the message,
+// kWebViewEvalBlocked, or FAILED when `envelope` is not one.
 int32_t ParseWebViewEvalEnvelope(const std::string& envelope,
                                  std::string* text);
 
