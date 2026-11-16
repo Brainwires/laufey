@@ -45,6 +45,7 @@ using laufey_common::PasskeyReportNotSupported;
 using laufey_common::PasskeyRequestOptions;
 using laufey_common::PasskeyRpIdPin;
 using laufey_common::PasskeyWindowClosing;
+using laufey_common::SetPasskeyCancelRepeatLimitForTesting;
 using laufey_common::json::JsonReader;
 using laufey_common::json::JsonValue;
 
@@ -948,6 +949,38 @@ static void TestTimeoutRacesFinish() {
     EXPECT(CountOf(recorders[i]) == 1);
 }
 
+// An OS operation that ignores every cancel (it never reports back) gives up
+// the slot once the repeats stop: the request was answered when it was
+// aborted, and a later request is not refused for as long as the OS call
+// hangs. Its late Finish frees nothing (the next request's slot stays held)
+// and delivers nothing.
+static void TestIgnoredCancelReleasesSlot() {
+  SetPasskeyCancelRepeatLimitForTesting(100);
+  Recorder r;
+  std::atomic<int> cancels{0};
+  auto c = PasskeyBegin(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r);
+  EXPECT(c);
+  c->SetCanceller([&] { ++cancels; }, 10);
+  c->Abort("timeout", "the passkey request timed out");
+  EXPECT(CountOf(r) == 1 && HasCode(LastOf(r), "timeout"));
+  EXPECT(PasskeyBusyForTesting());
+  for (int i = 0; i < 400 && PasskeyBusyForTesting(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  EXPECT(!PasskeyBusyForTesting());
+  EXPECT(cancels >= 2);
+  Recorder next;
+  auto d = PasskeyBegin(LAUFEY_PASSKEY_GET, kClerkGet, Record, &next);
+  EXPECT(d && PasskeyBusyForTesting());
+  // The hung call returns at last: nothing for its caller, and the next
+  // request keeps its slot.
+  c->Finish(PasskeyErrorEnvelope("cancelled", "late"));
+  EXPECT(CountOf(r) == 1 && HasCode(LastOf(r), "timeout"));
+  EXPECT(PasskeyBusyForTesting());
+  d->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+  EXPECT(!PasskeyBusyForTesting());
+  SetPasskeyCancelRepeatLimitForTesting(0);
+}
+
 static void TestWindowClosing() {
   Recorder r;
   int a = 0, b = 0;
@@ -1043,6 +1076,7 @@ int main() {
   TestTimeout();
   TestDroppedCancelIsRepeated();
   TestTimeoutRacesFinish();
+  TestIgnoredCancelReleasesSlot();
   TestWindowClosing();
   TestDroppedCeremonyStillAnswers();
   TestConcurrentBegin();

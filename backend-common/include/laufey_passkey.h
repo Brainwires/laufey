@@ -69,7 +69,10 @@ constexpr uint32_t kPasskeyMaxTimeoutMs = 600000;
 constexpr uint32_t kPasskeyDefaultTimeoutMs = 60000;
 // A canceller installed with a repeat interval (Windows: an
 // early WebAuthNCancelCurrentOperation is dropped) runs again this often
-// until the OS operation ends, for at most kPasskeyCancelRepeatLimitMs.
+// until the OS operation ends, for at most kPasskeyCancelRepeatLimitMs. An
+// operation that still hasn't ended by then gives up its slot: the request
+// was answered already (Abort), and an OS call that ignores every cancel
+// must not refuse every later request with "already in progress".
 constexpr uint32_t kPasskeyCancelRepeatMs = 250;
 constexpr uint32_t kPasskeyCancelRepeatLimitMs = 60000;
 
@@ -314,6 +317,8 @@ void PasskeyWindowClosing(const void* window_key);
 
 // Test-only: whether a ceremony holds the app-wide slot.
 bool PasskeyBusyForTesting();
+// Replaces kPasskeyCancelRepeatLimitMs (0 restores it). Tests only.
+void SetPasskeyCancelRepeatLimitForTesting(uint32_t ms);
 
 #ifdef __APPLE__
 // LAUFEY_PASSKEY_* capability flags: both on macOS 12+ (the platform and

@@ -5,8 +5,10 @@
 
 #include "laufey_passkey.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <thread>
@@ -715,6 +717,19 @@ void PasskeyCeremony::SetCanceller(std::function<void()> cancel,
     RunCanceller(std::move(cancel), repeat_ms);
 }
 
+namespace {
+std::atomic<uint32_t> g_cancel_repeat_limit_override{0};
+
+uint32_t CancelRepeatLimitMs() {
+  uint32_t ms = g_cancel_repeat_limit_override.load();
+  return ms ? ms : kPasskeyCancelRepeatLimitMs;
+}
+}  // namespace
+
+void SetPasskeyCancelRepeatLimitForTesting(uint32_t ms) {
+  g_cancel_repeat_limit_override.store(ms);
+}
+
 void PasskeyCeremony::RunCanceller(std::function<void()> cancel,
                                    uint32_t repeat_ms) {
   cancel();
@@ -730,8 +745,9 @@ void PasskeyCeremony::RunCanceller(std::function<void()> cancel,
   if (!self)
     return;
   std::thread([self, cancel = std::move(cancel), repeat_ms] {
+    uint32_t limit_ms = CancelRepeatLimitMs();
     auto give_up = std::chrono::steady_clock::now() +
-                   std::chrono::milliseconds(kPasskeyCancelRepeatLimitMs);
+                   std::chrono::milliseconds(limit_ms);
     std::unique_lock<std::mutex> lock(self->mutex_);
     while (std::chrono::steady_clock::now() < give_up) {
       if (self->cv_.wait_for(lock, std::chrono::milliseconds(repeat_ms),
@@ -741,6 +757,18 @@ void PasskeyCeremony::RunCanceller(std::function<void()> cancel,
       cancel();
       lock.lock();
     }
+    if (self->finished_)
+      return;
+    lock.unlock();
+    // The OS operation ignored every cancel. The request was answered when
+    // it was aborted; its slot goes too, or every later request would be
+    // refused ("already in progress") for as long as the OS call hangs. Its
+    // Finish, if the call ever returns, delivers nothing and frees nothing.
+    std::fprintf(stderr,
+                 "laufey: a passkey operation still hadn't ended %u ms after "
+                 "it was cancelled; its slot is released\n",
+                 static_cast<unsigned>(limit_ms));
+    ReleaseSlot(self.get());
   }).detach();
 }
 
