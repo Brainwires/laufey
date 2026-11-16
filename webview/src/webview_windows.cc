@@ -2445,6 +2445,8 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // sees the state the handlers above left (a handler that took a
             // deferral answers later; that shows as "default" here).
             if (TracePermissionsEnabled()) {
+              std::cerr << "laufey: permission-trace enabled for window " << wid
+                        << std::endl;
               state->webview->add_PermissionRequested(
                   Callback<ICoreWebView2PermissionRequestedEventHandler>(
                       [wid](ICoreWebView2*,

@@ -701,6 +701,27 @@ if is_linux && [ "$backend" = webview ] &&
   rm -f "$log"
   exit 1
 fi
+# LAUFEY_TRACE_PERMISSIONS=1 (WebView2): the trace must have printed, its
+# startup line and a line for the page's own probe requests (geolocation,
+# notifications: scheme_page_html), so a run without permission lines says
+# that the engine raised none, not that the trace was off.
+# Only the runs that load that page (Layer 0, --lna).
+if [ "${LAUFEY_TRACE_PERMISSIONS:-}" = 1 ] && [ "$backend" = webview ] &&
+  { [ -z "$mode" ] || [ "$mode" = "--lna" ]; }; then
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      if ! grep -q 'laufey: permission-trace enabled' "$log"; then
+        echo "[e2e] FAIL the permission trace printed its startup line"
+        status=1
+      elif ! grep -q 'laufey: permission-trace window .* kind=' "$log"; then
+        echo "[e2e] FAIL the permission trace printed the page's probe requests"
+        status=1
+      else
+        echo "[e2e] PASS the permission trace printed (startup and probe lines)"
+      fi
+      ;;
+  esac
+fi
 # --network-quiet: the hosts in the CEF host's net log (loopback only).
 if [ "$mode" = "--network-quiet" ]; then
   if [ "$backend" != cef ]; then

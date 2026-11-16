@@ -382,6 +382,18 @@ fn scheme_page_html(echo_url: &str) -> String {
   } else {
     lna_checks::ws_probe_js("websocket", &lna_checks::ws_url(echo_url))
   };
+  // LAUFEY_TRACE_PERMISSIONS=1: requests the engine raises as permissions
+  // without a user gesture (geolocation, notifications), so the run shows
+  // the trace prints at all (scripts/native-e2e-run.sh checks for a line).
+  // Never awaited.
+  let permission_probe =
+    if std::env::var("LAUFEY_TRACE_PERMISSIONS").as_deref() == Ok("1") {
+      "try { navigator.geolocation.getCurrentPosition(() => {}, () => {}); } \
+       catch (e) {}\ntry { Notification.requestPermission().catch(() => {}); \
+       } catch (e) {}"
+    } else {
+      ""
+    };
   format!(
     r#"<!doctype html><html><head><meta charset="utf-8"><title>scheme</title></head><body>
 <script>
@@ -398,6 +410,7 @@ const r = {{ origin: location.origin, secure: !!window.isSecureContext,
              subtle: typeof (self.crypto && crypto.subtle), digestBytes: 0,
              storage: '', storagePrev: '', streamText: '', streamChunks: 0,
              echoBody: '', t: {{ start: Date.now() }} }};
+{permission_probe}
 // Wall-clock marks (ms since the epoch, as the host's LAUFEY_TIMING lines and
 // the net log): only the watchdog's report carries them.
 const mark = (k) => {{ r.t[k] = Date.now(); }};
