@@ -81,7 +81,7 @@ jobs:
       plan: ${{ steps.pick.outputs.plan }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@ce332445600fff5a1bcae034582f7a74f307abc4 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@0285478f4ade2850db7708170074bf11c0e95545 # pick-runners
         with:
           # Only the jobs this run has: the macOS arm64 legs on a full run unless a dispatch
           # moved them to macos-15-intel, `release` on a v* tag, and the Windows arm64 WebView2
