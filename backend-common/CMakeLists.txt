@@ -328,6 +328,11 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_js_calls_test COMMAND laufey_js_calls_test)
 
+  # Which DevTools window an open brought up (laufey_devtools_windows.h).
+  add_executable(laufey_devtools_windows_test tests/devtools_windows_test.cc)
+  target_link_libraries(laufey_devtools_windows_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_devtools_windows_test COMMAND laufey_devtools_windows_test)
+
   # The count in a stream ack the page posts (laufey_stream_ack.h).
   add_executable(laufey_stream_ack_test tests/stream_ack_test.cc)
   target_link_libraries(laufey_stream_ack_test PRIVATE laufey_backend_common)

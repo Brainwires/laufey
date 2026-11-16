@@ -2,6 +2,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_devtools_windows.h"
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
 #include "laufey_will_navigate.h"
@@ -159,7 +160,7 @@ struct WinWindowState {
   // thread has given up (DevTools can take many seconds to show on a loaded
   // machine). Cleared once found, or by close_devtools.
   bool devtools_awaiting = false;
-  std::vector<HWND> devtools_before;
+  std::vector<laufey_common::DevToolsWindowSeen> devtools_before;
   // The DevTools window this view last asked to close, until it is gone. A
   // WM_CLOSE that reaches a DevTools window the moment it shows can be
   // dropped, and the window then stays open while the view reads its
@@ -890,6 +891,10 @@ class WebView2Backend : public LaufeyBackend {
   // Ends `window_id`'s turn on browser process `pid` (if it holds it) and
   // starts the next queued open. windows_mutex_ held.
   void ReleaseDevToolsOpen(DWORD pid, uint32_t window_id);
+  // The DevTools windows other views of browser process `pid` have adopted
+  // or are closing: never new for `window_id`. windows_mutex_ held.
+  std::vector<uintptr_t> OtherViewsDevToolsWindows(uint32_t window_id,
+                                                   DWORD pid);
   // Starts the next queued open on browser process `pid` when none is in
   // flight. windows_mutex_ held.
   void StartNextDevToolsOpen(DWORD pid);
@@ -3823,14 +3828,22 @@ bool IsDevToolsWindowOf(HWND hwnd, DWORD pid) {
   return owner == pid && IsDevToolsFrame(hwnd);
 }
 
-// The first of `now` not in `before`, or null.
-HWND NewDevToolsWindow(const std::vector<HWND>& now,
-                       const std::vector<HWND>& before) {
-  for (HWND h : now) {
-    if (std::find(before.begin(), before.end(), h) == before.end())
-      return h;
-  }
-  return nullptr;
+uintptr_t HandleOf(HWND hwnd) {
+  return reinterpret_cast<uintptr_t>(hwnd);
+}
+
+HWND HwndOf(uintptr_t handle) {
+  return reinterpret_cast<HWND>(handle);
+}
+
+// The DevTools windows of `pid` with whether each is shown, for the baseline
+// and new-window rules of laufey_devtools_windows.h.
+std::vector<laufey_common::DevToolsWindowSeen> SeenDevToolsWindowsOf(
+    DWORD pid) {
+  std::vector<laufey_common::DevToolsWindowSeen> seen;
+  for (HWND h : DevToolsWindowsOf(pid))
+    seen.push_back({HandleOf(h), IsWindowVisible(h) != FALSE});
+  return seen;
 }
 
 // The browser process's top-level windows (visibility and title), for the
@@ -3919,8 +3932,9 @@ std::string DevToolsStateText(const WinWindowState* st) {
   if (!st)
     return "(no window)";
   std::string before;
-  for (HWND h : st->devtools_before)
-    before += (before.empty() ? "" : ",") + HwndText(h);
+  for (const auto& w : st->devtools_before)
+    before += (before.empty() ? "" : ",") + HwndText(HwndOf(w.handle)) +
+              (w.visible ? ":v" : ":h");
   return "hwnd=" + HwndText(st->devtools_hwnd) +
          " awaiting=" + (st->devtools_awaiting ? "1" : "0") +
          " opening=" + std::to_string(st->devtools_opening) +
@@ -3969,23 +3983,30 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
   }
   devtools_open_owner_[pid] = window_id;
   state->devtools_queued = false;
+  // The baseline (laufey_devtools_windows.h): the process's DevTools
+  // windows now, less this view's own where shown (open, or a close that
+  // was dropped: the engine brings that one to the front). The view's own
+  // window that is closing (hidden) stays in it: the engine makes a new
+  // window then. A repeated open while the first one's window hasn't shown
+  // keeps the first one's baseline, less the view's own shown windows.
+  std::vector<uintptr_t> own = {HandleOf(state->devtools_hwnd),
+                                HandleOf(state->devtools_closing)};
   if (!state->devtools_awaiting) {
-    // A repeated open while the first one's window hasn't shown keeps the
-    // first one's baseline: that window is still the one to adopt.
-    state->devtools_before = DevToolsWindowsOf(pid);
+    state->devtools_before =
+        laufey_common::DevToolsOpenBaseline(SeenDevToolsWindowsOf(pid), own);
     state->devtools_awaiting = true;
-  }
-  // This view's own DevTools window, open or still closing, is the one the
-  // engine brings back (it opens no second window for the view): it is the
-  // one to adopt, not part of the baseline.
-  for (HWND own : {state->devtools_hwnd, state->devtools_closing}) {
-    if (!own)
-      continue;
-    auto& b = state->devtools_before;
-    b.erase(std::remove(b.begin(), b.end(), own), b.end());
+  } else {
+    std::vector<laufey_common::DevToolsWindowSeen> kept;
+    for (const auto& w : state->devtools_before) {
+      bool is_own = w.handle && (w.handle == own[0] || w.handle == own[1]);
+      if (!(is_own && IsWindowVisible(HwndOf(w.handle))))
+        kept.push_back(w);
+    }
+    state->devtools_before = kept;
   }
   state->devtools_closing = nullptr;
-  std::vector<HWND> before = state->devtools_before;
+  std::vector<laufey_common::DevToolsWindowSeen> before =
+      state->devtools_before;
   state->devtools_opening++;
   state->devtools_close_pending = false;
   state->webview->OpenDevToolsWindow();
@@ -4000,7 +4021,7 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
     HWND found = nullptr;
     ULONGLONG start = GetTickCount64();
     bool reported = false;
-    for (int i = 0; !found; i++) {
+    while (!found) {
       Sleep(50);
       {
         std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
@@ -4009,12 +4030,9 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
         if (!st || !st->devtools_awaiting)
           break;
       }
-      found = NewDevToolsWindow(DevToolsWindowsOf(pid), before);
-      if (!found && i >= 10) {
-        HWND fg = GetForegroundWindow();
-        if (IsDevToolsWindowOf(fg, pid))
-          found = fg;
-      }
+      // Other views' windows are left out under the lock below.
+      found = HwndOf(laufey_common::NewDevToolsWindow(
+          SeenDevToolsWindowsOf(pid), before, {}));
       ULONGLONG elapsed = GetTickCount64() - start;
       if (!found && !reported && elapsed >= 5000) {
         reported = true;
@@ -4044,10 +4062,11 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
     // window that close just closed, so only an open still waiting adopts.
     // The same for a window the current open's baseline holds (this thread
     // may serve an earlier open, with an older baseline).
-    const auto& current = st->devtools_before;
     if (found &&
         (!st->devtools_awaiting ||
-         std::find(current.begin(), current.end(), found) != current.end())) {
+         !laufey_common::IsNewDevToolsWindow(
+             {HandleOf(found), IsWindowVisible(found) != FALSE},
+             st->devtools_before, OtherViewsDevToolsWindows(window_id, pid)))) {
       TraceDevTools("open: finder found, open already settled", window_id, pid,
                     "found=" + HwndText(found) + " " + DevToolsStateText(st));
       found = nullptr;
@@ -4063,6 +4082,20 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
       // under a newer open of the same view that is still looking.
       ReleaseDevToolsOpen(pid, window_id);
   }).detach();
+}
+
+std::vector<uintptr_t> WebView2Backend::OtherViewsDevToolsWindows(
+    uint32_t window_id, DWORD pid) {
+  std::vector<uintptr_t> others;
+  for (auto& [wid, other] : windows_) {
+    if (wid == window_id || static_cast<DWORD>(other.browser_pid) != pid)
+      continue;
+    for (HWND h : {other.devtools_hwnd, other.devtools_closing}) {
+      if (h)
+        others.push_back(HandleOf(h));
+    }
+  }
+  return others;
 }
 
 void WebView2Backend::ReleaseDevToolsOpen(DWORD pid, uint32_t window_id) {
@@ -4204,7 +4237,9 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
   std::vector<HWND> all = DevToolsWindowsOf(pid);
   if (state->devtools_awaiting) {
     // The window an open_devtools brought up, however late it showed.
-    if (HWND late = NewDevToolsWindow(all, state->devtools_before)) {
+    if (HWND late = HwndOf(laufey_common::NewDevToolsWindow(
+            SeenDevToolsWindowsOf(pid), state->devtools_before,
+            OtherViewsDevToolsWindows(window_id, pid)))) {
       AdoptDevToolsWindow(window_id, state, late);
       return state->devtools_hwnd;
     }
