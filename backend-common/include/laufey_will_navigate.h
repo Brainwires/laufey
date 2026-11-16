@@ -22,6 +22,13 @@
 // (NavigationMatchKey) and expire after kWillNavigateTokenLifetime, so a
 // token for a load that never happened can't let a later one through.
 //
+// A backend that learns a navigation targets the main frame only after the
+// engine has started it (WebKitGTK: at the response) may still decide it
+// earlier, at the navigation action, when it can tell it is the main frame's
+// then: it records the answer (RecordDecided), and the main frame's response
+// for that URL takes it (TakeDecided) instead of asking again. A redirect
+// reaches the response with another URL, so it is asked there as before.
+//
 // A backend that cannot hold a navigation (CEF, WebView2) never holds a
 // non-GET one either (WillNavigateHoldsMethod): starting it again would send
 // its body on the window's authority, not on that of the frame that really
@@ -259,6 +266,7 @@ class WillNavigateRequests {
       }
       embedder_.erase(window_id);
       reissue_.erase(window_id);
+      decided_.erase(window_id);
     }
     for (Reply& reply : refused) {
       if (reply)
@@ -311,6 +319,49 @@ class WillNavigateRequests {
     return TakeLocked(&embedder_, window_id, url, now);
   }
 
+  // Whether the navigation of `window_id` to `url` is the embedder's own,
+  // without consuming the token (a backend that looks before the load
+  // starts and takes it later).
+  bool IsEmbedderNavigation(uint32_t window_id, const std::string& url,
+                            Clock::time_point now = Clock::now()) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = embedder_.find(window_id);
+    return it != embedder_.end() && it->second.expires >= now &&
+           it->second.key == NavigationMatchKey(url);
+  }
+
+  // `window_id`'s top-level navigation to `url` was decided before the
+  // engine started it (`decision`: ALLOW, or DEFAULT once the guard let it
+  // through). One per window: a newer one replaces it. Expires after
+  // kWillNavigateTokenLifetime.
+  void RecordDecided(uint32_t window_id, const std::string& url,
+                     uint32_t decision, Clock::time_point now = Clock::now()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    decided_[window_id] = Decided{
+        Token{NavigationMatchKey(url), now + kWillNavigateTokenLifetime},
+        NormalizeWillNavigateDecision(decision)};
+  }
+
+  // Whether the navigation of `window_id` to `url` was decided before it
+  // started (sets `decision`, and consumes the record when it matches).
+  bool TakeDecided(uint32_t window_id, const std::string& url,
+                   uint32_t* decision, Clock::time_point now = Clock::now()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = decided_.find(window_id);
+    if (it == decided_.end())
+      return false;
+    if (it->second.token.expires < now) {
+      decided_.erase(it);
+      return false;
+    }
+    if (it->second.token.key != NavigationMatchKey(url))
+      return false;
+    if (decision)
+      *decision = it->second.decision;
+    decided_.erase(it);
+    return true;
+  }
+
   // A backend that cancelled a navigation to decide it starts it again:
   // that load is already decided (neither reported nor guarded). Call it
   // right before starting the load, on the UI thread.
@@ -350,6 +401,10 @@ class WillNavigateRequests {
   struct Token {
     std::string key;
     Clock::time_point expires;
+  };
+  struct Decided {
+    Token token;
+    uint32_t decision = LAUFEY_NAVIGATION_DEFAULT;
   };
 
   WillNavigateRequests() = default;
@@ -408,6 +463,7 @@ class WillNavigateRequests {
   std::map<uint64_t, Pending> pending_;
   std::map<uint32_t, Token> embedder_;
   std::map<uint32_t, Token> reissue_;
+  std::map<uint32_t, Decided> decided_;
 };
 
 }  // namespace laufey_common

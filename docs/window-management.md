@@ -705,7 +705,8 @@ that backend refuses the main frame's response instead
 (`webkit_response_policy_decision_is_main_frame_main_resource`, WebKitGTK 2.40):
 the engine has already sent the request, but nothing from the response is
 committed or run. Before 2.40 it stops the main frame's load as it starts or
-redirects.
+redirects. With a will-navigate handler set, a navigation of a document that has
+no child frames is decided at its navigation action instead (below).
 
 ### Will-navigate (API 56)
 
@@ -722,12 +723,12 @@ reported: the embedder's own `navigate()`, back / forward and reloads,
 `about:blank` / `about:srcdoc`, sub-frames and popups (which keep their own
 rule). With no handler nothing waits.
 
-| Backend   | How it waits                                                                                                                |
-| --------- | --------------------------------------------------------------------------------------------------------------------------- |
-| WKWebView | the navigation's `decisionHandler` is called with the answer                                                                |
-| WebKitGTK | the main frame's response decision is held (2.40+; kind `other`, no initiator; an embedder load that redirects is reported) |
-| CEF       | cancelled in `OnBeforeBrowse`, then started again by URL when it may load; a non-GET one is not reported                    |
-| WebView2  | cancelled in `NavigationStarting`, then started again by URL when it may load; a non-GET one is not reported                |
+| Backend   | How it waits                                                                                                                                                                                  |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WKWebView | the navigation's `decisionHandler` is called with the answer                                                                                                                                  |
+| WebKitGTK | the navigation action is held when the document has no child frames, else the main frame's response decision (2.40+; kind `other`, no initiator; an embedder load that redirects is reported) |
+| CEF       | cancelled in `OnBeforeBrowse`, then started again by URL when it may load; a non-GET one is not reported                                                                                      |
+| WebView2  | cancelled in `NavigationStarting`, then started again by URL when it may load; a non-GET one is not reported                                                                                  |
 
 CEF and WebView2 cannot hold a navigation, so they cancel it and start it again.
 A non-GET navigation (a form POST) is never held there: started again it would
@@ -743,6 +744,20 @@ transition; WebView2's API navigation, with no Referer), never a page's own
 navigation to the same URL.
 
 A navigation started again is a new history entry.
+
+WebKitGTK starts a top-level load as soon as its navigation action is let
+through, and from then until the load commits or is cancelled the page's own
+loads fail (a fetch in flight with "Load failed", a new one with "access control
+checks"). Its navigation action names no frame, though: only the response says
+whether it is the main frame's. So laufey asks the page's main frame, in an
+isolated script world, how many child frames it has (`window.length`): with
+none, the navigation can only be the main frame's, and it is held at its action,
+before anything starts; the guard decides there too, and the response that
+follows is not asked again. A refused navigation then leaves the page exactly as
+it was, its loads included. A document with frames (or one too busy to answer
+within a second), a redirect, a reload or a history navigation is decided at the
+main frame's response as before, where the page's loads made while the embedder
+decides fail.
 
 A test can turn on `test_capture_external_opens`: every URL a backend would hand
 to the browser (the guard, a popup, the reserved call) is then recorded for

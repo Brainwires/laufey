@@ -53,6 +53,7 @@ extern "C" unsigned long gdk_x11_window_get_xid(GdkWindow* window);
 
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 
@@ -821,7 +822,9 @@ static void LaufeyLaunchInBrowser(const char* uri) {
 // main frame's response instead (webkit_response_policy_decision_is_main_
 // frame_main_resource, WebKitGTK 2.40): a refused one is ignored, so nothing
 // from it commits or runs (the engine has already sent its request), and an
-// http(s) destination opens in the OS browser. The response's URI is the
+// http(s) destination opens in the OS browser. With a will-navigate handler
+// set, a navigation of a document with no child frames is decided at its
+// navigation action instead (HoldNavigationAction). The response's URI is the
 // final one, after any redirect. Older WebKitGTK falls back to stopping the
 // main frame's load as it starts or redirects.
 static bool GuardRefuses(uint32_t wid, const char* uri) {
@@ -911,27 +914,192 @@ static gboolean on_permission_request(WebKitWebView* webview,
   return TRUE;
 }
 
-static gboolean on_decide_policy(WebKitWebView* /*webview*/,
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+// Will-navigate (API 56) at the navigation action. WebKit starts a top-level
+// load as soon as its navigation action is used, and from then until the
+// load commits or is cancelled the page's own loads fail (a fetch in flight:
+// "Load failed"; a new one: "access control checks"). Holding the decision
+// until the main frame's response, where WebKitGTK first says which frame a
+// navigation targets, would leave a page whose navigation the embedder
+// refuses without the loads it made meanwhile. So the navigation action is
+// held instead, before anything starts, whenever it can only be the main
+// frame's: WebKitGTK's navigation action names no frame, but a document with
+// no child frames (`window.length` 0, read in an isolated world the page's
+// scripts cannot shadow it in) has no sub-frame to navigate. Then the
+// embedder is asked there and the guard decides there; the decision is
+// recorded for the response (WillNavigateRequests::RecordDecided). A
+// document with frames, a redirect, a reload or history navigation, a
+// same-document one and the embedder's own load keep the response-time
+// decision.
+
+// The isolated script world the frame count is read in.
+static constexpr char kFrameCountWorld[] = "laufey-will-navigate";
+// How long the frame count may take (a page busy in a long script) before
+// the navigation is left to its response instead.
+static constexpr guint kFrameCountTimeoutMs = 1000;
+
+struct HeldNavigationAction {
+  WebKitPolicyDecision* decision;  // a reference
+  uint32_t wid;
+  std::string url;
+  GCancellable* cancellable;  // a reference
+  guint timeout_id;
+};
+
+// The embedder's answer for a navigation held at its action, on the GTK
+// thread: REFUSE cancels it (nothing opens in the browser), DEFAULT lets the
+// guard decide now, ALLOW loads it. A load that goes ahead is recorded, so
+// its response is not asked again.
+static void AnswerNavigationAction(WebKitPolicyDecision* decision, uint32_t wid,
+                                   const std::string& url, uint32_t answer) {
+  if (answer == LAUFEY_NAVIGATION_REFUSE ||
+      (answer != LAUFEY_NAVIGATION_ALLOW && GuardRefuses(wid, url.c_str()))) {
+    webkit_policy_decision_ignore(decision);
+    return;
+  }
+  laufey_common::WillNavigateRequests::Instance().RecordDecided(wid, url,
+                                                                answer);
+  webkit_policy_decision_use(decision);
+}
+
+static gboolean OnFrameCountTimeout(gpointer data) {
+  auto* held = static_cast<HeldNavigationAction*>(data);
+  held->timeout_id = 0;
+  g_cancellable_cancel(held->cancellable);
+  return G_SOURCE_REMOVE;
+}
+
+static void OnFrameCount(GObject* source, GAsyncResult* result, gpointer data) {
+  std::unique_ptr<HeldNavigationAction> held(
+      static_cast<HeldNavigationAction*>(data));
+  if (held->timeout_id != 0)
+    g_source_remove(held->timeout_id);
+  g_object_unref(held->cancellable);
+  GError* error = nullptr;
+  JSCValue* value = webkit_web_view_evaluate_javascript_finish(
+      WEBKIT_WEB_VIEW(source), result, &error);
+  bool main_frame =
+      value && jsc_value_is_number(value) && jsc_value_to_double(value) == 0;
+  if (value)
+    g_object_unref(value);
+  g_clear_error(&error);
+  WebKitPolicyDecision* decision = held->decision;
+  if (main_frame) {
+    uint32_t wid = held->wid;
+    std::string url = held->url;
+    // WebKitGTK says neither how the navigation started nor which document
+    // started it: kind OTHER, no initiator.
+    auto start = laufey_common::WillNavigateRequests::Instance().Ask(
+        wid, url, "", LAUFEY_NAVIGATION_KIND_OTHER,
+        [decision, wid, url](uint32_t answer) {
+          struct Answer {
+            WebKitPolicyDecision* decision;
+            uint32_t wid;
+            std::string url;
+            uint32_t answer;
+          };
+          g_main_context_invoke_full(
+              nullptr, G_PRIORITY_DEFAULT,
+              [](gpointer data) -> gboolean {
+                auto* a = static_cast<Answer*>(data);
+                AnswerNavigationAction(a->decision, a->wid, a->url, a->answer);
+                return G_SOURCE_REMOVE;
+              },
+              new Answer{decision, wid, url, answer},
+              [](gpointer data) {
+                auto* a = static_cast<Answer*>(data);
+                g_object_unref(a->decision);
+                delete a;
+              });
+        });
+    if (start == laufey_common::WillNavigateStart::kAsked)
+      return;  // the reply owns the reference
+  }
+  // A document with frames (or no answer, or the handler cleared meanwhile):
+  // the main frame's response decides, as without this.
+  webkit_policy_decision_use(decision);
+  g_object_unref(decision);
+}
+
+// Holds a navigation action to ask the embedder before the load starts, when
+// it may be the main frame's (see above). False: decided as before.
+static bool HoldNavigationAction(WebKitWebView* webview,
+                                 WebKitPolicyDecision* decision, uint32_t wid) {
+  auto& will = laufey_common::WillNavigateRequests::Instance();
+  if (wid == 0 || !will.HandlerSet())
+    return false;
+  WebKitNavigationAction* action =
+      webkit_navigation_policy_decision_get_navigation_action(
+          WEBKIT_NAVIGATION_POLICY_DECISION(decision));
+  if (!action || webkit_navigation_action_is_redirect(action))
+    return false;
+  switch (webkit_navigation_action_get_navigation_type(action)) {
+    case WEBKIT_NAVIGATION_TYPE_BACK_FORWARD:
+    case WEBKIT_NAVIGATION_TYPE_RELOAD:
+    case WEBKIT_NAVIGATION_TYPE_FORM_RESUBMITTED:
+      return false;
+    default:
+      break;
+  }
+  WebKitURIRequest* request = webkit_navigation_action_get_request(action);
+  const char* uri = request ? webkit_uri_request_get_uri(request) : nullptr;
+  if (!uri)
+    return false;
+  std::string url(uri);
+  if (!laufey_common::WillNavigateReported(url) ||
+      will.IsEmbedderNavigation(wid, url))
+    return false;
+  // A fragment of the current document is a same-document navigation (no
+  // response follows; never reported).
+  const char* current = webkit_web_view_get_uri(webview);
+  if (current && url.find('#') != std::string::npos) {
+    std::string here(current);
+    if (url.substr(0, url.find('#')) == here.substr(0, here.find('#')))
+      return false;
+  }
+  auto* held =
+      new HeldNavigationAction{WEBKIT_POLICY_DECISION(g_object_ref(decision)),
+                               wid, url, g_cancellable_new(), 0};
+  held->timeout_id =
+      g_timeout_add(kFrameCountTimeoutMs, OnFrameCountTimeout, held);
+  webkit_web_view_evaluate_javascript(webview, "window.length", -1,
+                                      kFrameCountWorld, nullptr,
+                                      held->cancellable, OnFrameCount, held);
+  return true;
+}
+#endif
+
+static gboolean on_decide_policy(WebKitWebView* webview,
                                  WebKitPolicyDecision* decision,
                                  WebKitPolicyDecisionType type,
                                  gpointer user_data) {
 #if WEBKIT_CHECK_VERSION(2, 40, 0)
+  uint32_t wid = static_cast<uint32_t>(GPOINTER_TO_UINT(user_data));
+  if (type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION)
+    return HoldNavigationAction(webview, decision, wid) ? TRUE : FALSE;
   if (type != WEBKIT_POLICY_DECISION_TYPE_RESPONSE)
     return FALSE;
   auto* response_decision = WEBKIT_RESPONSE_POLICY_DECISION(decision);
-  uint32_t wid = static_cast<uint32_t>(GPOINTER_TO_UINT(user_data));
   WebKitURIResponse* response =
       webkit_response_policy_decision_get_response(response_decision);
   const char* uri = response ? webkit_uri_response_get_uri(response) : nullptr;
   bool main_resource =
       wid != 0 && webkit_response_policy_decision_is_main_frame_main_resource(
                       response_decision);
+  auto& will = laufey_common::WillNavigateRequests::Instance();
+  // Decided at its navigation action (HoldNavigationAction): ALLOW skips the
+  // guard, DEFAULT has the guard decide again (the same URL: it lets it
+  // through again).
+  uint32_t decided = LAUFEY_NAVIGATION_DEFAULT;
+  bool decided_early =
+      main_resource && uri && will.TakeDecided(wid, uri, &decided);
   // Will-navigate (API 56), where the guard decides: the main frame's
   // response, held (WebKit lets the decision come later) until the embedder
-  // answers. WebKitGTK says neither how the navigation started nor which
-  // document started it: kind OTHER, no initiator.
-  if (main_resource && uri) {
-    auto& will = laufey_common::WillNavigateRequests::Instance();
+  // answers, when it was not decided at its navigation action (a document
+  // with frames, a redirect, a history navigation). WebKitGTK says neither
+  // how the navigation started nor which document started it: kind OTHER,
+  // no initiator.
+  if (main_resource && uri && !decided_early) {
     std::string url(uri);
     if (!will.TakeEmbedderNavigation(wid, url) && will.HandlerSet() &&
         laufey_common::WillNavigateReported(url)) {
@@ -979,7 +1147,8 @@ static gboolean on_decide_policy(WebKitWebView* /*webview*/,
       g_object_unref(decision);
     }
   }
-  if (main_resource && GuardRefuses(wid, uri)) {
+  if (main_resource && decided != LAUFEY_NAVIGATION_ALLOW &&
+      GuardRefuses(wid, uri)) {
     webkit_policy_decision_ignore(decision);
     return TRUE;
   }
@@ -991,6 +1160,7 @@ static gboolean on_decide_policy(WebKitWebView* /*webview*/,
   }
   return FALSE;
 #else
+  (void)webview;
   (void)decision;
   (void)type;
   (void)user_data;

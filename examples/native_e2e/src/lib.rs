@@ -859,6 +859,9 @@ fn e2e_main() {
           let Some(req) = download_checks::serve_scheme(req) else {
             return;
           };
+          let Some(req) = navigation_checks::serve_scheme(req) else {
+            return;
+          };
           if let Some(req) = stream_checks::serve(req, &streams) {
             serve_scheme_request(req, &echo, &seen)
           }

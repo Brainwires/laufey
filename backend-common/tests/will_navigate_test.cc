@@ -154,6 +154,48 @@ int main() {
   r.ForgetWindow(8);
   EXPECT(!r.TakeEmbedderNavigation(8, "myapp://app/", t0));
 
+  // Looking at the embedder's token does not spend it.
+  r.ExpectEmbedderNavigation(16, "myapp://app/", t0);
+  EXPECT(!r.IsEmbedderNavigation(16, "myapp://app/other", t0));
+  EXPECT(!r.IsEmbedderNavigation(17, "myapp://app/", t0));
+  EXPECT(r.IsEmbedderNavigation(16, "MyApp://App", t0));
+  EXPECT(r.IsEmbedderNavigation(16, "myapp://app/", t0));
+  EXPECT(!r.IsEmbedderNavigation(
+      16, "myapp://app/",
+      t0 + kWillNavigateTokenLifetime + std::chrono::milliseconds(1)));
+  EXPECT(r.TakeEmbedderNavigation(16, "myapp://app/", t0));
+  EXPECT(!r.IsEmbedderNavigation(16, "myapp://app/", t0));
+
+  // A navigation decided before the engine started it (WebKitGTK's
+  // navigation action): its main-frame response takes the decision once,
+  // matched on the normalized URL; another URL (a redirect) does not.
+  uint32_t got = 99;
+  r.RecordDecided(20, "HTTPS://A.test/x#frag", LAUFEY_NAVIGATION_ALLOW, t0);
+  EXPECT(!r.TakeDecided(20, "https://a.test/redirected", &got, t0));
+  EXPECT(got == 99);
+  EXPECT(!r.TakeDecided(21, "https://a.test/x", &got, t0));
+  EXPECT(r.TakeDecided(20, "https://a.test/x", &got, t0));
+  EXPECT(got == LAUFEY_NAVIGATION_ALLOW);
+  EXPECT(!r.TakeDecided(20, "https://a.test/x", &got, t0));
+  // A newer decision replaces the window's earlier one.
+  r.RecordDecided(20, "https://a.test/one", LAUFEY_NAVIGATION_ALLOW, t0);
+  r.RecordDecided(20, "https://a.test/two", LAUFEY_NAVIGATION_DEFAULT, t0);
+  EXPECT(!r.TakeDecided(20, "https://a.test/one", &got, t0));
+  EXPECT(r.TakeDecided(20, "https://a.test/two", &got, t0));
+  EXPECT(got == LAUFEY_NAVIGATION_DEFAULT);
+  // Anything but ALLOW / REFUSE reads as DEFAULT.
+  r.RecordDecided(20, "https://a.test/odd", 77, t0);
+  EXPECT(r.TakeDecided(20, "https://a.test/odd", &got, t0));
+  EXPECT(got == LAUFEY_NAVIGATION_DEFAULT);
+  // Expired, or dropped with its window.
+  r.RecordDecided(20, "https://a.test/late", LAUFEY_NAVIGATION_ALLOW, t0);
+  EXPECT(!r.TakeDecided(
+      20, "https://a.test/late", &got,
+      t0 + kWillNavigateTokenLifetime + std::chrono::milliseconds(1)));
+  r.RecordDecided(20, "https://a.test/gone", LAUFEY_NAVIGATION_ALLOW, t0);
+  r.ForgetWindow(20);
+  EXPECT(!r.TakeDecided(20, "https://a.test/gone", &got, t0));
+
   // Re-issue tokens are kept apart from the embedder's.
   r.ExpectReissue(10, "https://a/form", t0);
   EXPECT(!r.TakeEmbedderNavigation(10, "https://a/form", t0));
