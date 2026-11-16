@@ -634,35 +634,6 @@ pub async fn run(w: &Window) {
   }
 }
 
-/// Creates a web view in a window that was just made. A backend creates the
-/// window's own page asynchronously (CEF's browser exists only once the
-/// engine has made it), and until then create_webview answers NoWindow: it
-/// is asked again until the window has its page, bounded only as a safety
-/// stop (WINDOW_READY_LIMIT).
-async fn create_when_window_ready(
-  window_id: u32,
-  options: &WebViewOptions,
-) -> Result<laufey::WebView, WebViewError> {
-  const WINDOW_READY_LIMIT: Duration = Duration::from_secs(30);
-  let start = std::time::Instant::now();
-  loop {
-    match laufey::create_webview(window_id, options, |_| {}) {
-      Err(WebViewError::NoWindow) if start.elapsed() < WINDOW_READY_LIMIT => {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-      }
-      result => {
-        if result.is_ok() && start.elapsed() > Duration::from_millis(50) {
-          eprintln!(
-            "[e2e] window {window_id} had its page after {} ms",
-            start.elapsed().as_millis()
-          );
-        }
-        return result;
-      }
-    }
-  }
-}
-
 /// LAUFEY_E2E_ONLY=devtools-off: with the app's DevTools off a web view's
 /// open_devtools is NOT_ALLOWED (and nothing opens).
 pub async fn devtools_off() {
@@ -677,13 +648,17 @@ pub async fn devtools_off() {
   };
   let w = Window::new(320, 240).title("native-e2e-webview-devtools-off");
   w.show();
-  let options = WebViewOptions {
-    url: format!("{base}/a"),
-    bounds: bounds(0.0, 0.0, 200.0, 150.0),
-    partition: Some("ephemeral:e2e-devtools".into()),
-    ..Default::default()
-  };
-  match create_when_window_ready(w.id(), &options).await {
+  tokio::time::sleep(Duration::from_millis(500)).await;
+  match laufey::create_webview(
+    w.id(),
+    &WebViewOptions {
+      url: format!("{base}/a"),
+      bounds: bounds(0.0, 0.0, 200.0, 150.0),
+      partition: Some("ephemeral:e2e-devtools".into()),
+      ..Default::default()
+    },
+    |_| {},
+  ) {
     Ok(view) => {
       check(
         "a web view's open_devtools is NOT_ALLOWED under LAUFEY_INSPECTABLE=0",
