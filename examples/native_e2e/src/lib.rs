@@ -1959,13 +1959,19 @@ fn e2e_main() {
           STREAM_CHUNKS.len()
         );
         match &echo_url {
-          Some(_) => check(
-            &format!(
-              "cross-origin fetch from the custom scheme sends Origin: {E2E_ORIGIN} (got {:?})",
-              r.echo_body
-            ),
-            r.echo_body == format!("origin={E2E_ORIGIN}"),
-          ),
+          Some(url) => {
+            let ok = r.echo_body == format!("origin={E2E_ORIGIN}");
+            if !ok {
+              lna_checks::log_loopback_connections(Some(url));
+            }
+            check(
+              &format!(
+                "cross-origin fetch from the custom scheme sends Origin: {E2E_ORIGIN} (got {:?})",
+                r.echo_body
+              ),
+              ok,
+            )
+          }
           None => na("cross-origin Origin header (could not bind a loopback echo server)"),
         }
       }

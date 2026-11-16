@@ -251,12 +251,16 @@ pub async fn run(echo_url: Option<&str>) {
   w.show();
   let reported = wait_for(|| report.lock().unwrap().is_some(), 200, 100).await;
   let echo = report.lock().unwrap().clone().unwrap_or_default();
+  let fetched = echo == "origin=laufey-e2e://app";
+  if !fetched {
+    log_loopback_connections(echo_url);
+  }
   check(
     &format!(
       "a fetch from the custom-scheme page reaches a loopback server \
        (reported {reported}, got {echo:?})"
     ),
-    echo == "origin=laufey-e2e://app",
+    fetched,
   );
   wait_for(
     || probes.lock().unwrap().contains_key("websocket"),
@@ -272,6 +276,177 @@ pub async fn run(echo_url: Option<&str>) {
     .unwrap_or_default();
   check_app_origin_websocket(echo_url, &got);
   other_origin_blocked(echo_url).await;
+}
+
+/// After a loopback request from the page didn't arrive: the echo server's
+/// port and every TCP connection to or from it (state, owning process), so
+/// the log shows whether the engine tried to connect at all. Windows only
+/// (GetExtendedTcpTable); a no-op elsewhere.
+pub fn log_loopback_connections(echo_url: Option<&str>) {
+  let Some(port) = echo_url.and_then(|u| {
+    u.split("://")
+      .nth(1)?
+      .split('/')
+      .next()?
+      .rsplit(':')
+      .next()?
+      .parse::<u16>()
+      .ok()
+  }) else {
+    return;
+  };
+  #[cfg(windows)]
+  {
+    let rows = tcp_table::connections_on_port(port);
+    eprintln!(
+      "[e2e] loopback echo server port {port}: {} TCP row(s){}",
+      rows.len(),
+      if rows.is_empty() { "" } else { ":" }
+    );
+    for row in rows {
+      eprintln!("[e2e]   {row}");
+    }
+  }
+  #[cfg(not(windows))]
+  eprintln!("[e2e] loopback echo server port {port}");
+}
+
+#[cfg(windows)]
+mod tcp_table {
+  use std::ffi::c_void;
+
+  #[link(name = "iphlpapi")]
+  extern "system" {
+    fn GetExtendedTcpTable(
+      table: *mut c_void,
+      size: *mut u32,
+      order: i32,
+      af: u32,
+      class: i32,
+      reserved: u32,
+    ) -> u32;
+  }
+
+  extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn CloseHandle(h: *mut c_void) -> i32;
+    fn QueryFullProcessImageNameW(
+      process: *mut c_void,
+      flags: u32,
+      name: *mut u16,
+      size: *mut u32,
+    ) -> i32;
+  }
+
+  const AF_INET: u32 = 2;
+  const TCP_TABLE_OWNER_PID_ALL: i32 = 5;
+  const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+  #[repr(C)]
+  #[derive(Clone, Copy)]
+  struct Row {
+    state: u32,
+    local_addr: u32,
+    local_port: u32,
+    remote_addr: u32,
+    remote_port: u32,
+    pid: u32,
+  }
+
+  fn state_name(state: u32) -> &'static str {
+    match state {
+      1 => "CLOSED",
+      2 => "LISTEN",
+      3 => "SYN_SENT",
+      4 => "SYN_RCVD",
+      5 => "ESTABLISHED",
+      6 => "FIN_WAIT1",
+      7 => "FIN_WAIT2",
+      8 => "CLOSE_WAIT",
+      9 => "CLOSING",
+      10 => "LAST_ACK",
+      11 => "TIME_WAIT",
+      12 => "DELETE_TCB",
+      _ => "?",
+    }
+  }
+
+  fn addr(a: u32, port: u32) -> String {
+    let b = a.to_le_bytes();
+    let p = u16::from_be((port & 0xffff) as u16);
+    format!("{}.{}.{}.{}:{p}", b[0], b[1], b[2], b[3])
+  }
+
+  fn process_name(pid: u32) -> String {
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+      return "?".into();
+    }
+    let mut buf = [0u16; 260];
+    let mut len = buf.len() as u32;
+    let ok =
+      unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) };
+    unsafe { CloseHandle(h) };
+    if ok == 0 {
+      return "?".into();
+    }
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    path.rsplit('\\').next().unwrap_or(&path).to_string()
+  }
+
+  pub fn connections_on_port(port: u16) -> Vec<String> {
+    let mut size = 0u32;
+    unsafe {
+      GetExtendedTcpTable(
+        std::ptr::null_mut(),
+        &mut size,
+        0,
+        AF_INET,
+        TCP_TABLE_OWNER_PID_ALL,
+        0,
+      )
+    };
+    if size == 0 {
+      return Vec::new();
+    }
+    let mut buf = vec![0u32; (size as usize).div_ceil(4) + 16];
+    size = (buf.len() * 4) as u32;
+    if unsafe {
+      GetExtendedTcpTable(
+        buf.as_mut_ptr() as *mut c_void,
+        &mut size,
+        0,
+        AF_INET,
+        TCP_TABLE_OWNER_PID_ALL,
+        0,
+      )
+    } != 0
+    {
+      return Vec::new();
+    }
+    let count = buf[0] as usize;
+    let rows = unsafe {
+      std::slice::from_raw_parts(buf.as_ptr().add(1) as *const Row, count)
+    };
+    rows
+      .iter()
+      .filter(|r| {
+        let lp = u16::from_be((r.local_port & 0xffff) as u16);
+        let rp = u16::from_be((r.remote_port & 0xffff) as u16);
+        lp == port || rp == port
+      })
+      .map(|r| {
+        format!(
+          "{} {} -> {} pid {} ({})",
+          state_name(r.state),
+          addr(r.local_addr, r.local_port),
+          addr(r.remote_addr, r.remote_port),
+          r.pid,
+          process_name(r.pid)
+        )
+      })
+      .collect()
+  }
 }
 
 /// The WebSocket URL on the loopback echo server at `echo_url`.
