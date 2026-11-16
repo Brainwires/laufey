@@ -50,6 +50,22 @@ int main() {
     EXPECT(NewDevToolsWindow({{kNew, true}}, baseline, {}) == kNew);
   }
   {
+    // windows-11-arm (CI, traced): the view closed kOld, and the next open
+    // came while kOld was still visible (its WM_CLOSE not handled yet). The
+    // engine made kNew for the open; kOld then closed. Taking the visible
+    // closing window as the view's own picked kOld, left kNew untracked on
+    // screen, and the open after that waited for a new window while the
+    // engine brought kNew to the front. A closing window is never the
+    // view's own: the backend's open waits until it is destroyed, and kNew
+    // is the one taken.
+    auto closing_visible = DevToolsOpenBaseline({{kOld, true}}, {0, 0});
+    EXPECT(closing_visible.size() == 1 && closing_visible[0].visible);
+    EXPECT(NewDevToolsWindow({{kOld, true}, {kNew, false}}, closing_visible,
+                             {}) == kNew);
+    auto after_destroy = DevToolsOpenBaseline({}, {0, 0});
+    EXPECT(NewDevToolsWindow({{kNew, false}}, after_destroy, {}) == kNew);
+  }
+  {
     // The view's own window is shown (open, or a close that was dropped):
     // the engine brings it to the front, so it is the one to adopt.
     auto baseline = DevToolsOpenBaseline({{kOld, true}}, {kOld, 0});

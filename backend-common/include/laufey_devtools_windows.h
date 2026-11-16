@@ -12,11 +12,12 @@
 //   made and not shown yet).
 //
 // A window another view of the process has adopted or is closing is never
-// new for this one. The view's own window is left out of the baseline when
-// it is shown (open, or a close that was dropped: the engine brings that
-// one to the front instead of making another), and kept, as hidden, when it
-// is closing (Chromium hides a window it closes, then destroys it, and an
-// open meanwhile makes a new window). Header-only; handles are the
+// new for this one. The view's open window is left out of the baseline when
+// it is shown (the engine brings that one to the front instead of making
+// another). A window the view is closing is never its own here: the backend
+// lets an open start only once that window is destroyed, since an engine
+// asked to open meanwhile makes a new window or brings the dying one back
+// depending on how far the close has got. Header-only; handles are the
 // platform's window handles as integers.
 
 #ifndef LAUFEY_DEVTOOLS_WINDOWS_H_
@@ -35,8 +36,7 @@ struct DevToolsWindowSeen {
 };
 
 // The baseline for an open: the windows seen now, less the view's own
-// (`own`: the window it has adopted, and the one it is closing) where they
-// are shown.
+// (`own`: the window it has open) where shown.
 inline std::vector<DevToolsWindowSeen> DevToolsOpenBaseline(
     const std::vector<DevToolsWindowSeen>& now,
     const std::vector<uintptr_t>& own) {

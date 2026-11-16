@@ -179,6 +179,9 @@ struct WinWindowState {
   // An open_devtools waiting for another view of the same browser process to
   // find its DevTools window first (devtools_open_owner_).
   bool devtools_queued = false;
+  // An open_devtools waiting for the view's previous DevTools window to be
+  // destroyed (devtools_closing): the close watcher starts it.
+  bool devtools_open_after_close = false;
   // CreateCoreWebView2Controller failures so far, and when the first was
   // (GetTickCount64), for the retry budget (RetryControllerCreation).
   int controller_failures = 0;
@@ -4211,6 +4214,22 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
           &not_ready))
     return;
   DWORD pid = static_cast<DWORD>(state->browser_pid);
+  // The view's previous DevTools window is still closing (a WM_CLOSE posted,
+  // the window not destroyed yet). What the engine does with an open then
+  // depends on how far that close has got: a new window once it is under
+  // way, the old one back if it was dropped (runners showed both, the
+  // old one still visible either way), so the window the open brings up
+  // can't be told apart. The open waits until the old window is destroyed
+  // (the close watcher starts it then), or adopts the old one if it never
+  // goes (CloseDevToolsWindow).
+  if (HWND closing = state->devtools_closing;
+      closing && IsDevToolsWindowOf(closing, pid)) {
+    state->devtools_open_after_close = true;
+    TraceDevTools("open: waits for the closing window to go", window_id, pid,
+                  DevToolsStateText(state));
+    return;
+  }
+  state->devtools_open_after_close = false;
   // Another view of this browser process is still finding its DevTools
   // window: this open waits its turn (ReleaseDevToolsOpen starts it).
   auto in_flight = devtools_open_owner_.find(pid);
@@ -4228,13 +4247,11 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
   devtools_open_owner_[pid] = window_id;
   state->devtools_queued = false;
   // The baseline (laufey_devtools_windows.h): the process's DevTools
-  // windows now, less this view's own where shown (open, or a close that
-  // was dropped: the engine brings that one to the front). The view's own
-  // window that is closing (hidden) stays in it: the engine makes a new
-  // window then. A repeated open while the first one's window hasn't shown
-  // keeps the first one's baseline, less the view's own shown windows.
-  std::vector<uintptr_t> own = {HandleOf(state->devtools_hwnd),
-                                HandleOf(state->devtools_closing)};
+  // windows now, less this view's open one where shown (the engine brings
+  // that one to the front). No window of the view is closing here (the open
+  // waited above). A repeated open while the first one's window hasn't shown
+  // keeps the first one's baseline, less the view's open one if shown.
+  std::vector<uintptr_t> own = {HandleOf(state->devtools_hwnd), 0};
   if (!state->devtools_awaiting) {
     state->devtools_before =
         laufey_common::DevToolsOpenBaseline(SeenDevToolsWindowsOf(pid), own);
@@ -4437,9 +4454,16 @@ void WebView2Backend::CloseDevToolsWindow(uint32_t window_id,
         return;
       // Closed once the window is destroyed, not when it hides: Chromium
       // hides it first, and a close that reached it while it was being set
-      // up is dropped (it then shows anyway).
+      // up is dropped (it then shows anyway). An open that waited for it
+      // starts now.
       if (!IsDevToolsWindowOf(hwnd, pid)) {
         st->devtools_closing = nullptr;
+        if (st->devtools_open_after_close) {
+          st->devtools_open_after_close = false;
+          TraceDevTools("close: window gone, starting the open that waited",
+                        window_id, pid, DevToolsStateText(st));
+          RunOnUiThread([this, window_id] { OpenDevTools(window_id); });
+        }
         return;
       }
       if (!IsWindowVisible(hwnd))
@@ -4457,6 +4481,15 @@ void WebView2Backend::CloseDevToolsWindow(uint32_t window_id,
                 << kDevToolsCloseWatchMs / 1000 << " s after close_devtools"
                 << std::endl;
       st->devtools_closing = nullptr;
+      // An open waited for it: the window that stayed is the view's DevTools
+      // (the engine brings it back for the open), so it is the open one.
+      if (st->devtools_open_after_close && IsDevToolsWindowOf(hwnd, pid)) {
+        st->devtools_open_after_close = false;
+        st->devtools_hwnd = hwnd;
+        st->devtools_seen_visible = IsWindowVisible(hwnd) != FALSE;
+        TraceDevTools("close: window stayed, adopted for the open that waited",
+                      window_id, pid, DevToolsStateText(st));
+      }
     }
   }).detach();
 }
@@ -4515,6 +4548,10 @@ void WebView2Backend::CloseDevTools(uint32_t window_id) {
   HWND hwnd = FindDevToolsWindow(window_id);
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
+  if (state && state->devtools_open_after_close) {
+    // An open still waiting for the previous window to go: dropped.
+    state->devtools_open_after_close = false;
+  }
   if (state && state->devtools_queued) {
     // Not started yet: the open is dropped from the queue.
     state->devtools_queued = false;
