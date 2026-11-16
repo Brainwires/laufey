@@ -3382,6 +3382,34 @@ fn passkey_get_options(rp_id: &str, timeout_ms: u32) -> String {
 }
 
 /// A request's envelope, or a FAIL when none arrives in time.
+/// How long laufey keeps cancelling an OS passkey operation that doesn't end
+/// before it gives up the operation's slot: kPasskeyCancelRepeatLimitMs,
+/// read from laufey_passkey.h at build time, so the test's bound follows the
+/// backend's.
+fn passkey_cancel_repeat_limit_ms() -> u64 {
+  const HEADER: &str =
+    include_str!("../../../backend-common/include/laufey_passkey.h");
+  const KEY: &str = "kPasskeyCancelRepeatLimitMs = ";
+  let at = HEADER
+    .find(KEY)
+    .expect("kPasskeyCancelRepeatLimitMs in laufey_passkey.h")
+    + KEY.len();
+  HEADER[at..]
+    .split(';')
+    .next()
+    .and_then(|v| v.trim().parse::<u64>().ok())
+    .expect("kPasskeyCancelRepeatLimitMs is a number")
+}
+
+/// Past laufey's release of a hung operation's slot, for the probe's own
+/// cadence and a loaded machine.
+const PASSKEY_RELEASE_MARGIN_MS: u64 = 15_000;
+
+/// The longest a cancelled OS call that does end takes on Windows: the 2 s
+/// request plus kOsTimeoutSlackMs (10 s, passkey_win.cc). Later than that,
+/// the slot was released by the liveness limit.
+const PASSKEY_OS_BACKSTOP_MS: u64 = 12_000;
+
 /// Whether the passkey slot is free, without starting an OS operation: a
 /// request for a window that doesn't exist takes the slot when it is free
 /// and gives it back at once ("window 999999 not found"); a held slot
@@ -3570,15 +3598,19 @@ async fn passkey_checks(window_id: u32) {
   // cancels it (WebAuthNCancelCurrentOperation) and the slot stays held
   // until the OS call returns; that is usually at once, but the OS may also
   // run to its own backstop (the request's 2 s + kOsTimeoutSlackMs, 10 s, in
-  // passkey_win.cc): windows-11-arm once still held it 5 s after the
-  // timeout. Wait past that backstop, so only a slot that never frees fails.
-  // Probed with a request for a window that doesn't exist (passkey_slot_probe):
-  // a probe that finds the slot free must not start an OS operation of its
-  // own, or the next check finds the slot held by the probe.
+  // passkey_win.cc), or ignore every cancel and hang (windows-11-arm 2 of
+  // about 40 runs, brain now and then). A hung call gives the slot up when
+  // the repeated cancels stop (kPasskeyCancelRepeatLimitMs), so the bound is
+  // that limit plus a margin: the check fails only on a slot that never
+  // frees. Probed with a request for a window that doesn't exist
+  // (passkey_slot_probe): a probe that finds the slot free must not start
+  // an OS operation of its own, or the next check finds the slot held by it.
   let started = std::time::Instant::now();
-  let deadline = std::time::Duration::from_secs(15);
+  let bound = std::time::Duration::from_millis(
+    passkey_cancel_repeat_limit_ms() + PASSKEY_RELEASE_MARGIN_MS,
+  );
   let mut freed = false;
-  while started.elapsed() < deadline {
+  while started.elapsed() < bound {
     let env = passkey_slot_probe("passkey get after the first").await;
     if env.contains("not found") {
       freed = true;
@@ -3586,27 +3618,16 @@ async fn passkey_checks(window_id: u32) {
     }
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
   }
+  let after = started.elapsed().as_millis();
+  if freed && after >= PASSKEY_OS_BACKSTOP_MS as u128 {
+    eprintln!(
+      "[e2e] INFO OS call hung; released by the liveness limit after {after} ms"
+    );
+  }
   check(
-    &format!(
-      "the passkey slot frees after a request ends (after {} ms)",
-      started.elapsed().as_millis()
-    ),
+    &format!("the passkey slot frees after a request ends (after {after} ms)"),
     freed,
   );
-  if !freed {
-    // Rare on windows-11-arm (2 of about 40 runs): the OS call ended neither
-    // when cancelled nor at its own deadline. Say whether it ever does.
-    let mut later = None;
-    while started.elapsed() < std::time::Duration::from_secs(75) {
-      let env = passkey_slot_probe("passkey get after a held slot").await;
-      if env.contains("not found") {
-        later = Some(started.elapsed().as_millis());
-        break;
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    eprintln!("[e2e] INFO the held passkey slot freed after {later:?} ms");
-  }
   if cfg!(target_os = "macos") && freed {
     passkey_refusal_latency_checks(window_id).await;
   }
