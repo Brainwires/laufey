@@ -505,6 +505,22 @@ fi
 echo "== native-e2e: backend=$backend bin=$bin runtime=$rt =="
 
 is_linux() { [ "$(uname -s)" = "Linux" ]; }
+# WebView2: the Evergreen runtime the run uses (machine-wide, else per user),
+# so two machines' results can be compared.
+if [ "$backend" = webview ]; then
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      wv2_client='Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+      wv2_pv=""
+      for wv2_key in "HKLM\\SOFTWARE\\WOW6432Node\\$wv2_client" "HKCU\\Software\\$wv2_client"; do
+        wv2_pv="$(MSYS2_ARG_CONV_EXCL='*' reg query "$wv2_key" /v pv 2>/dev/null |
+          awk '$1 == "pv" {print $NF}')"
+        [ -z "$wv2_pv" ] || break
+      done
+      echo "== WebView2 runtime ${wv2_pv:-unknown} =="
+      ;;
+  esac
+fi
 
 # What runs: the backend, or (--layer1) the D-Bus observer that starts it.
 target=("$bin")
