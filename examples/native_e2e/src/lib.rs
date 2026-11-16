@@ -959,6 +959,25 @@ fn e2e_main() {
         system_checks::devtools_off().await;
         finish();
       }
+      // A passkey request whose window closes at once, n times
+      // (LAUFEY_E2E_PASSKEY_REPEAT, default 1): WebView2 on Windows.
+      Ok("passkey-early-cancel") => {
+        let rounds = std::env::var("LAUFEY_E2E_PASSKEY_REPEAT")
+          .ok()
+          .and_then(|v| v.parse::<u32>().ok())
+          .unwrap_or(1)
+          .max(1);
+        // Open throughout: each round closes its own window, and closing
+        // the app's last window would quit it.
+        let anchor = Window::new(240, 160).title("native-e2e-passkey-anchor");
+        anchor.show();
+        for i in 1..=rounds {
+          eprintln!("[e2e] passkey early cancel round {i}/{rounds}");
+          passkey_early_cancel_checks().await;
+        }
+        anchor.close();
+        finish();
+      }
       // Menus and notifications (API 41).
       Ok("menus-notifications") => {
         menu_notification_checks::run().await;
@@ -3654,6 +3673,9 @@ async fn passkey_early_cancel_checks() {
     laufey::passkey_get(w.id(), &passkey_get_options("example.com", 60_000));
   w.close();
   let env = passkey_answer("passkey get whose window closes", pending).await;
+  if passkey_code(&env) != "cancelled" {
+    eprintln!("[e2e] passkey get whose window closes at once answered {env}");
+  }
   check(
     &format!(
       "passkey get whose window closes at once -> cancelled (got {})",

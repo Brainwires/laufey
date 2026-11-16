@@ -3,7 +3,7 @@
 # Run the backend-agnostic native_e2e_runtime under a given backend and
 # propagate its PASS/FAIL exit code. See docs/e2e-testing.md.
 #
-#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--media-capture|--navigation|--lifetime|--tray-roles|--quit-request|--overlay-edge|--initial-size|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads]
+#   scripts/native-e2e-run.sh <winit|webview|cef> [--layer1|--late-tray-host|--scheme-body|--bridge-origin|--media-capture|--navigation|--lifetime|--tray-roles|--quit-request|--overlay-edge|--initial-size|--lna|--window-api|--background|--hidpi|--io|--system|--devtools-off|--menus-notifications|--auth-thread|--launch-visibility|--platform|--title-bar|--file-chooser|--secret-store|--sandbox|--network-quiet|--downloads|--passkey-early-cancel]
 #
 # --layer1 (Linux only) wraps the run in the D-Bus StatusNotifier/dbusmenu
 # observer (native_e2e_driver) under a private session bus: it checks the
@@ -222,6 +222,11 @@ fi
 if [ "$mode" = "--devtools-off" ]; then
   export LAUFEY_E2E_ONLY=devtools-off
   export LAUFEY_INSPECTABLE=0
+fi
+# --passkey-early-cancel (WebView2): only the passkey request whose window
+# closes at once, LAUFEY_E2E_PASSKEY_REPEAT times.
+if [ "$mode" = "--passkey-early-cancel" ]; then
+  export LAUFEY_E2E_ONLY=passkey-early-cancel
 fi
 if [ "$mode" = "--sandbox" ]; then
   export LAUFEY_E2E_ONLY=sandbox
