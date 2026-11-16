@@ -365,15 +365,22 @@ if [ "$mode" = "--bridge-origin" ] || [ "$mode" = "--media-capture" ]; then
   # undefined (WKWebView turns media devices on only for an app permitted to
   # capture: a usage string, or a TCC grant its responsible process already
   # has, as on GitHub's macOS images), and macOS would end the process at the
-  # first capture. Restored when the run ends.
-  plist_backup=""
+  # first capture. The original is kept beside it (Info.plist.e2e-orig) and
+  # put back when the run ends, on an interrupt or termination too; a copy
+  # left by a run that was killed outright is put back before anything else.
   case "$bin" in
     */Contents/MacOS/*)
       if [ "$mode" = "--media-capture" ] && [ "$(uname -s)" = Darwin ]; then
         plist="${bin%/MacOS/*}/Info.plist"
-        plist_backup="$(mktemp "${TMPDIR:-/tmp}/native-e2e-plist.XXXXXX")"
-        cp "$plist" "$plist_backup"
-        trap 'rm -f "$launch_file" "$colocated_rt"; cp "$plist_backup" "$plist" && rm -f "$plist_backup"' EXIT
+        plist_orig="$plist.e2e-orig"
+        if [ -f "$plist_orig" ]; then
+          echo "restoring $plist from an interrupted run"
+          mv -f "$plist_orig" "$plist"
+        fi
+        cp "$plist" "$plist_orig"
+        trap 'rm -f "$launch_file" "$colocated_rt"; [ ! -f "$plist_orig" ] || mv -f "$plist_orig" "$plist"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
         for key in NSMicrophoneUsageDescription NSCameraUsageDescription; do
           /usr/libexec/PlistBuddy -c "Delete :$key" "$plist" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :$key string laufey native e2e: media capture checks" "$plist"
