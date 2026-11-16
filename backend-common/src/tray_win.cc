@@ -17,6 +17,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
+#include "win32_menu.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -42,6 +43,8 @@ struct WinTrayEntry {
   HICON hicon_light;
   HICON hicon_dark;
   HMENU hmenu;
+  // The item icons' bitmaps (hbmpItem): owned here, freed with the menu.
+  std::vector<HBITMAP> menu_bitmaps;
   std::map<UINT, std::string> cmd_to_id;
   // The commands of the menu's quit role items (the app's quit).
   std::set<UINT> quit_cmds;
@@ -405,9 +408,15 @@ struct OwnedValue {
   OwnedValue& operator=(const OwnedValue&) = delete;
 };
 
+void FreeMenuBitmaps(std::vector<HBITMAP>& bitmaps) {
+  for (HBITMAP b : bitmaps) DeleteObject(b);
+  bitmaps.clear();
+}
+
 HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api,
                              std::map<UINT, std::string>& cmd_to_id,
-                             std::set<UINT>& quit_cmds) {
+                             std::set<UINT>& quit_cmds,
+                             std::vector<HBITMAP>& bitmaps) {
   if (!val || !api->value_is_list(val)) return nullptr;
   HMENU menu = CreatePopupMenu();
   size_t count = api->value_list_size(val);
@@ -471,7 +480,8 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
     OwnedValue submenu{api, api->value_dict_get(itemVal, "submenu")};
     laufey_value_t* submenuVal = submenu.v;
     if (submenuVal && api->value_is_list(submenuVal)) {
-      HMENU sub = BuildWinMenuFromValue(submenuVal, api, cmd_to_id, quit_cmds);
+      HMENU sub = BuildWinMenuFromValue(submenuVal, api, cmd_to_id, quit_cmds,
+                                        bitmaps);
       AppendMenuW(menu, MF_POPUP | MF_STRING, (UINT_PTR)sub, wlabel.c_str());
       continue;
     }
@@ -504,6 +514,22 @@ HMENU BuildWinMenuFromValue(laufey_value_t* val, const laufey_backend_api_t* api
       flags |= MF_CHECKED;
     }
     AppendMenuW(menu, flags, cmd, wlabel.c_str());
+    // The item's icon (PNG bytes), drawn as the window menus draw it
+    // (win32_menu.h); it was dropped here.
+    OwnedValue icon{api, api->value_dict_get(itemVal, "icon")};
+    if (icon.v && api->value_is_binary(icon.v)) {
+      size_t len = 0;
+      const void* bytes = api->value_get_binary(icon.v, &len);
+      HBITMAP hbmp = win32_menu::LoadMenuIconBitmap(bytes, len);
+      if (hbmp) {
+        MENUITEMINFOW mii = {};
+        mii.cbSize = sizeof(mii);
+        mii.fMask = MIIM_BITMAP;
+        mii.hbmpItem = hbmp;
+        SetMenuItemInfoW(menu, cmd, FALSE, &mii);
+        bitmaps.push_back(hbmp);
+      }
+    }
     if (!item_id.empty()) cmd_to_id[cmd] = item_id;
   }
   return menu;
@@ -549,6 +575,7 @@ void DestroyTrayIconWin(uint32_t tray_id) {
   if (it->second.hicon_light) DestroyIcon(it->second.hicon_light);
   if (it->second.hicon_dark) DestroyIcon(it->second.hicon_dark);
   if (it->second.hmenu) DestroyMenu(it->second.hmenu);
+  FreeMenuBitmaps(it->second.menu_bitmaps);
   TrayMap().erase(it);
 }
 
@@ -615,18 +642,23 @@ void SetTrayMenuWin(uint32_t tray_id, laufey_value_t* menu_template,
                      laufey_menu_click_fn on_click, void* on_click_data) {
   std::map<UINT, std::string> cmd_to_id;
   std::set<UINT> quit_cmds;
+  std::vector<HBITMAP> bitmaps;
   HMENU menu = menu_template ? BuildWinMenuFromValue(menu_template, api,
-                                                     cmd_to_id, quit_cmds)
+                                                     cmd_to_id, quit_cmds,
+                                                     bitmaps)
                              : nullptr;
   if (menu_template) api->value_free(menu_template);
   std::lock_guard<std::mutex> lock(TrayMutex());
   auto it = TrayMap().find(tray_id);
   if (it == TrayMap().end()) {
     if (menu) DestroyMenu(menu);
+    FreeMenuBitmaps(bitmaps);
     return;
   }
   if (it->second.hmenu) DestroyMenu(it->second.hmenu);
+  FreeMenuBitmaps(it->second.menu_bitmaps);
   it->second.hmenu = menu;
+  it->second.menu_bitmaps = std::move(bitmaps);
   it->second.cmd_to_id = cmd_to_id;
   it->second.quit_cmds = quit_cmds;
   it->second.menu_click_fn = on_click;
