@@ -166,6 +166,11 @@ struct WinWindowState {
   // (CloseDevToolsWindow), and an open_devtools meanwhile adopts that window
   // instead of waiting for a new one.
   HWND devtools_closing = nullptr;
+  // Whether devtools_hwnd has been seen shown since it was adopted: the
+  // window is adopted when the engine creates it, hidden; once shown, hidden
+  // again means it is closing (Chromium hides a DevTools window, then
+  // destroys it).
+  bool devtools_seen_visible = false;
   // CreateCoreWebView2Controller failures so far (RetryControllerCreation).
   int controller_failures = 0;
 };
@@ -3748,8 +3753,28 @@ bool WebView2Backend::TestTriggerMenuAccelerator(uint32_t window_id,
 
 namespace {
 
-// The visible top-level windows of process `pid` titled "DevTools..." (the
-// title Chromium gives a DevTools window: "DevTools - <page>").
+// Whether `hwnd`, a top-level window of the browser process, is a DevTools
+// window: Chromium's frame class, no owner, and a caption (or the "DevTools"
+// title). Told apart this way, not by the title alone, because Chromium
+// creates the window hidden and untitled, shows it, and titles it last (on a
+// loaded machine seconds later): a window found by its title was found late,
+// and every step that waited for it raced the engine.
+bool IsDevToolsFrame(HWND hwnd) {
+  wchar_t cls[32] = {};
+  if (!GetClassNameW(hwnd, cls, 32) || wcscmp(cls, L"Chrome_WidgetWin_1") != 0)
+    return false;
+  if (::GetWindow(hwnd, GW_OWNER))
+    return false;  // a popup of a page (a select list, an autofill box)
+  LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+  if ((style & WS_CAPTION) == WS_CAPTION)
+    return true;
+  wchar_t title[16] = {};
+  int n = GetWindowTextW(hwnd, title, 16);
+  return n >= 8 && wcsncmp(title, L"DevTools", 8) == 0;
+}
+
+// The DevTools windows of browser process `pid`, shown or not (a window
+// that is still being set up, or closing, is hidden).
 std::vector<HWND> DevToolsWindowsOf(DWORD pid) {
   struct Scan {
     DWORD pid;
@@ -3762,11 +3787,7 @@ std::vector<HWND> DevToolsWindowsOf(DWORD pid) {
         auto* sc = reinterpret_cast<Scan*>(lp);
         DWORD owner = 0;
         GetWindowThreadProcessId(hwnd, &owner);
-        if (owner != sc->pid || !IsWindowVisible(hwnd))
-          return TRUE;
-        wchar_t title[16] = {};
-        int n = GetWindowTextW(hwnd, title, 16);
-        if (n >= 8 && wcsncmp(title, L"DevTools", 8) == 0)
+        if (owner == sc->pid && IsDevToolsFrame(hwnd))
           sc->found.push_back(hwnd);
         return TRUE;
       },
@@ -3774,14 +3795,13 @@ std::vector<HWND> DevToolsWindowsOf(DWORD pid) {
   return scan.found;
 }
 
+// Whether `hwnd` still exists as a DevTools window of `pid`, shown or not.
 bool IsDevToolsWindowOf(HWND hwnd, DWORD pid) {
   if (!hwnd || !IsWindow(hwnd))
     return false;
-  for (HWND h : DevToolsWindowsOf(pid)) {
-    if (h == hwnd)
-      return true;
-  }
-  return false;
+  DWORD owner = 0;
+  GetWindowThreadProcessId(hwnd, &owner);
+  return owner == pid && IsDevToolsFrame(hwnd);
 }
 
 // The first of `now` not in `before`, or null.
@@ -3862,8 +3882,9 @@ void TraceDevTools(const char* step, uint32_t window_id, DWORD pid,
           GetClassNameW(hwnd, cls, 64);
           sc->out += " [" + HwndText(hwnd) + " class=\"" +
                      laufey_common::WideToUtf8(cls) + "\" title=\"" +
-                     laufey_common::WideToUtf8(title) + "\" owner=" +
-                     HwndText(::GetWindow(hwnd, GW_OWNER)) +
+                     laufey_common::WideToUtf8(title) +
+                     "\" owner=" + HwndText(::GetWindow(hwnd, GW_OWNER)) +
+                     (IsDevToolsFrame(hwnd) ? " devtools" : "") +
                      (IsWindowVisible(hwnd) ? " visible]" : " hidden]");
           return TRUE;
         },
@@ -3919,14 +3940,16 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
     state->devtools_before = DevToolsWindowsOf(pid);
     state->devtools_awaiting = true;
   }
-  // A window this view closed that is still showing is this view's DevTools
-  // (the engine brings it to the front rather than opening another): it is
-  // the one to adopt, not part of the baseline.
-  if (HWND closing = state->devtools_closing) {
-    state->devtools_closing = nullptr;
+  // This view's own DevTools window, open or still closing, is the one the
+  // engine brings back (it opens no second window for the view): it is the
+  // one to adopt, not part of the baseline.
+  for (HWND own : {state->devtools_hwnd, state->devtools_closing}) {
+    if (!own)
+      continue;
     auto& b = state->devtools_before;
-    b.erase(std::remove(b.begin(), b.end(), closing), b.end());
+    b.erase(std::remove(b.begin(), b.end(), own), b.end());
   }
+  state->devtools_closing = nullptr;
   std::vector<HWND> before = state->devtools_before;
   state->devtools_opening++;
   state->devtools_close_pending = false;
@@ -3961,8 +3984,8 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
       if (!found && !reported && elapsed >= 5000) {
         reported = true;
         std::cerr << "laufey: window " << window_id
-                  << "'s DevTools have not shown 5 s after open_devtools; "
-                     "the browser process's windows: "
+                  << "'s DevTools window has not appeared 5 s after "
+                     "open_devtools; the browser process's windows: "
                   << DescribeTopLevelWindowsOf(pid) << std::endl;
       }
       if (!found && elapsed >= kDevToolsFindMs)
@@ -4000,6 +4023,7 @@ void WebView2Backend::AdoptDevToolsWindow(uint32_t window_id,
     return;
   }
   state->devtools_hwnd = found;
+  state->devtools_seen_visible = IsWindowVisible(found) != FALSE;
 }
 
 void WebView2Backend::CloseDevToolsWindow(uint32_t window_id,
@@ -4020,11 +4044,16 @@ void WebView2Backend::CloseDevToolsWindow(uint32_t window_id,
       // Gone, opened again (adopted), or closed through another call.
       if (!st || st->devtools_closing != hwnd)
         return;
+      // Closed once the window is destroyed, not when it hides: Chromium
+      // hides it first, and a close that reached it while it was being set
+      // up is dropped (it then shows anyway).
       if (!IsDevToolsWindowOf(hwnd, pid)) {
         st->devtools_closing = nullptr;
         return;
       }
-      // Still showing: the close was dropped. Ask again.
+      if (!IsWindowVisible(hwnd))
+        continue;  // hidden: closing, or not shown yet
+      // Showing although it was closed: the close was dropped. Ask again.
       TraceDevTools("close: still showing, asked again", window_id, pid,
                     "target=" + HwndText(hwnd) + " " + DevToolsStateText(st));
       PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -4047,8 +4076,16 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
   if (!state || !state->browser_pid)
     return nullptr;
   DWORD pid = static_cast<DWORD>(state->browser_pid);
-  if (IsDevToolsWindowOf(state->devtools_hwnd, pid))
-    return state->devtools_hwnd;
+  if (HWND own = state->devtools_hwnd; IsDevToolsWindowOf(own, pid)) {
+    if (IsWindowVisible(own)) {
+      state->devtools_seen_visible = true;
+      return own;
+    }
+    // Not shown yet: still opening, and open as far as the view knows.
+    if (!state->devtools_seen_visible)
+      return own;
+    // Shown, then hidden: closed (its own close button), being destroyed.
+  }
   state->devtools_hwnd = nullptr;
   std::vector<HWND> all = DevToolsWindowsOf(pid);
   if (state->devtools_awaiting) {
@@ -4067,9 +4104,10 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
   }
   if (sharing != 1)
     return nullptr;
-  // Not the one this view is closing (its close may take a moment).
+  // A shown one, not the one this view is closing (its close may take a
+  // moment).
   for (HWND h : all) {
-    if (h != state->devtools_closing)
+    if (h != state->devtools_closing && IsWindowVisible(h))
       return h;
   }
   return nullptr;
