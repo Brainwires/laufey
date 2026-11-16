@@ -10,6 +10,7 @@
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
 #include "laufey_message_dialog.h"
+#include "laufey_hidden_window_mac.h"
 
 #import <Cocoa/Cocoa.h>
 
@@ -85,7 +86,8 @@ uint32_t ShowMessageDialogMac(ParentResolver parent,
           NSWindow* window = parent ? (__bridge NSWindow*)parent() : nil;
           NSAlert* alert = BuildAlert(request);
           size_t count = request.buttons.size();
-          if (window && window.isVisible && !window.attachedSheet) {
+          if (window && MacWindowShown((__bridge void*)window) &&
+              !window.attachedSheet) {
             [alert beginSheetModalForWindow:window
                           completionHandler:^(NSModalResponse response) {
                             FinishWithResponse(id, response, count);

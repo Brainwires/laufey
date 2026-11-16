@@ -9,6 +9,7 @@
 #include <dispatch/dispatch.h>
 
 #include "laufey_single_instance.h"
+#include "laufey_hidden_window_mac.h"
 
 namespace laufey_common {
 
@@ -20,7 +21,8 @@ void ActivateAppMac() {
       // Front-most first; skip windows the embedder hid (orderOut:) and
       // panels/status items that can't become main.
       for (NSWindow* window in [NSApp orderedWindows]) {
-        if (([window isVisible] || [window isMiniaturized]) &&
+        if ((MacWindowShown((__bridge void*)window) ||
+             [window isMiniaturized]) &&
             [window canBecomeMainWindow]) {
           target = window;
           break;

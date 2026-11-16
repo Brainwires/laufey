@@ -90,6 +90,12 @@ bool IsValidWindowLevel(int32_t level);
 // neither is THROTTLE.
 int32_t BackgroundThrottlingFromFlags(uint32_t flags);
 
+// Whether a window created with `flags` is hidden by keeping it ordered in
+// but invisible on macOS (the WebView backend): an unthrottled one
+// (BACKGROUND_UNTHROTTLED) that doesn't ask to be ordered out
+// (MACOS_HIDDEN_ORDER_OUT).
+bool HidesInvisiblyFromFlags(uint32_t flags);
+
 // The policy named by the launch configuration's "activationPolicy"
 // ("regular", "accessory", "prohibited"), or -1 when it names none.
 int32_t ParseActivationPolicy(const std::string& value);

@@ -11,6 +11,11 @@
 //!   with BackgroundThrottling::None. A Suspend window's count is reported,
 //!   not checked: when WebKit freezes a page is its own business.
 //!
+//! - macOS WebView: a None window hidden after it was shown (hide()) keeps
+//!   its page's rate too: it stays ordered in but invisible (transparent,
+//!   clicks passing through, not key, not reported visible), while one
+//!   created with MacosHiddenMode::OrderOut is really ordered out.
+//!
 //! Each policy is measured alone (its window the only hidden one) and then
 //! all three at once (the windows share WebKit's process pool; the policy is
 //! per page). LAUFEY_E2E_BACKGROUND_REPEAT=N runs those rounds N times;
@@ -174,6 +179,121 @@ async fn round(
   Some(ran)
 }
 
+/// Ticks of a 100 ms interval in the page of `w` from 4 s after it started
+/// to 1 s before the question, `idle` s later.
+#[cfg(target_os = "macos")]
+async fn ticks_after(w: &Window, idle: u64) -> f64 {
+  page_number(
+    w,
+    "window.__ticks = []; window.__start = performance.now(); \
+     setInterval(() => __ticks.push(performance.now() - __start), 100); 1",
+  )
+  .await;
+  tokio::time::sleep(Duration::from_secs(idle)).await;
+  let end = (idle - 1) * 1000;
+  page_number(
+    w,
+    &format!(
+      "typeof __ticks === 'undefined' ? -1 : \
+       __ticks.filter((t) => t > 4000 && t < {end}).length"
+    ),
+  )
+  .await
+  .unwrap_or(0.0)
+}
+
+/// macOS: hide() on a shown None window keeps it ordered in, invisible, and
+/// its page at full rate; MacosHiddenMode::OrderOut really orders it out.
+#[cfg(target_os = "macos")]
+async fn hidden_after_show(idle: u64) {
+  use crate::overlay_checks::mac;
+  use laufey::MacosHiddenMode;
+  let span = (idle - 5) as f64;
+  for mode in [MacosHiddenMode::Invisible, MacosHiddenMode::OrderOut] {
+    let title = format!("native-e2e-background-shown-{mode:?}");
+    let w = Window::new_with_options(
+      320,
+      240,
+      WindowOptions {
+        background_throttling: BackgroundThrottling::None,
+        macos_hidden_mode: mode,
+        ..Default::default()
+      },
+    )
+    .title(&title)
+    .load(&format!("laufey-e2e://app/titled/{title}"));
+    if !page_loaded(&w).await {
+      na(&format!("{mode:?}: a shown window's page never loaded"));
+      w.close();
+      continue;
+    }
+    w.show();
+    w.focus();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    w.hide();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let t = title.clone();
+    let native = laufey::spawn_on_ui_thread(move || {
+      (
+        mac::window_flag(&t, c"isVisible"),
+        mac::window_flag(&t, c"isKeyWindow"),
+        mac::window_flag(&t, c"ignoresMouseEvents"),
+      )
+    })
+    .await
+    .unwrap_or((None, None, None));
+    let n = ticks_after(&w, idle).await;
+    eprintln!(
+      "[e2e] None, shown then hidden ({mode:?}): {n} ticks in 4-{} s; \
+       visible {}, native (ordered in, key, ignores mouse) {native:?}",
+      idle - 1,
+      w.get_visible()
+    );
+    check(
+      &format!("a hidden None window ({mode:?}) is not reported visible"),
+      !w.get_visible(),
+    );
+    match mode {
+      MacosHiddenMode::Invisible => {
+        check(
+          "hide() keeps a None window ordered in but invisible: clicks pass \
+           through and it is not key",
+          native == (Some(true), Some(false), Some(true)),
+        );
+        check(
+          "a None window hidden after it was shown keeps its timers' rate",
+          n >= span * 6.0,
+        );
+      }
+      MacosHiddenMode::OrderOut => check(
+        "MacosHiddenMode::OrderOut really orders a hidden None window out",
+        native.0 == Some(false),
+      ),
+    }
+    // Shown again: on screen, taking clicks.
+    w.show();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let t = title.clone();
+    let shown = laufey::spawn_on_ui_thread(move || {
+      (
+        mac::window_flag(&t, c"isVisible"),
+        mac::window_flag(&t, c"ignoresMouseEvents"),
+      )
+    })
+    .await
+    .unwrap_or((None, None));
+    check(
+      &format!(
+        "a hidden None window ({mode:?}) shown again is visible and takes \
+         clicks ({shown:?}, visible {})",
+        w.get_visible()
+      ),
+      w.get_visible() && shown == (Some(true), Some(false)),
+    );
+    w.close();
+  }
+}
+
 fn env_number(name: &str, default: u64) -> u64 {
   std::env::var(name)
     .ok()
@@ -263,4 +383,6 @@ pub async fn run() {
      beside other hidden windows",
     unthrottled.0 > 0 && unthrottled.1 == unthrottled.0,
   );
+  #[cfg(target_os = "macos")]
+  hidden_after_show(idle).await;
 }

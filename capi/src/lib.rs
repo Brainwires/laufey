@@ -107,6 +107,7 @@ pub const LAUFEY_WINDOW_FLAG_TRANSPARENT: u32 = 1 << 4;
 pub const LAUFEY_WINDOW_FLAG_OVERLAY: u32 = 1 << 5;
 pub const LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED: u32 = 1 << 6;
 pub const LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND: u32 = 1 << 7;
+pub const LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT: u32 = 1 << 8;
 
 pub const LAUFEY_WINDOW_HANDLE_UNKNOWN: i32 = 0;
 pub const LAUFEY_WINDOW_HANDLE_APPKIT: i32 = 1;
@@ -1132,6 +1133,10 @@ pub struct WindowOptions {
   /// What the page does while the window is not on screen (API 51; see
   /// [`Window::background_throttling`]). Throttled by default.
   pub background_throttling: BackgroundThrottling,
+  /// How a [`BackgroundThrottling::None`] window is hidden on macOS (the
+  /// WebView backend; see [`MacosHiddenMode`]). Kept ordered in, invisible,
+  /// by default.
+  pub macos_hidden_mode: MacosHiddenMode,
 }
 
 impl WindowOptions {
@@ -1156,6 +1161,7 @@ impl WindowOptions {
       flags |= LAUFEY_WINDOW_FLAG_OVERLAY;
     }
     flags |= self.background_throttling.to_flags();
+    flags |= self.macos_hidden_mode.to_flags();
     flags
   }
 }

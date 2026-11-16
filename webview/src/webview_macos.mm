@@ -13,6 +13,7 @@
 #include "laufey_media_capture.h"
 #include "laufey_will_navigate.h"
 #include "laufey_io.h"
+#include "laufey_hidden_window_mac.h"
 #include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
 #include "laufey_single_instance.h"
@@ -76,6 +77,10 @@ struct MacWindowState {
   // While click passthrough is active, keep feeding this window's mouse
   // events from the global (other-app) monitors.
   bool click_passthrough_forward = false;
+  // Hidden by keeping it ordered in, invisible, rather than ordered out
+  // (laufey_hidden_window_mac.h): an unthrottled window that didn't ask for
+  // LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT.
+  bool hide_invisibly = false;
 };
 
 static bool ApplyBackgroundThrottling(WKPreferences* preferences,
@@ -2457,6 +2462,7 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       state.window_id = window_id;
       state.window = window;
       state.webview = webview;
+      state.hide_invisibly = laufey_common::HidesInvisiblyFromFlags(flags);
       state.message_handler = handler;
       state.window_delegate = delegate;
       state.ui_delegate = uiDelegate;
@@ -2476,6 +2482,10 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       if (hidden) {
         // Leave the window unmapped; the embedder reveals it later (typically
         // from a page-load handler) so the empty initial frame is never shown.
+        // An unthrottled one is ordered in, invisible, so its page runs at
+        // full rate before it is ever shown.
+        if (laufey_common::HidesInvisiblyFromFlags(flags))
+          laufey_common::MacHideInvisibly((__bridge void*)window);
       } else if (no_activate) {
         // Show without activating the app / stealing focus.
         [window orderFrontRegardless];
@@ -2503,6 +2513,7 @@ void WKWebViewBackend::CloseWindow(uint32_t window_id) {
       // See OnWindowClosedByUser.
       laufey_common::PasskeyWindowClosing((__bridge const void*)win);
       laufey_common::AuthSessionWindowClosing((__bridge const void*)win);
+      laufey_common::MacRestoreFromInvisibleHide((__bridge void*)win);
       [win close];
     }
   });
@@ -3449,7 +3460,7 @@ uint32_t WKWebViewBackend::ForwardTargetAt(NSPoint screen_point,
     // passthrough*; without ignoresMouseEvents an event over this frame that
     // reached another app was simply over an occluding window.
     if (!it->second.click_passthrough_forward || ![win ignoresMouseEvents] ||
-        ![win isVisible])
+        !laufey_common::MacWindowShown((__bridge void*)win))
       continue;
     if (!NSPointInRect(screen_point, [win frame]))
       continue;
@@ -3628,7 +3639,7 @@ bool WKWebViewBackend::IsVisible(uint32_t window_id) {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
-      result = [state->window isVisible];
+      result = laufey_common::MacWindowShown((__bridge void*)state->window);
     }
   });
   return result;
@@ -3649,6 +3660,7 @@ void WKWebViewBackend::Show(uint32_t window_id) {
       }
       if (!win)
         return;
+      laufey_common::MacRestoreFromInvisibleHide((__bridge void*)win);
       if ([win styleMask] & NSWindowStyleMaskNonactivatingPanel) {
         // A tray / menu-bar panel never activates the app.
         [win makeKeyAndOrderFront:nil];
@@ -3668,14 +3680,21 @@ void WKWebViewBackend::Hide(uint32_t window_id) {
   dispatch_async(dispatch_get_main_queue(), ^{
     @autoreleasepool {
       NSWindow* win = nil;
+      bool invisibly = false;
       {
         std::lock_guard<std::mutex> lock(windows_mutex_);
         auto* state = GetWindow(window_id);
         if (state) {
           win = state->window;
+          invisibly = state->hide_invisibly;
         }
       }
       if (!win)
+        return;
+      // An unthrottled window stays ordered in, invisible, so WebKit keeps
+      // its page at full rate (laufey_hidden_window_mac.h); a full-screen
+      // one, and every other, is ordered out.
+      if (invisibly && laufey_common::MacHideInvisibly((__bridge void*)win))
         return;
       [win orderOut:nil];
     }
@@ -3696,6 +3715,8 @@ void WKWebViewBackend::Focus(uint32_t window_id) {
         }
       }
       if (win) {
+        // Focusing a hidden window shows it.
+        laufey_common::MacRestoreFromInvisibleHide((__bridge void*)win);
         // Activates ignoring other apps without touching the activation
         // policy: an Accessory app's window comes to the front and is key.
         laufey_common::MacFocusWindow((__bridge void*)win);

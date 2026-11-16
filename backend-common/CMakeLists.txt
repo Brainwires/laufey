@@ -94,6 +94,7 @@ if(APPLE)
     src/share_mac.mm
     src/user_activity_mac.mm
     src/overlay_mac.mm
+    src/hidden_window_mac.mm
     src/quit_request_mac.mm
     src/message_dialog_mac.mm
     src/speech_mac.mm
@@ -892,6 +893,16 @@ if(LAUFEY_BUILD_TESTS)
     )
     target_compile_options(laufey_passkey_mac_test PRIVATE -fobjc-arc)
     add_test(NAME laufey_passkey_mac_test COMMAND laufey_passkey_mac_test)
+
+    # A window hidden by keeping it ordered in, invisible (an unthrottled
+    # window on the WebView backend), and restored exactly.
+    add_executable(laufey_hidden_window_mac_test
+                   tests/hidden_window_mac_test.mm)
+    target_link_libraries(laufey_hidden_window_mac_test PRIVATE
+      laufey_backend_common "-framework Cocoa")
+    target_compile_options(laufey_hidden_window_mac_test PRIVATE -fobjc-arc)
+    add_test(NAME laufey_hidden_window_mac_test
+             COMMAND laufey_hidden_window_mac_test)
 
     # The drag pasteboard's files (the CEF backend's external drops).
     add_executable(laufey_io_mac_test tests/io_mac_test.mm)

@@ -7,6 +7,7 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_hidden_window_mac.h"
 
 #import <Cocoa/Cocoa.h>
 
@@ -259,7 +260,8 @@ class MacFileDialog : public FileDialogPlatform {
                                           : LAUFEY_FILE_DIALOG_CANCELLED,
                                       paths);
     };
-    if (parent_ && parent_.isVisible && !parent_.attachedSheet) {
+    if (parent_ && MacWindowShown((__bridge void*)parent_) &&
+        !parent_.attachedSheet) {
       [panel_ beginSheetModalForWindow:parent_ completionHandler:done];
     } else {
       [panel_ beginWithCompletionHandler:done];

@@ -28,6 +28,7 @@
 // still go to the window beneath; a pointing device's click comes much later.
 
 #include "laufey_overlay.h"
+#include "laufey_hidden_window_mac.h"
 
 #include "laufey_launch_config.h"
 #include "laufey_ui_tasks.h"
@@ -86,7 +87,7 @@ ScreenRect ToScreenRect(NSRect r) {
 void Recompute(NSWindow* window, LaufeyOverlayState* st) {
   NSPoint p = [NSEvent mouseLocation];  // bottom-left screen space
   NSRect frame = [window frame];
-  bool visible = [window isVisible];
+  bool visible = MacWindowShown((__bridge void*)window);
   bool pass = ShouldPassThroughAtScreenPoint(
       st.explicitPassthrough, st->region, visible,
       ToScreenRect([window contentRectForFrameRect:frame]), p.x, p.y);

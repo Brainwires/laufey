@@ -84,6 +84,12 @@ int32_t BackgroundThrottlingFromFlags(uint32_t flags) {
   return LAUFEY_BACKGROUND_THROTTLING_THROTTLE;
 }
 
+bool HidesInvisiblyFromFlags(uint32_t flags) {
+  return BackgroundThrottlingFromFlags(flags) ==
+             LAUFEY_BACKGROUND_THROTTLING_NONE &&
+         !(flags & LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT);
+}
+
 int32_t ParseActivationPolicy(const std::string& value) {
   if (value == "regular")
     return LAUFEY_ACTIVATION_POLICY_REGULAR;
@@ -292,7 +298,8 @@ LayerEdgeAnchor ComputeLayerEdgeAnchor(int output_x, int output_y,
   a.right = 2 * (x - output_x) + width >= output_width;
   a.bottom = 2 * (y - output_y) + height >= output_height;
   a.margin_x = a.right ? output_x + output_width - (x + width) : x - output_x;
-  a.margin_y = a.bottom ? output_y + output_height - (y + height) : y - output_y;
+  a.margin_y =
+      a.bottom ? output_y + output_height - (y + height) : y - output_y;
   if (a.margin_x < 0)
     a.margin_x = 0;
   if (a.margin_y < 0)

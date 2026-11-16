@@ -10,6 +10,7 @@
 #include "laufey_notifications.h"
 #include "laufey_single_instance.h"
 #include "laufey_overlay.h"
+#include "laufey_hidden_window_mac.h"
 #include "laufey_quit_request.h"
 #include "laufey_window.h"
 
@@ -163,7 +164,10 @@ void EnsureEditMenu(NSMenu* menubar) {
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)sender
                     hasVisibleWindows:(BOOL)hasVisibleWindows {
-  laufey_common::FireDockReopenMac(hasVisibleWindows ? true : false);
+  // A window hidden by keeping it ordered in (an unthrottled one) is not
+  // visible to the user (laufey_hidden_window_mac.h).
+  laufey_common::FireDockReopenMac(laufey_common::MacHasVisibleWindowsForReopen(
+      hasVisibleWindows ? true : false));
   // Always swallow the default "show last hidden window" behavior — the
   // embedder's callback decides what to do.
   return NO;

@@ -295,17 +295,40 @@ macOS (the WebView backend, macOS 14+) maps them to
 `WKPreferences.inactiveSchedulingPolicy` (`Throttle`, `None`, `Suspend`); for
 `None` it also turns off WebKit's hidden-page timer throttling (a WebKit SPI,
 asked for by selector: without it a hidden page's timers still fire at most once
-a second, but it is never frozen). A hidden page's 100 ms interval ran about
-once a second throttled and at its full rate with `None`, over three minutes
-alone and beside hidden windows of the other policies (the policy is per page,
-though the windows share WebKit's process pool). WKWebView's own default,
-`Suspend`, froze the page of a window created hidden about a second after it
-loaded (its timers, the runtime's events and its sockets waited until it
-showed), which a tray app handling clicks in a hidden window can't have: every
-window now starts at `Throttle`. `background_throttling()` reads the policy
-back. Before macOS 14 WebKit never suspends a page; CEF, WebView2 and WebKitGTK
-throttle a hidden page's timers without freezing it and take no flag: there the
-flags are ignored and `background_throttling()` is `None`. Winit has no page.
+a second, but it is never frozen).
+
+That alone doesn't keep a hidden page at full rate on a Mac with a display:
+WebKit gives a page's web content process its foreground priority only while the
+page's view is on screen, and the view of a window ordered out never is, so
+macOS coalesced the hidden page's timers (a 100 ms interval fired every 200-600
+ms; a CI runner's virtual display never showed it). So a `None` window is hidden
+(`hide()`, or created hidden) by keeping it ordered in but invisible: fully
+transparent, without a shadow, passing every click through, never key or main
+(if AppKit makes it key, it steps aside at once), out of window cycling
+(Cmd-\`), Mission Control and Exposé (a transient window), the Window menu,
+screen sharing and screenshots (`sharingType` none), and accessibility, at the
+back of the window list. `get_visible()` reports it hidden, a file dialog or
+message box doesn't attach to it as a sheet, the Dock icon's click counts it as
+no window, and `show()` / `focus()` restore every property it changed. A
+full-screen window is ordered out all the same (an invisible one would leave its
+Space empty). While a `None` window is open the app also holds a user-initiated
+activity (idle sleep still allowed), so macOS never puts it into App Nap, and
+the window's web view ignores window occlusion. An app that needs the window
+really removed asks for `MacosHiddenMode::OrderOut`
+(`WindowOptions::macos_hidden_mode`,
+`LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT`); its hidden page is then throttled
+by the OS again. Every other platform and policy ignores the mode. A hidden
+page's 100 ms interval ran about once a second throttled and at its full rate
+with `None`, over three minutes alone and beside hidden windows of the other
+policies (the policy is per page, though the windows share WebKit's process
+pool). WKWebView's own default, `Suspend`, froze the page of a window created
+hidden about a second after it loaded (its timers, the runtime's events and its
+sockets waited until it showed), which a tray app handling clicks in a hidden
+window can't have: every window now starts at `Throttle`.
+`background_throttling()` reads the policy back. Before macOS 14 WebKit never
+suspends a page; CEF, WebView2 and WebKitGTK throttle a hidden page's timers
+without freezing it and take no flag: there the flags are ignored and
+`background_throttling()` is `None`. Winit has no page.
 
 ## Maximize, minimize and fullscreen (API ≥ 38)
 

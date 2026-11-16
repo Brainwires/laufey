@@ -92,6 +92,17 @@ extern "C" {
 #define LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED (1u << 6)
 #define LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND (1u << 7)
 
+// MACOS_HIDDEN_ORDER_OUT (laufey 0.8.1) is for a BACKGROUND_UNTHROTTLED
+// window on the macOS WebView backend. There WebKit runs a page at full rate
+// only while its view is on screen, and a window ordered out never is, so by
+// default such a window is hidden (hide_window, or created HIDDEN) by keeping
+// it ordered in but invisible: fully transparent, passing every click
+// through, never key or main, out of window cycling, Mission Control, the
+// Window menu, screen sharing and accessibility, and reported as not visible.
+// This flag asks for a window that is really removed instead (ordered out),
+// whose hidden page the OS then throttles. Ignored everywhere else.
+#define LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT (1u << 8)
+
 // --- Window state, screens and chrome (API >= 38) ---------------------------
 //
 // Window state bits returned by get_window_state and passed to the

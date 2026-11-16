@@ -8,6 +8,7 @@
 use crate::{
   api, LaufeyBackendApi, Window, LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND,
   LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED,
+  LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT,
 };
 
 pub const LAUFEY_BACKGROUND_THROTTLING_THROTTLE: i32 = 0;
@@ -60,6 +61,35 @@ impl BackgroundThrottling {
       BackgroundThrottling::Throttle => 0,
       BackgroundThrottling::None => LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED,
       BackgroundThrottling::Suspend => LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND,
+    }
+  }
+}
+
+/// How a [`BackgroundThrottling::None`] window is hidden on macOS (the
+/// WebView backend; ignored everywhere else and for the other policies).
+/// WebKit runs a page at full rate only while its view is on screen, and the
+/// view of a window ordered out never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MacosHiddenMode {
+  /// Hidden (`hide()`, or created hidden) by keeping it ordered in but
+  /// invisible: fully transparent, passing clicks through, never key or main,
+  /// out of window cycling, Mission Control, the Window menu, screen sharing
+  /// and accessibility, and reported as not visible. Its page keeps its full
+  /// rate. A full-screen window is ordered out all the same. The default.
+  #[default]
+  Invisible,
+  /// Hidden by ordering it out, as every other window is: really removed,
+  /// and its hidden page throttled by the OS.
+  OrderOut,
+}
+
+impl MacosHiddenMode {
+  /// The creation flag (`LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT`, or none
+  /// for [`MacosHiddenMode::Invisible`]).
+  pub fn to_flags(self) -> u32 {
+    match self {
+      MacosHiddenMode::Invisible => 0,
+      MacosHiddenMode::OrderOut => LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT,
     }
   }
 }
@@ -136,6 +166,30 @@ mod tests {
     // The default asks for nothing: a plain window still goes through
     // create_window.
     assert_eq!(WindowOptions::default().to_flags(), 0);
+  }
+
+  #[test]
+  fn the_macos_hidden_mode_is_a_creation_flag() {
+    assert_eq!(MacosHiddenMode::default(), MacosHiddenMode::Invisible);
+    assert_eq!(MacosHiddenMode::Invisible.to_flags(), 0);
+    let flags = WindowOptions {
+      background_throttling: BackgroundThrottling::None,
+      macos_hidden_mode: MacosHiddenMode::OrderOut,
+      ..Default::default()
+    }
+    .to_flags();
+    assert_eq!(
+      flags,
+      LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED
+        | LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT
+    );
+    // The default mode adds nothing.
+    let flags = WindowOptions {
+      background_throttling: BackgroundThrottling::None,
+      ..Default::default()
+    }
+    .to_flags();
+    assert_eq!(flags, LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED);
   }
 
   #[test]

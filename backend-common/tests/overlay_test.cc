@@ -173,6 +173,19 @@ static void TestLevelsAndPolicy() {
                                     LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND) ==
       LAUFEY_BACKGROUND_THROTTLING_NONE);
 
+  // Hidden by keeping it ordered in (macOS): only an unthrottled window that
+  // doesn't ask to be ordered out.
+  EXPECT(!HidesInvisiblyFromFlags(0));
+  EXPECT(!HidesInvisiblyFromFlags(LAUFEY_WINDOW_FLAG_HIDDEN));
+  EXPECT(!HidesInvisiblyFromFlags(LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND));
+  EXPECT(HidesInvisiblyFromFlags(LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED));
+  EXPECT(HidesInvisiblyFromFlags(LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED |
+                                 LAUFEY_WINDOW_FLAG_HIDDEN |
+                                 LAUFEY_WINDOW_FLAG_BACKGROUND_SUSPEND));
+  EXPECT(!HidesInvisiblyFromFlags(LAUFEY_WINDOW_FLAG_BACKGROUND_UNTHROTTLED |
+                                  LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT));
+  EXPECT(!HidesInvisiblyFromFlags(LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT));
+
   EXPECT(ParseActivationPolicy("regular") == LAUFEY_ACTIVATION_POLICY_REGULAR);
   EXPECT(ParseActivationPolicy("accessory") ==
          LAUFEY_ACTIVATION_POLICY_ACCESSORY);
