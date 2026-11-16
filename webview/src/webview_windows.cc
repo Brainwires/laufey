@@ -211,6 +211,65 @@ constexpr ULONGLONG kDevToolsFindMs = 30000;
 constexpr ULONGLONG kDevToolsCloseWatchMs = 10000;
 constexpr DWORD kDevToolsCloseRetryMs = 500;
 
+// LAUFEY_TRACE_PERMISSIONS=1: one stderr line per permission request the
+// engine raises for a window (its kind, raw too, the URI, whether a user
+// gesture started it, and the state the handlers left), and per renderer or
+// browser process failure and certificate error. Off by default: no handler
+// is added then.
+static bool TracePermissionsEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("LAUFEY_TRACE_PERMISSIONS");
+    return v && std::string(v) == "1";
+  }();
+  return enabled;
+}
+
+static const char* PermissionKindName(COREWEBVIEW2_PERMISSION_KIND kind) {
+  switch (kind) {
+    case COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION:
+      return "unknown";
+    case COREWEBVIEW2_PERMISSION_KIND_MICROPHONE:
+      return "microphone";
+    case COREWEBVIEW2_PERMISSION_KIND_CAMERA:
+      return "camera";
+    case COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION:
+      return "geolocation";
+    case COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS:
+      return "notifications";
+    case COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS:
+      return "other-sensors";
+    case COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ:
+      return "clipboard-read";
+    case COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS:
+      return "multiple-automatic-downloads";
+    case COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE:
+      return "file-read-write";
+    case COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY:
+      return "autoplay";
+    case COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS:
+      return "local-fonts";
+    case COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES:
+      return "midi-sysex";
+    case COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT:
+      return "window-management";
+    default:
+      return "other";
+  }
+}
+
+static const char* PermissionStateName(COREWEBVIEW2_PERMISSION_STATE state) {
+  switch (state) {
+    case COREWEBVIEW2_PERMISSION_STATE_DEFAULT:
+      return "default";
+    case COREWEBVIEW2_PERMISSION_STATE_ALLOW:
+      return "allow";
+    case COREWEBVIEW2_PERMISSION_STATE_DENY:
+      return "deny";
+    default:
+      return "?";
+  }
+}
+
 // Test hook (LAUFEY_TEST_WV2_CONTROLLER_FAILURES=<n>): the process's first n
 // successful CreateCoreWebView2Controller completions are treated as
 // failures (E_FAIL; the controller is closed), so the documented retry runs
@@ -2381,6 +2440,84 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                     })
                     .Get(),
                 nullptr);
+
+            // LAUFEY_TRACE_PERMISSIONS=1 (diagnostics): added last, so it
+            // sees the state the handlers above left (a handler that took a
+            // deferral answers later; that shows as "default" here).
+            if (TracePermissionsEnabled()) {
+              state->webview->add_PermissionRequested(
+                  Callback<ICoreWebView2PermissionRequestedEventHandler>(
+                      [wid](ICoreWebView2*,
+                            ICoreWebView2PermissionRequestedEventArgs* args)
+                          -> HRESULT {
+                        COREWEBVIEW2_PERMISSION_KIND kind =
+                            COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+                        args->get_PermissionKind(&kind);
+                        LPWSTR uri = nullptr;
+                        std::string url;
+                        if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+                          url = WideToUtf8(uri);
+                          CoTaskMemFree(uri);
+                        }
+                        BOOL user = FALSE;
+                        args->get_IsUserInitiated(&user);
+                        COREWEBVIEW2_PERMISSION_STATE answer =
+                            COREWEBVIEW2_PERMISSION_STATE_DEFAULT;
+                        args->get_State(&answer);
+                        std::cerr << "laufey: permission-trace window " << wid
+                                  << " kind=" << PermissionKindName(kind)
+                                  << " (" << static_cast<int>(kind)
+                                  << ") uri=" << url
+                                  << " user_initiated=" << (user ? 1 : 0)
+                                  << " state=" << PermissionStateName(answer)
+                                  << std::endl;
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+              state->webview->add_ProcessFailed(
+                  Callback<ICoreWebView2ProcessFailedEventHandler>(
+                      [wid](ICoreWebView2*,
+                            ICoreWebView2ProcessFailedEventArgs* args)
+                          -> HRESULT {
+                        COREWEBVIEW2_PROCESS_FAILED_KIND kind =
+                            COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
+                        args->get_ProcessFailedKind(&kind);
+                        std::cerr << "laufey: permission-trace window " << wid
+                                  << " process failed, kind "
+                                  << static_cast<int>(kind) << std::endl;
+                        return S_OK;
+                      })
+                      .Get(),
+                  nullptr);
+              ComPtr<ICoreWebView2_14> webview14;
+              if (SUCCEEDED(state->webview.As(&webview14)) && webview14) {
+                webview14->add_ServerCertificateErrorDetected(
+                    Callback<
+                        ICoreWebView2ServerCertificateErrorDetectedEventHandler>(
+                        [wid](
+                            ICoreWebView2*,
+                            ICoreWebView2ServerCertificateErrorDetectedEventArgs*
+                                args) -> HRESULT {
+                          LPWSTR uri = nullptr;
+                          std::string url;
+                          if (SUCCEEDED(args->get_RequestUri(&uri)) && uri) {
+                            url = WideToUtf8(uri);
+                            CoTaskMemFree(uri);
+                          }
+                          COREWEBVIEW2_WEB_ERROR_STATUS status =
+                              COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                          args->get_ErrorStatus(&status);
+                          std::cerr << "laufey: permission-trace window " << wid
+                                    << " certificate error "
+                                    << static_cast<int>(status) << " for "
+                                    << url << std::endl;
+                          return S_OK;
+                        })
+                        .Get(),
+                    nullptr);
+              }
+            }
 
             state->webview_ready = true;
 
