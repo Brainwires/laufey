@@ -260,6 +260,8 @@ async fn shortcut_checks(caps: &laufey::SystemCapabilities) {
 async fn real_press_check(pressed: &Arc<Mutex<Vec<String>>>) {
   let before = pressed.lock().unwrap().len();
   #[cfg(windows)]
+  let watch: Option<win_input::LlWatch>;
+  #[cfg(windows)]
   {
     // Injected input reaches a hotkey only on the session's input desktop;
     // on a locked or disconnected session it is dropped although SendInput
@@ -269,6 +271,11 @@ async fn real_press_check(pressed: &Arc<Mutex<Vec<String>>>) {
       na(&format!("a real key press ({reason})"));
       return;
     }
+    // Our own low-level keyboard hook watches for the injected F10 press:
+    // seen means the input entered the session's input stream (and a miss
+    // is lost after the hooks, or in the hotkey path); unseen means it never
+    // entered it.
+    watch = win_input::LlWatch::start();
     let sent = win_input::press_ctrl_alt_shift_f10();
     check("SendInput injected the key press", sent);
   }
@@ -287,11 +294,26 @@ async fn real_press_check(pressed: &Arc<Mutex<Vec<String>>>) {
   let fired =
     wait_for(|| pressed.lock().unwrap().len() > before, 100, 20).await;
   #[cfg(windows)]
-  if !fired {
-    eprintln!(
-      "[e2e] real key press: no hotkey within 2 s; now {}",
-      win_input::input_state()
-    );
+  {
+    match watch.map(win_input::LlWatch::finish) {
+      Some(true) => eprintln!(
+        "[e2e] real key press: our low-level keyboard hook saw the injected \
+         F10 press (it entered the input stream)"
+      ),
+      Some(false) => eprintln!(
+        "[e2e] real key press: our low-level keyboard hook did NOT see the \
+         injected F10 press (it never entered the input stream)"
+      ),
+      None => eprintln!(
+        "[e2e] real key press: no low-level keyboard hook could be installed"
+      ),
+    }
+    if !fired {
+      eprintln!(
+        "[e2e] real key press: no hotkey within 2 s; now {}",
+        win_input::input_state()
+      );
+    }
   }
   check("a real key press fires the global shortcut", fired);
   check(
@@ -569,6 +591,118 @@ mod win_input {
         extra: 0,
       },
       _pad: [0; 8],
+    }
+  }
+
+  extern "system" {
+    fn SetWindowsHookExW(
+      id: i32,
+      proc_: extern "system" fn(i32, usize, isize) -> isize,
+      module: *mut c_void,
+      thread: u32,
+    ) -> *mut c_void;
+    fn UnhookWindowsHookEx(hook: *mut c_void) -> i32;
+    fn CallNextHookEx(
+      hook: *mut c_void,
+      code: i32,
+      wparam: usize,
+      lparam: isize,
+    ) -> isize;
+    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    fn PeekMessageW(
+      msg: *mut [u64; 8],
+      hwnd: *mut c_void,
+      min: u32,
+      max: u32,
+      remove: u32,
+    ) -> i32;
+  }
+
+  #[repr(C)]
+  struct KbdLlHookStruct {
+    vk: u32,
+    scan: u32,
+    flags: u32,
+    time: u32,
+    extra: usize,
+  }
+
+  const WH_KEYBOARD_LL: i32 = 13;
+  const WM_KEYDOWN: usize = 0x0100;
+  const WM_SYSKEYDOWN: usize = 0x0104;
+  const LLKHF_INJECTED: u32 = 0x10;
+  const PM_REMOVE: u32 = 1;
+  const VK_F10: u32 = 0x79;
+
+  static INJECTED_F10_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+  extern "system" fn ll_keyboard(
+    code: i32,
+    wparam: usize,
+    lparam: isize,
+  ) -> isize {
+    if code >= 0 && (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN) {
+      let k = unsafe { &*(lparam as *const KbdLlHookStruct) };
+      if k.vk == VK_F10 && k.flags & LLKHF_INJECTED != 0 {
+        INJECTED_F10_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
+      }
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+  }
+
+  /// A WH_KEYBOARD_LL hook on a thread of its own (a low-level hook is
+  /// called through its thread's message loop), installed for one check and
+  /// removed on every path: when finish() is called, or after 3 s at most.
+  pub struct LlWatch {
+    done: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+  }
+
+  impl LlWatch {
+    /// None when the hook can't be installed.
+    pub fn start() -> Option<LlWatch> {
+      INJECTED_F10_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
+      let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
+      let (done, done_rx) = std::sync::mpsc::channel::<()>();
+      let thread = std::thread::spawn(move || {
+        let hook = unsafe {
+          SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            ll_keyboard,
+            GetModuleHandleW(std::ptr::null()),
+            0,
+          )
+        };
+        let _ = ready_tx.send(!hook.is_null());
+        if hook.is_null() {
+          return;
+        }
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut msg = [0u64; 8];
+        while std::time::Instant::now() < end && done_rx.try_recv().is_err() {
+          while unsafe {
+            PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE)
+          } != 0
+          {}
+          std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        unsafe { UnhookWindowsHookEx(hook) };
+      });
+      match ready_rx.recv() {
+        Ok(true) => Some(LlWatch { done, thread }),
+        _ => {
+          let _ = thread.join();
+          None
+        }
+      }
+    }
+
+    /// Removes the hook and says whether it saw the injected F10 press.
+    pub fn finish(self) -> bool {
+      let _ = self.done.send(());
+      let _ = self.thread.join();
+      INJECTED_F10_SEEN.load(std::sync::atomic::Ordering::SeqCst)
     }
   }
 
