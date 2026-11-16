@@ -3650,6 +3650,79 @@ async fn passkey_checks(window_id: u32) {
   if cfg!(target_os = "windows") && backend == "webview" && freed {
     passkey_early_cancel_checks().await;
   }
+  #[cfg(windows)]
+  no_passkey_dialog_left_check().await;
+}
+
+/// Windows: every passkey request above ended (answered, cancelled, timed
+/// out); none may leave the OS's own dialog (Windows Security, shown by
+/// CredentialUIBroker.exe) on screen. A dialog left behind is secure UI
+/// that takes the foreground and swallows input until someone closes it.
+/// Any such dialog counts (the broker's windows can't be tied to the
+/// process that asked).
+#[cfg(windows)]
+async fn no_passkey_dialog_left_check() {
+  let started = std::time::Instant::now();
+  let mut left = webauthn_dialogs();
+  while !left.is_empty()
+    && started.elapsed() < std::time::Duration::from_secs(10)
+  {
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    left = webauthn_dialogs();
+  }
+  check(
+    &format!(
+      "no Windows Security passkey dialog is left on screen ({})",
+      if left.is_empty() {
+        "none".to_string()
+      } else {
+        left.join("; ")
+      }
+    ),
+    left.is_empty(),
+  );
+}
+
+/// The visible top-level windows of the Windows Security credential dialog
+/// (class "Credential Dialog Xaml Host"), as "pid N title T".
+#[cfg(windows)]
+pub(crate) fn webauthn_dialogs() -> Vec<String> {
+  use std::ffi::c_void;
+  extern "system" {
+    fn EnumWindows(
+      cb: unsafe extern "system" fn(*mut c_void, isize) -> i32,
+      lparam: isize,
+    ) -> i32;
+    fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+    fn GetClassNameW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
+    fn GetWindowTextW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
+    fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+  }
+  unsafe extern "system" fn each(hwnd: *mut c_void, lp: isize) -> i32 {
+    let out = unsafe { &mut *(lp as *mut Vec<String>) };
+    if unsafe { IsWindowVisible(hwnd) } == 0 {
+      return 1;
+    }
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), 64) };
+    if String::from_utf16_lossy(&class[..n.max(0) as usize])
+      != "Credential Dialog Xaml Host"
+    {
+      return 1;
+    }
+    let mut title = [0u16; 128];
+    let t = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), 128) };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    out.push(format!(
+      "pid {pid} title {:?}",
+      String::from_utf16_lossy(&title[..t.max(0) as usize])
+    ));
+    1
+  }
+  let mut found: Vec<String> = Vec::new();
+  unsafe { EnumWindows(each, &mut found as *mut Vec<String> as isize) };
+  found
 }
 
 /// macOS: how long the OS takes to refuse a ceremony once its agent runs.

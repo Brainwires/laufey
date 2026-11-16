@@ -934,6 +934,16 @@ void PasskeyWindowClosing(const void* window_key) {
     active->Abort(kPasskeyCancelled, "the window was closed");
 }
 
+void PasskeyAppQuitting() {
+  std::shared_ptr<PasskeyCeremony> active;
+  {
+    std::lock_guard<std::mutex> lock(SlotMutex());
+    active = SlotWeak().lock();
+  }
+  if (active)
+    active->Abort(kPasskeyCancelled, "the app is quitting");
+}
+
 bool PasskeyBusyForTesting() {
   std::lock_guard<std::mutex> lock(SlotMutex());
   return g_slot_owner != nullptr;

@@ -2756,6 +2756,10 @@ void WebView2Backend::WatchSessionEnd() {
 
 void WebView2Backend::Quit() {
   laufey_common::MarkQuitting();
+  // A passkey dialog still open ends with the app (`cancelled`): the OS
+  // operation is cancelled before the windows go, so its dialog doesn't
+  // outlive the app.
+  laufey_common::PasskeyAppQuitting();
   // quit() settles a session end the OS is waiting on: it may go ahead.
   laufey_common::AnswerQuitRequest(true);
   // PostQuitMessage posts to the CALLING thread's queue; the loop to end is

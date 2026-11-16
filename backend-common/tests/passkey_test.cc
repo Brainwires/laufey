@@ -44,6 +44,7 @@ using laufey_common::PasskeyRegistrationResult;
 using laufey_common::PasskeyReportNotSupported;
 using laufey_common::PasskeyRequestOptions;
 using laufey_common::PasskeyRpIdPin;
+using laufey_common::PasskeyAppQuitting;
 using laufey_common::PasskeyWindowClosing;
 using laufey_common::SetPasskeyCancelRepeatLimitForTesting;
 using laufey_common::json::JsonReader;
@@ -981,6 +982,25 @@ static void TestIgnoredCancelReleasesSlot() {
   SetPasskeyCancelRepeatLimitForTesting(0);
 }
 
+// quit(): the request in progress is cancelled whatever window it is
+// anchored to, and its OS operation is asked to stop at once.
+static void TestAppQuitting() {
+  Recorder r;
+  std::atomic<int> cancels{0};
+  int a = 0;
+  auto c = PasskeyBegin(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r);
+  EXPECT(c);
+  c->SetWindowKey(&a);
+  c->SetCanceller([&] { ++cancels; });
+  PasskeyAppQuitting();
+  EXPECT(CountOf(r) == 1 && HasCode(LastOf(r), "cancelled"));
+  EXPECT(cancels == 1);
+  c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
+  EXPECT(!PasskeyBusyForTesting());
+  PasskeyAppQuitting();  // nothing in progress: a no-op
+  EXPECT(CountOf(r) == 1);
+}
+
 static void TestWindowClosing() {
   Recorder r;
   int a = 0, b = 0;
@@ -1077,6 +1097,7 @@ int main() {
   TestDroppedCancelIsRepeated();
   TestTimeoutRacesFinish();
   TestIgnoredCancelReleasesSlot();
+  TestAppQuitting();
   TestWindowClosing();
   TestDroppedCeremonyStillAnswers();
   TestConcurrentBegin();

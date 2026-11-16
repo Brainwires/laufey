@@ -2994,6 +2994,10 @@ void WKWebViewBackend::FlushWebStorage() {
 
 void WKWebViewBackend::Quit() {
   laufey_common::MarkQuitting();
+  // A passkey dialog still open ends with the app (`cancelled`): the OS
+  // operation is cancelled before the windows go, so its dialog doesn't
+  // outlive the app.
+  laufey_common::PasskeyAppQuitting();
   // AppKit is waiting on applicationShouldTerminate:'s answer: going ahead
   // ends the app through applicationWillTerminate:.
   if (laufey_common::AnswerQuitRequest(true))

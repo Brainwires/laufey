@@ -315,6 +315,12 @@ void PasskeyReportNotSupported(laufey_passkey_result_fn callback,
 // abort it with `cancelled`. Backends call this from their window teardown.
 void PasskeyWindowClosing(const void* window_key);
 
+// The app is quitting (quit()): the request in progress, whatever window it
+// is anchored to, is aborted with `cancelled`, which cancels its OS
+// operation, so an OS dialog (Windows Security) doesn't stay on screen
+// after the app. Any thread.
+void PasskeyAppQuitting();
+
 // Test-only: whether a ceremony holds the app-wide slot.
 bool PasskeyBusyForTesting();
 // Replaces kPasskeyCancelRepeatLimitMs (0 restores it). Tests only.

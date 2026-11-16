@@ -2505,6 +2505,10 @@ void WebKitGTKBackend::ExecuteJs(uint32_t window_id, const std::string& script,
 
 void WebKitGTKBackend::Quit() {
   laufey_common::MarkQuitting();
+  // A passkey dialog still open ends with the app (`cancelled`): the OS
+  // operation is cancelled before the windows go, so its dialog doesn't
+  // outlive the app.
+  laufey_common::PasskeyAppQuitting();
   // A GTK modal (an alert, a script dialog) is a nested loop on the GTK
   // thread that would keep gtk_main from returning until someone dismissed
   // it: end it, as a cancel.

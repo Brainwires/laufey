@@ -287,6 +287,10 @@ static void Backend_Quit(void* data) {
 #endif
 #endif
   laufey_common::MarkQuitting();
+  // A passkey dialog still open ends with the app (`cancelled`): the OS
+  // operation is cancelled before the windows go, so its dialog doesn't
+  // outlive the app.
+  laufey_common::PasskeyAppQuitting();
   laufey_common::NoteQuitRequested();
 #if defined(__linux__)
   // A GTK modal (an alert, a script dialog) is a nested loop on TID_UI that
