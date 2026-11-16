@@ -6,11 +6,17 @@ A `Makefile` drives the build. `make help` lists every target.
 
 - Rust 1.99.1 (pinned in `rust-toolchain.toml`; rustup installs it on first use)
 - `cmake` and `ninja`
-- macOS: `brew install llvm` (for `libclang`)
+- `libclang`, which the `laufey` crate's build script (bindgen) loads to read
+  `capi/include/laufey.h`. Set `LIBCLANG_PATH` to the folder holding it when
+  bindgen doesn't find it on its own:
+  - macOS: `brew install llvm`
+  - Linux: `libclang-dev` (Debian / Ubuntu)
+  - Windows: LLVM's installer, or only `libclang.dll` (for example from the
+    `libclang` wheel on PyPI, its `clang/native` folder)
 - Linux: GTK + X dev packages
   (`libgtk-3-dev libxkbcommon-dev libxrandr-dev
   libxrender-dev libxtst-dev`)
-- Windows: Visual Studio (MSVC) + LLVM; build from a `vcvars64` shell
+- Windows: Visual Studio (MSVC) Build Tools; build from a `vcvars64` shell
 
 `make check-deps` verifies the base tools.
 
