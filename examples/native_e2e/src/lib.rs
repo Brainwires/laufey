@@ -3382,6 +3382,20 @@ fn passkey_get_options(rp_id: &str, timeout_ms: u32) -> String {
 }
 
 /// A request's envelope, or a FAIL when none arrives in time.
+/// Whether the passkey slot is free, without starting an OS operation: a
+/// request for a window that doesn't exist takes the slot when it is free
+/// and gives it back at once ("window 999999 not found"); a held slot
+/// answers "already in progress". A probe through a real window would start
+/// an OS operation itself when the slot is free, and the slot would then be
+/// held by the probe (WebView2 holds it until the OS call returns).
+async fn passkey_slot_probe(name: &str) -> String {
+  passkey_answer(
+    name,
+    laufey::passkey_get(999_999, &passkey_get_options("example.com", 1000)),
+  )
+  .await
+}
+
 async fn passkey_answer(
   name: &str,
   fut: impl std::future::Future<Output = String>,
@@ -3558,16 +3572,15 @@ async fn passkey_checks(window_id: u32) {
   // run to its own backstop (the request's 2 s + kOsTimeoutSlackMs, 10 s, in
   // passkey_win.cc): windows-11-arm once still held it 5 s after the
   // timeout. Wait past that backstop, so only a slot that never frees fails.
+  // Probed with a request for a window that doesn't exist (passkey_slot_probe):
+  // a probe that finds the slot free must not start an OS operation of its
+  // own, or the next check finds the slot held by the probe.
   let started = std::time::Instant::now();
   let deadline = std::time::Duration::from_secs(15);
   let mut freed = false;
   while started.elapsed() < deadline {
-    let env = passkey_answer(
-      "passkey get after the first",
-      laufey::passkey_get(window_id, &passkey_get_options("example.com", 1000)),
-    )
-    .await;
-    if !env.contains("already in progress") {
+    let env = passkey_slot_probe("passkey get after the first").await;
+    if env.contains("not found") {
       freed = true;
       break;
     }
@@ -3585,15 +3598,8 @@ async fn passkey_checks(window_id: u32) {
     // when cancelled nor at its own deadline. Say whether it ever does.
     let mut later = None;
     while started.elapsed() < std::time::Duration::from_secs(75) {
-      let env = passkey_answer(
-        "passkey get after a held slot",
-        laufey::passkey_get(
-          window_id,
-          &passkey_get_options("example.com", 1000),
-        ),
-      )
-      .await;
-      if !env.contains("already in progress") {
+      let env = passkey_slot_probe("passkey get after a held slot").await;
+      if env.contains("not found") {
         later = Some(started.elapsed().as_millis());
         break;
       }
@@ -3686,16 +3692,12 @@ async fn passkey_early_cancel_checks() {
   let started = std::time::Instant::now();
   let mut freed = false;
   while started.elapsed() < std::time::Duration::from_secs(15) {
-    let env = passkey_answer(
-      "passkey get after an early cancel",
-      laufey::passkey_get(0, &passkey_get_options("example.com", 1000)),
-    )
-    .await;
-    if !env.contains("already in progress") {
+    let env = passkey_slot_probe("passkey get after an early cancel").await;
+    if env.contains("not found") {
       freed = true;
       break;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
   }
   check(
     &format!(
