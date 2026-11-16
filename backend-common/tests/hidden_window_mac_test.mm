@@ -4,8 +4,9 @@
 // it ordered in is invisible, passes clicks through, is out of cycling, the
 // Window menu, screen sharing and accessibility, gives up key, still counts
 // as on screen for AppKit (and so for WebKit), is not "shown" for laufey, and
-// is restored exactly; a full-screen window is left to orderOut. Needs a
-// window server session (a macOS runner has one). Run via
+// is restored exactly, with what was set on it while hidden; a full-screen
+// window is left to orderOut. Needs a window server session (a macOS runner
+// has one). Run via
 // `ctest --test-dir webview/build`.
 
 #include "laufey_hidden_window_mac.h"
@@ -109,6 +110,52 @@ int main() {
     EXPECT(!window.excludedFromWindowsMenu);
     EXPECT(window.isAccessibilityElement);
     EXPECT(!MacRestoreFromInvisibleHide((__bridge void*)window));
+
+    // Opacity, click passthrough and the collection behaviour set while
+    // hidden: the window stays invisible, ignoring clicks and out of
+    // Mission Control, the getters read the new values, and a show applies
+    // them rather than the ones from before the hide.
+    EXPECT(MacHideInvisibly((__bridge void*)window));
+    MacSetWindowAlpha((__bridge void*)window, 0.5);
+    MacSetIgnoresMouseEvents((__bridge void*)window, true);
+    MacSetCollectionBehavior((__bridge void*)window,
+                             NSWindowCollectionBehaviorManaged |
+                                 NSWindowCollectionBehaviorCanJoinAllSpaces);
+    EXPECT(window.alphaValue == 0);
+    EXPECT(window.ignoresMouseEvents);
+    EXPECT(window.collectionBehavior & NSWindowCollectionBehaviorTransient);
+    EXPECT(window.collectionBehavior &
+           NSWindowCollectionBehaviorCanJoinAllSpaces);
+    EXPECT(!(window.collectionBehavior & NSWindowCollectionBehaviorManaged));
+    EXPECT(MacWindowAlpha((__bridge void*)window) == 0.5);
+    EXPECT(MacIgnoresMouseEvents((__bridge void*)window));
+    EXPECT(MacCollectionBehavior((__bridge void*)window) ==
+           (NSWindowCollectionBehaviorManaged |
+            NSWindowCollectionBehaviorCanJoinAllSpaces));
+    MacSetIgnoresMouseEvents((__bridge void*)window, false);
+    EXPECT(window.ignoresMouseEvents);
+    EXPECT(MacRestoreFromInvisibleHide((__bridge void*)window));
+    EXPECT(window.alphaValue == 0.5);
+    EXPECT(!window.ignoresMouseEvents);
+    EXPECT(window.collectionBehavior ==
+           (NSWindowCollectionBehaviorManaged |
+            NSWindowCollectionBehaviorCanJoinAllSpaces));
+    // On a shown window they are the window's own properties.
+    MacSetWindowAlpha((__bridge void*)window, 0.75);
+    EXPECT(window.alphaValue == 0.75);
+    EXPECT(MacWindowAlpha((__bridge void*)window) == 0.75);
+    MacSetCollectionBehavior((__bridge void*)window,
+                             NSWindowCollectionBehaviorManaged);
+    EXPECT(window.collectionBehavior == NSWindowCollectionBehaviorManaged);
+
+    // Forgetting a hide (before a close) restores nothing.
+    EXPECT(MacHideInvisibly((__bridge void*)window));
+    EXPECT(MacForgetInvisibleHide((__bridge void*)window));
+    EXPECT(!MacIsInvisiblyHidden((__bridge void*)window));
+    EXPECT(window.alphaValue == 0);
+    EXPECT(!MacForgetInvisibleHide((__bridge void*)window));
+    [window orderOut:nil];
+    window.alphaValue = 1;
 
     // A window that was never on screen (created hidden) is ordered in.
     NSWindow* fresh = MakeWindow(NSMakeRect(260, 0, 120, 80));

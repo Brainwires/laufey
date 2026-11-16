@@ -2513,7 +2513,8 @@ void WKWebViewBackend::CloseWindow(uint32_t window_id) {
       // See OnWindowClosedByUser.
       laufey_common::PasskeyWindowClosing((__bridge const void*)win);
       laufey_common::AuthSessionWindowClosing((__bridge const void*)win);
-      laufey_common::MacRestoreFromInvisibleHide((__bridge void*)win);
+      // Not restored first: that would show it for a moment.
+      laufey_common::MacForgetInvisibleHide((__bridge void*)win);
       [win close];
     }
   });
@@ -3272,7 +3273,10 @@ void WKWebViewBackend::SetWindowOpacity(uint32_t window_id, double opacity) {
       std::lock_guard<std::mutex> lock(windows_mutex_);
       auto* state = GetWindow(window_id);
       if (state) {
-        [state->window setAlphaValue:(CGFloat)opacity];
+        // A hidden unthrottled window takes it when shown
+        // (laufey_hidden_window_mac.h).
+        laufey_common::MacSetWindowAlpha((__bridge void*)state->window,
+                                         opacity);
       }
     }
   });
@@ -3284,7 +3288,7 @@ double WKWebViewBackend::GetWindowOpacity(uint32_t window_id) {
     std::lock_guard<std::mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
     if (state) {
-      result = (double)[state->window alphaValue];
+      result = laufey_common::MacWindowAlpha((__bridge void*)state->window);
     }
   });
   return result;

@@ -23,7 +23,7 @@ NSString* const kAccessible = @"accessible";
 NSString* const kKeyObserver = @"keyObserver";
 NSString* const kMainObserver = @"mainObserver";
 
-NSDictionary* Saved(NSWindow* window) {
+NSMutableDictionary* Saved(NSWindow* window) {
   return objc_getAssociatedObject(window, &kSavedKey);
 }
 
@@ -74,7 +74,7 @@ bool MacHideInvisibly(void* raw) {
     return true;
   if (window.styleMask & NSWindowStyleMaskFullScreen)
     return false;
-  NSDictionary* saved = @{
+  NSMutableDictionary* saved = [@{
     kAlpha : @(window.alphaValue),
     kIgnoresMouse : @(window.ignoresMouseEvents),
     kShadow : @(window.hasShadow),
@@ -84,7 +84,7 @@ bool MacHideInvisibly(void* raw) {
     kAccessible : @(window.isAccessibilityElement),
     kKeyObserver : WatchFor(window, NSWindowDidBecomeKeyNotification),
     kMainObserver : WatchFor(window, NSWindowDidBecomeMainNotification),
-  };
+  } mutableCopy];
   objc_setAssociatedObject(window, &kSavedKey, saved,
                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
   window.alphaValue = 0;
@@ -100,16 +100,33 @@ bool MacHideInvisibly(void* raw) {
   return true;
 }
 
-bool MacRestoreFromInvisibleHide(void* raw) {
-  NSWindow* window = (__bridge NSWindow*)raw;
+namespace {
+
+// Ends the hide's bookkeeping (the record and its observers); the record,
+// or nil when the window wasn't hidden this way.
+NSDictionary* TakeSaved(NSWindow* window) {
   NSDictionary* saved = window ? Saved(window) : nil;
   if (!saved)
-    return false;
+    return nil;
   objc_setAssociatedObject(window, &kSavedKey, nil,
                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
   NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
   [center removeObserver:saved[kKeyObserver]];
   [center removeObserver:saved[kMainObserver]];
+  return saved;
+}
+
+}  // namespace
+
+bool MacForgetInvisibleHide(void* raw) {
+  return TakeSaved((__bridge NSWindow*)raw) != nil;
+}
+
+bool MacRestoreFromInvisibleHide(void* raw) {
+  NSWindow* window = (__bridge NSWindow*)raw;
+  NSDictionary* saved = TakeSaved(window);
+  if (!saved)
+    return false;
   window.collectionBehavior =
       (NSWindowCollectionBehavior)[saved[kBehavior] unsignedIntegerValue];
   window.sharingType = (NSWindowSharingType)[saved[kSharing] integerValue];
@@ -124,6 +141,65 @@ bool MacRestoreFromInvisibleHide(void* raw) {
 bool MacIsInvisiblyHidden(const void* raw) {
   NSWindow* window = (__bridge NSWindow*)raw;
   return window && Saved(window) != nil;
+}
+
+void MacSetWindowAlpha(void* raw, double alpha) {
+  NSWindow* window = (__bridge NSWindow*)raw;
+  if (!window)
+    return;
+  if (NSMutableDictionary* saved = Saved(window))
+    saved[kAlpha] = @(alpha);
+  else
+    window.alphaValue = alpha;
+}
+
+double MacWindowAlpha(const void* raw) {
+  NSWindow* window = (__bridge NSWindow*)raw;
+  if (!window)
+    return 1.0;
+  NSDictionary* saved = Saved(window);
+  return saved ? [saved[kAlpha] doubleValue] : window.alphaValue;
+}
+
+void MacSetIgnoresMouseEvents(void* raw, bool ignores) {
+  NSWindow* window = (__bridge NSWindow*)raw;
+  if (!window)
+    return;
+  if (NSMutableDictionary* saved = Saved(window))
+    saved[kIgnoresMouse] = @(ignores);
+  else
+    window.ignoresMouseEvents = ignores;
+}
+
+bool MacIgnoresMouseEvents(const void* raw) {
+  NSWindow* window = (__bridge NSWindow*)raw;
+  if (!window)
+    return false;
+  NSDictionary* saved = Saved(window);
+  return saved ? [saved[kIgnoresMouse] boolValue] : window.ignoresMouseEvents;
+}
+
+void MacSetCollectionBehavior(void* raw, unsigned long behavior) {
+  NSWindow* window = (__bridge NSWindow*)raw;
+  if (!window)
+    return;
+  NSWindowCollectionBehavior b = (NSWindowCollectionBehavior)behavior;
+  if (NSMutableDictionary* saved = Saved(window)) {
+    saved[kBehavior] = @(b);
+    // Still out of Mission Control and the cycle while hidden.
+    window.collectionBehavior = InvisibleBehavior(b);
+  } else {
+    window.collectionBehavior = b;
+  }
+}
+
+unsigned long MacCollectionBehavior(const void* raw) {
+  NSWindow* window = (__bridge NSWindow*)raw;
+  if (!window)
+    return 0;
+  NSDictionary* saved = Saved(window);
+  return saved ? [saved[kBehavior] unsignedLongValue]
+               : (unsigned long)window.collectionBehavior;
 }
 
 bool MacWindowShown(const void* raw) {

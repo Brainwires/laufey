@@ -30,8 +30,26 @@ bool MacHideInvisibly(void* window);
 // makes it key) as for any show. False when it wasn't hidden this way.
 bool MacRestoreFromInvisibleHide(void* window);
 
+// Drops what MacHideInvisibly recorded without restoring anything, for a
+// window that is about to close: restoring first would make it visible for
+// a moment. False when it wasn't hidden this way.
+bool MacForgetInvisibleHide(void* window);
+
 // Whether `window` is hidden by MacHideInvisibly.
 bool MacIsInvisiblyHidden(const void* window);
+
+// The properties MacHideInvisibly takes over, set and read through it: on a
+// window it hides, a value set is recorded and applied when the window is
+// shown (MacRestoreFromInvisibleHide), so it stays invisible meanwhile and
+// the value isn't lost, and the getters read that value back; on any other
+// window these are the NSWindow properties. `behavior` is an
+// NSWindowCollectionBehavior.
+void MacSetWindowAlpha(void* window, double alpha);
+double MacWindowAlpha(const void* window);
+void MacSetIgnoresMouseEvents(void* window, bool ignores);
+bool MacIgnoresMouseEvents(const void* window);
+void MacSetCollectionBehavior(void* window, unsigned long behavior);
+unsigned long MacCollectionBehavior(const void* window);
 
 // Whether `window` is on screen for the user: ordered in (isVisible) and not
 // hidden by MacHideInvisibly. What "visible" means for laufey's own checks

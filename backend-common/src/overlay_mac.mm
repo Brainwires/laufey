@@ -94,8 +94,10 @@ void Recompute(NSWindow* window, LaufeyOverlayState* st) {
   st.wantsCursorPoll =
       WantsHitRegionCursorPoll(st.explicitPassthrough, st->region, visible,
                                ToScreenRect(frame), p.x, p.y);
-  if ((bool)[window ignoresMouseEvents] != pass)
-    [window setIgnoresMouseEvents:pass];
+  // A window hidden invisibly keeps passing clicks through; the value is
+  // what it takes when shown (laufey_hidden_window_mac.h).
+  if (MacIgnoresMouseEvents((__bridge void*)window) != pass)
+    MacSetIgnoresMouseEvents((__bridge void*)window, pass);
 }
 
 void RecomputeAll();
@@ -325,7 +327,8 @@ bool MacSetVisibleOnAllWorkspaces(void* nswindow, bool visible,
   NSWindow* window = (__bridge NSWindow*)nswindow;
   if (!window)
     return false;
-  NSWindowCollectionBehavior b = [window collectionBehavior];
+  NSWindowCollectionBehavior b =
+      (NSWindowCollectionBehavior)MacCollectionBehavior(nswindow);
   b &= ~(NSWindowCollectionBehaviorCanJoinAllSpaces |
          NSWindowCollectionBehaviorMoveToActiveSpace |
          NSWindowCollectionBehaviorFullScreenAuxiliary |
@@ -341,7 +344,7 @@ bool MacSetVisibleOnAllWorkspaces(void* nswindow, bool visible,
     // be above it (set_window_level STATUS or higher).
     b |= NSWindowCollectionBehaviorFullScreenAuxiliary;
   }
-  [window setCollectionBehavior:b];
+  MacSetCollectionBehavior(nswindow, b);
   return true;
 }
 
