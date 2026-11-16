@@ -178,6 +178,10 @@ struct WinWindowState {
   bool devtools_queued = false;
   // CreateCoreWebView2Controller failures so far (RetryControllerCreation).
   int controller_failures = 0;
+  // LAUFEY_TRACE_NETWORK=1: the DevTools event receivers, held for the
+  // window's life.
+  std::vector<ComPtr<ICoreWebView2DevToolsProtocolEventReceiver>>
+      trace_receivers;
 };
 
 // Custom window message for UI tasks
@@ -219,6 +223,20 @@ constexpr DWORD kDevToolsCloseRetryMs = 500;
 static bool TracePermissionsEnabled() {
   static const bool enabled = [] {
     const char* v = std::getenv("LAUFEY_TRACE_PERMISSIONS");
+    return v && std::string(v) == "1";
+  }();
+  return enabled;
+}
+
+// LAUFEY_TRACE_NETWORK=1: the engine's own account of the page's requests,
+// from the DevTools protocol (Network.requestWillBeSent for loopback and
+// private addresses, Network.loadingFailed with its blockedReason /
+// corsErrorStatus, Log.entryAdded, Runtime.consoleAPICalled and
+// Runtime.exceptionThrown), one stderr line each. Off by default: nothing is
+// enabled or subscribed then.
+static bool TraceNetworkEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("LAUFEY_TRACE_NETWORK");
     return v && std::string(v) == "1";
   }();
   return enabled;
@@ -2518,6 +2536,58 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
                         })
                         .Get(),
                     nullptr);
+              }
+            }
+
+            // LAUFEY_TRACE_NETWORK=1 (diagnostics).
+            if (TraceNetworkEnabled()) {
+              std::cerr << "laufey: network-trace enabled for window " << wid
+                        << std::endl;
+              for (const wchar_t* domain :
+                   {L"Network.enable", L"Log.enable", L"Runtime.enable"}) {
+                state->webview->CallDevToolsProtocolMethod(domain, L"{}",
+                                                           nullptr);
+              }
+              for (const wchar_t* event :
+                   {L"Network.requestWillBeSent", L"Network.loadingFailed",
+                    L"Log.entryAdded", L"Runtime.consoleAPICalled",
+                    L"Runtime.exceptionThrown"}) {
+                ComPtr<ICoreWebView2DevToolsProtocolEventReceiver> receiver;
+                if (FAILED(state->webview->GetDevToolsProtocolEventReceiver(
+                        event, &receiver)) ||
+                    !receiver)
+                  continue;
+                std::string name = WideToUtf8(event);
+                receiver->add_DevToolsProtocolEventReceived(
+                    Callback<
+                        ICoreWebView2DevToolsProtocolEventReceivedEventHandler>(
+                        [wid, name](
+                            ICoreWebView2*,
+                            ICoreWebView2DevToolsProtocolEventReceivedEventArgs*
+                                args) -> HRESULT {
+                          LPWSTR raw = nullptr;
+                          if (FAILED(args->get_ParameterObjectAsJson(&raw)) ||
+                              !raw)
+                            return S_OK;
+                          std::string params = WideToUtf8(raw);
+                          CoTaskMemFree(raw);
+                          // Only the requests that reach for this machine or
+                          // its network (the ones Local Network Access and
+                          // the private-network rules govern).
+                          if (name == "Network.requestWillBeSent" &&
+                              params.find("127.0.0.1") == std::string::npos &&
+                              params.find("localhost") == std::string::npos)
+                            return S_OK;
+                          if (params.size() > 2000)
+                            params.resize(2000);
+                          std::cerr << "laufey: network-trace window " << wid
+                                    << " " << name << " " << params
+                                    << std::endl;
+                          return S_OK;
+                        })
+                        .Get(),
+                    nullptr);
+                state->trace_receivers.push_back(receiver);
               }
             }
 
