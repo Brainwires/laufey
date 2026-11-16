@@ -4035,12 +4035,29 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
       return;
     }
     st->devtools_opening--;
-    TraceDevTools(found ? "open: finder found" : "open: finder stopped",
-                  window_id, pid,
-                  "found=" + HwndText(found) + " " + DevToolsStateText(st));
+    // The scan ran without the lock: the open may have been settled meanwhile
+    // (its window adopted through FindDevToolsWindow, then closed by a
+    // close_devtools). Adopting the scan's result then would bring back the
+    // window that close just closed, so only an open still waiting adopts.
+    // The same for a window the current open's baseline holds (this thread
+    // may serve an earlier open, with an older baseline).
+    const auto& current = st->devtools_before;
+    if (found &&
+        (!st->devtools_awaiting ||
+         std::find(current.begin(), current.end(), found) != current.end())) {
+      TraceDevTools("open: finder found, open already settled", window_id, pid,
+                    "found=" + HwndText(found) + " " + DevToolsStateText(st));
+      found = nullptr;
+    } else {
+      TraceDevTools(found ? "open: finder found" : "open: finder stopped",
+                    window_id, pid,
+                    "found=" + HwndText(found) + " " + DevToolsStateText(st));
+    }
     if (found)
       AdoptDevToolsWindow(window_id, st, found);
-    else
+    else if (!st->devtools_awaiting || st->devtools_opening == 0)
+      // The turn ends with the view's last finder (or a settled open), never
+      // under a newer open of the same view that is still looking.
       ReleaseDevToolsOpen(pid, window_id);
   }).detach();
 }
