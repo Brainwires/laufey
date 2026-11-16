@@ -30,6 +30,8 @@ concurrency:
 jobs:
   runners:
     name: pick runners
+    # The crates.io `laufey` name is upstream's: forks never publish it.
+    if: github.repository == 'littledivy/laufey'
     # Our self-hosted pools first, GitHub-hosted for the overflow: a job takes our pool only
     # while it has a free slot, else its GitHub image at once (fork pull requests: GitHub only).
     runs-on: ubuntu-latest
@@ -48,7 +50,8 @@ jobs:
   publish:
     name: cargo publish (laufey)
     needs: runners
-    if: ${{ !cancelled() }}
+    # The crates.io `laufey` name is upstream's: forks never publish it.
+    if: ${{ !cancelled() && github.repository == 'littledivy/laufey' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').publish || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
