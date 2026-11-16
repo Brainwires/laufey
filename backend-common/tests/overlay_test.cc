@@ -6,6 +6,7 @@
 
 #include "laufey_overlay.h"
 
+#include <clocale>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -250,6 +251,23 @@ static void TestSpeechRequest() {
   EXPECT(!Parse(big.c_str(), &r));
 }
 
+// The fractional numbers are read with a '.' decimal point whatever the
+// locale says (GTK sets LC_NUMERIC: German writes ',', Persian the two-byte
+// U+066B), not cut at the '.'. A locale the machine lacks is skipped.
+static void TestSpeechRequestLocales() {
+  const char* locales[] = {"de_DE.UTF-8", "sv_SE.UTF-8", "fa_IR.UTF-8",
+                           "ar_SA.UTF-8"};
+  const char* json = R"({"text":"x","rate": 1.5,"pitch":0.25,"volume":5e-1})";
+  for (const char* name : locales) {
+    if (!std::setlocale(LC_NUMERIC, name))
+      continue;
+    SpeechRequest r;
+    EXPECT(Parse(json, &r));
+    EXPECT(r.rate == 1.5 && r.pitch == 0.25 && r.volume == 0.5);
+    std::setlocale(LC_NUMERIC, "C");
+  }
+}
+
 static void TestSpeechTracker() {
   SpeechTracker t;
   std::vector<Report> reports;
@@ -290,6 +308,7 @@ int main() {
   TestLayerEdgeAnchor();
   TestLevelsAndPolicy();
   TestSpeechRequest();
+  TestSpeechRequestLocales();
   TestSpeechTracker();
   std::printf("overlay_test: all passed\n");
   return 0;

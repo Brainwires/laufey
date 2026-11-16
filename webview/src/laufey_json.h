@@ -3,6 +3,7 @@
 #ifndef LAUFEY_JSON_H_
 #define LAUFEY_JSON_H_
 
+#include "laufey_c_number.h"
 #include "laufey_utf8.h"
 #include "webview_value.h"
 
@@ -95,11 +96,10 @@ inline std::string Serialize(const laufey::ValuePtr& value) {
       return value->GetBool() ? "true" : "false";
     case laufey::ValueType::Int:
       return std::to_string(value->GetInt());
-    case laufey::ValueType::Double: {
-      char buf[64];
-      snprintf(buf, sizeof(buf), "%.17g", value->GetDouble());
-      return buf;
-    }
+    case laufey::ValueType::Double:
+      // '.' whatever the locale ("%.17g" writes "1,5" under a German one,
+      // which the page reads as two numbers); null for NaN / infinity.
+      return laufey_common::FormatDoubleC(value->GetDouble());
     case laufey::ValueType::String:
       return "\"" + Escape(value->GetString()) + "\"";
     case laufey::ValueType::Binary: {
@@ -395,16 +395,10 @@ class Parser {
         ++p_;
     }
     // The token is validated. strtod follows the process locale's decimal
-    // separator (GTK sets the locale), so hand it that separator.
+    // point (GTK sets the locale), which StrtodC hands it, multi-byte ones
+    // included.
     std::string token(start, p_);
-    const char* point = std::localeconv()->decimal_point;
-    if (point && point[0] && point[0] != '.' && !point[1]) {
-      for (char& c : token) {
-        if (c == '.')
-          c = point[0];
-      }
-    }
-    double d = std::strtod(token.c_str(), nullptr);
+    double d = laufey_common::StrtodC(token.c_str(), nullptr);
     if (!std::isfinite(d))
       return nullptr;  // out of range ("1e999"); JSON.stringify never writes it
     if (integral && d >= INT_MIN && d <= INT_MAX)

@@ -9,6 +9,8 @@
 #include "laufey_json.h"
 
 #include <chrono>
+#include <clocale>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -143,6 +145,37 @@ int main() {
     ValuePtr again = P(json::Serialize(v));
     EXPECT(again && again->GetDict().at("s")->GetString() == "\xE2\x9C\x93\n");
     EXPECT(again->GetDict().at("n")->GetList().size() == 3);
+  }
+
+  // Numbers keep a '.' decimal point whatever LC_NUMERIC says (GTK sets
+  // it): "1.5" is not cut at the '.' (littledivy/laufey#125, where the cut
+  // token then made the args array grow without end), and a double is
+  // written "2.5", never "2,5" (two numbers in an array). A locale the
+  // machine lacks is skipped; fa_IR / ar_SA have a two-byte decimal point.
+  {
+    const char* locales[] = {"de_DE.UTF-8", "sv_SE.UTF-8", "fa_IR.UTF-8",
+                             "ar_SA.UTF-8"};
+    for (const char* name : locales) {
+      if (!std::setlocale(LC_NUMERIC, name))
+        continue;
+      const char* doc =
+          R"({"callId":1,"method":"m","args":[{"fee":1.5},-2.25e1]})";
+      ValuePtr v = P(doc);
+      EXPECT(v && v->IsDict());
+      const auto& args = v->GetDict().at("args")->GetList();
+      EXPECT(args.size() == 2);
+      EXPECT(args[0]->GetDict().at("fee")->GetDouble() == 1.5);
+      EXPECT(args[1]->GetDouble() == -22.5);
+      ValuePtr list = laufey::Value::List();
+      list->GetList().push_back(laufey::Value::Double(2.5));
+      EXPECT(json::Serialize(list) == "[2.5]");
+      std::setlocale(LC_NUMERIC, "C");
+    }
+  }
+  {
+    ValuePtr list = laufey::Value::List();
+    list->GetList().push_back(laufey::Value::Double(NAN));
+    EXPECT(json::Serialize(list) == "[null]");
   }
 
   std::printf("laufey_json_test: ok\n");

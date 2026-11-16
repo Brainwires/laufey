@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "json_reader.h"
+#include "laufey_c_number.h"
 
 namespace laufey_common {
 
@@ -152,8 +153,9 @@ bool FindNumberLiteral(const std::string& json, const std::string& key,
           j++;
         if (j < json.size() && json[j] == ':') {
           const char* start = json.c_str() + j + 1;
-          char* end = nullptr;
-          double v = std::strtod(start, &end);
+          const char* end = nullptr;
+          // '.' whatever LC_NUMERIC says (GTK sets it: "1.5" read as 1).
+          double v = laufey_common::StrtodC(start, &end);
           if (end != start && std::isfinite(v)) {
             *out = v;
             return true;
