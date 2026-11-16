@@ -360,6 +360,24 @@ if [ "$mode" = "--bridge-origin" ] || [ "$mode" = "--media-capture" ]; then
     printf '{ "bridgeOrigins": ["app://e2e-bridge-ok"] }\n' >"$launch_file"
   fi
   trap 'rm -f "$launch_file" "$colocated_rt"' EXIT
+  # macOS: what the capture checks depend on, printed with the run (the
+  # guest's OS and WebKit, the capture devices it has, the bundle's usage
+  # strings and entitlements), so a failure on a runner shows its cause.
+  if [ "$mode" = "--media-capture" ] && [ "$(uname -s)" = Darwin ]; then
+    echo "== media capture environment =="
+    sw_vers 2>&1 | sed 's/^/  /' || true
+    echo "  WebKit $(defaults read /System/Library/Frameworks/WebKit.framework/Resources/Info.plist CFBundleVersion 2>&1 || true)"
+    echo "  cameras:"
+    system_profiler SPCameraDataType 2>&1 | grep -E '^ {4}[^ ].*:$|Model ID' | sed 's/^/  /' || true
+    echo "  audio devices:"
+    system_profiler SPAudioDataType 2>&1 | grep -E '^ {8}[^ ].*:$|Input Channels|Input Source' | sed 's/^/  /' || true
+    plist="${bin%/MacOS/*}/Info.plist"
+    for key in NSCameraUsageDescription NSMicrophoneUsageDescription; do
+      echo "  $key: $(/usr/libexec/PlistBuddy -c "Print :$key" "$plist" 2>&1 || true)"
+    done
+    echo "  entitlements:"
+    codesign -d --entitlements - "${bin%/Contents/MacOS/*}" 2>&1 | grep -iE 'device|audio|camera|sandbox|Executable' | sed 's/^/    /' || true
+  fi
   # First without the runtime: a packaged app that ships none must exit at
   # once with status 3 and say why, not wait (a dialog, an empty window).
   missing_log="$(mktemp "${TMPDIR:-/tmp}/native-e2e-missing.XXXXXX")"

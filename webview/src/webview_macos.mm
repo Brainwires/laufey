@@ -2216,7 +2216,27 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
         @try {
           [config.preferences setValue:@YES
                                 forKey:@"mockCaptureDevicesEnabled"];
-        } @catch (NSException*) {
+        } @catch (NSException* e) {
+          std::cerr << "laufey: test hook: mockCaptureDevicesEnabled: "
+                    << e.reason.UTF8String << std::endl;
+        }
+        // What the engine reads back, for the e2e log (once per process).
+        static bool logged = false;
+        if (!logged) {
+          logged = true;
+          for (NSString* key in @[
+                 @"mockCaptureDevicesEnabled", @"mediaDevicesEnabled",
+                 @"mediaStreamEnabled", @"peerConnectionEnabled"
+               ]) {
+            NSString* value = @"(no such preference)";
+            @try {
+              value = [[config.preferences valueForKey:key] description];
+            } @catch (NSException*) {
+            }
+            std::cerr << "laufey: test hook: WKPreferences " << key.UTF8String
+                      << " = " << (value ? value.UTF8String : "nil")
+                      << std::endl;
+          }
         }
       }
       [config.userContentController addScriptMessageHandler:handler

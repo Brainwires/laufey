@@ -82,7 +82,12 @@ async function capture(step) {
       return 'ok';
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
-      return 'err:NoMediaDevices';
+      // Why, for the log: a secure context, and what the engine exposes.
+      return 'err:NoMediaDevices (secureContext=' + window.isSecureContext +
+        ', mediaDevices=' + typeof navigator.mediaDevices +
+        ', getUserMedia=' + typeof navigator.getUserMedia +
+        ', webkitGetUserMedia=' + typeof navigator.webkitGetUserMedia +
+        ', origin=' + location.origin + ')';
     const stream = await navigator.mediaDevices.getUserMedia(constraints[step]);
     stream.getTracks().forEach((t) => t.stop());
     return 'ok';
@@ -221,7 +226,9 @@ fn check_allowed(name: &str, result: &str) {
   }
   check(
     &format!("{name} ({result})"),
-    result != "none" && !refused(result) && result != "err:NoMediaDevices",
+    result != "none"
+      && !refused(result)
+      && !result.starts_with("err:NoMediaDevices"),
   );
 }
 
