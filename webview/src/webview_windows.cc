@@ -52,6 +52,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <condition_variable>
@@ -171,6 +172,9 @@ struct WinWindowState {
   // again means it is closing (Chromium hides a DevTools window, then
   // destroys it).
   bool devtools_seen_visible = false;
+  // An open_devtools waiting for another view of the same browser process to
+  // find its DevTools window first (devtools_open_owner_).
+  bool devtools_queued = false;
   // CreateCoreWebView2Controller failures so far (RetryControllerCreation).
   int controller_failures = 0;
 };
@@ -874,6 +878,18 @@ class WebView2Backend : public LaufeyBackend {
   // asks again until it is gone (devtools_closing). windows_mutex_ held.
   void CloseDevToolsWindow(uint32_t window_id, WinWindowState* state,
                            HWND hwnd);
+  // One open_devtools in flight per browser process. A DevTools window is
+  // told apart from the process's others only as the one that appeared after
+  // the open (WebView2 gives no handle to it), so two views of one process
+  // opening at once could each adopt the other's. The view whose open is in
+  // flight, by browser process, and the views waiting their turn: a later
+  // open waits until the earlier one has found its window, given up, been
+  // closed, or its window is gone. windows_mutex_ held.
+  std::map<DWORD, uint32_t> devtools_open_owner_;
+  std::map<DWORD, std::deque<uint32_t>> devtools_open_queue_;
+  // Ends `window_id`'s turn on browser process `pid` (if it holds it) and
+  // starts the next queued open. windows_mutex_ held.
+  void ReleaseDevToolsOpen(DWORD pid, uint32_t window_id);
   std::recursive_mutex windows_mutex_;
   bool class_registered_ = false;
   // See SchemesForEnvironment.
@@ -3934,6 +3950,22 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
           &not_ready))
     return;
   DWORD pid = static_cast<DWORD>(state->browser_pid);
+  // Another view of this browser process is still finding its DevTools
+  // window: this open waits its turn (ReleaseDevToolsOpen starts it).
+  auto in_flight = devtools_open_owner_.find(pid);
+  if (in_flight != devtools_open_owner_.end() &&
+      in_flight->second != window_id && GetWindow(in_flight->second)) {
+    auto& queue = devtools_open_queue_[pid];
+    if (std::find(queue.begin(), queue.end(), window_id) == queue.end())
+      queue.push_back(window_id);
+    state->devtools_queued = true;
+    TraceDevTools("open: queued behind another view's open", window_id, pid,
+                  "in_flight=" + std::to_string(in_flight->second) + " " +
+                      DevToolsStateText(state));
+    return;
+  }
+  devtools_open_owner_[pid] = window_id;
+  state->devtools_queued = false;
   if (!state->devtools_awaiting) {
     // A repeated open while the first one's window hasn't shown keeps the
     // first one's baseline: that window is still the one to adopt.
@@ -3998,15 +4030,56 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
     }
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
     auto* st = GetWindow(window_id);
-    if (!st)
+    if (!st) {
+      ReleaseDevToolsOpen(pid, window_id);
       return;
+    }
     st->devtools_opening--;
-    TraceDevTools(found ? "open: finder found" : "open: finder gave up",
+    TraceDevTools(found ? "open: finder found" : "open: finder stopped",
                   window_id, pid,
                   "found=" + HwndText(found) + " " + DevToolsStateText(st));
     if (found)
       AdoptDevToolsWindow(window_id, st, found);
+    else
+      ReleaseDevToolsOpen(pid, window_id);
   }).detach();
+}
+
+void WebView2Backend::ReleaseDevToolsOpen(DWORD pid, uint32_t window_id) {
+  auto owner = devtools_open_owner_.find(pid);
+  if (owner == devtools_open_owner_.end() || owner->second != window_id)
+    return;
+  devtools_open_owner_.erase(owner);
+  auto queued = devtools_open_queue_.find(pid);
+  if (queued == devtools_open_queue_.end())
+    return;
+  while (!queued->second.empty()) {
+    uint32_t next = queued->second.front();
+    queued->second.pop_front();
+    auto* st = GetWindow(next);
+    if (st && st->devtools_queued) {
+      st->devtools_queued = false;
+      // Always posted (never run inline from inside the caller, which holds
+      // another view's DevTools state): ahead of any open asked for later.
+      struct Start {
+        WebView2Backend* self;
+        uint32_t window_id;
+      };
+      auto* start = new Start{this, next};
+      if (!PostUiTask(
+              [](void* p) {
+                auto* s = static_cast<Start*>(p);
+                s->self->OpenDevTools(s->window_id);
+                delete s;
+              },
+              start)) {
+        delete start;
+      }
+      break;
+    }
+  }
+  if (queued->second.empty())
+    devtools_open_queue_.erase(queued);
 }
 
 void WebView2Backend::AdoptDevToolsWindow(uint32_t window_id,
@@ -4015,6 +4088,7 @@ void WebView2Backend::AdoptDevToolsWindow(uint32_t window_id,
                 "found=" + HwndText(found) + " " + DevToolsStateText(state));
   state->devtools_awaiting = false;
   state->devtools_before.clear();
+  ReleaseDevToolsOpen(static_cast<DWORD>(state->browser_pid), window_id);
   if (state->devtools_close_pending) {
     // Closed while still opening: close what has now opened.
     state->devtools_close_pending = false;
@@ -4122,6 +4196,16 @@ void WebView2Backend::CloseDevTools(uint32_t window_id) {
   HWND hwnd = FindDevToolsWindow(window_id);
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
+  if (state && state->devtools_queued) {
+    // Not started yet: the open is dropped from the queue.
+    state->devtools_queued = false;
+    auto queued =
+        devtools_open_queue_.find(static_cast<DWORD>(state->browser_pid));
+    if (queued != devtools_open_queue_.end()) {
+      auto& q = queued->second;
+      q.erase(std::remove(q.begin(), q.end(), window_id), q.end());
+    }
+  }
   if (!hwnd) {
     TraceDevTools("close: no window found", window_id,
                   state ? static_cast<DWORD>(state->browser_pid) : 0,
@@ -4138,6 +4222,7 @@ void WebView2Backend::CloseDevTools(uint32_t window_id) {
     // A repeated open of DevTools already open found nothing new to wait for.
     state->devtools_awaiting = false;
     state->devtools_before.clear();
+    ReleaseDevToolsOpen(static_cast<DWORD>(state->browser_pid), window_id);
   }
 }
 
