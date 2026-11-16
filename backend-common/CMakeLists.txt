@@ -328,6 +328,12 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_js_calls_test COMMAND laufey_js_calls_test)
 
+  # When a failed WebView2 controller creation is retried
+  # (laufey_controller_retry.h).
+  add_executable(laufey_controller_retry_test tests/controller_retry_test.cc)
+  target_link_libraries(laufey_controller_retry_test PRIVATE laufey_backend_common)
+  add_test(NAME laufey_controller_retry_test COMMAND laufey_controller_retry_test)
+
   # Which DevTools window an open brought up (laufey_devtools_windows.h).
   add_executable(laufey_devtools_windows_test tests/devtools_windows_test.cc)
   target_link_libraries(laufey_devtools_windows_test PRIVATE laufey_backend_common)

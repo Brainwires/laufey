@@ -2,6 +2,7 @@
 
 #include "runtime_loader.h"
 #include "laufey_backend_common.h"
+#include "laufey_controller_retry.h"
 #include "laufey_devtools_windows.h"
 #include "laufey_quit_request.h"
 #include "laufey_media_capture.h"
@@ -56,7 +57,9 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <chrono>
 #include <condition_variable>
+#include <future>
 #include <vector>
 #include <functional>
 #include <memory>
@@ -176,8 +179,10 @@ struct WinWindowState {
   // An open_devtools waiting for another view of the same browser process to
   // find its DevTools window first (devtools_open_owner_).
   bool devtools_queued = false;
-  // CreateCoreWebView2Controller failures so far (RetryControllerCreation).
+  // CreateCoreWebView2Controller failures so far, and when the first was
+  // (GetTickCount64), for the retry budget (RetryControllerCreation).
   int controller_failures = 0;
+  ULONGLONG first_controller_failure = 0;
   // LAUFEY_TRACE_NETWORK=1: the DevTools event receivers, held for the
   // window's life.
   std::vector<ComPtr<ICoreWebView2DevToolsProtocolEventReceiver>>
@@ -198,15 +203,14 @@ constexpr UINT kWebViewReadyTimeoutMs = 45000;
 // ready (distinct from "window not found", which means no such window).
 constexpr char kWebViewNotReady[] =
     "web view not ready (its WebView2 controller was not created)";
-// How many times a window's CreateCoreWebView2Controller may fail before its
-// web view is given up on. WebView2's contract (ICoreWebView2Environment::
-// CreateCoreWebView2Controller): the app retries a failed creation,
-// starting again from a new environment, unless the error is
-// ERROR_INVALID_STATE (a running instance with other environment options)
-// or the parent window is gone (E_ABORT). Without the retry a window whose
-// one creation failed (seen on CI right after another launch of the same
-// app) never gets a web view: no page, no DevTools.
-constexpr int kControllerAttempts = 4;
+// A window's failed CreateCoreWebView2Controller is retried. WebView2's
+// contract (ICoreWebView2Environment::CreateCoreWebView2Controller): the app
+// retries a failed creation, starting again from a new environment, unless
+// the error is ERROR_INVALID_STATE (a running instance with other
+// environment options) or the parent window is gone (E_ABORT). Without the
+// retry a window whose one creation failed (seen on CI right after another
+// launch of the same app) never gets a web view: no page, no DevTools. When
+// and for how long: laufey_controller_retry.h.
 // How long the DevTools finder thread looks for the window an
 // open_devtools brought up; past it FindDevToolsWindow still adopts it.
 constexpr ULONGLONG kDevToolsFindMs = 30000;
@@ -911,9 +915,10 @@ class WebView2Backend : public LaufeyBackend {
                           ICoreWebView2Environment* env,
                           std::vector<std::string> schemes);
   // A failed CreateCoreWebView2Controller (`hr`): logs it and, when
-  // WebView2's contract allows (kControllerAttempts), starts the window's
-  // web view again from a new environment after a short pause. False when
-  // it gives up (the caller then settles the window's waiters as failed).
+  // WebView2's contract and the retry budget allow (laufey_controller_retry.h),
+  // starts the window's web view again from a new environment after a pause.
+  // False when it gives up (the caller then settles the window's waiters as
+  // failed).
   // UI thread.
   bool RetryControllerCreation(uint32_t window_id, HWND hwnd, HRESULT hr,
                                const std::vector<std::string>& schemes);
@@ -2614,6 +2619,7 @@ bool WebView2Backend::RetryControllerCreation(
     uint32_t window_id, HWND hwnd, HRESULT hr,
     const std::vector<std::string>& schemes) {
   int failures = 0;
+  ULONGLONG elapsed_ms = 0;
   bool alive = false;
   {
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
@@ -2621,6 +2627,9 @@ bool WebView2Backend::RetryControllerCreation(
     if (state && state->hwnd == hwnd && IsWindow(hwnd)) {
       alive = true;
       failures = ++state->controller_failures;
+      if (failures == 1)
+        state->first_controller_failure = GetTickCount64();
+      elapsed_ms = GetTickCount64() - state->first_controller_failure;
     }
   }
   // E_ABORT with the window gone is the documented outcome of closing a
@@ -2631,20 +2640,24 @@ bool WebView2Backend::RetryControllerCreation(
               << static_cast<uint32_t>(hr) << std::dec << ")" << std::endl;
     return false;
   }
+  // From a new environment, as WebView2's documentation asks, after a pause
+  // that lets a browser process holding the user data folder finish exiting
+  // (laufey_controller_retry.h: a backoff within a budget of time).
+  DWORD delay_ms = laufey_common::ControllerRetryDelayMs(
+      static_cast<uint32_t>(failures),
+      static_cast<uint32_t>(elapsed_ms > 0xFFFFFFFFull ? 0xFFFFFFFFull
+                                                       : elapsed_ms),
+      hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE));
   std::cerr << "Failed to create WebView2 controller for window " << window_id
             << " (hr=0x" << std::hex << static_cast<uint32_t>(hr) << std::dec
-            << ", attempt " << failures << " of " << kControllerAttempts << ")"
-            << std::endl;
-  if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE) ||
-      failures >= kControllerAttempts) {
+            << ", attempt " << failures << ", " << elapsed_ms
+            << " ms after the first failure)" << std::endl;
+  if (delay_ms == 0) {
     std::cerr << "laufey: window " << window_id
               << " has no web view: WebView2 could not create its controller"
               << std::endl;
     return false;
   }
-  // From a new environment, as WebView2's documentation asks; the pause
-  // lets a browser process that was shutting down finish exiting.
-  DWORD delay_ms = 250u << (failures - 1);
   std::thread([this, window_id, hwnd, schemes, delay_ms] {
     Sleep(delay_ms);
     RunOnUiThread([this, window_id, hwnd, schemes] {
@@ -4559,6 +4572,29 @@ bool WebView2Backend::IsDevToolsOpen(uint32_t window_id) {
 bool WebView2Backend::IsDevToolsEnabled(uint32_t window_id) {
   if (window_id == 0)
     return laufey_common::LaunchInspectable();
+  // The setting is the engine's, which a window's web view has only once it
+  // is created (asynchronously; seconds on a loaded machine). Asked off the
+  // UI thread while it is still being created, this waits for it (at most
+  // the web view's ready timeout) instead of answering false for a web view
+  // that will have it on. A web view that never comes answers false.
+  if (GetCurrentThreadId() != ui_thread_id_) {
+    auto ready = std::make_shared<std::promise<void>>();
+    std::future<void> settled = ready->get_future();
+    bool queued = false;
+    RunOnUiThreadSync([&] {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      auto* state = GetWindow(window_id);
+      if (!state)
+        return;
+      const char* not_ready = nullptr;
+      if (!WebViewReadyOrQueue(
+              state, [ready](const char*) { ready->set_value(); }, &not_ready))
+        queued = not_ready == nullptr;
+    });
+    if (queued)
+      settled.wait_for(
+          std::chrono::milliseconds(kWebViewReadyTimeoutMs + 1000));
+  }
   BOOL enabled = FALSE;
   RunOnUiThreadSync([&] {
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
