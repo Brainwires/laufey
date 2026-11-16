@@ -34,7 +34,8 @@ inline bool ParseStreamAckCount(const std::string& n, size_t* out) {
   const char* end = n.data() + n.size();
   auto result = std::from_chars(n.data(), end, value);
   if (result.ec != std::errc() || result.ptr != end ||
-      value > std::numeric_limits<size_t>::max())
+      // Parenthesized: <windows.h> defines a max() macro.
+      value > (std::numeric_limits<size_t>::max)())
     return false;
   *out = static_cast<size_t>(value);
   return true;
