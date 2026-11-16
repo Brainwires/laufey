@@ -981,12 +981,16 @@ that it says so). `--devtools-off` runs the DevTools part again under
   key, a press through `test_trigger_shortcut` reaching the handler with the
   canonical form, and a real key press: on Windows injected with `SendInput` and
   arriving as `WM_HOTKEY`, on X11 injected with xdotool (XTEST) and matched
-  against the shortcut's key grab. Then the **conflict**: the battery starts a
-  second copy of the backend (`LAUFEY_E2E_ONLY=shortcut-holder`, its own data
-  directory) that registers a shortcut and reports through a file; this process
-  must get `CONFLICT` for the same shortcut from the OS (Carbon's exclusive hot
-  keys, `RegisterHotKey`, an X11 grab), and `OK` once the holder has released it
-  and exited. Unregister, the list, the test hook after unregistering, and
+  against the shortcut's key grab. On Windows the real press is N/A, with the
+  reason, when injected input can't reach the process's desktop: the session has
+  no input desktop it can open (locked, disconnected, or on a secure desktop) or
+  input goes to another desktop; `SendInput` reports such input as sent and the
+  system drops it. Then the **conflict**: the battery starts a second copy of
+  the backend (`LAUFEY_E2E_ONLY=shortcut-holder`, its own data directory) that
+  registers a shortcut and reports through a file; this process must get
+  `CONFLICT` for the same shortcut from the OS (Carbon's exclusive hot keys,
+  `RegisterHotKey`, an X11 grab), and `OK` once the holder has released it and
+  exited. Unregister, the list, the test hook after unregistering, and
   re-registering finish it. A Wayland session with the portal is N/A (nothing
   can answer the portal's dialog); the portal client is covered by
   `shortcuts_portal_test` (ctest) against a mock portal.

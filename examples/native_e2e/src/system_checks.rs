@@ -261,6 +261,14 @@ async fn real_press_check(pressed: &Arc<Mutex<Vec<String>>>) {
   let before = pressed.lock().unwrap().len();
   #[cfg(windows)]
   {
+    // Injected input reaches a hotkey only on the session's input desktop;
+    // on a locked or disconnected session it is dropped although SendInput
+    // reports it sent.
+    eprintln!("[e2e] real key press: {}", win_input::input_state());
+    if let Some(reason) = win_input::input_unreachable_reason() {
+      na(&format!("a real key press ({reason})"));
+      return;
+    }
     let sent = win_input::press_ctrl_alt_shift_f10();
     check("SendInput injected the key press", sent);
   }
@@ -276,10 +284,16 @@ async fn real_press_check(pressed: &Arc<Mutex<Vec<String>>>) {
         .is_some(),
     );
   }
-  check(
-    "a real key press fires the global shortcut",
-    wait_for(|| pressed.lock().unwrap().len() > before, 100, 20).await,
-  );
+  let fired =
+    wait_for(|| pressed.lock().unwrap().len() > before, 100, 20).await;
+  #[cfg(windows)]
+  if !fired {
+    eprintln!(
+      "[e2e] real key press: no hotkey within 2 s; now {}",
+      win_input::input_state()
+    );
+  }
+  check("a real key press fires the global shortcut", fired);
   check(
     "the real press carries the canonical accelerator",
     pressed.lock().unwrap()[before..]
@@ -393,6 +407,7 @@ pub async fn hold_shortcut() {
 
 #[cfg(windows)]
 mod win_input {
+  use std::ffi::c_void;
   #[repr(C)]
   #[derive(Clone, Copy)]
   struct KeybdInput {
@@ -415,6 +430,129 @@ mod win_input {
 
   extern "system" {
     fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+    fn OpenInputDesktop(flags: u32, inherit: i32, access: u32) -> isize;
+    fn CloseDesktop(desktop: isize) -> i32;
+    fn GetThreadDesktop(thread: u32) -> isize;
+    fn GetCurrentThreadId() -> u32;
+    fn GetUserObjectInformationW(
+      object: isize,
+      index: i32,
+      info: *mut u16,
+      len: u32,
+      needed: *mut u32,
+    ) -> i32;
+    fn GetLastError() -> u32;
+    fn SetLastError(code: u32);
+    fn GetForegroundWindow() -> *mut c_void;
+    fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+    fn GetClassNameW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
+    fn GetWindowTextW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
+    fn GetCurrentProcessId() -> u32;
+    fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
+    fn WTSGetActiveConsoleSessionId() -> u32;
+  }
+
+  fn utf16_text(buf: &[u16], len: i32) -> String {
+    let len = (len.max(0) as usize).min(buf.len());
+    String::from_utf16_lossy(&buf[..len])
+  }
+
+  /// What injected input meets on this machine, for the log of the real key
+  /// press: the input desktop against this thread's, the foreground window
+  /// and whose it is, and this process's session against the console's.
+  pub fn input_state() -> String {
+    let input = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
+    let input_desc = if input == 0 {
+      format!("OpenInputDesktop failed (error {})", unsafe {
+        GetLastError()
+      })
+    } else {
+      let name = desktop_name(input);
+      unsafe { CloseDesktop(input) };
+      format!("input desktop {name:?}")
+    };
+    let ours = desktop_name(unsafe { GetThreadDesktop(GetCurrentThreadId()) });
+    let fg = unsafe { GetForegroundWindow() };
+    let mut fg_pid = 0u32;
+    let mut class = [0u16; 128];
+    let mut title = [0u16; 128];
+    let (class_len, title_len) = if !fg.is_null() {
+      unsafe {
+        GetWindowThreadProcessId(fg, &mut fg_pid);
+        (
+          GetClassNameW(fg, class.as_mut_ptr(), class.len() as i32),
+          GetWindowTextW(fg, title.as_mut_ptr(), title.len() as i32),
+        )
+      }
+    } else {
+      (0, 0)
+    };
+    let pid = unsafe { GetCurrentProcessId() };
+    let mut session = u32::MAX;
+    unsafe { ProcessIdToSessionId(pid, &mut session) };
+    let console = unsafe { WTSGetActiveConsoleSessionId() };
+    format!(
+      "{input_desc}, this thread's desktop {ours:?}; foreground window \
+       {fg:?} class {:?} title {:?} pid {fg_pid} ({}); session {session}, \
+       console session {console}",
+      utf16_text(&class, class_len),
+      utf16_text(&title, title_len),
+      if fg.is_null() {
+        "none"
+      } else if fg_pid == pid {
+        "this process"
+      } else {
+        "another process"
+      },
+    )
+  }
+
+  const UOI_NAME: i32 = 2;
+  const DESKTOP_READOBJECTS: u32 = 0x0001;
+
+  fn desktop_name(desktop: isize) -> Option<String> {
+    let mut buf = [0u16; 256];
+    let mut needed = 0u32;
+    let ok = unsafe {
+      GetUserObjectInformationW(
+        desktop,
+        UOI_NAME,
+        buf.as_mut_ptr(),
+        (buf.len() * 2) as u32,
+        &mut needed,
+      )
+    };
+    if ok == 0 {
+      return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
+  }
+
+  /// Why injected input can't reach this process's desktop, if it can't:
+  /// SendInput reports the events as sent either way, but the system drops
+  /// them when this session has no input desktop (disconnected) or the input
+  /// desktop is another one (the workstation is locked: Winlogon's secure
+  /// desktop; a UAC prompt; the screen saver), and a hotkey only fires for
+  /// input on the input desktop.
+  pub fn input_unreachable_reason() -> Option<String> {
+    let input = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
+    if input == 0 {
+      let err = unsafe { GetLastError() };
+      return Some(format!(
+        "this session has no input desktop it can open (OpenInputDesktop \
+         error {err}: locked, disconnected or on a secure desktop)"
+      ));
+    }
+    let input_name = desktop_name(input);
+    unsafe { CloseDesktop(input) };
+    let ours = desktop_name(unsafe { GetThreadDesktop(GetCurrentThreadId()) });
+    match (input_name, ours) {
+      (Some(i), Some(o)) if !i.eq_ignore_ascii_case(&o) => Some(format!(
+        "input goes to desktop {i:?}, not this process's {o:?}"
+      )),
+      _ => None,
+    }
   }
 
   const INPUT_KEYBOARD: u32 = 1;
@@ -449,6 +587,7 @@ mod win_input {
       key(ALT, true),
       key(CTRL, true),
     ];
+    unsafe { SetLastError(0) };
     let sent = unsafe {
       SendInput(
         seq.len() as u32,
@@ -456,6 +595,11 @@ mod win_input {
         std::mem::size_of::<Input>() as i32,
       )
     };
+    let err = unsafe { GetLastError() };
+    eprintln!(
+      "[e2e] SendInput returned {sent} of {} (GetLastError {err})",
+      seq.len()
+    );
     sent as usize == seq.len()
   }
 }
