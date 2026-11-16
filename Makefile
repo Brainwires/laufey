@@ -149,7 +149,7 @@ webview: check-deps webauthn-linux ## Build the webview backend
 $(CEF_TARBALL):
 	@echo "Downloading CEF $(CEF_VERSION) for $(CEF_ARCH)..."
 	@mkdir -p $(CEF_DIR)
-	curl -fL -o $(CEF_TARBALL).part "$(CEF_DOWNLOAD_URL)"
+	curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o $(CEF_TARBALL).part "$(CEF_DOWNLOAD_URL)"
 	@actual=$$( (command -v sha256sum >/dev/null && sha256sum $(CEF_TARBALL).part || shasum -a 256 $(CEF_TARBALL).part) | cut -d' ' -f1); \
 	if [ "$$actual" != "$(CEF_SHA256)" ]; then \
 		echo "CEF $(CEF_ARCH): SHA-256 $$actual, expected $(CEF_SHA256)" >&2; \
