@@ -158,6 +158,13 @@ struct WinWindowState {
   // machine). Cleared once found, or by close_devtools.
   bool devtools_awaiting = false;
   std::vector<HWND> devtools_before;
+  // The DevTools window this view last asked to close, until it is gone. A
+  // WM_CLOSE that reaches a DevTools window the moment it shows can be
+  // dropped, and the window then stays open while the view reads its
+  // DevTools as closed; the close is asked again until it takes
+  // (CloseDevToolsWindow), and an open_devtools meanwhile adopts that window
+  // instead of waiting for a new one.
+  HWND devtools_closing = nullptr;
   // CreateCoreWebView2Controller failures so far (RetryControllerCreation).
   int controller_failures = 0;
 };
@@ -188,6 +195,10 @@ constexpr int kControllerAttempts = 4;
 // How long the DevTools finder thread looks for the window an
 // open_devtools brought up; past it FindDevToolsWindow still adopts it.
 constexpr ULONGLONG kDevToolsFindMs = 30000;
+// How long a DevTools window this view closed is watched until it is gone,
+// and how often its close is asked again.
+constexpr ULONGLONG kDevToolsCloseWatchMs = 10000;
+constexpr DWORD kDevToolsCloseRetryMs = 500;
 
 // Test hook (LAUFEY_TEST_WV2_CONTROLLER_FAILURES=<n>): the process's first n
 // successful CreateCoreWebView2Controller completions are treated as
@@ -851,7 +862,12 @@ class WebView2Backend : public LaufeyBackend {
   HWND FindDevToolsWindow(uint32_t window_id);
   // Makes `found` the view's DevTools window (closing it instead when a
   // close_devtools came while it was opening). windows_mutex_ held.
-  static void AdoptDevToolsWindow(WinWindowState* state, HWND found);
+  void AdoptDevToolsWindow(uint32_t window_id, WinWindowState* state,
+                           HWND found);
+  // Closes the view's DevTools window `hwnd` as its close button does, and
+  // asks again until it is gone (devtools_closing). windows_mutex_ held.
+  void CloseDevToolsWindow(uint32_t window_id, WinWindowState* state,
+                           HWND hwnd);
   std::recursive_mutex windows_mutex_;
   bool class_registered_ = false;
   // See SchemesForEnvironment.
@@ -3835,6 +3851,14 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
     state->devtools_before = DevToolsWindowsOf(pid);
     state->devtools_awaiting = true;
   }
+  // A window this view closed that is still showing is this view's DevTools
+  // (the engine brings it to the front rather than opening another): it is
+  // the one to adopt, not part of the baseline.
+  if (HWND closing = state->devtools_closing) {
+    state->devtools_closing = nullptr;
+    auto& b = state->devtools_before;
+    b.erase(std::remove(b.begin(), b.end(), closing), b.end());
+  }
   std::vector<HWND> before = state->devtools_before;
   state->devtools_opening++;
   state->devtools_close_pending = false;
@@ -3885,21 +3909,57 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
       return;
     st->devtools_opening--;
     if (found)
-      AdoptDevToolsWindow(st, found);
+      AdoptDevToolsWindow(window_id, st, found);
   }).detach();
 }
 
-void WebView2Backend::AdoptDevToolsWindow(WinWindowState* state, HWND found) {
+void WebView2Backend::AdoptDevToolsWindow(uint32_t window_id,
+                                          WinWindowState* state, HWND found) {
   state->devtools_awaiting = false;
   state->devtools_before.clear();
   if (state->devtools_close_pending) {
     // Closed while still opening: close what has now opened.
     state->devtools_close_pending = false;
     state->devtools_hwnd = nullptr;
-    PostMessageW(found, WM_CLOSE, 0, 0);
+    CloseDevToolsWindow(window_id, state, found);
     return;
   }
   state->devtools_hwnd = found;
+}
+
+void WebView2Backend::CloseDevToolsWindow(uint32_t window_id,
+                                          WinWindowState* state, HWND hwnd) {
+  // The DevTools window belongs to the browser process; closing it is what
+  // its own close button does.
+  PostMessageW(hwnd, WM_CLOSE, 0, 0);
+  state->devtools_closing = hwnd;
+  DWORD pid = static_cast<DWORD>(state->browser_pid);
+  std::thread([this, window_id, pid, hwnd] {
+    ULONGLONG start = GetTickCount64();
+    while (GetTickCount64() - start < kDevToolsCloseWatchMs) {
+      Sleep(kDevToolsCloseRetryMs);
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      auto* st = GetWindow(window_id);
+      // Gone, opened again (adopted), or closed through another call.
+      if (!st || st->devtools_closing != hwnd)
+        return;
+      if (!IsDevToolsWindowOf(hwnd, pid)) {
+        st->devtools_closing = nullptr;
+        return;
+      }
+      // Still showing: the close was dropped. Ask again.
+      PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    auto* st = GetWindow(window_id);
+    if (st && st->devtools_closing == hwnd) {
+      std::cerr << "laufey: window " << window_id
+                << "'s DevTools window did not close "
+                << kDevToolsCloseWatchMs / 1000 << " s after close_devtools"
+                << std::endl;
+      st->devtools_closing = nullptr;
+    }
+  }).detach();
 }
 
 HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
@@ -3915,7 +3975,7 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
   if (state->devtools_awaiting) {
     // The window an open_devtools brought up, however late it showed.
     if (HWND late = NewDevToolsWindow(all, state->devtools_before)) {
-      AdoptDevToolsWindow(state, late);
+      AdoptDevToolsWindow(window_id, state, late);
       return state->devtools_hwnd;
     }
   }
@@ -3928,7 +3988,12 @@ HWND WebView2Backend::FindDevToolsWindow(uint32_t window_id) {
   }
   if (sharing != 1)
     return nullptr;
-  return all.empty() ? nullptr : all.front();
+  // Not the one this view is closing (its close may take a moment).
+  for (HWND h : all) {
+    if (h != state->devtools_closing)
+      return h;
+  }
+  return nullptr;
 }
 
 void WebView2Backend::CloseDevTools(uint32_t window_id) {
@@ -3947,10 +4012,8 @@ void WebView2Backend::CloseDevTools(uint32_t window_id) {
       state->devtools_close_pending = true;
     return;
   }
-  // The DevTools window belongs to the browser process; closing it is what
-  // its own close button does.
-  PostMessageW(hwnd, WM_CLOSE, 0, 0);
   if (state) {
+    CloseDevToolsWindow(window_id, state, hwnd);
     state->devtools_hwnd = nullptr;
     // A repeated open of DevTools already open found nothing new to wait for.
     state->devtools_awaiting = false;
