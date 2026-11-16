@@ -4540,9 +4540,18 @@ bool WebView2Backend::IsDevToolsOpen(uint32_t window_id) {
     auto* state = GetWindow(window_id);
     HWND found = FindDevToolsWindow(window_id);
     open = found != nullptr && !(state && state->devtools_close_pending);
-    TraceDevTools(open ? "is_open: yes" : "is_open: no", window_id,
-                  state ? static_cast<DWORD>(state->browser_pid) : 0,
-                  "found=" + HwndText(found) + " " + DevToolsStateText(state));
+    // Traced when the answer (or the window it names) changes, not on every
+    // poll of a caller waiting for it.
+    static std::map<uint32_t, std::pair<bool, HWND>> last_answer;
+    auto answer = std::make_pair(open, found);
+    auto seen = last_answer.find(window_id);
+    if (seen == last_answer.end() || seen->second != answer) {
+      last_answer[window_id] = answer;
+      TraceDevTools(
+          open ? "is_open: yes" : "is_open: no", window_id,
+          state ? static_cast<DWORD>(state->browser_pid) : 0,
+          "found=" + HwndText(found) + " " + DevToolsStateText(state));
+    }
   });
   return open;
 }

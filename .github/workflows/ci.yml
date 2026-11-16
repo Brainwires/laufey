@@ -1058,6 +1058,9 @@ jobs:
         env:
           LAUFEY_E2E_DEVTOOLS_REPEAT: ${{ github.event_name == 'workflow_dispatch' && '10' || '1' }}
           LAUFEY_E2E_WATCHDOG_SECS: ${{ github.event_name == 'workflow_dispatch' && '900' || '300' }}
+          # WebView2: each DevTools step with the browser process's windows,
+          # so an intermittent failure on a runner names its order.
+          LAUFEY_TRACE_DEVTOOLS: ${{ matrix.backend == 'webview' && '1' || '' }}
         run: scripts/native-e2e-run.sh ${{ matrix.backend }} --system
 
       - name: System — DevTools disabled (LAUFEY_INSPECTABLE=0)
