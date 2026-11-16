@@ -1385,6 +1385,15 @@ pub(crate) mod win {
     fn ClientToScreen(hwnd: *mut c_void, point: *mut Point) -> i32;
     fn GetClassNameW(hwnd: *mut c_void, buf: *mut u16, len: i32) -> i32;
     fn PostMessageW(hwnd: *mut c_void, msg: u32, wp: usize, lp: isize) -> i32;
+    fn SetWindowPos(
+      hwnd: *mut c_void,
+      after: *mut c_void,
+      x: i32,
+      y: i32,
+      cx: i32,
+      cy: i32,
+      flags: u32,
+    ) -> i32;
   }
 
   #[link(name = "ole32")]
@@ -1640,6 +1649,29 @@ pub(crate) mod win {
       )
     };
     sent as usize == seq.len()
+  }
+
+  /// Puts `hwnd`'s top-level window in the topmost band (`on`) or back
+  /// out of it, without moving, sizing or activating it.
+  pub fn set_topmost(hwnd: *mut c_void, on: bool) -> bool {
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    // HWND_TOPMOST, HWND_NOTOPMOST.
+    let after = (if on { -1isize } else { -2isize }) as *mut c_void;
+    let root = unsafe { GetAncestor(hwnd, 2) }; // GA_ROOT
+    let target = if root.is_null() { hwnd } else { root };
+    unsafe {
+      SetWindowPos(
+        target,
+        after,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+      ) != 0
+    }
   }
 
   /// Bring `hwnd`'s window to the front with an Alt press around

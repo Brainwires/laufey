@@ -604,15 +604,42 @@ async fn real_click(win: &Window, title: &str) -> Option<String> {
     #[cfg(windows)]
     {
       use crate::io_checks::ole_input;
+      use crate::menu_notification_checks::win;
+      // In front of every other window for the click (a runner image may
+      // show a system window, such as a Microsoft account prompt, over the
+      // test window), then back to normal: the foreground (sharing the
+      // foreground thread's input, else an Alt press), and the topmost band.
+      let hwnd = win::find_window(title);
+      if hwnd.is_null() {
+        check(&format!("a clicked link: a window titled {title:?}"), false);
+        return None;
+      }
+      if !win::focus(hwnd) {
+        win::activate_with_alt(hwnd);
+      }
+      let topmost = win::set_topmost(hwnd, true);
+      tokio::time::sleep(Duration::from_millis(300)).await;
+      let at = ole_input::root_at(cx, cy);
+      if at != hwnd {
+        let covered_by = ole_input::window_at(cx, cy);
+        win::set_topmost(hwnd, false);
+        check(
+          &format!(
+            "a clicked link: the test window is under the click point \
+             ({cx}, {cy}) (topmost {topmost}; there: {covered_by})"
+          ),
+          false,
+        );
+        return None;
+      }
       ole_input::move_to(cx, cy);
       tokio::time::sleep(Duration::from_millis(80)).await;
       ole_input::button(true);
       tokio::time::sleep(Duration::from_millis(60)).await;
       ole_input::button(false);
-      Some(format!(
-        "SendInput at ({cx}, {cy}), over {}",
-        ole_input::window_at(cx, cy)
-      ))
+      let over = ole_input::window_at(cx, cy);
+      win::set_topmost(hwnd, false);
+      Some(format!("SendInput at ({cx}, {cy}), over {over}"))
     }
     #[cfg(not(windows))]
     {

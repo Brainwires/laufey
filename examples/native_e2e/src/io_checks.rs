@@ -733,6 +733,18 @@ pub(crate) mod ole_input {
     }
   }
 
+  /// The top-level window at (x, y) (null when none).
+  pub fn root_at(x: i32, y: i32) -> Hwnd {
+    unsafe {
+      let hwnd = WindowFromPoint(Point { x, y });
+      if hwnd.is_null() {
+        hwnd
+      } else {
+        GetAncestor(hwnd, 2) // GA_ROOT
+      }
+    }
+  }
+
   /// The top-level window at (x, y), for the log: title, class, and
   /// whether it is this process's.
   pub fn window_at(x: i32, y: i32) -> String {
