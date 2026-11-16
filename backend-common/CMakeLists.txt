@@ -147,6 +147,7 @@ elseif(WIN32)
     src/overlay_win.cc
     src/quit_request_win.cc
     src/speech_win.cc
+    src/secret_store_win.cc
   )
 endif()
 
@@ -875,6 +876,18 @@ if(LAUFEY_BUILD_TESTS)
   endif()
 
   if(WIN32)
+    # The secure store against the real Credential Manager (and the
+    # PasswordVault move); skipped (77) in a logon session without one
+    # unless LAUFEY_SECRET_TEST_REQUIRE=1.
+    add_executable(laufey_secret_store_win_test
+                   tests/secret_store_win_test.cc)
+    target_link_libraries(laufey_secret_store_win_test PRIVATE
+      laufey_backend_common)
+    add_test(NAME laufey_secret_store_win_test
+             COMMAND laufey_secret_store_win_test)
+    set_tests_properties(laufey_secret_store_win_test PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
     # The OLE drag source the Windows native e2e drags real files out of
     # with SendInput (scripts/native-e2e-run.sh --io).
     add_executable(laufey_ole_drag_source tests/ole_drag_source.cc)

@@ -22,9 +22,7 @@
 #include "laufey_passkey.h"
 #include "laufey_platform_features.h"
 #include "laufey_title_bar.h"
-#if defined(__linux__) || defined(__APPLE__)
 #include "laufey_secret_store.h"
-#endif
 #include "laufey_auth_session.h"
 #include "laufey_ui_tasks.h"
 #include "laufey_scheme_registry.h"
@@ -3923,11 +3921,11 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.title_bar_preferences = Backend_TitleBarPreferences;
   backend_api_.set_title_bar_preferences_changed_handler =
       Backend_SetTitleBarPreferencesChangedHandler;
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(_WIN32) || defined(__APPLE__)
   // The secure store (API 47): the Secret Service through libsecret on
   // Linux, the Keychain (Security.framework, items only this app may read
-  // without a prompt; see docs/secure-store.md) on macOS. Windows keeps NULL
-  // (its Credential Locker is the embedder's).
+  // without a prompt; see docs/secure-store.md) on macOS, the Credential
+  // Manager on Windows (secret_store_win.cc).
   backend_api_.secret_lookup = [](void*, const char* service,
                                   const char* account, uint32_t timeout_ms,
                                   char** value, char** reason) {

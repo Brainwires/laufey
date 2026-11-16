@@ -3,8 +3,9 @@
 //! The secure store (API 47): a small secret per (service, account) in the
 //! OS's secret store. On Linux the CEF and WebView backends use the Secret
 //! Service through libsecret; on macOS they use the Keychain (items only the
-//! app may read); elsewhere (Windows, and Winit) the entry points are NULL
-//! and every call answers [`SecretError::NotSupported`]. Each call
+//! app may read); on Windows the Credential Manager (items carry the app
+//! id). On Winit the entry points are NULL and every call answers
+//! [`SecretError::NotSupported`]. Each call
 //! blocks the calling thread for at most about `timeout` (`Duration::ZERO`:
 //! the backend's default, 20 s); call it off the UI thread and off an async
 //! runtime's workers. See `docs/secure-store.md`.
@@ -18,12 +19,14 @@ use crate::{api, LaufeyBackendApi};
 /// Why a secure-store call didn't do what was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretError {
-  /// This backend has no secure store (Windows, Winit, older than API 47).
+  /// This backend has no secure store (Winit, Windows before laufey 0.8.1,
+  /// older than API 47).
   NotSupported,
   /// The store can't answer: no provider, a locked keyring no one unlocked,
   /// no session bus, libsecret missing (Linux); a locked keychain, access
-  /// refused, an item another program wrote in the way (macOS). The reason
-  /// says which, and what to do.
+  /// refused, an item another program wrote in the way (macOS); a logon
+  /// session without a credential store (Windows). The reason says which,
+  /// and what to do.
   Unavailable(String),
   /// Bad arguments (empty strings, a NUL byte).
   Failed(String),

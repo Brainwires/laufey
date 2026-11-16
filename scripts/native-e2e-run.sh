@@ -103,7 +103,7 @@
 # file dialogs use (the portal's FileChooser where the portal offers one,
 # GTK's otherwise) agrees with platform_features, and a real dialog closes
 # with cancel_file_dialog.
-# --secret-store (API 47; secret_checks.rs): on Linux and macOS every
+# --secret-store (API 47; secret_checks.rs): on Linux, macOS and Windows every
 # secure-store call answers within its timeout (a value, not found, or
 # unavailable with a reason); LAUFEY_E2E_EXPECT_SECRET=ok|unavailable for a
 # real session (macOS CI: ok, the round trip in the login keychain).

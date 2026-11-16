@@ -1,12 +1,14 @@
 //! The secure store (API 47; LAUFEY_E2E_ONLY=secret-store,
 //! scripts/native-e2e-run.sh --secret-store).
 //!
-//! On Linux and macOS (CEF and WebView) every call answers within its
+//! On Linux, macOS and Windows (CEF and WebView) every call answers within its
 //! timeout: a value, "not found", or "unavailable" with a reason (no
 //! provider, a locked keyring no one unlocked). Never a hang, and never a
 //! bad-arguments failure for good arguments. On macOS the host's login
-//! keychain does the round trip (CI: LAUFEY_E2E_EXPECT_SECRET=ok). Elsewhere
-//! (Windows, Winit) the entry points are NULL. Expectations for a real
+//! keychain does the round trip (CI: LAUFEY_E2E_EXPECT_SECRET=ok); on
+//! Windows the Credential Manager (a logon session without one, as over SSH,
+//! is "unavailable" with a reason). On Winit the entry points are NULL.
+//! Expectations for a real
 //! session (LAUFEY_E2E_HOST_SESSION=1):
 //!
 //! ```text
@@ -29,8 +31,10 @@ fn expect(name: &str) -> Option<String> {
 pub(crate) async fn run() {
   if !laufey::secret_store_supported() {
     check(
-      "no secure store off Linux and macOS (CEF / WebView)",
-      !(cfg!(target_os = "linux") || cfg!(target_os = "macos"))
+      "no secure store off Linux, macOS and Windows (CEF / WebView)",
+      !(cfg!(target_os = "linux")
+        || cfg!(target_os = "macos")
+        || cfg!(target_os = "windows"))
         || std::env::var("LAUFEY_E2E_BACKEND").as_deref() == Ok("winit"),
     );
     na("the secure store (this backend has none)");

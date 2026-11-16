@@ -9,7 +9,10 @@
 // (code injected into this app aside; unsigned or ad-hoc builds with
 // byte-identical hosts are one program to macOS). Another program can write
 // a login-keychain item without a prompt; see secret_store_mac.mm for what
-// the store makes of that. Below: Linux.
+// the store makes of that. On Windows (secret_store_win.cc) the Credential
+// Manager, generic credentials named after the app id, service and account,
+// a long value split over several; PasswordVault items an older build wrote
+// move over on the first run of the updated app. Below: Linux.
 //
 // On Linux: a small secret per (service, account)
 // in the Secret Service (org.freedesktop.secrets: gnome-keyring, KWallet's

@@ -971,7 +971,7 @@ jobs:
       # API 47: the secure store answers within its timeout (Linux: the
       # private bus may have no provider, or a keyring no one can unlock:
       # unavailable with a reason; macOS: the round trip in the login
-      # keychain); NULL elsewhere.
+      # keychain; Windows: the Credential Manager); NULL on Winit.
       - name: Secure store
         timeout-minutes: 10
         shell: bash

@@ -16,8 +16,8 @@ Each returns a `LAUFEY_SECRET_*` status (`OK`, `NOT_FOUND`, `UNAVAILABLE`,
 **blocks the calling thread** for at most about its timeout (0: 20 s): call it
 off the UI thread.
 
-They exist on Linux and macOS, in the CEF and WebView backends. On Windows (and
-on Winit) they are `NULL`: the embedder uses the Credential Locker itself.
+They exist on Linux, macOS and Windows, in the CEF and WebView backends. On
+Winit they are `NULL`.
 
 ## macOS
 
@@ -89,6 +89,51 @@ login-keychain item, and an ad-hoc signed CEF bundle isn't always taken for it,
 although its access list lets it change the value) wipes the value instead: the
 item is left empty, marked deleted (`kSecAttrComment` `laufey:deleted`), reads
 as `NOT_FOUND`, and the next store reuses it.
+
+There is never a plaintext fallback.
+
+## Windows
+
+The secret is a generic credential in the Windows Credential Manager
+(`CredWriteW` / `CredReadW` / `CredDeleteW`, `CRED_TYPE_GENERIC`, persisted for
+this user on this machine, `CRED_PERSIST_LOCAL_MACHINE`: kept across logons,
+never roamed), written by the app's own process. Windows encrypts it with the
+user's DPAPI key. Like the Secret Service, the Credential Manager doesn't keep
+the programs of a user apart (any program of the user can read a generic
+credential), so the item's target name carries the app id:
+
+```text
+laufey/<app id>/<service>/<account>
+```
+
+each part with `%`, `/`, `#` and control characters percent-encoded, so one app
+never reads or overwrites another's item; an app without an app id uses the
+empty one. The credential's user name is the account and its comment the label
+(cut to 256 characters). Credential Manager (Control Panel, Windows Credentials)
+lists the items under those names.
+
+A credential holds at most 2560 bytes, so a longer value is split: the first
+2560 bytes in the item itself and the rest in items named
+`<target>#<generation>/<n>`; the item's `laufey/parts` attribute says how many
+and which generation. A store writes the new parts first and the item last, then
+deletes the old parts, so a reader sees one whole value or the other (a lookup
+that meets parts being replaced reads again). A value is at most 64 KiB
+(`FAILED` above that). A delete removes the item and its parts.
+
+Nothing prompts and nothing waits: every call answers at once, and the timeout
+bounds nothing. A logon session without a credential store (a service, or a
+network logon such as SSH with a key) is `UNAVAILABLE`, saying so; any other
+refusal is `UNAVAILABLE` with Windows' message and error code.
+
+Items an older build of the app stored with the Windows Runtime's
+`PasswordVault` (`Windows.Security.Credentials`: resource = service, user name =
+account, which is how Deno Desktop's `secure-store` capability stored them
+through PowerShell) move here by the app's lookups during the first run of the
+updated app, by the same rule as on Linux: a lookup that finds nothing takes the
+vault's credential, stores it here and removes it from the vault, during the
+first run whose app data directory has no `.laufey-secret-store-v2` marker, and
+only when that directory existed when the process started. A key first looked up
+on a later run stays in the vault.
 
 There is never a plaintext fallback.
 
@@ -181,6 +226,13 @@ still fails with such an error is retried once with a new service.
   before (not to a newly installed app, nor on a later run), a second daemon
   taking the name over (written to and read from), then locked without a
   prompter (at once) and with a prompter that never answers (after the timeout).
+- `laufey_secret_store_win_test` (ctest, Windows): against the real Credential
+  Manager: bad arguments, the round trip, a 9000-byte value split over four
+  credentials and read back whole, a shorter value and a delete removing the
+  parts, two app ids keeping separate items, the 64 KiB limit, and a
+  PasswordVault item moved on the first run of an app that ran before (not for a
+  newly installed app, nor on a later run). Skipped (77) in a logon session
+  without a credential store unless `LAUFEY_SECRET_TEST_REQUIRE=1`.
 - `scripts/native-e2e-run.sh <backend> --secret-store`: every call answers
   within its timeout through the backend (macOS: the round trip, in the host's
   login keychain); `LAUFEY_E2E_EXPECT_SECRET=ok|unavailable` for a real session.
