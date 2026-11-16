@@ -478,6 +478,10 @@ class WKWebViewBackend : public LaufeyBackend {
   // recorded when create_window_ex is called: the window itself is created
   // on the main queue later. Guarded by windows_mutex_.
   std::map<uint32_t, int32_t> background_throttling_;
+  // Held while a window created with LAUFEY_BACKGROUND_THROTTLING_NONE is
+  // open (UpdateUnthrottledActivityLocked). Guarded by windows_mutex_.
+  id<NSObject> unthrottled_activity_ = nil;
+  void UpdateUnthrottledActivityLocked();
 
   // Set once the first WKWebViewConfiguration has been built, i.e. the
   // registered-scheme set has been read; a later RegisterSchemeHandler warns.
@@ -1794,8 +1798,34 @@ MacWindowState* WKWebViewBackend::GetWindow(uint32_t window_id) {
   return it != windows_.end() ? &it->second : nullptr;
 }
 
+// While a window that asked for BackgroundThrottling::None is open, the app
+// holds a user-initiated NSProcessInfo activity, so macOS never puts the app
+// into App Nap while that window is hidden (App Nap coalesces the timers of a
+// napping app, and WebKit runs a page's web content process on the app's
+// behalf). Idle system sleep is still allowed. Under windows_mutex_.
+void WKWebViewBackend::UpdateUnthrottledActivityLocked() {
+  bool wanted = false;
+  for (const auto& [wid, policy] : background_throttling_) {
+    if (policy == LAUFEY_BACKGROUND_THROTTLING_NONE) {
+      wanted = true;
+      break;
+    }
+  }
+  NSProcessInfo* info = [NSProcessInfo processInfo];
+  if (wanted && !unthrottled_activity_) {
+    unthrottled_activity_ = [info
+        beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+                          reason:@"a window's page runs unthrottled while "
+                                 @"hidden (BackgroundThrottling::None)"];
+  } else if (!wanted && unthrottled_activity_) {
+    [info endActivity:unthrottled_activity_];
+    unthrottled_activity_ = nil;
+  }
+}
+
 void WKWebViewBackend::RemoveWindowState(uint32_t window_id) {
   background_throttling_.erase(window_id);
+  UpdateUnthrottledActivityLocked();
   auto it = windows_.find(window_id);
   if (it == windows_.end())
     return;
@@ -2094,6 +2124,7 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
     std::lock_guard<std::mutex> lock(windows_mutex_);
     background_throttling_[window_id] =
         laufey_common::BackgroundThrottlingFromFlags(flags);
+    UpdateUnthrottledActivityLocked();
   }
   dispatch_async(dispatch_get_main_queue(), ^{
     @autoreleasepool {
