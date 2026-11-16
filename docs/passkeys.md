@@ -171,7 +171,8 @@ An authentication's `response` holds `clientDataJSON`, `authenticatorData`,
   The slot is freed before the result is delivered, so the next request can
   start from the callback. After a timeout or a closed window the result is
   delivered at once, but the slot stays taken until the OS has actually ended
-  the operation.
+  the operation, or, for an OS operation that ignores every cancel, until laufey
+  stops cancelling it (60 s).
 
 ## macOS
 
@@ -272,7 +273,19 @@ The OS answers a cancel that arrives before the call has registered its
 cancellation id with `S_OK` and drops it, and where nobody answers the dialog
 the call runs past its own timeout too, so laufey repeats the cancel every 250
 ms until the call returns (for at most 60 s); one request runs at a time, so the
-next one waits for that.
+next one waits for that. `quit()` cancels the request in progress the same way,
+whatever window it is anchored to.
+
+Some Windows builds accept the cancel (`S_OK`, the request's own cancellation
+id) yet neither end the call nor close their dialog, and ignore the call's own
+timeout too: the Windows Security dialog then stays on screen until the user
+dismisses it. Seen on Windows 11 Insider build 26300 (26H2, UBR 9974;
+`webauthn.dll` 10.0.26100.9278); on a release build (GitHub's `windows-latest`
+image) the call ends within about a second and a half of the cancel. laufey has
+already answered the request (`timeout` / `cancelled`); when the repeated
+cancels stop it gives up the request's slot, so later requests aren't refused
+for as long as the OS call hangs. No API lets an app close another process's
+secure dialog.
 
 Errors: `NTE_USER_CANCELLED` and `ERROR_CANCELLED` → `cancelled`;
 `ERROR_TIMEOUT` → `timeout`; `NTE_NOT_SUPPORTED` → `not_supported`; otherwise by

@@ -3578,6 +3578,23 @@ async fn passkey_checks(window_id: u32) {
     passkey_code(&env) == "unknown" && env.contains("not found"),
   );
 
+  // LAUFEY_E2E_PASSKEY_OS=0 (Windows): no request that reaches the OS and
+  // puts its dialog on screen, for a machine whose OS keeps that dialog
+  // after laufey cancels the request (docs/passkeys.md); the checks that
+  // need one are N/A. The no-dialog check below still runs.
+  if cfg!(windows)
+    && std::env::var("LAUFEY_E2E_PASSKEY_OS").as_deref() == Ok("0")
+  {
+    na(
+      "a real OS passkey request, the slot after it and a request whose \
+       window closes (LAUFEY_E2E_PASSKEY_OS=0: this machine's OS keeps a \
+       cancelled request's dialog)",
+    );
+    #[cfg(windows)]
+    no_passkey_dialog_left_check(false).await;
+    return;
+  }
+
   // A real OS request, and a second one while it is in progress.
   let options = passkey_get_options("example.com", 2000);
   let first = laufey::passkey_get(window_id, &options);
@@ -3638,7 +3655,10 @@ async fn passkey_checks(window_id: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
   }
   let after = started.elapsed().as_millis();
-  if freed && after >= PASSKEY_OS_BACKSTOP_MS as u128 {
+  // The OS call outlived its own deadline and every cancel: laufey released
+  // the slot without the OS ever answering.
+  let os_hung = freed && after >= PASSKEY_OS_BACKSTOP_MS as u128;
+  if os_hung {
     eprintln!(
       "[e2e] INFO OS call hung; released by the liveness limit after {after} ms"
     );
@@ -3657,7 +3677,9 @@ async fn passkey_checks(window_id: u32) {
     passkey_early_cancel_checks().await;
   }
   #[cfg(windows)]
-  no_passkey_dialog_left_check().await;
+  no_passkey_dialog_left_check(os_hung).await;
+  #[cfg(not(windows))]
+  let _ = os_hung;
 }
 
 /// Windows: every passkey request above ended (answered, cancelled, timed
@@ -3666,8 +3688,14 @@ async fn passkey_checks(window_id: u32) {
 /// that takes the foreground and swallows input until someone closes it.
 /// Any such dialog counts (the broker's windows can't be tied to the
 /// process that asked).
+///
+/// `os_hung`: the real OS request's call never returned (the slot was
+/// released by the liveness limit). Its dialog staying is then the OS
+/// keeping it after accepting laufey's cancel, which some Windows builds do
+/// (docs/passkeys.md): N/A naming the build. A dialog left after every OS
+/// call returned fails.
 #[cfg(windows)]
-async fn no_passkey_dialog_left_check() {
+async fn no_passkey_dialog_left_check(os_hung: bool) {
   let started = std::time::Instant::now();
   let mut left = webauthn_dialogs();
   while !left.is_empty()
@@ -3675,6 +3703,16 @@ async fn no_passkey_dialog_left_check() {
   {
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     left = webauthn_dialogs();
+  }
+  if !left.is_empty() && os_hung {
+    na(&format!(
+      "no Windows Security passkey dialog is left on screen: the OS accepted \
+       laufey's cancel but kept its dialog and call (Windows build {}); \
+       dismiss it by hand ({})",
+      windows_build(),
+      left.join("; ")
+    ));
+    return;
   }
   check(
     &format!(
@@ -3687,6 +3725,36 @@ async fn no_passkey_dialog_left_check() {
     ),
     left.is_empty(),
   );
+}
+
+/// The Windows build ("major.minor.build"), from RtlGetVersion.
+#[cfg(windows)]
+fn windows_build() -> String {
+  #[repr(C)]
+  struct OsVersionInfo {
+    size: u32,
+    major: u32,
+    minor: u32,
+    build: u32,
+    platform: u32,
+    csd: [u16; 128],
+  }
+  #[link(name = "ntdll")]
+  extern "system" {
+    fn RtlGetVersion(info: *mut OsVersionInfo) -> i32;
+  }
+  let mut info = OsVersionInfo {
+    size: std::mem::size_of::<OsVersionInfo>() as u32,
+    major: 0,
+    minor: 0,
+    build: 0,
+    platform: 0,
+    csd: [0; 128],
+  };
+  if unsafe { RtlGetVersion(&mut info) } != 0 {
+    return "unknown".into();
+  }
+  format!("{}.{}.{}", info.major, info.minor, info.build)
 }
 
 /// The visible top-level windows of the Windows Security credential dialog
