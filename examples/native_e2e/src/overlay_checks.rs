@@ -608,6 +608,14 @@ pub(crate) mod mac {
     Some(unsafe { send_bool(window, getter) })
   }
 
+  /// `-[NSWindow alphaValue]` of the window titled `title`.
+  pub fn window_alpha(title: &str) -> Option<f64> {
+    let window = window_titled(title)?;
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> f64 =
+      unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+    Some(unsafe { f(window, sel_registerName(c"alphaValue".as_ptr())) })
+  }
+
   /// `-[NSApplication isActive]`.
   pub fn app_active() -> bool {
     unsafe {

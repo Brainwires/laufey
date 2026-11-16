@@ -15,6 +15,11 @@
 //!   its page's rate too: it stays ordered in but invisible (transparent,
 //!   clicks passing through, not key, not reported visible), while one
 //!   created with MacosHiddenMode::OrderOut is really ordered out.
+//!   Opacity and click passthrough set while it is hidden that way keep it
+//!   invisible and apply when it is shown.
+//!
+//! A page that never loads fails its round: the macOS WebView backend always
+//! has one to load.
 //!
 //! Each policy is measured alone (its window the only hidden one) and then
 //! all three at once (the windows share WebKit's process pool; the policy is
@@ -26,7 +31,7 @@ use std::time::Duration;
 
 use laufey::{BackgroundThrottling, Value, Window, WindowOptions};
 
-use crate::{check, na, page_number};
+use crate::{check, page_number};
 
 const POLICIES: [BackgroundThrottling; 3] = [
   BackgroundThrottling::Throttle,
@@ -123,8 +128,14 @@ async fn round(
   }
   // The pages loaded, then tick every 100 ms, stamped from now. The windows
   // were never on screen.
-  for w in &windows {
+  for (w, policy) in windows.iter().zip(policies) {
     if !page_loaded(w).await {
+      // The WebView backend on macOS always has a page to load: one that
+      // never loads is a failure, not something this machine can't do.
+      check(
+        &format!("{label}: the {policy:?} window's page loaded"),
+        false,
+      );
       windows.iter().for_each(Window::close);
       return None;
     }
@@ -223,7 +234,7 @@ async fn hidden_after_show(idle: u64) {
     .title(&title)
     .load(&format!("laufey-e2e://app/titled/{title}"));
     if !page_loaded(&w).await {
-      na(&format!("{mode:?}: a shown window's page never loaded"));
+      check(&format!("{mode:?}: a shown window's page loaded"), false);
       w.close();
       continue;
     }
@@ -290,6 +301,49 @@ async fn hidden_after_show(idle: u64) {
       ),
       w.get_visible() && shown == (Some(true), Some(false)),
     );
+    if mode == MacosHiddenMode::Invisible {
+      // Opacity and click passthrough set while it is hidden this way: it
+      // stays invisible, the getter reads the new opacity, and the show
+      // applies both (not what it had before the hide).
+      w.hide();
+      tokio::time::sleep(Duration::from_millis(300)).await;
+      w.set_opacity(0.6);
+      w.set_click_passthrough(true);
+      tokio::time::sleep(Duration::from_millis(300)).await;
+      let t = title.clone();
+      let hidden = laufey::spawn_on_ui_thread(move || {
+        (mac::window_alpha(&t), mac::window_flag(&t, c"isVisible"))
+      })
+      .await
+      .unwrap_or((None, None));
+      let read_back = w.get_opacity();
+      check(
+        &format!(
+          "set_opacity while hidden leaves it invisible and reads back \
+           ({hidden:?}, get_opacity {read_back})"
+        ),
+        hidden == (Some(0.0), Some(true)) && (read_back - 0.6).abs() < 1e-6,
+      );
+      w.show();
+      tokio::time::sleep(Duration::from_millis(500)).await;
+      let t = title.clone();
+      let after = laufey::spawn_on_ui_thread(move || {
+        (
+          mac::window_alpha(&t),
+          mac::window_flag(&t, c"ignoresMouseEvents"),
+        )
+      })
+      .await
+      .unwrap_or((None, None));
+      check(
+        &format!(
+          "shown, it takes the opacity and click passthrough set while \
+           hidden ({after:?})"
+        ),
+        matches!(after, (Some(a), Some(true)) if (a - 0.6).abs() < 1e-3),
+      );
+      w.set_click_passthrough(false);
+    }
     w.close();
   }
 }
@@ -361,9 +415,7 @@ pub async fn run() {
       }
     }
   }
-  if no_page {
-    na("a hidden window's page never loaded (no page to run timers)");
-  }
+  check("every hidden window's page loaded", !no_page);
   check(
     "the hidden pages are still the pages their timers were started in",
     !replaced,
