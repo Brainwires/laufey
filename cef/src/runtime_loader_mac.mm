@@ -975,8 +975,9 @@ void Backend_SetTrayDoubleClickHandler_Mac(void* /*data*/, uint32_t tray_id,
 // window's own NSWindow (older CEF) is restacked as a subview instead.
 bool LaufeyCefRestackOverlaysMac(uint32_t window_id,
                                  const std::vector<void*>& browser_views) {
-  NSWindow* parent = (__bridge NSWindow*)RuntimeLoader::GetInstance()
-                         ->GetNSWindowForLaufeyId(window_id);
+  NSWindow* parent =
+      (__bridge NSWindow*)RuntimeLoader::GetInstance()->GetNSWindowForLaufeyId(
+          window_id);
   if (!parent)
     return false;
   bool all = true;

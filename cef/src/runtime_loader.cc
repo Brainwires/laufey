@@ -1081,28 +1081,27 @@ static void Backend_Focus(void* data, uint32_t window_id) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
-    CefPostTask(TID_UI, base::BindOnce(
-                            [](CefRefPtr<CefBrowser> b, uint32_t wid) {
-                              auto browser_view =
-                                  CefBrowserView::GetForBrowser(b);
-                              if (browser_view) {
-                                auto window = browser_view->GetWindow();
-                                if (window) {
-                                  LaufeyShowCefWindow(window, wid);
-                                  window->Activate();
+    CefPostTask(TID_UI,
+                base::BindOnce(
+                    [](CefRefPtr<CefBrowser> b, uint32_t wid) {
+                      auto browser_view = CefBrowserView::GetForBrowser(b);
+                      if (browser_view) {
+                        auto window = browser_view->GetWindow();
+                        if (window) {
+                          LaufeyShowCefWindow(window, wid);
+                          window->Activate();
 #if defined(__APPLE__)
-                                  // As the WKWebView backend: activate
-                                  // ignoring other apps, never through the
-                                  // activation policy, so an Accessory
-                                  // app's window comes to the front.
-                                  laufey_common::MacFocusWindow(
-                                      NSWindowForCefHandle(
-                                          window->GetWindowHandle()));
+                          // As the WKWebView backend: activate
+                          // ignoring other apps, never through the
+                          // activation policy, so an Accessory
+                          // app's window comes to the front.
+                          laufey_common::MacFocusWindow(
+                              NSWindowForCefHandle(window->GetWindowHandle()));
 #endif
-                                }
-                              }
-                            },
-                            browser, window_id));
+                        }
+                      }
+                    },
+                    browser, window_id));
   }
 }
 
@@ -3470,8 +3469,7 @@ static bool Backend_SetWindowTitlebarStyle(void* /*data*/, uint32_t window_id,
 #endif
 }
 
-static bool Backend_SetWindowTitleVisibility(void* /*data*/,
-                                             uint32_t window_id,
+static bool Backend_SetWindowTitleVisibility(void* /*data*/, uint32_t window_id,
                                              int visibility) {
 #if defined(__APPLE__)
   bool ok = false;
@@ -3622,7 +3620,8 @@ static bool Backend_WebViewSetZoom(void* /*data*/, uint32_t webview_id,
 
 static double Backend_WebViewGetZoom(void* /*data*/, uint32_t webview_id) {
   double zoom = 0;
-  cef_invoke_sync([&] { zoom = laufey_cef_child_webview::GetZoom(webview_id); });
+  cef_invoke_sync(
+      [&] { zoom = laufey_cef_child_webview::GetZoom(webview_id); });
   return zoom;
 }
 
@@ -3754,13 +3753,12 @@ static void Backend_WebViewCapture(void* /*data*/, uint32_t webview_id,
   if (scale > 4)
     scale = 4;
   bool posted = CefPostTask(
-      TID_UI,
-      base::BindOnce(
-          [](uint32_t id, int32_t f, int32_t q, double sc,
-             laufey_webview_capture_fn cb, void* ud) {
-            laufey_cef_child_webview::Capture(id, f, q, sc, cb, ud);
-          },
-          webview_id, format, quality, scale, callback, user_data));
+      TID_UI, base::BindOnce(
+                  [](uint32_t id, int32_t f, int32_t q, double sc,
+                     laufey_webview_capture_fn cb, void* ud) {
+                    laufey_cef_child_webview::Capture(id, f, q, sc, cb, ud);
+                  },
+                  webview_id, format, quality, scale, callback, user_data));
   if (!posted)
     callback(user_data, LAUFEY_WEBVIEW_FAILED, nullptr, 0,
              "the UI thread is gone");

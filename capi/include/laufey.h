@@ -1210,9 +1210,9 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 // webview_set_z_order and the RAISE / LOWER commands restack the window's
 // views (else the order stays the creation order and they return false).
 #define LAUFEY_WEBVIEW_CAP_Z_ORDER (1u << 5)
-#define LAUFEY_WEBVIEW_CAP_ZOOM (1u << 6)          // webview_set_zoom / _get_zoom
-#define LAUFEY_WEBVIEW_CAP_FIND (1u << 7)          // webview_find + FIND_RESULT
-#define LAUFEY_WEBVIEW_CAP_DEVTOOLS (1u << 8)      // webview_open_devtools
+#define LAUFEY_WEBVIEW_CAP_ZOOM (1u << 6)      // webview_set_zoom / _get_zoom
+#define LAUFEY_WEBVIEW_CAP_FIND (1u << 7)      // webview_find + FIND_RESULT
+#define LAUFEY_WEBVIEW_CAP_DEVTOOLS (1u << 8)  // webview_open_devtools
 #define LAUFEY_WEBVIEW_CAP_CONTEXT_MENU (1u << 9)  // CONTEXT_MENU, "app" menus
 #define LAUFEY_WEBVIEW_CAP_PRINT (1u << 10)        // webview_print
 // "clipboardRead" / "clipboardWrite" are applied (else the engine's default:
@@ -1246,7 +1246,7 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 #define LAUFEY_WEBVIEW_FAILED 7        // the engine failed
 #define LAUFEY_WEBVIEW_SCRIPT_ERROR 8  // evaluate: the script threw
 #define LAUFEY_WEBVIEW_NOT_SERIALIZABLE 9  // evaluate: no JSON for the value
-#define LAUFEY_WEBVIEW_NOT_ALLOWED 10  // open_devtools: the app's DevTools are off
+#define LAUFEY_WEBVIEW_NOT_ALLOWED 10  // open_devtools: app DevTools are off
 
 // The most web views one window holds at once.
 #define LAUFEY_WEBVIEW_MAX_PER_WINDOW 32
@@ -1258,7 +1258,8 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 #define LAUFEY_WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE 4
 #define LAUFEY_WEBVIEW_COMMAND_STOP 5
 #define LAUFEY_WEBVIEW_COMMAND_FOCUS 6  // give the view the keyboard focus
-// Above / below every other web view of its window (LAUFEY_WEBVIEW_CAP_Z_ORDER).
+// Above / below every other web view of its window
+// (LAUFEY_WEBVIEW_CAP_Z_ORDER).
 #define LAUFEY_WEBVIEW_COMMAND_RAISE 7
 #define LAUFEY_WEBVIEW_COMMAND_LOWER 8
 
@@ -3178,7 +3179,8 @@ struct laufey_backend_api {
 
   // The view's state as JSON: {"url", "title", "load" (the last LOAD state),
   // "canGoBack", "canGoForward", "visible", "bounds": {"x", "y", "width",
-  // "height"}, "zOrder" (see webview_set_z_order)}. Free with string_free; NULL for an unknown id. Any thread.
+  // "height"}, "zOrder" (see webview_set_z_order)}. Free with string_free; NULL
+  // for an unknown id. Any thread.
   char* (*webview_state)(void* backend_data, uint32_t webview_id);
 
   // Run `script` as a classic script in an isolated world of the view's main

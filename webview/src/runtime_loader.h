@@ -903,16 +903,22 @@ class LaufeyBackend {
   virtual bool WebViewSetZoom(uint32_t /*webview_id*/, double /*factor*/) {
     return false;
   }
-  virtual double WebViewGetZoom(uint32_t /*webview_id*/) { return 0; }
-  virtual bool WebViewFind(uint32_t /*webview_id*/,
-                           const std::string& /*text*/, uint32_t /*flags*/) {
+  virtual double WebViewGetZoom(uint32_t /*webview_id*/) {
+    return 0;
+  }
+  virtual bool WebViewFind(uint32_t /*webview_id*/, const std::string& /*text*/,
+                           uint32_t /*flags*/) {
     return false;
   }
-  virtual bool WebViewStopFind(uint32_t /*webview_id*/) { return false; }
+  virtual bool WebViewStopFind(uint32_t /*webview_id*/) {
+    return false;
+  }
   virtual int32_t WebViewOpenDevTools(uint32_t /*webview_id*/) {
     return LAUFEY_WEBVIEW_UNSUPPORTED;
   }
-  virtual bool WebViewPrint(uint32_t /*webview_id*/) { return false; }
+  virtual bool WebViewPrint(uint32_t /*webview_id*/) {
+    return false;
+  }
   // LAUFEY_WEBVIEW_CAP_FORWARD_KEYS: replaces the view's "forwardKeys"
   // (canonical forms; the trampoline parsed them).
   virtual bool WebViewSetForwardKeys(uint32_t /*webview_id*/,

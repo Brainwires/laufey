@@ -199,7 +199,7 @@ void TrackInspector(WebKitWebView* webview) {
 struct LinuxWindowState {
   uint32_t window_id;
   GtkWidget* window;
-  GtkWidget* vbox;      // container for menu bar + webview
+  GtkWidget* vbox;  // container for menu bar + webview
   // Holds the page webview (its main child) and the window's child web views
   // (API 58), laid over the page.
   GtkWidget* overlay = nullptr;
