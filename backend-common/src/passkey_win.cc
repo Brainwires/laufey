@@ -22,6 +22,7 @@
 #include <webauthn.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <utility>
@@ -30,6 +31,41 @@
 
 namespace laufey_common {
 namespace {
+
+// LAUFEY_TRACE_PASSKEY=1: one stderr line per WebAuthn step of a request
+// (its cancellation id, the OS call starting and returning, every cancel
+// and its HRESULT), with the thread and the milliseconds since the request
+// started. Off by default.
+bool TracePasskeyEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("LAUFEY_TRACE_PASSKEY");
+    return v && std::string(v) == "1";
+  }();
+  return enabled;
+}
+
+std::string GuidText(const GUID& g) {
+  char buf[40];
+  std::snprintf(buf, sizeof(buf),
+                "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                static_cast<unsigned long>(g.Data1), g.Data2, g.Data3,
+                g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4],
+                g.Data4[5], g.Data4[6], g.Data4[7]);
+  return buf;
+}
+
+void TracePasskey(ULONGLONG start, const GUID* id, const char* step,
+                  HRESULT hr) {
+  if (!TracePasskeyEnabled())
+    return;
+  std::fprintf(stderr,
+               "laufey: passkey-trace +%llu ms thread %lu id %s %s "
+               "hr=0x%08lx\n",
+               static_cast<unsigned long long>(GetTickCount64() - start),
+               static_cast<unsigned long>(GetCurrentThreadId()),
+               id ? GuidText(*id).c_str() : "none", step,
+               static_cast<unsigned long>(hr));
+}
 
 // HRESULTs the mapping names (winerror.h spells some only in newer SDKs).
 constexpr HRESULT kUserCancelled = static_cast<HRESULT>(0x80090036L);  // NTE_
@@ -452,13 +488,24 @@ void PasskeyStartWin(std::shared_ptr<PasskeyCeremony> ceremony,
   // id is dropped (S_OK, yet the call goes on), and the call doesn't honour
   // its own timeout when nobody answers the dialog, so the canceller repeats
   // until the call returns (kPasskeyCancelRepeatMs).
+  const ULONGLONG trace_start = GetTickCount64();
   auto cancellation_id = std::make_shared<GUID>();
-  bool cancellable = api.get_cancellation_id && api.cancel_current_operation &&
-                     SUCCEEDED(api.get_cancellation_id(cancellation_id.get()));
+  HRESULT id_hr = api.get_cancellation_id && api.cancel_current_operation
+                      ? api.get_cancellation_id(cancellation_id.get())
+                      : E_NOTIMPL;
+  bool cancellable = SUCCEEDED(id_hr);
+  TracePasskey(trace_start, cancellable ? cancellation_id.get() : nullptr,
+               ("WebAuthNGetCancellationId (webauthn.dll API version " +
+                std::to_string(api.version) + ", owner window " +
+                std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + ")")
+                   .c_str(),
+               id_hr);
   if (cancellable) {
     ceremony->SetCanceller(
-        [cancellation_id] {
-          Api().cancel_current_operation(cancellation_id.get());
+        [cancellation_id, trace_start] {
+          HRESULT hr = Api().cancel_current_operation(cancellation_id.get());
+          TracePasskey(trace_start, cancellation_id.get(),
+                       "WebAuthNCancelCurrentOperation", hr);
         },
         kPasskeyCancelRepeatMs);
   }
@@ -467,7 +514,8 @@ void PasskeyStartWin(std::shared_ptr<PasskeyCeremony> ceremony,
                                           : kPasskeyDefaultTimeoutMs;
   ceremony->StartTimeout(timeout);
 
-  std::thread([ceremony, hwnd, timeout, cancellation_id, cancellable] {
+  std::thread([ceremony, hwnd, timeout, cancellation_id, cancellable,
+               trace_start] {
     if (ceremony->delivered()) {
       // Aborted before the OS call started.
       ceremony->Finish(
@@ -476,10 +524,18 @@ void PasskeyStartWin(std::shared_ptr<PasskeyCeremony> ceremony,
     }
     GUID* id = cancellable ? cancellation_id.get() : nullptr;
     DWORD os_timeout = timeout + kOsTimeoutSlackMs;
+    TracePasskey(trace_start, id,
+                 ceremony->is_create()
+                     ? "WebAuthNAuthenticatorMakeCredential starts"
+                     : "WebAuthNAuthenticatorGetAssertion starts",
+                 S_OK);
     std::string envelope =
         ceremony->is_create()
             ? MakeCredential(hwnd, ceremony->creation(), os_timeout, id)
             : GetAssertion(hwnd, ceremony->request(), os_timeout, id);
+    TracePasskey(trace_start, id,
+                 ("the OS call returned: " + envelope.substr(0, 160)).c_str(),
+                 S_OK);
     ceremony->Finish(envelope);
   }).detach();
 }
