@@ -48,6 +48,7 @@
 
 #include <shlwapi.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -3821,6 +3822,73 @@ std::string DescribeTopLevelWindowsOf(DWORD pid) {
   return scan.n ? scan.out : "none";
 }
 
+// LAUFEY_TRACE_DEVTOOLS=1: one stderr line per DevTools step with the
+// view's tracking state and every top-level window of its browser process
+// (handle, class, title, owner, visibility), for diagnosing which window an
+// open / close found. Off by default: nothing is enumerated then.
+bool TraceDevToolsEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("LAUFEY_TRACE_DEVTOOLS");
+    return v && std::string(v) == "1";
+  }();
+  return enabled;
+}
+
+std::string HwndText(HWND hwnd) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%p", static_cast<void*>(hwnd));
+  return buf;
+}
+
+void TraceDevTools(const char* step, uint32_t window_id, DWORD pid,
+                   const std::string& state) {
+  if (!TraceDevToolsEnabled())
+    return;
+  struct Scan {
+    DWORD pid;
+    std::string out;
+  } scan{pid, {}};
+  if (pid) {
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+          auto* sc = reinterpret_cast<Scan*>(lp);
+          DWORD owner_pid = 0;
+          GetWindowThreadProcessId(hwnd, &owner_pid);
+          if (owner_pid != sc->pid)
+            return TRUE;
+          wchar_t title[64] = {};
+          wchar_t cls[64] = {};
+          GetWindowTextW(hwnd, title, 64);
+          GetClassNameW(hwnd, cls, 64);
+          sc->out += " [" + HwndText(hwnd) + " class=\"" +
+                     laufey_common::WideToUtf8(cls) + "\" title=\"" +
+                     laufey_common::WideToUtf8(title) + "\" owner=" +
+                     HwndText(::GetWindow(hwnd, GW_OWNER)) +
+                     (IsWindowVisible(hwnd) ? " visible]" : " hidden]");
+          return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&scan));
+  }
+  std::cerr << "laufey: devtools-trace t=" << GetTickCount64() << " window "
+            << window_id << " " << step << " pid=" << pid << " " << state
+            << " windows:" << (scan.out.empty() ? " none" : scan.out)
+            << std::endl;
+}
+
+std::string DevToolsStateText(const WinWindowState* st) {
+  if (!st)
+    return "(no window)";
+  std::string before;
+  for (HWND h : st->devtools_before)
+    before += (before.empty() ? "" : ",") + HwndText(h);
+  return "hwnd=" + HwndText(st->devtools_hwnd) +
+         " awaiting=" + (st->devtools_awaiting ? "1" : "0") +
+         " opening=" + std::to_string(st->devtools_opening) +
+         " close_pending=" + (st->devtools_close_pending ? "1" : "0") +
+         " closing=" + HwndText(st->devtools_closing) + " before={" + before +
+         "}";
+}
+
 }  // namespace
 
 void WebView2Backend::OpenDevTools(uint32_t window_id) {
@@ -3863,6 +3931,8 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
   state->devtools_opening++;
   state->devtools_close_pending = false;
   state->webview->OpenDevToolsWindow();
+  TraceDevTools("open: asked the engine", window_id, pid,
+                DevToolsStateText(state));
   // The window appears asynchronously (or, when this view's DevTools are
   // already open, the existing one comes to the front): find it and remember
   // it, for close_devtools / is_devtools_open. Past kDevToolsFindMs the
@@ -3908,6 +3978,9 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
     if (!st)
       return;
     st->devtools_opening--;
+    TraceDevTools(found ? "open: finder found" : "open: finder gave up",
+                  window_id, pid,
+                  "found=" + HwndText(found) + " " + DevToolsStateText(st));
     if (found)
       AdoptDevToolsWindow(window_id, st, found);
   }).detach();
@@ -3915,6 +3988,8 @@ void WebView2Backend::OpenDevTools(uint32_t window_id) {
 
 void WebView2Backend::AdoptDevToolsWindow(uint32_t window_id,
                                           WinWindowState* state, HWND found) {
+  TraceDevTools("adopt", window_id, static_cast<DWORD>(state->browser_pid),
+                "found=" + HwndText(found) + " " + DevToolsStateText(state));
   state->devtools_awaiting = false;
   state->devtools_before.clear();
   if (state->devtools_close_pending) {
@@ -3934,6 +4009,8 @@ void WebView2Backend::CloseDevToolsWindow(uint32_t window_id,
   PostMessageW(hwnd, WM_CLOSE, 0, 0);
   state->devtools_closing = hwnd;
   DWORD pid = static_cast<DWORD>(state->browser_pid);
+  TraceDevTools("close: posted WM_CLOSE", window_id, pid,
+                "target=" + HwndText(hwnd) + " " + DevToolsStateText(state));
   std::thread([this, window_id, pid, hwnd] {
     ULONGLONG start = GetTickCount64();
     while (GetTickCount64() - start < kDevToolsCloseWatchMs) {
@@ -3948,6 +4025,8 @@ void WebView2Backend::CloseDevToolsWindow(uint32_t window_id,
         return;
       }
       // Still showing: the close was dropped. Ask again.
+      TraceDevTools("close: still showing, asked again", window_id, pid,
+                    "target=" + HwndText(hwnd) + " " + DevToolsStateText(st));
       PostMessageW(hwnd, WM_CLOSE, 0, 0);
     }
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
@@ -4006,6 +4085,9 @@ void WebView2Backend::CloseDevTools(uint32_t window_id) {
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   if (!hwnd) {
+    TraceDevTools("close: no window found", window_id,
+                  state ? static_cast<DWORD>(state->browser_pid) : 0,
+                  DevToolsStateText(state));
     // Still opening: the window doesn't exist yet and would open after this
     // close. Close it once it has been found.
     if (state && (state->devtools_opening > 0 || state->devtools_awaiting))
@@ -4027,8 +4109,11 @@ bool WebView2Backend::IsDevToolsOpen(uint32_t window_id) {
   RunOnUiThreadSync([&] {
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
     auto* state = GetWindow(window_id);
-    open = FindDevToolsWindow(window_id) != nullptr &&
-           !(state && state->devtools_close_pending);
+    HWND found = FindDevToolsWindow(window_id);
+    open = found != nullptr && !(state && state->devtools_close_pending);
+    TraceDevTools(open ? "is_open: yes" : "is_open: no", window_id,
+                  state ? static_cast<DWORD>(state->browser_pid) : 0,
+                  "found=" + HwndText(found) + " " + DevToolsStateText(state));
   });
   return open;
 }
