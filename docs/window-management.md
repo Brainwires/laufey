@@ -668,7 +668,10 @@ another origin and a request for a new window (`window.open()`,
   navigation guard, API 48, below). The page-side interceptor still hands a
   user-initiated one (the Navigation API's `userInitiated`, or on WKWebView,
   which lacks that API, a trusted click on a link) to the browser before the
-  engine starts it.
+  engine starts it; with a will-navigate handler set (below), the handler is
+  asked about it first, as for any top-level navigation. WebKit treats a script
+  the embedder runs (`execute_js`) as a user action, so there a
+  `location.href = …` from `execute_js` takes this path too.
 
 ### The navigation guard (API 48)
 
@@ -766,4 +769,8 @@ to the browser (the guard, a popup, the reserved call) is then recorded for
 A script can also call the reserved `__laufeyOpenExternal(url)` method of the
 bridge namespace directly, without a gesture. The backend applies the URL rule
 to that call (so it can only ever open an `http(s)` page in the browser) but
-cannot see a gesture there, since the call is an ordinary bridge message.
+cannot see a gesture there, since the call is an ordinary bridge message. With a
+will-navigate handler set, the handler sees that call's URL first (kind `other`;
+on CEF the calling document's URL as the initiator): `Refuse` drops it, `Allow`
+loads it in the window as the embedder's own navigation would, and `Default`
+leaves it to the guard.

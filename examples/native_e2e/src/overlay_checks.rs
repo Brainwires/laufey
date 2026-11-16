@@ -490,7 +490,7 @@ async fn wait_for_ui(
 }
 
 #[cfg(target_os = "macos")]
-mod mac {
+pub(crate) mod mac {
   //! The window by its title through the Objective-C runtime, the cursor
   //! and clicks through Quartz. Main thread unless noted.
   use std::ffi::{c_char, c_void, CStr};
@@ -644,6 +644,87 @@ mod mac {
   /// Moves the cursor (top-left screen coordinates). Any thread.
   pub fn warp_cursor(x: f64, y: f64) {
     unsafe { CGWarpMouseCursorPosition(CGPoint { x, y }) };
+  }
+
+  unsafe fn send_ptr(obj: *mut c_void, sel: &CStr, arg: *mut c_void) {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+      std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, sel_registerName(sel.as_ptr()), arg)
+  }
+
+  unsafe fn send_f64(obj: *mut c_void, sel: &CStr) -> f64 {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> f64 =
+      std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, sel_registerName(sel.as_ptr()))
+  }
+
+  /// A left click at (x, y) of the content of the window titled `title`
+  /// (points from its bottom-left), through the app's own event dispatch:
+  /// two NSEvents built as the window server delivers a click, handed to
+  /// `-[NSApplication sendEvent:]`, which routes them to the window and the
+  /// view under the point as it routes a real click. Unlike CGEventPost it
+  /// needs no Post Event permission (a CI runner has none), and the page
+  /// sees a trusted click with user activation. The window is made key
+  /// first (a click on a background window only activates it). False when
+  /// there is no such window.
+  pub fn app_click(title: &str, x: f64, y: f64) -> bool {
+    let Some(window) = window_titled(title) else {
+      return false;
+    };
+    unsafe {
+      let app = send0(
+        objc_getClass(c"NSApplication".as_ptr()),
+        c"sharedApplication",
+      );
+      send_ptr(window, c"makeKeyAndOrderFront:", std::ptr::null_mut());
+      let number = send_usize(window, c"windowNumber") as isize;
+      let uptime = send_f64(
+        send0(objc_getClass(c"NSProcessInfo".as_ptr()), c"processInfo"),
+        c"systemUptime",
+      );
+      #[allow(clippy::type_complexity)]
+      let make: unsafe extern "C" fn(
+        *mut c_void,
+        *mut c_void,
+        usize,
+        CGPoint,
+        usize,
+        f64,
+        isize,
+        *mut c_void,
+        isize,
+        isize,
+        f32,
+      ) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+      let sel = sel_registerName(
+        c"mouseEventWithType:location:modifierFlags:timestamp:windowNumber:\
+context:eventNumber:clickCount:pressure:"
+          .as_ptr(),
+      );
+      let class = objc_getClass(c"NSEvent".as_ptr());
+      // NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp.
+      for (i, kind) in [1usize, 2].into_iter().enumerate() {
+        let event = make(
+          class,
+          sel,
+          kind,
+          CGPoint { x, y },
+          0,
+          uptime + i as f64 * 0.05,
+          number,
+          std::ptr::null_mut(),
+          0,
+          1,
+          if kind == 1 { 1.0 } else { 0.0 },
+        );
+        if event.is_null() {
+          return false;
+        }
+        send_ptr(app, c"sendEvent:", event);
+      }
+    }
+    true
   }
 
   /// Posts a left click where the cursor is (needs the Post Event

@@ -1221,6 +1221,41 @@ void LaufeyHandler::CloseAllBrowsers(bool force_close) {
   }
 }
 
+// Where the external-link interceptor's navigation goes, once will-navigate
+// answered (`answer`; UI thread): REFUSE drops it; ALLOW loads it in the
+// window, as the embedder's own navigation would; DEFAULT has the guard
+// decide: an origin it lets this window load (one the embedder allows)
+// stays in the window, and anything else goes to the OS browser when the
+// URL rule allows it, within the window's per-second budget.
+static void DecideOpenExternal(CefRefPtr<CefBrowser> browser,
+                               uint32_t window_id, const std::string& url,
+                               uint32_t answer) {
+  if (answer == LAUFEY_NAVIGATION_REFUSE)
+    return;
+  if (answer == LAUFEY_NAVIGATION_ALLOW && window_id != 0) {
+    laufey_common::NavigationGuard::Instance().SetWindowUrl(window_id, url);
+    laufey_common::WillNavigateRequests::Instance().ExpectEmbedderNavigation(
+        window_id, url);
+    if (CefRefPtr<CefFrame> main = browser->GetMainFrame())
+      main->LoadURL(url);
+    return;
+  }
+  laufey_common::NavigationDecision decision =
+      window_id != 0
+          ? laufey_common::NavigationGuard::Instance().Decide(window_id, url)
+          : (IsAllowedExternalLinkUrl(url)
+                 ? laufey_common::NavigationDecision::kOpenInBrowser
+                 : laufey_common::NavigationDecision::kBlock);
+  if (decision == laufey_common::NavigationDecision::kAllow) {
+    if (CefRefPtr<CefFrame> main = browser->GetMainFrame())
+      main->LoadURL(url);
+  } else if (decision == laufey_common::NavigationDecision::kOpenInBrowser) {
+    LaufeyOpenExternalURL(url);
+  } else {
+    laufey_common::LogGuardedNavigation(url, decision);
+  }
+}
+
 bool LaufeyHandler::OnProcessMessageReceived(
     CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
     CefProcessId source_process, CefRefPtr<CefProcessMessage> message) {
@@ -1257,27 +1292,31 @@ bool LaufeyHandler::OnProcessMessageReceived(
       if (callArgs && callArgs->GetSize() > 0 &&
           callArgs->GetType(0) == VTYPE_STRING) {
         std::string url = callArgs->GetString(0).ToString();
-        // An origin the navigation guard lets this window load (one the
-        // embedder allows) stays in the window; anything else goes to the
-        // OS browser when the URL rule allows it, within the window's
-        // per-second budget.
         uint32_t window_id =
             RuntimeLoader::GetInstance()->GetLaufeyIdForBrowser(browser);
-        laufey_common::NavigationDecision decision =
-            window_id != 0
-                ? laufey_common::NavigationGuard::Instance().Decide(window_id,
-                                                                    url)
-                : (IsAllowedExternalLinkUrl(url)
-                       ? laufey_common::NavigationDecision::kOpenInBrowser
-                       : laufey_common::NavigationDecision::kBlock);
-        if (decision == laufey_common::NavigationDecision::kAllow) {
-          frame->LoadURL(url);
-        } else if (decision ==
-                   laufey_common::NavigationDecision::kOpenInBrowser) {
-          LaufeyOpenExternalURL(url);
-        } else {
-          laufey_common::LogGuardedNavigation(url, decision);
+        // The interceptor cancelled a top-level navigation the page
+        // started, so OnBeforeBrowse never sees it: will-navigate (API 56)
+        // is asked here first, as it would have been there.
+        auto& will = laufey_common::WillNavigateRequests::Instance();
+        bool asked = false;
+        if (window_id != 0 && IsAllowedExternalLinkUrl(url) &&
+            will.HandlerSet() && laufey_common::WillNavigateReported(url)) {
+          asked = will.Ask(window_id, url, frame->GetURL().ToString(),
+                           LAUFEY_NAVIGATION_KIND_OTHER,
+                           [browser, window_id, url](uint32_t answer) {
+                             CefPostTask(
+                                 TID_UI,
+                                 base::BindOnce(
+                                     [](CefRefPtr<CefBrowser> b, uint32_t wid,
+                                        std::string u, uint32_t a) {
+                                       DecideOpenExternal(b, wid, u, a);
+                                     },
+                                     browser, window_id, url, answer));
+                           }) == laufey_common::WillNavigateStart::kAsked;
         }
+        if (!asked)
+          DecideOpenExternal(browser, window_id, url,
+                             LAUFEY_NAVIGATION_DEFAULT);
       }
       CefRefPtr<CefProcessMessage> reply =
           CefProcessMessage::Create("laufey_response");

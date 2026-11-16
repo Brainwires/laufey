@@ -67,10 +67,11 @@
 # scale, that sizes and positions stay in DIPs, and the window's physical
 # size on screen.
 #
-# On Linux, --window-api, --hidpi, --io, --system and --menus-notifications
-# also hand the battery xdotool (LAUFEY_E2E_XDOTOOL) for real X input: key
-# presses for global shortcuts and menu accelerators, and an XDND drag from
-# a GTK drag source (laufey_xdnd_source, built with the backend's tests).
+# On Linux, --window-api, --hidpi, --io, --system, --menus-notifications and
+# --navigation also hand the battery xdotool (LAUFEY_E2E_XDOTOOL) for real X
+# input: key presses for global shortcuts and menu accelerators, an XDND drag
+# from a GTK drag source (laufey_xdnd_source, built with the backend's tests),
+# and clicks on links to another origin (will-navigate).
 # LAUFEY_E2E_WM=none turns the window manager off.
 # --io runs only the API 39 checks: drag and drop (through the test hook),
 # real file dialogs driven by the test hook, the rich clipboard.
@@ -543,7 +544,8 @@ fi
 screen="1280x1024x24"
 if is_linux; then
   case "$mode" in
-    --window-api | --hidpi | --io | --system | --menus-notifications)
+    --window-api | --hidpi | --io | --system | --menus-notifications | \
+      --navigation)
       wm="${LAUFEY_E2E_WM:-openbox}"
       if [ "$wm" != none ] && command -v "$wm" >/dev/null; then
         export LAUFEY_E2E_WM="$wm"

@@ -387,6 +387,8 @@ async fn refused_navigation_keeps_page(own: &str, other: &str, hits: &Hits) {
       .push(format!("{} {}", nav.kind.as_str(), nav.url));
     let answer = if nav.url.starts_with(&refused_prefix) {
       NavigationAnswer::Refuse
+    } else if nav.url.contains("/click-allow") {
+      NavigationAnswer::Allow
     } else {
       NavigationAnswer::Default
     };
@@ -414,7 +416,215 @@ async fn refused_navigation_keeps_page(own: &str, other: &str, hits: &Hits) {
     refused_from(LIVE_SCHEME_URL, "app", mode, other, &reported, hits).await;
   }
   refused_navigation_loop(own, other, &reported).await;
+  open_external_asks_first(own, other, &reported).await;
+  for answer in ["refuse", "allow", "default"] {
+    clicked_link(own, other, answer, &reported).await;
+  }
   laufey::clear_will_navigate_handler();
+}
+
+/// The external-link interceptor's reserved bridge call (what a user's click
+/// on a link to another origin, or on WebKit a script the embedder runs,
+/// turns into before the engine sees a navigation) asks will-navigate first
+/// too: a refused URL is neither loaded nor handed to the browser.
+async fn open_external_asks_first(
+  own: &str,
+  other: &str,
+  reported: &Mutex<Vec<String>>,
+) {
+  let start = format!("{own}/live");
+  let refused = format!("{other}/refused-external-now");
+  let win = Window::new(480, 320)
+    .bind("ping", |call| call.resolve(Value::String("pong".into())))
+    .load(&start);
+  let first = wait_url(&win, &start, 100).await;
+  let _ = laufey::test_take_external_opens();
+  let called = eval_async(
+    &win,
+    &format!(
+      "typeof Laufey === 'undefined' ? 'no bridge' : \
+       Promise.resolve(Laufey.__laufeyOpenExternal('{refused}')) \
+         .then(() => 'called')"
+    ),
+  )
+  .await;
+  let asked = wait_for(
+    || {
+      reported
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|u| u.ends_with(&refused))
+    },
+    50,
+    200,
+  )
+  .await;
+  tokio::time::sleep(Duration::from_millis(500)).await;
+  let here = eval_string(&win, "location.href").await;
+  let opened = laufey::test_take_external_opens().unwrap_or_default();
+  check(
+    &format!(
+      "navigation: the external-link call asks will-navigate first, and a \
+       refused URL neither loads nor reaches the browser ({first:?}, \
+       {called:?}, asked {asked}, at {here:?}, to the browser: {opened:?})"
+    ),
+    first.as_deref() == Some(start.as_str())
+      && called.as_deref() == Some("called")
+      && asked
+      && here.as_deref() == Some(start.as_str())
+      && !opened.contains(&refused),
+  );
+  win.close();
+}
+
+/// A real click on a link to another origin, for each answer: the page
+/// starts the navigation the way a user does (OS input: xdotool / XTEST on
+/// X11, SendInput on Windows; on macOS, where posting OS events needs a
+/// permission a CI runner lacks, NSEvents through the app's own event
+/// dispatch, which reaches the page as a trusted click). Will-navigate must
+/// see it, and then Refuse keeps the page and opens nothing, Allow loads it
+/// in the window, Default leaves it to the guard (another origin: the
+/// browser, not the window).
+async fn clicked_link(
+  own: &str,
+  other: &str,
+  answer: &str,
+  reported: &Mutex<Vec<String>>,
+) {
+  let start = format!("{own}/live");
+  let target = match answer {
+    "refuse" => format!("{other}/refused-click-now"),
+    "allow" => format!("{other}/click-allow-now"),
+    _ => format!("{other}/click-default-now"),
+  };
+  let label = format!("navigation (a clicked link, {answer})");
+  let title = format!("native-e2e-click-{answer}");
+  let win = Window::new(480, 320).title(&title).load(&start);
+  let first = wait_url(&win, &start, 100).await;
+  if first.as_deref() != Some(start.as_str()) {
+    check(&format!("{label}: the page loads ({first:?})"), false);
+    win.close();
+    return;
+  }
+  // A link over the whole page, so the click lands on it wherever the
+  // window's content is; the page counts the trusted mousedowns it gets.
+  eval_string(
+    &win,
+    &format!(
+      "document.title = '{title}'; window.__downs = 0; \
+       addEventListener('mousedown', \
+         (e) => {{ if (e.isTrusted) window.__downs++; }}, true); \
+       const a = document.createElement('a'); a.href = '{target}'; \
+       a.textContent = 'go'; a.style.cssText = 'position:fixed;inset:0;\
+         display:block;background:#fff;z-index:2147483647'; \
+       document.body.appendChild(a); 'ok'"
+    ),
+  )
+  .await;
+  win.show();
+  win.focus();
+  tokio::time::sleep(Duration::from_millis(500)).await;
+  let _ = laufey::test_take_external_opens();
+  let Some(how) = real_click(&win, &title).await else {
+    win.close();
+    return;
+  };
+  let asked = wait_for(
+    || {
+      reported
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|u| u.ends_with(&target))
+    },
+    50,
+    200,
+  )
+  .await;
+  let downs = eval_string(&win, "String(window.__downs)").await;
+  let want = if answer == "allow" { &target } else { &start };
+  let here = wait_url(&win, want, 25).await;
+  tokio::time::sleep(Duration::from_millis(300)).await;
+  let opened = laufey::test_take_external_opens().unwrap_or_default();
+  let to_browser = opened.contains(&target);
+  let outcome = match answer {
+    "refuse" => here.as_deref() == Some(start.as_str()) && !to_browser,
+    "allow" => here.as_deref() == Some(target.as_str()) && !to_browser,
+    _ => here.as_deref() == Some(start.as_str()) && to_browser,
+  };
+  check(
+    &format!(
+      "{label}: will-navigate sees the click's navigation and the answer \
+       holds ({how}; trusted mousedowns {downs:?}, asked {asked}, at \
+       {here:?}, to the browser: {opened:?})"
+    ),
+    asked && outcome,
+  );
+  win.close();
+}
+
+/// Clicks the middle of the window's content with real input; how, or
+/// `None` (reported) when this session can't.
+async fn real_click(win: &Window, title: &str) -> Option<String> {
+  #[cfg(target_os = "macos")]
+  {
+    let (w, h) = win.get_size();
+    let t = title.to_string();
+    let (x, y) = (w as f64 / 2.0, h as f64 / 2.0);
+    let ok = laufey::spawn_on_ui_thread(move || {
+      crate::overlay_checks::mac::app_click(&t, x, y)
+    })
+    .await
+    .unwrap_or(false);
+    if !ok {
+      check(
+        &format!("a clicked link: NSEvents reach the window {title:?}"),
+        false,
+      );
+      return None;
+    }
+    Some("NSEvents through -[NSApplication sendEvent:]".into())
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = win;
+    if cfg!(target_os = "linux") && crate::os_view::xdotool().is_none() {
+      na("a clicked link (needs xdotool on X11)");
+      return None;
+    }
+    let Some((x, y, w, h)) = crate::os_view::content_rect(title) else {
+      check(
+        &format!("a clicked link: the window {title:?} is on screen"),
+        false,
+      );
+      return None;
+    };
+    let (cx, cy) = (x + w / 2, y + h / 2);
+    #[cfg(windows)]
+    {
+      use crate::io_checks::ole_input;
+      ole_input::move_to(cx, cy);
+      tokio::time::sleep(Duration::from_millis(80)).await;
+      ole_input::button(true);
+      tokio::time::sleep(Duration::from_millis(60)).await;
+      ole_input::button(false);
+      Some(format!(
+        "SendInput at ({cx}, {cy}), over {}",
+        ole_input::window_at(cx, cy)
+      ))
+    }
+    #[cfg(not(windows))]
+    {
+      let (sx, sy) = (cx.to_string(), cy.to_string());
+      let moved = crate::os_view::xdo(&["mousemove", &sx, &sy]).is_some();
+      tokio::time::sleep(Duration::from_millis(80)).await;
+      let clicked = crate::os_view::xdo(&["click", "1"]).is_some();
+      Some(format!(
+        "xdotool at ({cx}, {cy}): moved {moved}, clicked {clicked}"
+      ))
+    }
+  }
 }
 
 /// The refusal again and again, from each page: every round's navigation

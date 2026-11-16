@@ -43,6 +43,7 @@
 #endif
 
 #include <iostream>
+#include <memory>
 #include <cstring>
 #include <vector>
 
@@ -2403,6 +2404,33 @@ void RuntimeLoader::OnJsCall(uint32_t window_id, uint64_t page_call_id,
   }
 }
 
+// Where the external-link interceptor's navigation goes, once will-navigate
+// answered (`answer`): REFUSE drops it; ALLOW loads it in the window, as the
+// embedder's own navigation would; DEFAULT has the guard decide: an origin it
+// lets this window load (one the embedder allows) stays in the window, and
+// anything else goes to the OS browser when the URL rule allows it, within
+// the window's per-second budget.
+void RuntimeLoader::DecideOpenExternal(uint32_t window_id,
+                                       const std::string& url,
+                                       uint32_t answer) {
+  LaufeyBackend* backend = GetBackend();
+  if (!backend || answer == LAUFEY_NAVIGATION_REFUSE)
+    return;
+  if (answer == LAUFEY_NAVIGATION_ALLOW) {
+    Backend_Navigate(this, window_id, url.c_str());
+    return;
+  }
+  laufey_common::NavigationDecision decision =
+      laufey_common::NavigationGuard::Instance().Decide(window_id, url);
+  if (decision == laufey_common::NavigationDecision::kAllow) {
+    backend->Navigate(window_id, url);
+  } else if (decision == laufey_common::NavigationDecision::kOpenInBrowser) {
+    backend->OpenExternalURL(url);
+  } else {
+    laufey_common::LogGuardedNavigation(url, decision);
+  }
+}
+
 void RuntimeLoader::PollPendingJsCalls() {
   std::vector<PendingJsCall> calls;
   {
@@ -2440,23 +2468,38 @@ void RuntimeLoader::PollPendingJsCalls() {
           url = list[0]->GetString();
         }
       }
-      // An origin the navigation guard lets this window load (one the
-      // embedder allows) stays in the window; anything else goes to the OS
-      // browser when the URL rule allows it, within the window's
-      // per-second budget.
-      laufey_common::NavigationDecision decision =
-          laufey_common::NavigationGuard::Instance().Decide(call.window_id,
-                                                            url);
-      if (LaufeyBackend* backend = GetBackend()) {
-        if (decision == laufey_common::NavigationDecision::kAllow) {
-          backend->Navigate(call.window_id, url);
-        } else if (decision ==
-                   laufey_common::NavigationDecision::kOpenInBrowser) {
-          backend->OpenExternalURL(url);
-        } else {
-          laufey_common::LogGuardedNavigation(url, decision);
+      // The interceptor cancelled a top-level navigation the page started,
+      // so the engine's own navigation hook never sees it: will-navigate
+      // (API 56) is asked here first, as it would have been there.
+      uint32_t wid = call.window_id;
+      auto& will = laufey_common::WillNavigateRequests::Instance();
+      if (IsAllowedExternalLinkUrl(url) && will.HandlerSet() &&
+          laufey_common::WillNavigateReported(url)) {
+        struct Answered {
+          RuntimeLoader* loader;
+          uint32_t wid;
+          std::string url;
+          uint32_t answer;
+        };
+        RuntimeLoader* self = this;
+        auto start = will.Ask(
+            wid, url, "", LAUFEY_NAVIGATION_KIND_OTHER,
+            [self, wid, url](uint32_t answer) {
+              laufey_common::UiTaskDispatcher::Get().Dispatch(
+                  [](void* data, bool ran) {
+                    std::unique_ptr<Answered> a(static_cast<Answered*>(data));
+                    // Not run (the event loop has ended): nothing to load.
+                    if (ran)
+                      a->loader->DecideOpenExternal(a->wid, a->url, a->answer);
+                  },
+                  new Answered{self, wid, url, answer});
+            });
+        if (start == laufey_common::WillNavigateStart::kAsked) {
+          RespondToCall(call.call_id, laufey::Value::Null(), nullptr);
+          continue;
         }
       }
+      DecideOpenExternal(wid, url, LAUFEY_NAVIGATION_DEFAULT);
       RespondToCall(call.call_id, laufey::Value::Null(), nullptr);
       continue;
     }

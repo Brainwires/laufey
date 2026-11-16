@@ -98,6 +98,10 @@ class RuntimeLoader {
                 const std::string& origin);
 
   void PollPendingJsCalls();
+  // The external-link interceptor's navigation, once will-navigate answered
+  // (runtime_loader.cc).
+  void DecideOpenExternal(uint32_t window_id, const std::string& url,
+                          uint32_t answer);
 
   // Answers the page's call `page_call_id` in `window_id`.
   void JsCallRespond(uint32_t window_id, uint64_t page_call_id,
