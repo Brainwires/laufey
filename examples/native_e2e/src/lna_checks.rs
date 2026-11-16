@@ -255,13 +255,19 @@ pub async fn run(echo_url: Option<&str>) {
   if !fetched {
     log_loopback_connections(echo_url);
   }
-  check(
-    &format!(
-      "a fetch from the custom-scheme page reaches a loopback server \
+  if let Some(reason) = loopback_skip_reason() {
+    na(&format!(
+      "a fetch from the custom-scheme page reaches a loopback server ({reason})"
+    ));
+  } else {
+    check(
+      &format!(
+        "a fetch from the custom-scheme page reaches a loopback server \
        (reported {reported}, got {echo:?})"
-    ),
-    fetched,
-  );
+      ),
+      fetched,
+    );
+  }
   wait_for(
     || probes.lock().unwrap().contains_key("websocket"),
     100,
@@ -458,7 +464,25 @@ pub fn ws_url(echo_url: &str) -> String {
 
 /// The custom-scheme page's WebSocket to the loopback echo server opened
 /// and got its message (`got` is what the page reported).
+/// LAUFEY_E2E_LOOPBACK=0 (WebView2): the custom-scheme page's requests to
+/// loopback are N/A, for a machine whose WebView2 holds them without ever
+/// sending or failing them (docs/custom-schemes.md); the reason, else None.
+pub fn loopback_skip_reason() -> Option<&'static str> {
+  let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
+  (backend == "webview"
+    && cfg!(windows)
+    && std::env::var("LAUFEY_E2E_LOOPBACK").as_deref() == Ok("0"))
+  .then_some(
+    "LAUFEY_E2E_LOOPBACK=0: this machine's WebView2 holds a custom-scheme \
+     page's loopback requests, never sending or failing them",
+  )
+}
+
 pub fn check_app_origin_websocket(echo_url: Option<&str>, got: &str) {
+  if let Some(reason) = loopback_skip_reason() {
+    na(&format!("a WebSocket to loopback ({reason})"));
+    return;
+  }
   if echo_url.is_none() {
     na("a WebSocket to loopback (could not bind a loopback echo server)");
     return;

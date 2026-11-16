@@ -148,6 +148,19 @@ is not declared, so it is denied. LNA is never switched off for the process (no
 The WebView backends have no such checks: WKWebView, WebView2 and WebKitGTK let
 a page reach loopback servers already.
 
+One exception is known: on WebView2 157 (157.0.4341.46) on Windows 11 Insider
+build 26300 (26H2, 26300.9974), a custom-scheme page's `fetch` and WebSocket to
+a loopback server are accepted by the renderer (DevTools records the request)
+and then never sent: no connection attempt reaches the server, the request
+neither fails nor completes, and no permission request or prompt appears.
+Turning off Chromium's Local Network Access and Private Network Access features
+(`LocalNetworkAccessChecks`, `msWebViewAllowLocalNetworkAccessChecks`,
+`PrivateNetworkAccessSendPreflights`,
+`PrivateNetworkAccessRespectPreflightResults`,
+`BlockInsecurePrivateNetworkRequests`) or the network service sandbox changes
+nothing. Release builds of Windows (GitHub's `windows-latest` image) are not
+affected, and no app-side setting is known to change it.
+
 ## A document's body waits for its commit (CEF)
 
 On CEF the body of a frame's document served over a custom scheme (an HTML,

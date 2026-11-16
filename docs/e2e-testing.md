@@ -193,6 +193,14 @@ front (`LAUFEY_CUSTOM_SCHEMES=laufey-e2e`, set by `scripts/native-e2e-run.sh`,
 which also exports `LAUFEY_E2E_BACKEND`) because Chromium registers custom
 schemes before the runtime loads.
 
+Two switches are for a machine whose Windows misbehaves where release builds
+don't (both N/A with the reason; CI sets neither): `LAUFEY_E2E_LOOPBACK=0` makes
+the custom-scheme page's loopback `fetch` and WebSocket checks N/A on WebView2
+(a Windows Insider build whose WebView2 never sends them,
+[custom-schemes.md](custom-schemes.md)), and `LAUFEY_E2E_PASSKEY_OS=0` skips the
+passkey requests that reach the OS (a Windows build that keeps a cancelled
+request's dialog, [passkeys.md](passkeys.md)).
+
 Local Network Access (`lna_checks.rs`, also on its own with `--lna`) runs with
 Chromium's checks on: the custom-scheme page's cross-origin fetch and its
 WebSocket to the loopback echo server must get through (laufey grants local

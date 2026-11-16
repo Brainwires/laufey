@@ -1959,6 +1959,10 @@ fn e2e_main() {
           STREAM_CHUNKS.len()
         );
         match &echo_url {
+          Some(_) if lna_checks::loopback_skip_reason().is_some() => na(&format!(
+            "cross-origin Origin header ({})",
+            lna_checks::loopback_skip_reason().unwrap_or_default()
+          )),
           Some(url) => {
             let ok = r.echo_body == format!("origin={E2E_ORIGIN}");
             if !ok {
