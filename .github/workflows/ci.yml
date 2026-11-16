@@ -1802,6 +1802,8 @@ jobs:
           toolchain: 1.99.1
 
       - name: Publish laufey crate to crates.io
+        # The crates.io `laufey` name is upstream's: forks never publish it.
+        if: github.repository == 'littledivy/laufey'
         working-directory: capi
         # Non-fatal: a missing/under-scoped CARGO_REGISTRY_TOKEN, or a version
         # already on crates.io, must not block the GitHub release below.
