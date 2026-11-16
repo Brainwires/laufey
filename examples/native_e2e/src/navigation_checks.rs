@@ -612,9 +612,13 @@ mod covering {
   const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 
   /// The shell's own flyouts (Start, search, the notification centre and
-  /// quick settings, widgets): dismissed with Escape, as a user does, never
-  /// closed or ended.
-  const SHELL_FLYOUTS: &[&str] = &[
+  /// quick settings, widgets), and the Microsoft account sign-in window
+  /// (WWAHost, a CoreWindow the runner image shows over everything):
+  /// dismissed with Escape, as a user does, never closed or ended. Closing
+  /// WWAHost's window (WM_CLOSE) handed the activation to the shell, and the
+  /// Start menu opened under the click (windows-11-arm, run 43974809403).
+  const ESCAPE_ONLY: &[&str] = &[
+    "wwahost.exe",
     "startmenuexperiencehost.exe",
     "searchhost.exe",
     "searchapp.exe",
@@ -624,7 +628,8 @@ mod covering {
     "webexperiencehostapp.exe",
   ];
 
-  /// Processes whose window over the test may be ended: the account /
+  /// Processes whose window over the test may be closed (WM_CLOSE), and
+  /// ended if it stays: the account /
   /// credential brokers and settings hosts a runner image shows prompts
   /// from. Matched on the executable's file name, any case.
   const BROKERS: &[&str] = &[
@@ -659,9 +664,10 @@ mod covering {
     }
   }
 
-  /// Closes the top-level window `root` of another process; if it is still
-  /// there after a moment and its process is a known broker, ends that
-  /// process. Logs what it did.
+  /// Dismisses the top-level window `root` of another process: Escape for
+  /// the shell's flyouts and the sign-in window, else, for a known broker,
+  /// WM_CLOSE and, if it stays, the end of its process; any other window is
+  /// left alone. Waits for the shell to settle after, and logs what it did.
   pub fn clear(root: *mut c_void) {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(root, &mut pid) };
@@ -675,7 +681,7 @@ mod covering {
       .unwrap_or("")
       .to_ascii_lowercase();
     let what = crate::io_checks::ole_input::window_at_hwnd(root);
-    if SHELL_FLYOUTS.contains(&file.as_str()) {
+    if ESCAPE_ONLY.contains(&file.as_str()) {
       eprintln!(
         "[e2e] INFO dismissing {what} ({image}) over the test window with \
          Escape"
@@ -686,15 +692,18 @@ mod covering {
       std::thread::sleep(std::time::Duration::from_millis(600));
       return;
     }
+    if !BROKERS.contains(&file.as_str()) {
+      eprintln!(
+        "[e2e] INFO leaving {what} ({image}) over the test window: not a \
+         known broker or shell flyout"
+      );
+      return;
+    }
     eprintln!("[e2e] INFO closing {what} ({image}) over the test window");
     unsafe { PostMessageW(root, WM_CLOSE, 0, 0) };
     std::thread::sleep(std::time::Duration::from_millis(800));
     if unsafe { IsWindow(root) } == 0 {
       eprintln!("[e2e] INFO it closed");
-      return;
-    }
-    if !BROKERS.contains(&file.as_str()) {
-      eprintln!("[e2e] INFO it stayed; {file:?} is not a known broker");
       return;
     }
     let ended = unsafe {
@@ -707,6 +716,34 @@ mod covering {
     };
     std::thread::sleep(std::time::Duration::from_millis(500));
     eprintln!("[e2e] INFO it stayed; ended {file} (pid {pid}): {ended}");
+  }
+}
+
+/// Windows: waits until the point (cx, cy) has been the test window's
+/// (`hwnd`) for half a second, dismissing whatever covers it (at most six
+/// times) and putting the window back on top each time.
+#[cfg(windows)]
+async fn settle_on(hwnd: *mut std::ffi::c_void, cx: i32, cy: i32) {
+  use crate::io_checks::ole_input;
+  use crate::menu_notification_checks::win;
+  let mut clears = 0;
+  let mut steady = 0;
+  while steady < 4 {
+    let at = ole_input::root_at(cx, cy);
+    if at == hwnd || at.is_null() {
+      steady += 1;
+    } else {
+      steady = 0;
+      if clears == 6 || !covering::allowed() {
+        return;
+      }
+      clears += 1;
+      covering::clear(at);
+      win::set_topmost(hwnd, true);
+      tokio::time::sleep(Duration::from_millis(500)).await;
+      ole_input::move_to(cx, cy);
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
   }
 }
 
@@ -790,18 +827,11 @@ async fn real_click(win: &Window, title: &str) -> Option<String> {
       ole_input::move_to(cx, cy);
       tokio::time::sleep(Duration::from_millis(80)).await;
       // Again just before the press: a shell flyout can open meanwhile (the
-      // runner's Start menu did once, right after a sign-in prompt closed).
-      for _ in 0..3 {
-        let at = ole_input::root_at(cx, cy);
-        if at == hwnd || at.is_null() || !covering::allowed() {
-          break;
-        }
-        covering::clear(at);
-        win::set_topmost(hwnd, true);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        ole_input::move_to(cx, cy);
-        tokio::time::sleep(Duration::from_millis(80)).await;
-      }
+      // runner's Start menu did, right after a sign-in prompt closed). The
+      // point has to stay the test window's for half a second (four looks,
+      // 150 ms apart); whatever covers it is dismissed (Escape for Start:
+      // the Windows key is never pressed) and the wait starts over.
+      settle_on(hwnd, cx, cy).await;
       if ole_input::root_at(cx, cy) != hwnd {
         let covered_by = ole_input::window_at(cx, cy);
         win::set_topmost(hwnd, false);
@@ -817,9 +847,31 @@ async fn real_click(win: &Window, title: &str) -> Option<String> {
       ole_input::button(true);
       tokio::time::sleep(Duration::from_millis(60)).await;
       ole_input::button(false);
-      let over = ole_input::window_at(cx, cy);
+      let mut over = ole_input::window_at(cx, cy);
+      let mut retried = false;
+      // Covered between the press and the release (the release then went
+      // to the other window, so the link was never clicked): dismissed, and
+      // the click made once more.
+      if ole_input::root_at(cx, cy) != hwnd && covering::allowed() {
+        eprintln!("[e2e] INFO covered at the release ({over}); clicking again");
+        settle_on(hwnd, cx, cy).await;
+        if ole_input::root_at(cx, cy) == hwnd {
+          ole_input::button(true);
+          tokio::time::sleep(Duration::from_millis(60)).await;
+          ole_input::button(false);
+          over = ole_input::window_at(cx, cy);
+          retried = true;
+        }
+      }
       win::set_topmost(hwnd, false);
-      Some(format!("SendInput at ({cx}, {cy}), over {over}"))
+      Some(format!(
+        "SendInput at ({cx}, {cy}), over {over}{}",
+        if retried {
+          ", clicked again after a cover"
+        } else {
+          ""
+        }
+      ))
     }
     #[cfg(not(windows))]
     {
