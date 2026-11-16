@@ -890,6 +890,9 @@ class WebView2Backend : public LaufeyBackend {
   // Ends `window_id`'s turn on browser process `pid` (if it holds it) and
   // starts the next queued open. windows_mutex_ held.
   void ReleaseDevToolsOpen(DWORD pid, uint32_t window_id);
+  // Starts the next queued open on browser process `pid` when none is in
+  // flight. windows_mutex_ held.
+  void StartNextDevToolsOpen(DWORD pid);
   std::recursive_mutex windows_mutex_;
   bool class_registered_ = false;
   // See SchemesForEnvironment.
@@ -4067,6 +4070,12 @@ void WebView2Backend::ReleaseDevToolsOpen(DWORD pid, uint32_t window_id) {
   if (owner == devtools_open_owner_.end() || owner->second != window_id)
     return;
   devtools_open_owner_.erase(owner);
+  StartNextDevToolsOpen(pid);
+}
+
+void WebView2Backend::StartNextDevToolsOpen(DWORD pid) {
+  if (devtools_open_owner_.count(pid))
+    return;  // an open is in flight; it starts the next one when it ends
   auto queued = devtools_open_queue_.find(pid);
   if (queued == devtools_open_queue_.end())
     return;
@@ -4074,26 +4083,40 @@ void WebView2Backend::ReleaseDevToolsOpen(DWORD pid, uint32_t window_id) {
     uint32_t next = queued->second.front();
     queued->second.pop_front();
     auto* st = GetWindow(next);
-    if (st && st->devtools_queued) {
-      st->devtools_queued = false;
-      // Always posted (never run inline from inside the caller, which holds
-      // another view's DevTools state): ahead of any open asked for later.
-      struct Start {
-        WebView2Backend* self;
-        uint32_t window_id;
-      };
-      auto* start = new Start{this, next};
-      if (!PostUiTask(
-              [](void* p) {
-                auto* s = static_cast<Start*>(p);
-                s->self->OpenDevTools(s->window_id);
-                delete s;
-              },
-              start)) {
-        delete start;
-      }
+    if (!st || !st->devtools_queued)
+      continue;
+    // Always posted (never run inline from inside the caller, which holds
+    // another view's DevTools state), so it runs ahead of any open asked for
+    // later. The view stays marked queued until the task runs: a
+    // close_devtools meanwhile clears the mark, and the task then starts the
+    // next view instead of opening DevTools the caller has closed.
+    struct Start {
+      WebView2Backend* self;
+      uint32_t window_id;
+      DWORD pid;
+    };
+    auto* start = new Start{this, next, pid};
+    if (PostUiTask(
+            [](void* p) {
+              auto* s = static_cast<Start*>(p);
+              WebView2Backend* self = s->self;
+              uint32_t id = s->window_id;
+              DWORD from = s->pid;
+              delete s;
+              std::lock_guard<std::recursive_mutex> lock(self->windows_mutex_);
+              auto* view = self->GetWindow(id);
+              if (view && view->devtools_queued) {
+                view->devtools_queued = false;
+                self->OpenDevTools(id);
+              } else {
+                self->StartNextDevToolsOpen(from);
+              }
+            },
+            start)) {
       break;
     }
+    delete start;
+    st->devtools_queued = false;
   }
   if (queued->second.empty())
     devtools_open_queue_.erase(queued);
