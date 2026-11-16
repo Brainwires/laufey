@@ -2329,6 +2329,20 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
       LaufeyWebView* webview = [[LaufeyWebView alloc] initWithFrame:frame
                                                       configuration:config];
       webview.laufeyWindowId = window_id;
+      // BackgroundThrottling::None: WebKit takes a page whose window is not
+      // on screen (ordered out, minimized, covered) for an occluded one and
+      // throttles it whatever the scheduling policy says; with occlusion
+      // detection off the view counts as visible while it is in a window, so
+      // the page keeps its timers and rendering. WebKit SPI
+      // (WKWebViewPrivate, as WebKitTestRunner uses it), asked for by
+      // selector.
+      if (laufey_common::BackgroundThrottlingFromFlags(flags) ==
+          LAUFEY_BACKGROUND_THROTTLING_NONE) {
+        SEL occlusion =
+            NSSelectorFromString(@"_setWindowOcclusionDetectionEnabled:");
+        if ([webview respondsToSelector:occlusion])
+          ((void (*)(id, SEL, BOOL))objc_msgSend)(webview, occlusion, NO);
+      }
       if ([webview respondsToSelector:@selector(setInspectable:)]) {
         [webview setInspectable:inspectable];
       }
