@@ -133,7 +133,10 @@ updated app, by the same rule as on Linux: a lookup that finds nothing takes the
 vault's credential, stores it here and removes it from the vault, during the
 first run whose app data directory has no `.laufey-secret-store-v2` marker, and
 only when that directory existed when the process started. A key first looked up
-on a later run stays in the vault.
+on a later run stays in the vault. A delete removes the vault's copy too, and a
+store replaces it (the copy is removed); a key deleted or stored during a run is
+never moved from the vault afterwards in that run, so a secret deleted before it
+was ever looked up (a token cleared at sign-out) stays deleted.
 
 There is never a plaintext fallback.
 

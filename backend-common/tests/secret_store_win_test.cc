@@ -228,6 +228,47 @@ int main() {
     EXPECT(SecretLookup("laufey-secret-test-vault", "token", T, &value,
                         &reason) == SecretStatus::kNotFound);
     VaultRemove(vres, vuser);
+
+    // During the first run, a key deleted before it was ever looked up (a
+    // token cleared at sign-out) stays deleted: the delete removes the
+    // vault's copy too, and the lookup after it finds nothing.
+    std::string again_dir = TempDir("laufey-secret-again-");
+    CreateDirectoryW(Utf8ToWide(again_dir).c_str(), nullptr);
+    EXPECT(VaultAdd(vres, vuser, L"signed out"));
+    SetSecretStoreAppForTesting("dev.laufey.secret-test.c", again_dir.c_str(),
+                                true);
+    EXPECT(SecretDelete("laufey-secret-test-vault", "token", T, &reason) ==
+           SecretStatus::kOk);
+    EXPECT(!VaultHas(vres, vuser));
+    EXPECT(SecretLookup("laufey-secret-test-vault", "token", T, &value,
+                        &reason) == SecretStatus::kNotFound);
+    // And one the vault gets again later in that run (another program, an
+    // older build still running) is not moved back either.
+    EXPECT(VaultAdd(vres, vuser, L"resurrected"));
+    EXPECT(SecretLookup("laufey-secret-test-vault", "token", T, &value,
+                        &reason) == SecretStatus::kNotFound);
+    VaultRemove(vres, vuser);
+    DeleteFileW(Utf8ToWide(again_dir + "\\.laufey-secret-store-v2").c_str());
+    RemoveDirectoryW(Utf8ToWide(again_dir).c_str());
+
+    // A store during the first run replaces the vault's copy: it is removed,
+    // and the stored value is what a lookup reads.
+    std::string store_dir = TempDir("laufey-secret-store-");
+    CreateDirectoryW(Utf8ToWide(store_dir).c_str(), nullptr);
+    EXPECT(VaultAdd(vres, vuser, L"old token"));
+    SetSecretStoreAppForTesting("dev.laufey.secret-test.c", store_dir.c_str(),
+                                true);
+    EXPECT(SecretStore("laufey-secret-test-vault", "token", "", "new token", T,
+                       &reason) == SecretStatus::kOk);
+    EXPECT(!VaultHas(vres, vuser));
+    EXPECT(SecretLookup("laufey-secret-test-vault", "token", T, &value,
+                        &reason) == SecretStatus::kOk &&
+           value == "new token");
+    EXPECT(SecretDelete("laufey-secret-test-vault", "token", T, &reason) ==
+           SecretStatus::kOk);
+    DeleteFileW(Utf8ToWide(store_dir + "\\.laufey-secret-store-v2").c_str());
+    RemoveDirectoryW(Utf8ToWide(store_dir).c_str());
+
     DeleteFileW(Utf8ToWide(old_dir + "\\.laufey-secret-store-v2").c_str());
     RemoveDirectoryW(Utf8ToWide(old_dir).c_str());
     DeleteFileW(Utf8ToWide(fresh_dir + "\\.laufey-secret-store-v2").c_str());

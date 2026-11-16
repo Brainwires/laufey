@@ -48,6 +48,7 @@
 #include <cstring>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -425,6 +426,38 @@ bool TakeFromPasswordVault(const std::string& service,
   return true;
 }
 
+// Removes the PasswordVault credential for (resource, user), if there is one:
+// a delete or a store leaves no older copy behind for a lookup to move back.
+void RemoveFromPasswordVault(const std::string& service,
+                             const std::string& account) {
+  RoScope ro;
+  ComPtr<wsc::IPasswordVault> vault = OpenVault();
+  if (!vault)
+    return;
+  std::wstring resource = Utf8ToWide(service);
+  std::wstring user = Utf8ToWide(account);
+  ComPtr<wsc::IPasswordCredential> cred;
+  if (SUCCEEDED(vault->Retrieve(
+          HStringReference(resource.c_str(), static_cast<UINT>(resource.size()))
+              .Get(),
+          HStringReference(user.c_str(), static_cast<UINT>(user.size())).Get(),
+          &cred)) &&
+      cred)
+    vault->Remove(cred.Get());
+}
+
+// The keys deleted or stored during this run (app id, service, account):
+// never moved from the vault afterwards, even when removing the vault's copy
+// failed. Under CallMutex.
+std::set<std::string>& Settled() {
+  static std::set<std::string> keys;
+  return keys;
+}
+
+std::string SettledKey(const std::string& service, const std::string& account) {
+  return WideToUtf8(Target(service, account));
+}
+
 }  // namespace
 
 SecretStatus SecretLookup(const std::string& service,
@@ -447,7 +480,8 @@ SecretStatus SecretLookup(const std::string& service,
     r.clear();
     s = ReadValue(Target(service, account), &v, nullptr, &r);
   }
-  if (s == SecretStatus::kNotFound && migrate) {
+  if (s == SecretStatus::kNotFound && migrate &&
+      !Settled().count(SettledKey(service, account))) {
     std::string moved;
     std::string store_reason;
     if (TakeFromPasswordVault(service, account, [&](const std::string& old) {
@@ -490,6 +524,11 @@ SecretStatus SecretStore(const std::string& service, const std::string& account,
   std::lock_guard<std::mutex> lock(CallMutex());
   MigrationWindow();
   SecretStatus s = StoreLocked(service, account, label, value, &r);
+  if (s == SecretStatus::kOk) {
+    // The value replaces any older copy an earlier build left in the vault.
+    Settled().insert(SettledKey(service, account));
+    RemoveFromPasswordVault(service, account);
+  }
   if (reason)
     *reason = s == SecretStatus::kOk ? std::string() : r;
   return s;
@@ -507,6 +546,11 @@ SecretStatus SecretDelete(const std::string& service,
   }
   std::lock_guard<std::mutex> lock(CallMutex());
   MigrationWindow();
+  // A copy an earlier build left in the PasswordVault goes too, and the key
+  // is never moved back from there during this run: a deleted secret stays
+  // deleted (even one deleted before it was ever looked up).
+  Settled().insert(SettledKey(service, account));
+  RemoveFromPasswordVault(service, account);
   const std::wstring target = Target(service, account);
   std::string bytes;
   Layout layout;
@@ -546,6 +590,7 @@ void SetSecretStoreAppForTesting(const char* app_id, const char* data_dir,
   s.ran_before = ran_before;
   s.decided = false;
   s.migrate = false;
+  Settled().clear();
 }
 
 namespace {
