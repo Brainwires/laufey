@@ -19,7 +19,7 @@ There is also an **iOS** backend (UIKit + WKWebView, statically linked) — see
 
 ## CEF
 
-Embeds Chromium 156 (CEF 156.0.28, Chromium 156.0.8078.88) through the Chromium
+Embeds Chromium 156 (CEF 156.0.30, Chromium 156.0.8078.96) through the Chromium
 Embedded Framework and runs Chromium's real multi-process architecture — a
 browser process plus renderer, GPU, and utility subprocesses, with the same
 rendering and DevTools you get in Chrome. The engine is bundled into the app, so
@@ -363,6 +363,12 @@ to 156.0.28 changes no public header (`include/` is unchanged); for the host:
   queues the start on that queue, behind the dismissal, as the WebView backend
   always has ([auth-session.md](auth-session.md)).
 
+It then moved to CEF 156.0.30 (Chromium 156.0.8078.96, the same branch and API
+version) for the Extended Stable security fixes in 156.0.8078.96, among them the
+fix for a bug Google reported as exploited in the wild. CEF 156.0.28 to 156.0.30
+is two CEF commits; `include/` differs only in `cef_version.h` and the dates in
+`cef_api_versions.h`.
+
 The hashes were checked against the `.sha1` and `.sha256` files CEF publishes
 beside each archive. What CEF 151 to 156 changed for the host:
 
@@ -439,7 +445,7 @@ When a bump is blocked (no CEF build for every platform yet, a regression the
 host must work around first), commit a waiver as `cef/staleness-waiver`:
 
 ```text
-pin: 156.0.28+g57389f0+chromium-156.0.8078.88
+pin: 156.0.30+g6028375+chromium-156.0.8078.96
 expires: 2026-12-01
 reason: CEF 159 has no Windows arm64 build yet (tracking issue link)
 ```

@@ -13,8 +13,8 @@
 
         arch = if system == "aarch64-darwin" then "macosarm64" else "macosx64";
 
-        cefVersion = "156.0.28";
-        cefFullVersion = "156.0.28+g57389f0+chromium-156.0.8078.88";
+        cefVersion = "156.0.30";
+        cefFullVersion = "156.0.30+g6028375+chromium-156.0.8078.96";
 
         cefUrlVersion = builtins.replaceStrings ["+"] ["%2B"] cefFullVersion;
 
@@ -22,8 +22,8 @@
           url = "https://cef-builds.spotifycdn.com/cef_binary_${cefUrlVersion}_${arch}_minimal.tar.bz2";
           name = "cef-minimal.tar.bz2";
           hash = if system == "aarch64-darwin"
-            then "sha256-hA0FZG/IjZhsPOn4/ofmOIYHI5GA/D4U4iHO/QXBLoc="
-            else "sha256-Kd975LiHeZFYRQpQrnI9iFZX6/hHJPtGCUr4b4PvG/0=";
+            then "sha256-cxtZnnjHG/M1MNZb+hiWP30dWZAsHzgfVFIYjlEWuFU="
+            else "sha256-qbL63NIOEUSm21cejkV8phYALYWKs2cb4pXZsLz8i8g=";
         };
 
         cef = pkgs.stdenv.mkDerivation {
