@@ -565,9 +565,10 @@ async fn clicked_link(
   win.close();
 }
 
-/// Puts a clicked-link window at the bottom right of the primary display's
+/// Puts a clicked-link window in the upper right of the primary display's
 /// work area (Windows): system sign-in prompts open in the middle of the
-/// screen, so a stray one doesn't sit on the click point.
+/// screen, and the Start menu, search and the notification centre open from
+/// the taskbar at the bottom, so a stray one doesn't sit on the click point.
 fn place_clear_of_popups(win: &Window) {
   if !cfg!(windows) {
     return;
@@ -578,10 +579,7 @@ fn place_clear_of_popups(win: &Window) {
     return;
   };
   let area = screen.work_area;
-  win.set_position(
-    (area.x + area.width - 480 - 24).max(area.x),
-    (area.y + area.height - 320 - 24).max(area.y),
-  );
+  win.set_position((area.x + area.width - 480 - 24).max(area.x), area.y + 24);
 }
 
 /// Another process's window over the click point, on a CI runner only.
@@ -612,6 +610,19 @@ mod covering {
   const WM_CLOSE: u32 = 0x0010;
   const PROCESS_TERMINATE: u32 = 0x0001;
   const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+  /// The shell's own flyouts (Start, search, the notification centre and
+  /// quick settings, widgets): dismissed with Escape, as a user does, never
+  /// closed or ended.
+  const SHELL_FLYOUTS: &[&str] = &[
+    "startmenuexperiencehost.exe",
+    "searchhost.exe",
+    "searchapp.exe",
+    "shellexperiencehost.exe",
+    "shellhost.exe",
+    "widgets.exe",
+    "webexperiencehostapp.exe",
+  ];
 
   /// Processes whose window over the test may be ended: the account /
   /// credential brokers and settings hosts a runner image shows prompts
@@ -658,21 +669,30 @@ mod covering {
       return;
     }
     let image = image_name(pid);
-    eprintln!(
-      "[e2e] INFO closing {} of pid {pid} ({image}) over the test window",
-      crate::io_checks::ole_input::window_at_hwnd(root)
-    );
+    let file = image
+      .rsplit(['\\', '/'])
+      .next()
+      .unwrap_or("")
+      .to_ascii_lowercase();
+    let what = crate::io_checks::ole_input::window_at_hwnd(root);
+    if SHELL_FLYOUTS.contains(&file.as_str()) {
+      eprintln!(
+        "[e2e] INFO dismissing {what} ({image}) over the test window with \
+         Escape"
+      );
+      crate::menu_notification_checks::win::press(
+        crate::menu_notification_checks::win::VK_ESCAPE,
+      );
+      std::thread::sleep(std::time::Duration::from_millis(600));
+      return;
+    }
+    eprintln!("[e2e] INFO closing {what} ({image}) over the test window");
     unsafe { PostMessageW(root, WM_CLOSE, 0, 0) };
     std::thread::sleep(std::time::Duration::from_millis(800));
     if unsafe { IsWindow(root) } == 0 {
       eprintln!("[e2e] INFO it closed");
       return;
     }
-    let file = image
-      .rsplit(['\\', '/'])
-      .next()
-      .unwrap_or("")
-      .to_ascii_lowercase();
     if !BROKERS.contains(&file.as_str()) {
       eprintln!("[e2e] INFO it stayed; {file:?} is not a known broker");
       return;
@@ -769,6 +789,31 @@ async fn real_click(win: &Window, title: &str) -> Option<String> {
       }
       ole_input::move_to(cx, cy);
       tokio::time::sleep(Duration::from_millis(80)).await;
+      // Again just before the press: a shell flyout can open meanwhile (the
+      // runner's Start menu did once, right after a sign-in prompt closed).
+      for _ in 0..3 {
+        let at = ole_input::root_at(cx, cy);
+        if at == hwnd || at.is_null() || !covering::allowed() {
+          break;
+        }
+        covering::clear(at);
+        win::set_topmost(hwnd, true);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ole_input::move_to(cx, cy);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+      }
+      if ole_input::root_at(cx, cy) != hwnd {
+        let covered_by = ole_input::window_at(cx, cy);
+        win::set_topmost(hwnd, false);
+        check(
+          &format!(
+            "a clicked link: the test window is under the click point \
+             ({cx}, {cy}) when it is pressed (there: {covered_by})"
+          ),
+          false,
+        );
+        return None;
+      }
       ole_input::button(true);
       tokio::time::sleep(Duration::from_millis(60)).await;
       ole_input::button(false);
