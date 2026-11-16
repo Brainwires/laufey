@@ -141,10 +141,12 @@ An allowed request still meets the OS's own consent, which laufey never changes:
 
 - macOS asks the user once per app (TCC). The app's `Info.plist` must carry
   `NSMicrophoneUsageDescription` and / or `NSCameraUsageDescription`; without
-  them macOS ends the process when the page first captures. A hardened-runtime
-  build also needs the `com.apple.security.device.audio-input` and / or
-  `com.apple.security.device.camera` entitlements. A refusal there reaches the
-  page as `NotAllowedError`, like laufey's own.
+  them macOS ends the process when the page first captures, and WKWebView does
+  not expose `navigator.mediaDevices` at all (it turns media devices on only for
+  an app permitted to capture, unless a TCC grant already covers the process). A
+  hardened-runtime build also needs the `com.apple.security.device.audio-input`
+  and / or `com.apple.security.device.camera` entitlements. A refusal there
+  reaches the page as `NotAllowedError`, like laufey's own.
 - Windows has privacy switches for each device (Settings > Privacy & security >
   Microphone / Camera). Two govern a desktop app such as a laufey app:
   "Microphone access" / "Camera access", for the whole device (the registry's

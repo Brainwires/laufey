@@ -360,6 +360,27 @@ if [ "$mode" = "--bridge-origin" ] || [ "$mode" = "--media-capture" ]; then
     printf '{ "bridgeOrigins": ["app://e2e-bridge-ok"] }\n' >"$launch_file"
   fi
   trap 'rm -f "$launch_file" "$colocated_rt"' EXIT
+  # macOS: the bundle carries the usage strings a capturing app must ship
+  # (docs/media-capture.md). Without them WebKit leaves navigator.mediaDevices
+  # undefined (WKWebView turns media devices on only for an app permitted to
+  # capture: a usage string, or a TCC grant its responsible process already
+  # has, as on GitHub's macOS images), and macOS would end the process at the
+  # first capture. Restored when the run ends.
+  plist_backup=""
+  case "$bin" in
+    */Contents/MacOS/*)
+      if [ "$mode" = "--media-capture" ] && [ "$(uname -s)" = Darwin ]; then
+        plist="${bin%/MacOS/*}/Info.plist"
+        plist_backup="$(mktemp "${TMPDIR:-/tmp}/native-e2e-plist.XXXXXX")"
+        cp "$plist" "$plist_backup"
+        trap 'rm -f "$launch_file" "$colocated_rt"; cp "$plist_backup" "$plist" && rm -f "$plist_backup"' EXIT
+        for key in NSMicrophoneUsageDescription NSCameraUsageDescription; do
+          /usr/libexec/PlistBuddy -c "Delete :$key" "$plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :$key string laufey native e2e: media capture checks" "$plist"
+        done
+      fi
+      ;;
+  esac
   # macOS: what the capture checks depend on, printed with the run (the
   # guest's OS and WebKit, the capture devices it has, the bundle's usage
   # strings and entitlements), so a failure on a runner shows its cause.
