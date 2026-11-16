@@ -379,6 +379,7 @@ static void InstallDefaultEditMenu() {
   [mainMenu addItem:appItem];
 
   EnsureEditMenu(mainMenu);
+  laufey_common::EnsureCloseWindowItem(mainMenu);
   [NSApp setMainMenu:mainMenu];
 }
 

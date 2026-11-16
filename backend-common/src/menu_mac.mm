@@ -474,4 +474,63 @@ void ShowContextMenuMac(void* nsview, int x, int y,
   });
 }
 
+namespace {
+
+bool MenuTreeTakesCmdW(NSMenu* menu) {
+  for (NSMenuItem* item in [menu itemArray]) {
+    if ([item action] == @selector(performClose:))
+      return true;
+    NSEventModifierFlags mask =
+        [item keyEquivalentModifierMask] &
+        (NSEventModifierFlagCommand | NSEventModifierFlagShift |
+         NSEventModifierFlagOption | NSEventModifierFlagControl);
+    if ([[item keyEquivalent] isEqualToString:@"w"] &&
+        mask == NSEventModifierFlagCommand)
+      return true;
+    if ([item submenu] && MenuTreeTakesCmdW([item submenu]))
+      return true;
+  }
+  return false;
+}
+
+NSMenu* TopSubmenuTitled(NSMenu* menubar, NSString* title) {
+  for (NSMenuItem* item in [menubar itemArray]) {
+    NSMenu* sub = [item submenu];
+    if (sub && ([[sub title] isEqualToString:title] ||
+                [[item title] isEqualToString:title]))
+      return sub;
+  }
+  return nil;
+}
+
+}  // namespace
+
+bool EnsureCloseWindowItem(NSMenu* menubar) {
+  if (!menubar || MenuTreeTakesCmdW(menubar))
+    return false;
+  NSMenuItem* close = [[NSMenuItem alloc] initWithTitle:@"Close Window"
+                                                 action:@selector(performClose:)
+                                          keyEquivalent:@"w"];
+  if (NSMenu* file = TopSubmenuTitled(menubar, @"File")) {
+    if ([file numberOfItems] > 0)
+      [file addItem:[NSMenuItem separatorItem]];
+    [file addItem:close];
+    return true;
+  }
+  if (NSMenu* window = TopSubmenuTitled(menubar, @"Window")) {
+    if ([window numberOfItems] > 0)
+      [window insertItem:[NSMenuItem separatorItem] atIndex:0];
+    [window insertItem:close atIndex:0];
+    return true;
+  }
+  NSMenu* window = [[NSMenu alloc] initWithTitle:@"Window"];
+  [window addItem:close];
+  NSMenuItem* windowItem = [[NSMenuItem alloc] initWithTitle:@"Window"
+                                                      action:nil
+                                               keyEquivalent:@""];
+  [windowItem setSubmenu:window];
+  [menubar addItem:windowItem];
+  return true;
+}
+
 }  // namespace laufey_common

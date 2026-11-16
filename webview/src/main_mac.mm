@@ -360,6 +360,7 @@ int main(int argc, char* argv[]) {
     [appMenuItem setSubmenu:appMenu];
 
     EnsureEditMenu(menubar);
+    laufey_common::EnsureCloseWindowItem(menubar);
     [NSApp setMainMenu:menubar];
 
     // Only a regular app takes the focus at launch: an accessory app (a

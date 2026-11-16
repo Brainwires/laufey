@@ -3833,6 +3833,7 @@ void WKWebViewBackend::SetApplicationMenu(uint32_t window_id,
     NSMenu* menubar = laufey_common::BuildNSMenuFromEntries(
         *entries, on_click, on_click_data, window_id);
     EnsureEditMenu(menubar);
+    laufey_common::EnsureCloseWindowItem(menubar);
     {
       std::lock_guard<std::mutex> lock(windows_mutex_);
       auto* state = GetWindow(window_id);
@@ -3868,6 +3869,7 @@ bool WKWebViewBackend::SetAppMenu(laufey_value_t* menu_template,
       menubar = laufey_common::BuildNSMenuFromEntries(*entries, click.fn,
                                                       click.data, 0);
       EnsureEditMenu(menubar);
+      laufey_common::EnsureCloseWindowItem(menubar);
     }
     g_app_menu = menubar;
     if (!menubar)

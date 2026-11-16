@@ -809,6 +809,7 @@ void Backend_SetApplicationMenu_Mac(void* data, uint32_t window_id,
     NSMenu* menubar = laufey_common::BuildNSMenuFromEntries(
         *entries, click.fn, click.data, window_id);
     EnsureEditMenu(menubar);
+    laufey_common::EnsureCloseWindowItem(menubar);
     // Store per-window
     {
       std::lock_guard<std::mutex> lock(g_window_menus_mutex);
@@ -842,6 +843,7 @@ bool Backend_SetAppMenu_Mac(void* data, laufey_value_t* menu_template,
       menubar = laufey_common::BuildNSMenuFromEntries(*entries, click.fn,
                                                       click.data, 0);
       EnsureEditMenu(menubar);
+      laufey_common::EnsureCloseWindowItem(menubar);
     }
     g_app_menu = menubar;
     if (!menubar)

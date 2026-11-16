@@ -907,6 +907,14 @@ if(LAUFEY_BUILD_TESTS)
     target_compile_options(laufey_passkey_mac_test PRIVATE -fobjc-arc)
     add_test(NAME laufey_passkey_mac_test COMMAND laufey_passkey_mac_test)
 
+    # The Close Window item the app menus get (no window, no app run).
+    add_executable(laufey_menu_close_mac_test tests/menu_close_mac_test.mm)
+    target_link_libraries(laufey_menu_close_mac_test PRIVATE
+      laufey_backend_common "-framework Cocoa")
+    target_compile_options(laufey_menu_close_mac_test PRIVATE -fobjc-arc)
+    add_test(NAME laufey_menu_close_mac_test
+             COMMAND laufey_menu_close_mac_test)
+
     # A window hidden by keeping it ordered in, invisible (an unthrottled
     # window on the WebView backend), and restored exactly.
     add_executable(laufey_hidden_window_mac_test

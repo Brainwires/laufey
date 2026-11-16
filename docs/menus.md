@@ -47,7 +47,13 @@ win.open_devtools();
 ```
 
 On macOS the application menu is the global menu bar at the top of the screen,
-and laufey swaps it as windows take focus. On Windows and Linux the menu is
+and laufey swaps it as windows take focus. Every macOS menu bar laufey installs,
+its default one and each app or window menu, gets an Edit submenu (Undo, Cut,
+Copy, Paste, Select All) when it has no Copy item, and a Close Window item
+(Cmd+W, which asks the key window's close handler as its close button does) when
+no item closes the window (`Role { role: "close" }`) and no item takes plain
+Cmd+W itself: at the end of a "File" submenu, else at the top of a "Window"
+submenu, else in a "Window" submenu of its own. On Windows and Linux the menu is
 attached to the individual window. A context menu is a pop-up shown at a point
 you specify, in window coordinates (top-left origin, the page's coordinates).
 

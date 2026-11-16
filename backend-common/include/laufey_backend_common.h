@@ -396,6 +396,13 @@ NSMenu* BuildNSMenuFromEntries(const std::vector<MenuEntry>& entries,
 // Records window `window_id`'s app menu (nil forgets it) for
 // TestTriggerMenuAcceleratorMac. Any thread.
 void RegisterWindowMenuMac(uint32_t window_id, NSMenu* menu);
+// Gives `menubar` a Close Window item (Cmd+W, performClose:, which asks the
+// key window's close handler as its close button does) unless it already has
+// one: an item that sends performClose: (the "close" role does), or any item
+// whose key equivalent is plain Cmd+W (the app's own Cmd+W wins). It goes at the end of a "File" submenu, else at the top of
+// a "Window" submenu, else in a new "Window" submenu. Main thread. Returns
+// whether it added one.
+bool EnsureCloseWindowItem(NSMenu* menubar);
 #endif
 
 // Backs test_trigger_menu_accelerator: a key-down NSEvent for the
