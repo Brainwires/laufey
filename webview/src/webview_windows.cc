@@ -1091,6 +1091,11 @@ LRESULT CALLBACK WebView2Backend::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
         // Not calling DestroyWindow is the standard Win32 idiom for this.
         return 0;
       }
+      // A passkey request anchored here ends `cancelled` before any of the
+      // teardown below: DestroyWindow destroys the window's owned windows
+      // (the WebAuthn dialog) before WM_DESTROY, and the OS call that ends
+      // with them would otherwise answer first, with its own error.
+      laufey_common::PasskeyWindowClosing(hwnd);
       // Unregistration and the last-window quit check live in WM_DESTROY,
       // which every destroy path hits (this one, and CloseWindow's direct
       // DestroyWindow when a deferred close is later resolved).
@@ -2451,6 +2456,19 @@ void WebView2Backend::CloseWindow(uint32_t window_id) {
     RunOnUiThread([this, window_id] { CloseWindow(window_id); });
     return;
   }
+  // A passkey request anchored here ends `cancelled` before the teardown
+  // (as in WM_CLOSE): DestroyWindow destroys the window's owned windows (the
+  // WebAuthn dialog) before WM_DESTROY, and the OS call that ends with them
+  // would otherwise answer first, with its own error. Outside the lock, as in
+  // WM_DESTROY: the result callback may re-enter the backend.
+  HWND closing = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+    if (auto* state = GetWindow(window_id))
+      closing = state->hwnd;
+  }
+  if (closing)
+    laufey_common::PasskeyWindowClosing(closing);
   std::vector<std::function<void(const char*)>> waiters;
   {
     std::lock_guard<std::recursive_mutex> lock(windows_mutex_);

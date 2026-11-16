@@ -961,6 +961,20 @@ static void TestWindowClosing() {
   EXPECT(CountOf(r) == 1 && HasCode(LastOf(r), "cancelled"));
   c->Finish(PasskeyErrorEnvelope("cancelled", "x"));
   EXPECT(CountOf(r) == 1 && !PasskeyBusyForTesting());
+
+  // The backend reports the close before tearing the window down (WebView2:
+  // before DestroyWindow destroys the WebAuthn dialog it owns), so the OS
+  // call's own error, which ends with that dialog, arrives second and is
+  // not delivered: the request reads `cancelled`, never `unknown`.
+  Recorder r2;
+  auto d = PasskeyBegin(LAUFEY_PASSKEY_GET, kClerkGet, Record, &r2);
+  EXPECT(d);
+  d->SetWindowKey(&a);
+  PasskeyWindowClosing(&a);
+  d->Finish(PasskeyErrorEnvelope(
+      "unknown", "The operation was canceled by the user (0x800704C7)"));
+  EXPECT(CountOf(r2) == 1 && HasCode(LastOf(r2), "cancelled"));
+  EXPECT(!PasskeyBusyForTesting());
 }
 
 static void TestDroppedCeremonyStillAnswers() {
