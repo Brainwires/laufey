@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 
+#include "laufey_hidden_window_mac.h"
 #include "laufey_launch_config.h"
 #include "laufey_title_options.h"
 #include "laufey_ui_tasks.h"
@@ -220,6 +221,14 @@ bool g_display_watcher_installed = false;
 void MacSetWindowState(void* nswindow, int action) {
   NSWindow* w = (__bridge NSWindow*)nswindow;
   if (!w)
+    return;
+  // A window hidden by keeping it ordered in, invisible (an unthrottled one,
+  // laufey_hidden_window_mac.h), takes neither: in full screen it would be an
+  // empty Space of its own, minimized a Dock tile that opens to nothing. It
+  // stays hidden, as it is; show() first.
+  if ((action == LAUFEY_WINDOW_ACTION_ENTER_FULLSCREEN ||
+       action == LAUFEY_WINDOW_ACTION_MINIMIZE) &&
+      MacIsInvisiblyHidden(nswindow))
     return;
   switch (action) {
     case LAUFEY_WINDOW_ACTION_MAXIMIZE:

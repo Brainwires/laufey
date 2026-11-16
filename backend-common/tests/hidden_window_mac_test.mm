@@ -10,6 +10,7 @@
 // `ctest --test-dir webview/build`.
 
 #include "laufey_hidden_window_mac.h"
+#include "laufey_window.h"
 
 #import <Cocoa/Cocoa.h>
 
@@ -167,6 +168,20 @@ int main() {
     EXPECT(!MacWindowShown((__bridge void*)fresh));
     EXPECT(MacRestoreFromInvisibleHide((__bridge void*)fresh));
     EXPECT(fresh.alphaValue == 1);
+
+    // Full screen and minimize are refused while hidden this way (an empty
+    // Space, a Dock tile that opens to nothing): it stays hidden.
+    EXPECT(MacHideInvisibly((__bridge void*)fresh));
+    MacSetWindowState((__bridge void*)fresh,
+                      LAUFEY_WINDOW_ACTION_ENTER_FULLSCREEN);
+    MacSetWindowState((__bridge void*)fresh, LAUFEY_WINDOW_ACTION_MINIMIZE);
+    for (int i = 0; i < 10; ++i)
+      Spin();
+    EXPECT(!(fresh.styleMask & NSWindowStyleMaskFullScreen));
+    EXPECT(!fresh.isMiniaturized);
+    EXPECT(MacIsInvisiblyHidden((__bridge void*)fresh));
+    EXPECT(fresh.alphaValue == 0);
+    EXPECT(MacRestoreFromInvisibleHide((__bridge void*)fresh));
 
     // The Dock's reopen: with only invisible windows on screen there is
     // nothing visible; one shown window is enough.

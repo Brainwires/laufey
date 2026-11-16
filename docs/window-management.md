@@ -311,10 +311,13 @@ back of the window list. `get_visible()` reports it hidden, a file dialog or
 message box doesn't attach to it as a sheet, the Dock icon's click counts it as
 no window, and `show()` / `focus()` restore every property it changed. A
 full-screen window is ordered out all the same (an invisible one would leave its
-Space empty). While a `None` window is open the app also holds a user-initiated
-activity (idle sleep still allowed), so macOS never puts it into App Nap, and
-the window's web view ignores window occlusion. An app that needs the window
-really removed asks for `MacosHiddenMode::OrderOut`
+Space empty), and a window hidden this way refuses `set_window_state`'s
+`ENTER_FULLSCREEN` and `MINIMIZE` (it stays hidden; show it first). Opacity,
+click passthrough and every-workspace visibility set while it is hidden apply
+when it is shown. While a `None` window is open the app also holds a
+user-initiated activity (idle sleep still allowed), so macOS never puts it into
+App Nap, and the window's web view ignores window occlusion. An app that needs
+the window really removed asks for `MacosHiddenMode::OrderOut`
 (`WindowOptions::macos_hidden_mode`,
 `LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT`); its hidden page is then throttled
 by the OS again. Every other platform and policy ignores the mode. A hidden
