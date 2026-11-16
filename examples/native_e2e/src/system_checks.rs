@@ -80,7 +80,49 @@ pub async fn run() {
   if rounds > 1 {
     eprintln!("[e2e] DevTools rounds passed: {clean}/{rounds}");
   }
+  if cfg!(windows) && caps.devtools() {
+    two_view_devtools_checks().await;
+  }
   anchor.close();
+}
+
+/// WebView2: two windows of one browser process open DevTools at once. Their
+/// DevTools windows are told apart only as the one that appeared after each
+/// open, so the backend runs one open per process at a time: both open, and
+/// each view's close and open state stay its own.
+async fn two_view_devtools_checks() {
+  let a = Window::new(400, 300).title("native-e2e-devtools-a");
+  a.navigate("about:blank");
+  a.show();
+  let b = Window::new(400, 300).title("native-e2e-devtools-b");
+  b.navigate("about:blank");
+  b.show();
+  wait_for(
+    || a.is_devtools_enabled() && b.is_devtools_enabled(),
+    300,
+    50,
+  )
+  .await;
+  a.open_devtools();
+  b.open_devtools();
+  check(
+    "two windows opening DevTools at once both get theirs",
+    wait_for(|| a.is_devtools_open() && b.is_devtools_open(), 300, 50).await,
+  );
+  a.close_devtools();
+  let a_closed = wait_for(|| !a.is_devtools_open(), 300, 50).await;
+  tokio::time::sleep(Duration::from_millis(1000)).await;
+  check(
+    "closing one window's DevTools leaves the other's open",
+    a_closed && b.is_devtools_open(),
+  );
+  b.close_devtools();
+  check(
+    "the other window's DevTools close too",
+    wait_for(|| !b.is_devtools_open(), 300, 50).await,
+  );
+  a.close();
+  b.close();
 }
 
 pub async fn devtools_off() {
