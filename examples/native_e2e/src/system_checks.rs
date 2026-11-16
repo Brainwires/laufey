@@ -1009,6 +1009,10 @@ async fn devtools_checks(
     early.show();
     early.open_devtools();
     let asked = std::time::Instant::now();
+    // The open waits for the web view, which a loaded machine may take many
+    // seconds to create (WebView2 retries a failed creation): reading the
+    // engine's setting waits for it to exist, then the open has 15 s.
+    let _ = early.is_devtools_enabled();
     let opened = wait_for(|| early.is_devtools_open(), 300, 50).await;
     eprintln!(
       "[e2e] open_devtools at creation: open={opened} after {} ms",
