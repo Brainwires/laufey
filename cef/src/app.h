@@ -218,6 +218,20 @@ void LaufeyApplyNetworkQuietDefaults(CefRefPtr<CefCommandLine> command_line);
 // thread.
 void LaufeyKeepLocalSpellcheckDictionaries(const std::string& root_cache_path);
 #endif
+// Chrome's secure DNS mode (a local-state preference; "off", "automatic" or
+// "secure"). Chrome's default, "automatic", upgrades the system resolver to
+// its provider's DNS-over-HTTPS server when that resolver is a known DoH
+// provider's (8.8.8.8, 1.1.1.1, ...), and then probes and queries that
+// server: connections the app never asked for. No switch or feature turns it
+// off; only this preference (or the DnsOverHttpsMode policy) does.
+inline constexpr char kLaufeySecureDnsModePref[] = "dns_over_https.mode";
+inline constexpr char kLaufeySecureDnsModeOff[] = "off";
+// Sets the secure DNS mode to off (docs/backends.md, "No network requests of
+// its own"), so the host makes no DNS-over-HTTPS connection of its own; the
+// system resolver answers every lookup. Kept in Local State, so later
+// launches start with it off. First thing in OnContextInitialized, before
+// any browser and before Chrome's DoH probes start; UI thread.
+void LaufeySecureDnsOff();
 // Whether DevTools can be reached in this process: inspectable, or a
 // remote-debugging switch present on the browser process's command line
 // despite it (read back from CEF's global command line). UI thread.

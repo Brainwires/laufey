@@ -147,6 +147,11 @@ jobs:
       - name: CEF staleness gate tests
         run: scripts/test-check-cef-staleness.sh
 
+      # The network-quiet net log reader against small saved logs (offline):
+      # other hosts, DoH requests and a secure DNS mode other than off fail.
+      - name: Net log reader tests
+        run: scripts/test-netlog-hosts.sh
+
       # Warns when the pinned CEF's Chromium is 2 majors behind Chrome stable
       # and fails at 3, unless a dated cef/staleness-waiver for this pin
       # covers it (docs/backends.md, "CEF bump cadence").

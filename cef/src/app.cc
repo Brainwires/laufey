@@ -47,6 +47,7 @@
 #include <cstdio>
 #include <fstream>
 
+#include "include/cef_preference.h"
 #include "include/cef_request_context.h"
 #endif
 
@@ -1616,6 +1617,24 @@ void LaufeyKeepLocalSpellcheckDictionaries(const std::string& root_cache_path) {
 }
 #endif
 
+void LaufeySecureDnsOff() {
+  CefRefPtr<CefPreferenceManager> global =
+      CefPreferenceManager::GetGlobalPreferenceManager();
+  if (!global)
+    return;
+  CefRefPtr<CefValue> mode = global->GetPreference(kLaufeySecureDnsModePref);
+  if (mode && mode->GetType() == VTYPE_STRING &&
+      mode->GetString() == kLaufeySecureDnsModeOff)
+    return;  // Off already (kept from an earlier launch).
+  CefRefPtr<CefValue> off = CefValue::Create();
+  off->SetString(kLaufeySecureDnsModeOff);
+  CefString error;
+  if (!global->SetPreference(kLaufeySecureDnsModePref, off, error)) {
+    std::cerr << "laufey: " << kLaufeySecureDnsModePref << ": "
+              << error.ToString() << std::endl;
+  }
+}
+
 bool LaufeyDevToolsReachable() {
   if (laufey_common::LaunchInspectable())
     return true;
@@ -1784,6 +1803,9 @@ bool LaufeyHandler::OnContextMenuCommand(
 
 void LaufeyApp::OnContextInitialized() {
   CEF_REQUIRE_UI_THREAD();
+
+  // No DNS-over-HTTPS connections of its own (app.h).
+  LaufeySecureDnsOff();
 
   // Create the handler and keep it alive for the lifetime of the app.
   // Backend_CreateWindow uses LaufeyHandler::GetInstance() from the runtime

@@ -956,6 +956,9 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
 
+    // No DNS-over-HTTPS connections of its own (app.h).
+    LaufeySecureDnsOff();
+
     // Before any browser starts the spellchecker, which would download a
     // missing Hunspell dictionary from Google.
     LaufeyKeepLocalSpellcheckDictionaries(g_root_cache_path);

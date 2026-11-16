@@ -325,6 +325,9 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
     laufey_common::Timing("OnContextInitialized");
+
+    // No DNS-over-HTTPS connections of its own (app.h).
+    LaufeySecureDnsOff();
     LaufeyStartTimingHeartbeats();
 
     LaufeyWarmUpProxyResolution();

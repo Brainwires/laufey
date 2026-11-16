@@ -10,7 +10,15 @@ or a stream job), a DNS lookup of it, or a socket connect to it (the system
 resolver's name servers, port 53, are judged by the names looked up). Loopback
 (localhost, *.localhost, 127.0.0.0/8, ::1) is always allowed; --allow adds a
 host. Exits 1 when a host is not allowed, or when an --expect host (the
-app's own request, proving the log captured the run) is missing. A log cut
+app's own request, proving the log captured the run) is missing.
+
+Secure DNS must be off, whatever the machine's resolver: Chrome's automatic
+mode upgrades the system resolver to its DNS-over-HTTPS server when that
+resolver is a known provider's, and then probes and queries it. Exits 1 when
+the log has a DoH request (DOH_URL_REQUEST), or when the host resolver's last
+configuration (DNS_CONFIG_CHANGED) has a secure DNS mode other than Off: on a
+machine whose resolver no provider runs, automatic mode makes no request but
+still shows in that configuration. A log cut
 short (the process ended before Chromium closed it) is read up to its last
 complete event.
 """
@@ -109,6 +117,34 @@ def hosts_in(event_type, params):
                     yield host.lower()
 
 
+DOH_REQUEST = "DOH_URL_REQUEST"
+DNS_CONFIG = "DNS_CONFIG_CHANGED"
+
+
+def secure_dns_problems(log, types, events):
+    """What the log shows of secure DNS being on (empty when it is off)."""
+    modes = {v: k for k, v in log["constants"].get("secureDnsMode", {}).items()}
+    problems = []
+    doh = sum(1 for e in events if types.get(e.get("type")) == DOH_REQUEST)
+    if doh:
+        problems.append(f"{doh} DNS-over-HTTPS request event(s) ({DOH_REQUEST})")
+    last = None
+    for event in events:
+        params = event.get("params")
+        if (types.get(event.get("type")) == DNS_CONFIG
+                and isinstance(params, dict) and "secure_dns_mode" in params):
+            last = params
+    if last is not None:
+        mode = modes.get(last["secure_dns_mode"], last["secure_dns_mode"])
+        if mode != "Off":
+            servers = [s.get("template") for s in
+                       (last.get("doh_config") or {}).get("servers", [])
+                       if isinstance(s, dict)]
+            problems.append(f"the resolver's last secure DNS mode is {mode} "
+                            f"(DoH servers: {servers or 'none'})")
+    return problems
+
+
 def is_loopback(host):
     host = host.strip("[]").rstrip(".")
     if host == "localhost" or host.endswith(".localhost"):
@@ -154,6 +190,9 @@ def main(argv):
         for host in hosts_in(types.get(event.get("type"), "?"), params):
             seen.setdefault(host, set()).add(types.get(event.get("type"), "?"))
     bad = sorted(h for h in seen if not is_loopback(h) and h not in allow)
+    secure_dns = secure_dns_problems(log, types, events)
+    for problem in secure_dns:
+        print(f"  SECURE DNS {problem}")
     for host in sorted(seen):
         tag = "UNEXPECTED" if host in bad else "ok"
         print(f"  {tag:<10} {host}  ({', '.join(sorted(seen[host]))})")
@@ -162,7 +201,7 @@ def main(argv):
         print(f"  MISSING    {host} (the log should show the app's request)")
     print(f"{len(events)} events, {len(seen)} hosts, "
           f"{len(bad)} unexpected")
-    return 1 if bad or missing else 0
+    return 1 if bad or missing or secure_dns else 0
 
 
 if __name__ == "__main__":

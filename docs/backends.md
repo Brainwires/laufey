@@ -73,6 +73,7 @@ the host does about each in the browser process (`cef/src/app.cc`,
 | `update.googleapis.com`, `edgedl.me.gvt1.com` (60 s after launch)        | component updater (`update_client`)                                                                                  | `--disable-component-update`                                |
 | `update.googleapis.com`, `edgedl.me.gvt1.com` (at launch, Chromium 156+) | on-device model manifest broker's manifest component (`update_client`), registered past `--disable-component-update` | `--optimization-guide-manifest-override` with an empty path |
 | `redirector.gvt1.com/edgedl/chrome/dict/*.bdic` (Linux)                  | Hunspell dictionary download (`spellcheck_hunspell_dictionary`)                                                      | only dictionaries already on disk are kept (see below)      |
+| `dns.google`, `chrome.cloudflare-dns.com` and other DoH servers          | secure DNS's automatic mode upgrading a known provider's resolver to DNS over HTTPS (`DOH_URL_REQUEST` probes)       | secure DNS mode off (see below)                             |
 
 - **Google accounts.** No switch or feature turns the ListAccounts check off:
   Chrome's signin metrics services ask for the accounts in the cookie jar when
@@ -81,6 +82,16 @@ the host does about each in the browser process (`cef/src/app.cc`,
   with `ERR_UNSAFE_PORT` before any DNS lookup or socket. Pages are not
   affected: `accounts.google.com` loads as any other site (Chrome only stops
   treating it as its own sign-in origin, which laufey never used).
+- **Secure DNS.** Chrome's secure DNS mode defaults to automatic: when the
+  machine's resolver belongs to a provider that also runs a DNS-over-HTTPS
+  server (Google's 8.8.8.8, Cloudflare's 1.1.1.1, and so on), Chrome probes that
+  server and sends its lookups there instead. No switch or feature turns this
+  off, so the host sets Chrome's `dns_over_https.mode` preference (Local State)
+  to `off` as soon as the browser context exists, before any browser and before
+  the probes start; the system resolver answers every lookup. The
+  `--network-quiet` check fails on a DoH request, and on a secure DNS mode other
+  than off in the resolver's last configuration, whatever the machine's
+  resolver.
 - **Spellcheck.** macOS and Windows check spelling with the OS's own
   spellchecker and download nothing. On Linux Chromium uses Hunspell and
   downloads each language's dictionary from Google the first time it is used, so
