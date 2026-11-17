@@ -42,6 +42,7 @@
 #import <Cocoa/Cocoa.h>
 #import <ImageIO/ImageIO.h>
 #import <WebKit/WebKit.h>
+#import <objc/runtime.h>
 
 #include "child_webview_mac.h"
 
@@ -420,6 +421,62 @@ void ApplyFrame(ChildView* v) {
   v->view.autoresizingMask =
       NSViewMaxXMargin |
       (parent.isFlipped ? NSViewMaxYMargin : NSViewMinYMargin);
+}
+
+// The page view's own mouse moves stay off its child web views. WebKit
+// hears a view's mouse moves through a tracking area whose owner is an
+// object of its own (not the view), and that area covers the whole page
+// view, its subviews included: over a child, the page's WebContent process
+// was still told where the mouse is, worked out the cursor of the element
+// under the child and set it, racing the child page's own cursor (a
+// flicker). WebKit's own topmost check (newer macOS) counts a subview as
+// part of the view, so it lets those moves through. Each tracking-area
+// owner of the page view that takes mouseMoved: is moved to a subclass of
+// its class whose mouseMoved: drops a move that hit-tests into a visible
+// child (a hidden view is never hit), as WebKit drops one over a sibling
+// view above it. Drags are mouseDragged: to the view the press went to, never
+// a tracking area's move, so a drag from the page keeps its cursor. Main
+// thread; idempotent.
+NSString* const kTrackingPrefix = @"LaufeyChildAwareTracking_";
+
+Class HostTrackingClass(Class base) {
+  static auto* classes = new std::map<Class, Class>();
+  auto it = classes->find(base);
+  if (it != classes->end())
+    return it->second;
+  IMP original = class_getMethodImplementation(base, @selector(mouseMoved:));
+  NSString* name =
+      [kTrackingPrefix stringByAppendingString:NSStringFromClass(base)];
+  Class sub = objc_allocateClassPair(base, name.UTF8String, 0);
+  if (sub) {
+    IMP filtered = imp_implementationWithBlock(^(id self_, NSEvent* event) {
+      if (laufey_child_webview_mac::OwnsEventLocation((__bridge void*)event))
+        return;
+      ((void (*)(id, SEL, NSEvent*))original)(self_, @selector(mouseMoved:),
+                                              event);
+    });
+    class_addMethod(sub, @selector(mouseMoved:), filtered, "v@:@");
+    objc_registerClassPair(sub);
+  }
+  (*classes)[base] = sub;
+  return sub;
+}
+
+void KeepPageMovesOffChildren(NSView* page_view) {
+  for (NSTrackingArea* area in page_view.trackingAreas) {
+    id owner = area.owner;
+    if (!owner || owner == page_view ||
+        !(area.options & NSTrackingMouseMoved) ||
+        ![owner respondsToSelector:@selector(mouseMoved:)])
+      continue;
+    Class cls = object_getClass(owner);
+    // Already ours, or a class someone else swapped in (KVO): leave it.
+    if (cls != [owner class] ||
+        [NSStringFromClass(cls) hasPrefix:kTrackingPrefix])
+      continue;
+    if (Class sub = HostTrackingClass(cls))
+      object_setClass(owner, sub);
+  }
 }
 
 // Sends the keyup of every forwarded key `v` still holds.
@@ -1171,6 +1228,7 @@ uint32_t Create(uint32_t window_id, void* page_view_ptr,
     v.options = options;
     v.bounds = options.bounds;
     v.visible = options.visible;
+    KeepPageMovesOffChildren(page_view);
     [page_view addSubview:view];
     ApplyFrame(&v);
     view.hidden = !options.visible;
