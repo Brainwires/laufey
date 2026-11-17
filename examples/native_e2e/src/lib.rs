@@ -57,6 +57,7 @@ mod system_checks;
 mod title_bar_checks;
 mod tray_role_checks;
 mod webview_checks;
+mod webview_cursor_checks;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -2385,6 +2386,8 @@ async fn window_api_checks() {
   focus_checks::run().await;
   // Child web views (API 58).
   webview_checks::run(&w).await;
+  // The cursor over a child web view is its page's (macOS).
+  webview_cursor_checks::run(&w, TITLE).await;
   // --hidpi: the rest of this battery then runs at that scale too.
   if let Some(scale) = std::env::var("LAUFEY_E2E_EXPECT_SCALE")
     .ok()
