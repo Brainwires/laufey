@@ -51,17 +51,29 @@ std::string ToStdString(NSString* s) {
   return utf8 ? std::string(utf8) : std::string();
 }
 
-// The window to anchor the sheet to when the caller named none.
+// A sheet's parent for a sheet (a cancelled session's sheet can still be the
+// key window while it leaves), else the window itself.
+NSWindow* SheetOwner(NSWindow* w) {
+  return w && w.isSheet && w.sheetParent ? w.sheetParent : w;
+}
+
+// The window to anchor the sheet to when the caller named none. Never a
+// sheet: its parent instead.
 NSWindow* DefaultAnchor() {
   if (NSApp.keyWindow)
-    return NSApp.keyWindow;
+    return SheetOwner(NSApp.keyWindow);
   if (NSApp.mainWindow)
-    return NSApp.mainWindow;
+    return SheetOwner(NSApp.mainWindow);
   for (NSWindow* w in NSApp.orderedWindows) {
-    if (w.visible)
+    if (w.visible && !w.isSheet)
       return w;
   }
   return nil;
+}
+
+// Whether `w` has a sheet on it, or one still on its way out.
+bool HasSheet(NSWindow* w) {
+  return w && (w.attachedSheet != nil || w.sheets.count > 0);
 }
 
 // Sessions laufey cancelled (AuthSession::Cancel: the app, the anchor window
@@ -86,8 +98,16 @@ NSMutableArray* WaitingStarts() {
 }
 
 // The OS reports nothing for a session cancelled while its consent prompt is
-// up, so a cancelled session is let go after this long at the latest.
+// up, so a cancelled session is let go without that report: no sooner than
+// this (the floor), and then only once its anchor window has no sheet left
+// (the cancelled sheet can take longer to leave on a slow or loaded Mac; a
+// session presented meanwhile was never shown and never answered: a macOS
+// Intel CI leg, run 43985473064), polled every kSheetPollNs.
 constexpr int64_t kRetireGraceNs = 3 * NSEC_PER_SEC;
+constexpr int64_t kSheetPollNs = 250 * NSEC_PER_MSEC;
+// The longest a cancelled session waits for its anchor's sheet to leave, and
+// a start waits for a sheet to leave its window: never forever.
+constexpr CFTimeInterval kSheetWaitCeilingS = 15.0;
 
 void RunWaitingStarts() {
   if (RetiringProviders().count != 0 || WaitingStarts().count == 0)
@@ -111,18 +131,41 @@ void Release(LaufeyAuthSessionProvider* provider) {
   });
 }
 
+// A retiring session past its floor: let go once its anchor has no sheet
+// (or the anchor is gone), or at the ceiling.
+void ReleaseWhenSheetLeft(LaufeyAuthSessionProvider* provider,
+                          __weak NSWindow* weak_anchor, CFAbsoluteTime since) {
+  if (![RetiringProviders() containsObject:provider])
+    return;  // The OS reported its end (Release).
+  NSWindow* anchor = weak_anchor;
+  if (HasSheet(anchor) &&
+      CFAbsoluteTimeGetCurrent() - since < kSheetWaitCeilingS) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, kSheetPollNs),
+                   dispatch_get_main_queue(), ^{
+                     ReleaseWhenSheetLeft(provider, weak_anchor, since);
+                   });
+    return;
+  }
+  Release(provider);
+}
+
 // Main thread, right after [session cancel]: keep the session until the OS
-// reports its end (Release) or the grace period passed.
+// reports its end (Release), or, past the floor, until its anchor's sheet
+// has left (at most kSheetWaitCeilingS).
 void Retire(LaufeyAuthSessionProvider* provider) {
   if (![LiveProviders() containsObject:provider])
     return;  // Already let go.
   [RetiringProviders() addObject:provider];
+  __weak NSWindow* weak_anchor = provider.anchor;
+  CFAbsoluteTime since = CFAbsoluteTimeGetCurrent();
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, kRetireGraceNs),
                  dispatch_get_main_queue(), ^{
-                   if ([RetiringProviders() containsObject:provider])
-                     Release(provider);
+                   ReleaseWhenSheetLeft(provider, weak_anchor, since);
                  });
 }
+
+void StartOnMain(std::shared_ptr<AuthSession> session, NSWindow* window,
+                 CFAbsoluteTime sheet_since);
 
 }  // namespace
 
@@ -147,10 +190,17 @@ void AuthSessionStartMac(std::shared_ptr<AuthSession> session,
   NSWindow* window = (__bridge NSWindow*)ns_window;
   if (![NSThread isMainThread]) {
     dispatch_async(dispatch_get_main_queue(), ^{
-      AuthSessionStartMac(session, (__bridge void*)window);
+      StartOnMain(session, window, CFAbsoluteTimeGetCurrent());
     });
     return;
   }
+  StartOnMain(session, window, CFAbsoluteTimeGetCurrent());
+}
+
+namespace {
+
+void StartOnMain(std::shared_ptr<AuthSession> session, NSWindow* window,
+                 CFAbsoluteTime sheet_since) {
   if (@available(macOS 10.15, *)) {
     @autoreleasepool {
       // Cancelled (window closed, test hook, shutdown) before it started.
@@ -168,8 +218,22 @@ void AuthSessionStartMac(std::shared_ptr<AuthSession> session,
         session->SetWindowKey((__bridge const void*)window);
         NSWindow* waiting_window = window;
         [WaitingStarts() addObject:^{
-          AuthSessionStartMac(session, (__bridge void*)waiting_window);
+          StartOnMain(session, waiting_window, CFAbsoluteTimeGetCurrent());
         }];
+        return;
+      }
+      // Never presented into a window whose sheet is still there or leaving
+      // (one presented then was never shown and never answered): queued
+      // behind it, polled, for at most kSheetWaitCeilingS, then presented.
+      // The window key is set, so the window closing meanwhile cancels it.
+      if (HasSheet(window) &&
+          CFAbsoluteTimeGetCurrent() - sheet_since < kSheetWaitCeilingS) {
+        session->SetWindowKey((__bridge const void*)window);
+        NSWindow* waiting_window = window;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, kSheetPollNs),
+                       dispatch_get_main_queue(), ^{
+                         StartOnMain(session, waiting_window, sheet_since);
+                       });
         return;
       }
       LaufeyAuthSessionProvider* provider =
@@ -287,6 +351,8 @@ void AuthSessionStartMac(std::shared_ptr<AuthSession> session,
                     "auth sessions need macOS 10.15 or newer");
   }
 }
+
+}  // namespace
 
 void AuthSessionStartMacQueued(std::shared_ptr<AuthSession> session,
                                void* ns_window) {

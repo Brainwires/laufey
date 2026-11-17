@@ -111,12 +111,17 @@ call `auth_session_cancel()`.
   `cancelled` itself when it cancels (window closed, test hook, quit) and drops
   whatever the OS reports later.
 - **A session started right after a cancel** waits until the OS has dismissed
-  the cancelled sheet (at most 3 s), then starts. Every backend starts it on the
-  main dispatch queue, behind the cancel's dismissal (the CEF backend resolves
-  the window in a CEF UI task first, which its external pump can run from a
-  timer ahead of that queue, and then queues the start): a session started while
-  the cancelled sheet was still up was sometimes never presented and never
-  answered.
+  the cancelled sheet, then starts: until macOS reports the cancelled session's
+  end, or, when it reports nothing (a cancel while the consent prompt is up),
+  for at least 3 s and then until the anchor window has no sheet left (polled,
+  15 s at most). A session is never presented into a window whose sheet is still
+  there or leaving: it waits for the sheet (15 s at most), and with no window
+  named it is anchored to the key window's sheet parent, never to a sheet. Every
+  backend starts it on the main dispatch queue, behind the cancel's dismissal
+  (the CEF backend resolves the window in a CEF UI task first, which its
+  external pump can run from a timer ahead of that queue, and then queues the
+  start): a session started while the cancelled sheet was still up was sometimes
+  never presented and never answered.
 - **The anchor window closing** cancels the session anchored to it.
 - **Quitting** (the event loop ending) cancels the running session before the
   runtime is shut down.

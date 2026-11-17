@@ -298,7 +298,10 @@ fn idp_hits(path: &str) -> usize {
 /// now and then never presented and never answered, its slot held for good
 /// (about 2% of macOS CI legs, where the battery did this once). The time
 /// from the sheet's page loading to the cancel varies, to cover the
-/// dismissal at different points.
+/// dismissal at different points, and every other next session names no
+/// window (anchored to the key window, which the cancelled sheet can still
+/// be while it leaves: the Deno Desktop runtime's e2e did that, run
+/// 43985473064).
 async fn cancel_restart_stress(anchor_id: u32, idp: &str) {
   let n = stress_iterations();
   if n == 0 {
@@ -323,7 +326,7 @@ async fn cancel_restart_stress(anchor_id: u32, idp: &str) {
     let state = format!("stress{i}");
     let t = Instant::now();
     let next = laufey::auth_session_start(
-      anchor_id,
+      if i % 2 == 1 { 0 } else { anchor_id },
       &format!("{idp}/auth/redirect?state={state}"),
       CALLBACK_SCHEME,
       true,
