@@ -578,6 +578,16 @@ static std::vector<std::string> DraggedFilePaths(id<NSDraggingInfo> info) {
   NSPoint _lastPoint;
 }
 
+// A mouse move AppKit sends the first responder (not through a tracking
+// area) over a visible child web view is that view's page's: the page would
+// set the cursor of the element under the child (see
+// KeepPageMovesOffChildren in child_webview_mac.mm).
+- (void)mouseMoved:(NSEvent*)event {
+  if (laufey_child_webview_mac::OwnsEventLocation((__bridge void*)event))
+    return;
+  [super mouseMoved:event];
+}
+
 - (NSPoint)laufeyDragPoint:(id<NSDraggingInfo>)info {
   NSPoint p = [self convertPoint:[info draggingLocation] fromView:nil];
   if (!self.isFlipped)

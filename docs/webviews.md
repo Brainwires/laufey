@@ -77,6 +77,14 @@ A web view is a browsing context of its own:
   (`CoversScreenPixel`). On CEF for macOS each overlay is a window of its own,
   and WebView2 delivers a view's input to its own window only. The view still
   reports FOCUS before the first click reaches its page.
+- **None of the window's cursor.** Over a shown view only its page sets the
+  cursor; over a hidden one the window's page does. A WKWebView child is a
+  subview of the window's page view, whose WebKit tracking area covers it, so
+  the page view drops the mouse moves that hit-test into a shown child (as
+  WebKit drops those over a view stacked above it); a drag that starts in the
+  window's page is still the page's. A WebKitGTK view has a window of its own,
+  whose cursor is the only one shown over it, and Chromium (CEF, WebView2) sets
+  a page's cursor only while the page's own view is under the pointer.
 - **None of the window's navigation rules.** The window's navigation guard and
   will-navigate handler never see the view; its main frame may load http(s)
   pages and `about:blank`, and any other scheme (`file:`, `data:`,
