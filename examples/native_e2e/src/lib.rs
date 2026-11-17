@@ -97,6 +97,35 @@ fn check(name: &str, ok: bool) {
 }
 
 /// Capability absent on this backend — informational, never fails the run.
+/// Why a window whose client area is `w` x `h` can't have that size on this
+/// machine, or `None`: with its frame (`win`'s outer size minus its client
+/// size) it is larger than every display, and the OS keeps a window's frame
+/// within a display's size (Windows' maximum tracking size; a CI VM's
+/// session can come up at 800x600).
+fn too_big_for_screens(win: &Window, w: i32, h: i32) -> Option<String> {
+  let (cw, ch) = win.get_size();
+  let (ow, oh) = win.get_outer_size();
+  let (fw, fh) = ((ow - cw).max(0), (oh - ch).max(0));
+  let screens = laufey::screens();
+  if screens.is_empty() {
+    return None;
+  }
+  let fits = screens
+    .iter()
+    .any(|s| w + fw <= s.bounds.width && h + fh <= s.bounds.height);
+  if fits {
+    return None;
+  }
+  let list: Vec<String> = screens
+    .iter()
+    .map(|s| format!("{}x{}", s.bounds.width, s.bounds.height))
+    .collect();
+  Some(format!(
+    "{w}x{h} plus its {fw}x{fh} frame is larger than every display ({})",
+    list.join(", ")
+  ))
+}
+
 fn na(name: &str) {
   eprintln!("[e2e] N/A  {name}");
 }
@@ -1157,17 +1186,25 @@ fn e2e_main() {
     // get_size is answered there too, after both, so it never reads the
     // default's client area (784x561 at 100 %) or 0x0 in between.
     let (early_w, early_h) = win.get_size();
-    check(
-      &format!(
-        "constructor size is readable immediately (got {early_w}x{early_h})"
-      ),
-      (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
-    );
+    // A display smaller than the window and its frame keeps it smaller.
+    let too_big = too_big_for_screens(&win, 800, 600);
+    if let Some(why) = &too_big {
+      na(&format!("constructor size is readable immediately ({why})"));
+    } else {
+      check(
+        &format!(
+          "constructor size is readable immediately (got {early_w}x{early_h})"
+        ),
+        (early_w - 800).abs() <= 2 && (early_h - 600).abs() <= 2,
+      );
+    }
     // And every read while the backend creates it is that size (or none
     // yet), never the default it creates the OS window at.
     let creating = std::time::Instant::now();
     let mut odd = None;
-    while creating.elapsed() < std::time::Duration::from_millis(1500) {
+    while too_big.is_none()
+      && creating.elapsed() < std::time::Duration::from_millis(1500)
+    {
       let (w, h) = win.get_size();
       if (w, h) != (0, 0) && ((w - 800).abs() > 2 || (h - 600).abs() > 2) {
         odd = Some((w, h));
@@ -1175,12 +1212,19 @@ fn e2e_main() {
       }
       tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    check(
-      &format!(
-        "the size reads as set while the window is created (odd read {odd:?})"
-      ),
-      odd.is_none(),
-    );
+    if let Some(why) = &too_big {
+      na(&format!(
+        "the size reads as set while the window is created ({why})"
+      ));
+    } else {
+      check(
+        &format!(
+          "the size reads as set while the window is created (odd read \
+           {odd:?})"
+        ),
+        odd.is_none(),
+      );
+    }
 
     // On macOS each of the next windows opens once the one before it answers
     // scripts (answers_script: the shader-cache stall). Their checks read the
@@ -1274,10 +1318,14 @@ fn e2e_main() {
       (early_scale - settled_scale).abs() < 0.01,
     );
     let (settled_w, settled_h) = win.get_size();
-    check(
-      "constructor size survives realize",
-      (settled_w - 800).abs() <= 2 && (settled_h - 600).abs() <= 2,
-    );
+    if let Some(why) = &too_big {
+      na(&format!("constructor size survives realize ({why})"));
+    } else {
+      check(
+        "constructor size survives realize",
+        (settled_w - 800).abs() <= 2 && (settled_h - 600).abs() <= 2,
+      );
+    }
 
     // After realize, WebView / CEF can still compare inner vs frame from
     // the live window. Winit's get_position only reflects a pending set,
