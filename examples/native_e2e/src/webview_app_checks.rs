@@ -30,10 +30,12 @@ use crate::{check, na};
 
 const PAGE: &str = "<!doctype html><title>webview-app</title><p>app</p>";
 const SMALL: &str = "laufey-dl!\n";
-/// The slow attachment: 400 chunks of 16 KiB, one every 100 ms (40 s: a
-/// pause, a resume and a cancel all land well before its end).
+/// The slow attachment never ends by itself within a battery: it declares
+/// 64 MiB and is sent 16 KiB every 100 ms (about seven minutes), until the
+/// client goes away. So a pause, a resume and a cancel always find it in
+/// progress, however slow or fast the machine.
 const SLOW_CHUNK: usize = 16 * 1024;
-const SLOW_CHUNKS: usize = 400;
+const SLOW_CHUNKS: usize = 4096;
 
 fn serve() -> Option<String> {
   let listener = TcpListener::bind("127.0.0.1:0").ok()?;
