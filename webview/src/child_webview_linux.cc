@@ -40,18 +40,23 @@
 
 #include <cairo.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
+#include <sys/stat.h>
 #include <webkit2/webkit2.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <functional>
+#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "laufey_backend_common.h"
+#include "laufey_downloads.h"
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
 
@@ -66,6 +71,15 @@ namespace {
 #define LAUFEY_CHILD_WEBVIEW_EVALUATE 1
 #else
 #define LAUFEY_CHILD_WEBVIEW_EVALUATE 0
+#endif
+
+// "downloads": "app" (API 59) holds each download in decide-destination
+// until the app answers, which needs the asynchronous decide-destination of
+// WebKitGTK 2.40 (as "ask" does).
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+#define LAUFEY_CHILD_WEBVIEW_APP_DOWNLOADS 1
+#else
+#define LAUFEY_CHILD_WEBVIEW_APP_DOWNLOADS 0
 #endif
 
 struct ChildView {
@@ -104,6 +118,10 @@ struct ChildView {
   bool open_popup = false;
   // Permission prompts this view has open (closed with it).
   std::vector<GtkWidget*> dialogs;
+  // "permissions": "app" (API 59): the requests waiting for
+  // webview_permission_respond, by request id (strong references; refused
+  // when the main frame navigates or the view closes).
+  std::map<uint32_t, WebKitPermissionRequest*> permissions;
   // The last keydown the view's handler saw (WebKit re-sends an unhandled
   // one), whether it was reported as unhandled, and the key held down (a
   // press of it again is a repeat).
@@ -506,22 +524,65 @@ std::string DownloadUrl(WebKitDownload* download) {
 }
 
 #if WEBKIT_CHECK_VERSION(2, 40, 0)
-void OnSaveResponse(GtkNativeDialog* dialog, gint response, gpointer data) {
-  auto* download = static_cast<WebKitDownload*>(data);
+// The OS save dialog of a download ("ask", and SAVE_AS under "app").
+struct SaveChooser {
+  // Runs once with the chosen path, or "" when the dialog was dismissed.
+  std::function<void(std::string)> done;
+};
+
+void FreeSaveChooser(gpointer data, GClosure*) {
+  delete static_cast<SaveChooser*>(data);
+}
+
+void OnSaveChooserResponse(GtkNativeDialog* dialog, gint response,
+                           gpointer data) {
+  auto* chooser = static_cast<SaveChooser*>(data);
   gchar* path = response == GTK_RESPONSE_ACCEPT
                     ? gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog))
                     : nullptr;
-  if (path) {
-    webkit_download_set_destination(download, path);
-    // The save dialog asked before replacing a file; WebKit refuses to
-    // replace one unless told.
-    webkit_download_set_allow_overwrite(download, TRUE);
-    g_free(path);
-  } else {
-    webkit_download_cancel(download);
-  }
-  g_object_unref(download);
-  g_object_unref(dialog);
+  std::string chosen = Str(path);
+  g_free(path);
+  std::function<void(std::string)> done = std::move(chooser->done);
+  chooser->done = nullptr;
+  if (done)
+    done(chosen);
+  g_object_unref(dialog);  // the last reference: frees `chooser` too
+}
+
+// Shows the save dialog over `anchor`'s window (none when it has no
+// toplevel), seeded with `suggested`, asking before it replaces a file.
+// Returns the dialog, which the response drops; CloseSaveChooser drops it
+// first without an answer.
+GtkFileChooserNative* ShowSaveChooser(GtkWidget* anchor,
+                                      const std::string& suggested,
+                                      std::function<void(std::string)> done) {
+  GtkWidget* toplevel = anchor ? gtk_widget_get_toplevel(anchor) : nullptr;
+  GtkWindow* parent = toplevel && gtk_widget_is_toplevel(toplevel)
+                          ? GTK_WINDOW(toplevel)
+                          : nullptr;
+  GtkFileChooserNative* chooser = gtk_file_chooser_native_new(
+      nullptr, parent, GTK_FILE_CHOOSER_ACTION_SAVE, nullptr, nullptr);
+  gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(chooser),
+                                                 TRUE);
+  gtk_file_chooser_set_current_name(
+      GTK_FILE_CHOOSER(chooser),
+      suggested.empty() ? "download" : suggested.c_str());
+  gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(chooser), parent != nullptr);
+  g_signal_connect_data(chooser, "response", G_CALLBACK(OnSaveChooserResponse),
+                        new SaveChooser{std::move(done)}, FreeSaveChooser,
+                        static_cast<GConnectFlags>(0));
+  gtk_native_dialog_show(GTK_NATIVE_DIALOG(chooser));
+  return chooser;
+}
+
+// Closes a dialog ShowSaveChooser opened, before it answered: its `done`
+// never runs.
+void CloseSaveChooser(GtkFileChooserNative* chooser) {
+  g_signal_handlers_disconnect_matched(
+      chooser, G_SIGNAL_MATCH_FUNC, 0, 0, nullptr,
+      reinterpret_cast<gpointer>(OnSaveChooserResponse), nullptr);
+  gtk_native_dialog_hide(GTK_NATIVE_DIALOG(chooser));
+  g_object_unref(chooser);
 }
 #endif
 
@@ -532,23 +593,19 @@ gboolean OnDecideDestination(WebKitDownload* download,
                              const gchar* suggested_filename, gpointer data) {
 #if WEBKIT_CHECK_VERSION(2, 40, 0)
   ChildView* v = Find(DataId(data));
-  GtkWidget* toplevel =
-      v ? gtk_widget_get_toplevel(GTK_WIDGET(v->view)) : nullptr;
-  GtkWindow* parent = toplevel && gtk_widget_is_toplevel(toplevel)
-                          ? GTK_WINDOW(toplevel)
-                          : nullptr;
-  GtkFileChooserNative* chooser = gtk_file_chooser_native_new(
-      nullptr, parent, GTK_FILE_CHOOSER_ACTION_SAVE, nullptr, nullptr);
-  gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(chooser),
-                                                 TRUE);
-  gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser),
-                                    suggested_filename && *suggested_filename
-                                        ? suggested_filename
-                                        : "download");
-  gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(chooser), parent != nullptr);
   g_object_ref(download);
-  g_signal_connect(chooser, "response", G_CALLBACK(OnSaveResponse), download);
-  gtk_native_dialog_show(GTK_NATIVE_DIALOG(chooser));
+  ShowSaveChooser(v ? GTK_WIDGET(v->view) : nullptr, Str(suggested_filename),
+                  [download](std::string path) {
+                    if (!path.empty()) {
+                      // The save dialog asked before replacing a file; WebKit
+                      // refuses to replace one unless told.
+                      webkit_download_set_allow_overwrite(download, TRUE);
+                      webkit_download_set_destination(download, path.c_str());
+                    } else {
+                      webkit_download_cancel(download);
+                    }
+                    g_object_unref(download);
+                  });
 #else
   // An older WebKitGTK can't wait for the dialog's answer: refuse rather
   // than save unasked.
@@ -557,9 +614,290 @@ gboolean OnDecideDestination(WebKitDownload* download,
   return TRUE;
 }
 
+// --- Downloads the app decides (API 59)
+// --------------------------------------------------------------
+//
+// Under "downloads": "app" each download of the view is held in
+// decide-destination (WebKitGTK 2.40+) and reported as "requested"; SAVE
+// sets the destination, SAVE_AS shows the save dialog first, CANCEL cancels
+// it. WebKitGTK can't pause or resume a download, so canResume is always
+// false. The downloads are kept by download id, apart from the views
+// (WebKitDownload signals can arrive after the view is gone): a download
+// whose last event was sent stays here, silent, until WebKit reports its end,
+// so a cancelled one's file is removed even when WebKit was still writing it.
+
+#if LAUFEY_CHILD_WEBVIEW_APP_DOWNLOADS
+struct AppDownload {
+  uint32_t id = 0;
+  uint32_t view_id = 0;
+  WebKitDownload* download = nullptr;  // strong reference
+  laufey_common::WebViewDownloadPhase phase =
+      laufey_common::WebViewDownloadPhase::kRequested;
+  // "requested" was sent (decide-destination ran).
+  bool requested = false;
+  // The last event was sent (or none is owed): control answers INVALID and
+  // only the engine's end remains.
+  bool ended = false;
+  bool completed = false;
+  std::string url;
+  std::string filename;
+  std::string mime_type;
+  int64_t total_bytes = -1;
+  std::string path;
+  GtkFileChooserNative* chooser = nullptr;  // SAVE_AS's dialog while up
+  laufey_common::WebViewProgressThrottle throttle;
+};
+
+// GTK thread only.
+std::map<uint32_t, AppDownload>& AppDownloads() {
+  static auto* downloads = new std::map<uint32_t, AppDownload>();
+  return *downloads;
+}
+
+AppDownload* FindAppDownload(uint32_t id) {
+  auto it = AppDownloads().find(id);
+  return it == AppDownloads().end() ? nullptr : &it->second;
+}
+
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void EmitDownload(const AppDownload& d, const char* state,
+                  int64_t received_bytes, const char* reason = nullptr) {
+  laufey_common::WebViewDownloadFields f;
+  f.id = d.id;
+  f.state = state;
+  f.url = d.url;
+  f.filename = d.filename;
+  f.mime_type = d.mime_type;
+  f.total_bytes = d.total_bytes;
+  f.received_bytes = received_bytes;
+  f.path = d.path;
+  if (std::strcmp(state, laufey_common::kWebViewDownloadProgressing) == 0 ||
+      std::strcmp(state, laufey_common::kWebViewDownloadInterrupted) == 0)
+    f.can_resume = 0;  // WebKitGTK has no resume
+  f.reason = reason;
+  Emit(d.view_id, LAUFEY_WEBVIEW_EVENT_DOWNLOAD,
+       laufey_common::WebViewDownloadJson(f));
+}
+
+// Removes what an unfinished download left at `path` (a regular file only:
+// never a directory or what a symbolic link points to).
+void RemovePartialFile(const std::string& path) {
+  if (path.empty())
+    return;
+  GStatBuf st;
+  if (g_lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+    g_unlink(path.c_str());
+}
+
+// Drops a download for good: its signals, the save dialog, the reference.
+void ForgetAppDownload(uint32_t id) {
+  auto it = AppDownloads().find(id);
+  if (it == AppDownloads().end())
+    return;
+  AppDownload d = std::move(it->second);
+  AppDownloads().erase(it);
+  if (d.chooser)
+    CloseSaveChooser(d.chooser);
+  g_signal_handlers_disconnect_by_data(d.download, IdData(id));
+  g_object_unref(d.download);
+}
+
+// Ends a download the app (or the view's close) cancelled: "cancelled" now,
+// when "requested" was sent, then the engine's cancel; the download stays
+// until WebKit reports its end, which removes its file again.
+void CancelAppDownload(AppDownload* d) {
+  if (d->ended)
+    return;
+  d->ended = true;
+  d->phase = laufey_common::WebViewDownloadPhase::kDone;
+  if (d->chooser) {
+    GtkFileChooserNative* chooser = d->chooser;
+    d->chooser = nullptr;
+    CloseSaveChooser(chooser);
+  }
+  uint32_t id = d->id;
+  if (d->requested) {
+    EmitDownload(*d, laufey_common::kWebViewDownloadCancelled,
+                 static_cast<int64_t>(
+                     webkit_download_get_received_data_length(d->download)));
+  }
+  d = FindAppDownload(id);
+  if (!d)
+    return;
+  RemovePartialFile(d->path);
+  webkit_download_cancel(d->download);
+}
+
+// SAVE, or SAVE_AS's chosen path: WebKit writes to exactly `path`, replacing
+// a regular file there (the app or the dialog asked).
+void StartAppDownload(AppDownload* d, const std::string& path) {
+  d->path = path;
+  d->phase = laufey_common::WebViewDownloadPhase::kProgressing;
+  webkit_download_set_allow_overwrite(d->download, TRUE);
+  webkit_download_set_destination(d->download, path.c_str());
+}
+
+// Held until the app answers (WebKitGTK 2.40+), as "ask" holds it for the
+// dialog.
+gboolean OnAppDecideDestination(WebKitDownload* download,
+                                const gchar* suggested_filename,
+                                gpointer data) {
+  AppDownload* d = FindAppDownload(DataId(data));
+  if (!d || d->ended) {
+    webkit_download_cancel(download);
+    return TRUE;
+  }
+  d->url = DownloadUrl(download);
+  d->filename = Str(suggested_filename);
+  if (d->filename.empty())
+    d->filename = laufey_common::UrlFileName(d->url);
+  if (WebKitURIResponse* response = webkit_download_get_response(download)) {
+    d->mime_type = Str(webkit_uri_response_get_mime_type(response));
+    guint64 length = webkit_uri_response_get_content_length(response);
+    if (length > 0)
+      d->total_bytes = static_cast<int64_t>(length);
+  }
+  d->requested = true;
+  d->phase = laufey_common::WebViewDownloadPhase::kRequested;
+  EmitDownload(*d, laufey_common::kWebViewDownloadRequested, 0);
+  return TRUE;
+}
+
+void OnAppReceivedData(WebKitDownload* download, guint64, gpointer data) {
+  AppDownload* d = FindAppDownload(DataId(data));
+  if (!d || d->ended ||
+      d->phase != laufey_common::WebViewDownloadPhase::kProgressing)
+    return;
+  if (d->total_bytes < 0) {
+    WebKitURIResponse* response = webkit_download_get_response(download);
+    guint64 length =
+        response ? webkit_uri_response_get_content_length(response) : 0;
+    if (length > 0)
+      d->total_bytes = static_cast<int64_t>(length);
+  }
+  if (!d->throttle.Ready(NowMs()))
+    return;
+  EmitDownload(
+      *d, laufey_common::kWebViewDownloadProgressing,
+      static_cast<int64_t>(webkit_download_get_received_data_length(download)));
+}
+
+// Before "finished" when the download fails (a cancel included).
+void OnAppDownloadFailed(WebKitDownload* download, GError* error,
+                         gpointer data) {
+  uint32_t id = DataId(data);
+  AppDownload* d = FindAppDownload(id);
+  if (!d)
+    return;
+  if (!d->ended) {
+    d->ended = true;
+    d->phase = laufey_common::WebViewDownloadPhase::kDone;
+    if (d->requested) {
+      int64_t received = static_cast<int64_t>(
+          webkit_download_get_received_data_length(download));
+      if (error && error->domain == WEBKIT_DOWNLOAD_ERROR &&
+          error->code == WEBKIT_DOWNLOAD_ERROR_CANCELLED_BY_USER) {
+        EmitDownload(*d, laufey_common::kWebViewDownloadCancelled, received);
+      } else {
+        const char* reason = laufey_common::kWebViewDownloadReasonFailed;
+        if (error && error->domain == WEBKIT_DOWNLOAD_ERROR) {
+          if (error->code == WEBKIT_DOWNLOAD_ERROR_NETWORK)
+            reason = laufey_common::kWebViewDownloadReasonNetwork;
+          else if (error->code == WEBKIT_DOWNLOAD_ERROR_DESTINATION)
+            reason = laufey_common::kWebViewDownloadReasonFile;
+        }
+        EmitDownload(*d, laufey_common::kWebViewDownloadInterrupted, received,
+                     reason);
+      }
+    }
+  }
+  if ((d = FindAppDownload(id)))
+    RemovePartialFile(d->path);
+}
+
+// The end of every download, after "failed" for one that failed.
+void OnAppDownloadFinished(WebKitDownload* download, gpointer data) {
+  uint32_t id = DataId(data);
+  AppDownload* d = FindAppDownload(id);
+  if (!d)
+    return;
+  if (!d->ended) {
+    d->ended = true;
+    d->completed = true;
+    d->phase = laufey_common::WebViewDownloadPhase::kDone;
+    int64_t size = static_cast<int64_t>(
+        webkit_download_get_received_data_length(download));
+    GStatBuf st;
+    if (!d->path.empty() && g_stat(d->path.c_str(), &st) == 0)
+      size = static_cast<int64_t>(st.st_size);
+    if (d->requested)
+      EmitDownload(*d, laufey_common::kWebViewDownloadCompleted, size);
+    d = FindAppDownload(id);
+  }
+  // Cancelled (or failed) before WebKit stopped writing: nothing stays.
+  if (d && !d->completed)
+    RemovePartialFile(d->path);
+  ForgetAppDownload(id);
+}
+
+void StartAppDownloadTracking(ChildView* v, WebKitDownload* download) {
+  size_t waiting = 0;
+  for (const auto& kv : AppDownloads()) {
+    const AppDownload& d = kv.second;
+    if (d.view_id == v->id && !d.ended &&
+        (d.phase == laufey_common::WebViewDownloadPhase::kRequested ||
+         d.phase == laufey_common::WebViewDownloadPhase::kChoosing))
+      ++waiting;
+  }
+  if (waiting >= LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS) {
+    std::cerr << "laufey: web view " << v->id << " has "
+              << LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS
+              << " downloads waiting for the app; another one is cancelled"
+              << std::endl;
+    webkit_download_cancel(download);
+    return;
+  }
+  uint32_t id = laufey_common::NextWebViewDownloadId();
+  AppDownload& d = AppDownloads()[id];
+  d.id = id;
+  d.view_id = v->id;
+  d.download = WEBKIT_DOWNLOAD(g_object_ref(download));
+  d.url = DownloadUrl(download);
+  gpointer data = IdData(id);
+  g_signal_connect(download, "decide-destination",
+                   G_CALLBACK(OnAppDecideDestination), data);
+  g_signal_connect(download, "received-data", G_CALLBACK(OnAppReceivedData),
+                   data);
+  g_signal_connect(download, "failed", G_CALLBACK(OnAppDownloadFailed), data);
+  g_signal_connect(download, "finished", G_CALLBACK(OnAppDownloadFinished),
+                   data);
+}
+
+// The view is closing: its downloads that are not done are cancelled
+// ("cancelled" before the view's CLOSED).
+void CancelAppDownloadsOf(uint32_t view_id) {
+  std::vector<uint32_t> ids;
+  for (const auto& kv : AppDownloads()) {
+    if (kv.second.view_id == view_id && !kv.second.ended)
+      ids.push_back(kv.first);
+  }
+  for (uint32_t id : ids) {
+    if (AppDownload* d = FindAppDownload(id))
+      CancelAppDownload(d);
+  }
+}
+#else
+void CancelAppDownloadsOf(uint32_t) {}
+#endif
+
 // Every download of a web view's context: a response the view could not
-// show that "ask" let through (webkit_policy_decision_download), or an
-// <a download> link, which WebKit turns into a download on its own.
+// show that "ask" or "app" let through (webkit_policy_decision_download), or
+// an <a download> link, which WebKit turns into a download on its own.
 void OnDownloadStarted(WebKitWebContext* context, WebKitDownload* download,
                        gpointer data) {
   WebKitWebView* web_view = webkit_download_get_web_view(download);
@@ -572,6 +910,14 @@ void OnDownloadStarted(WebKitWebContext* context, WebKitDownload* download,
     case laufey_common::WebViewDownloads::kAsk:
       g_signal_connect(download, "decide-destination",
                        G_CALLBACK(OnDecideDestination), IdData(v->id));
+      return;
+    case laufey_common::WebViewDownloads::kApp:
+#if LAUFEY_CHILD_WEBVIEW_APP_DOWNLOADS
+      StartAppDownloadTracking(v, download);
+#else
+      // Not reported (CheckWebViewOptionsSupported refuses the option).
+      webkit_download_cancel(download);
+#endif
       return;
     case laufey_common::WebViewDownloads::kBrowser: {
       std::string url = DownloadUrl(download);
@@ -669,9 +1015,106 @@ std::string OriginOf(const std::string& url) {
   return result;
 }
 
+// --- Permission requests the app answers (API 59)
+//
+// WebKitGTK says neither which frame asked nor (but for storage access) which
+// origin: the request is reported as the top-level page's, without "frame".
+
+// The kWebViewPermission* names of `request`, empty for a kind that is
+// refused without asking (as PermissionName refuses it). `origin` is set
+// when the request names its own requester (storage access).
+std::vector<std::string> AppPermissionNames(WebKitPermissionRequest* request,
+                                            std::string* origin) {
+  std::vector<std::string> names;
+  if (WEBKIT_IS_GEOLOCATION_PERMISSION_REQUEST(request)) {
+    names.push_back(laufey_common::kWebViewPermissionGeolocation);
+  } else if (WEBKIT_IS_NOTIFICATION_PERMISSION_REQUEST(request)) {
+    names.push_back(laufey_common::kWebViewPermissionNotifications);
+  } else if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request)) {
+    auto* media = WEBKIT_USER_MEDIA_PERMISSION_REQUEST(request);
+#if WEBKIT_CHECK_VERSION(2, 34, 0)
+    if (webkit_user_media_permission_is_for_display_device(media)) {
+      names.push_back(laufey_common::kWebViewPermissionScreen);
+      return names;
+    }
+#endif
+    if (webkit_user_media_permission_is_for_video_device(media))
+      names.push_back(laufey_common::kWebViewPermissionCamera);
+    if (webkit_user_media_permission_is_for_audio_device(media))
+      names.push_back(laufey_common::kWebViewPermissionMicrophone);
+  }
+#if WEBKIT_CHECK_VERSION(2, 28, 0)
+  else if (WEBKIT_IS_POINTER_LOCK_PERMISSION_REQUEST(request)) {
+    names.push_back(laufey_common::kWebViewPermissionPointerLock);
+  }
+#endif
+#if WEBKIT_CHECK_VERSION(2, 30, 0)
+  else if (WEBKIT_IS_WEBSITE_DATA_ACCESS_PERMISSION_REQUEST(request)) {
+    // The embedded site asking for its cookies under this page: a domain,
+    // and the Storage Access API is for secure contexts only.
+    const char* domain =
+        webkit_website_data_access_permission_request_get_requesting_domain(
+            WEBKIT_WEBSITE_DATA_ACCESS_PERMISSION_REQUEST(request));
+    if (domain && *domain)
+      *origin = laufey_common::WebViewOriginOf(std::string("https://") +
+                                               domain + "/");
+    names.push_back(laufey_common::kWebViewPermissionStorageAccess);
+  }
+#endif
+#if WEBKIT_CHECK_VERSION(2, 42, 0)
+  else if (WEBKIT_IS_CLIPBOARD_PERMISSION_REQUEST(request)) {
+    // A paste the page started without a user gesture (DOM paste access).
+    names.push_back(laufey_common::kWebViewPermissionClipboardRead);
+  }
+#endif
+  // Device info (enumerateDevices' labels) and media key systems are refused
+  // without asking, as under "ask".
+  return names;
+}
+
+gboolean OnAppPermissionRequest(ChildView* v,
+                                WebKitPermissionRequest* request) {
+  std::string origin;
+  std::vector<std::string> names = AppPermissionNames(request, &origin);
+  if (names.empty() ||
+      v->permissions.size() >= LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS) {
+    webkit_permission_request_deny(request);
+    return TRUE;
+  }
+  if (origin.empty())
+    origin = laufey_common::WebViewOriginOf(CurrentUrl(v));
+  laufey_common::WebViewPermissionFields f;
+  f.id = laufey_common::NextWebViewPermissionId();
+  f.origin = origin;
+  f.permissions = std::move(names);
+  // Pending while the reference is held and the handler returns TRUE.
+  v->permissions[f.id] = WEBKIT_PERMISSION_REQUEST(g_object_ref(request));
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+       laufey_common::WebViewPermissionRequestJson(f));
+  return TRUE;
+}
+
+// Refuses the view's unanswered requests, each reported "cancelled": its
+// main frame navigates, or it closes.
+void CancelAppPermissions(uint32_t view_id) {
+  ChildView* v = Find(view_id);
+  if (!v || v->permissions.empty())
+    return;
+  std::map<uint32_t, WebKitPermissionRequest*> pending;
+  pending.swap(v->permissions);
+  for (auto& [id, request] : pending) {
+    webkit_permission_request_deny(request);
+    g_object_unref(request);
+    Emit(view_id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+         laufey_common::WebViewPermissionCancelledJson(id));
+  }
+}
+
 gboolean OnPermissionRequest(WebKitWebView* web_view,
                              WebKitPermissionRequest* request, gpointer data) {
   ChildView* v = Find(DataId(data));
+  if (v && v->options.permissions == laufey_common::WebViewPermissions::kApp)
+    return OnAppPermissionRequest(v, request);
   const char* what = PermissionName(request);
   if (!v || !what ||
       v->options.permissions != laufey_common::WebViewPermissions::kAsk) {
@@ -748,6 +1191,7 @@ gboolean OnDecidePolicy(WebKitWebView* web_view, WebKitPolicyDecision* decision,
           v ? v->options.downloads : laufey_common::WebViewDownloads::kDeny;
       switch (downloads) {
         case laufey_common::WebViewDownloads::kAsk:
+        case laufey_common::WebViewDownloads::kApp:
           webkit_policy_decision_download(decision);
           break;
         case laufey_common::WebViewDownloads::kBrowser:
@@ -771,10 +1215,17 @@ void OnLoadChanged(WebKitWebView* web_view, WebKitLoadEvent event,
   if (!v)
     return;
   switch (event) {
-    case WEBKIT_LOAD_STARTED:
+    case WEBKIT_LOAD_STARTED: {
       v->load_ended = false;
+      uint32_t id = v->id;
+      // A new main-frame navigation: the old page's requests go away.
+      CancelAppPermissions(id);
+      v = Find(id);
+      if (!v)
+        return;
       SetLoad(v, "loading", CurrentUrl(v));
       break;
+    }
     case WEBKIT_LOAD_REDIRECTED:
       break;
     case WEBKIT_LOAD_COMMITTED:
@@ -1237,6 +1688,12 @@ uint32_t Capabilities() {
           LAUFEY_WEBVIEW_CAP_KEY_UP | LAUFEY_WEBVIEW_CAP_BLUR;
   if (HasPersistentRoot())
     caps |= LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS;
+  // API 59: no LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE (WebKitGTK can't pause or
+  // resume a download).
+#if LAUFEY_CHILD_WEBVIEW_APP_DOWNLOADS
+  caps |= LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS;
+#endif
+  caps |= LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS;
   return caps;
 }
 
@@ -1461,6 +1918,11 @@ bool Restack(const std::vector<uint32_t>& bottom_to_top) {
 }
 
 bool Close(uint32_t id) {
+  if (!Find(id))
+    return false;
+  // Its downloads and permission requests end before CLOSED ("cancelled").
+  CancelAppDownloadsOf(id);
+  CancelAppPermissions(id);
   auto it = Views().find(id);
   if (it == Views().end())
     return false;
@@ -1498,6 +1960,67 @@ bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
     return false;
   v->options.forward_keys = keys;
   return true;
+}
+
+int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
+                        const std::string& path) {
+  if (!Find(id))
+    return LAUFEY_WEBVIEW_CLOSED;
+#if LAUFEY_CHILD_WEBVIEW_APP_DOWNLOADS
+  AppDownload* d = FindAppDownload(download_id);
+  if (!d || d->view_id != id || !d->requested)
+    return LAUFEY_WEBVIEW_INVALID;
+  auto phase = d->ended ? laufey_common::WebViewDownloadPhase::kDone : d->phase;
+  int32_t status = laufey_common::WebViewDownloadAccepts(phase, action, false);
+  if (status != LAUFEY_WEBVIEW_OK)
+    return status;
+  switch (action) {
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE:
+      StartAppDownload(d, path);
+      return LAUFEY_WEBVIEW_OK;
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS: {
+      d->phase = laufey_common::WebViewDownloadPhase::kChoosing;
+      ChildView* v = Find(id);
+      d->chooser =
+          ShowSaveChooser(GTK_WIDGET(v->view),
+                          laufey_common::SanitizeDownloadFileName(d->filename),
+                          [download_id](std::string chosen) {
+                            AppDownload* d = FindAppDownload(download_id);
+                            if (!d || d->ended)
+                              return;
+                            d->chooser = nullptr;  // the response drops it
+                            if (chosen.empty())
+                              CancelAppDownload(d);
+                            else
+                              StartAppDownload(d, chosen);
+                          });
+      return LAUFEY_WEBVIEW_OK;
+    }
+    case LAUFEY_WEBVIEW_DOWNLOAD_CANCEL:
+      CancelAppDownload(d);
+      return LAUFEY_WEBVIEW_OK;
+  }
+  return LAUFEY_WEBVIEW_INVALID;
+#else
+  return LAUFEY_WEBVIEW_UNSUPPORTED;
+#endif
+}
+
+int32_t PermissionRespond(uint32_t id, uint32_t request_id, bool allow) {
+  ChildView* v = Find(id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  auto it = v->permissions.find(request_id);
+  if (it == v->permissions.end())
+    return LAUFEY_WEBVIEW_INVALID;
+  WebKitPermissionRequest* request = it->second;
+  v->permissions.erase(it);
+  if (allow)
+    webkit_permission_request_allow(request);
+  else
+    webkit_permission_request_deny(request);
+  g_object_unref(request);
+  return LAUFEY_WEBVIEW_OK;
 }
 
 void CloseAllForWindow(uint32_t window_id) {

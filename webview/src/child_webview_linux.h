@@ -46,6 +46,11 @@ bool Restack(const std::vector<uint32_t>& bottom_to_top);
 bool Close(uint32_t id);
 // Replaces the view's "forwardKeys" (canonical forms).
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
+// API 59 (laufey.h webview_download_control / webview_permission_respond):
+// the trampoline checked the action and SAVE's path.
+int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
+                        const std::string& path);
+int32_t PermissionRespond(uint32_t id, uint32_t request_id, bool allow);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
 // Whether `widget` is a child web view or inside one: its keys belong to that

@@ -16,6 +16,7 @@
 #include "laufey_platform_features.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
+#include "laufey_menu_snapshot.h"
 #include "laufey_notifications.h"
 #include "laufey_system.h"
 #include "laufey_single_instance.h"
@@ -1576,8 +1577,10 @@ class WebKitGTKBackend : public LaufeyBackend {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
            LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
-           LAUFEY_MENU_CAP_DESTRUCTIVE;
+           LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT;
   }
+  // menu_snapshot (API 59): the window's GtkMenuBar as it is now.
+  std::string MenuSnapshot(int32_t kind, uint32_t id) override;
   void ShowContextMenuEx(uint32_t window_id, int x, int y,
                          laufey_value_t* menu_template,
                          const laufey_backend_api_t* api,
@@ -1611,6 +1614,11 @@ class WebKitGTKBackend : public LaufeyBackend {
   bool WebViewClose(uint32_t webview_id) override;
   bool WebViewSetForwardKeys(uint32_t webview_id,
                              const std::vector<std::string>& keys) override;
+  int32_t WebViewDownloadControl(uint32_t webview_id, uint32_t download_id,
+                                 int32_t action,
+                                 const std::string& path) override;
+  int32_t WebViewPermissionRespond(uint32_t webview_id, uint32_t request_id,
+                                   bool allow) override;
   bool WebViewRestack(uint32_t window_id,
                       const std::vector<uint32_t>& bottom_to_top) override;
 
@@ -2573,6 +2581,29 @@ bool WebKitGTKBackend::WebViewSetForwardKeys(
     ok = laufey_child_webview_linux::SetForwardKeys(webview_id, keys);
   });
   return ok;
+}
+
+int32_t WebKitGTKBackend::WebViewDownloadControl(uint32_t webview_id,
+                                                 uint32_t download_id,
+                                                 int32_t action,
+                                                 const std::string& path) {
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  gtk_invoke_sync([&] {
+    status = laufey_child_webview_linux::DownloadControl(
+        webview_id, download_id, action, path);
+  });
+  return status;
+}
+
+int32_t WebKitGTKBackend::WebViewPermissionRespond(uint32_t webview_id,
+                                                   uint32_t request_id,
+                                                   bool allow) {
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  gtk_invoke_sync([&] {
+    status = laufey_child_webview_linux::PermissionRespond(webview_id,
+                                                           request_id, allow);
+  });
+  return status;
 }
 
 void WebKitGTKBackend::Navigate(uint32_t window_id, const std::string& url) {
@@ -3798,6 +3829,89 @@ void WebKitGTKBackend::SetApplicationMenu(uint32_t window_id,
     state->menu_bar = menu_bar;
     gtk_widget_show_all(menu_bar);
   });
+}
+
+// menu_snapshot (API 59): the items of a GtkMenuShell as GTK holds them
+// now. The id, role and accelerator text come from what the builder
+// (backend-common menu_linux.cc) attached to each item: GTK keeps no id, and
+// its accelerators are keyvals, not laufey's canonical spelling. The keys
+// are menu_linux.cc's.
+static constexpr const char kGtkMenuItemIdKey[] = "laufey-menu-id";
+static constexpr const char kGtkMenuItemRoleKey[] = "laufey-menu-role";
+static constexpr const char kGtkMenuItemAcceleratorKey[] =
+    "laufey-menu-accelerator";
+
+static void SnapshotGtkMenu(GtkWidget* shell,
+                            std::vector<laufey_common::MenuSnapshotItem>* out,
+                            int depth) {
+  if (!shell || !GTK_IS_CONTAINER(shell) || depth > 16)
+    return;
+  GList* children = gtk_container_get_children(GTK_CONTAINER(shell));
+  for (GList* l = children; l; l = l->next) {
+    GtkWidget* widget = GTK_WIDGET(l->data);
+    if (!GTK_IS_MENU_ITEM(widget))
+      continue;
+    laufey_common::MenuSnapshotItem item;
+    item.enabled = gtk_widget_get_sensitive(widget);
+    item.visible = gtk_widget_get_visible(widget);
+    if (GTK_IS_SEPARATOR_MENU_ITEM(widget)) {
+      item.type = laufey_common::MenuSnapshotItem::Type::kSeparator;
+      out->push_back(std::move(item));
+      continue;
+    }
+    GtkMenuItem* menu_item = GTK_MENU_ITEM(widget);
+    // The label's displayed text: without markup (a destructive item's red)
+    // or a mnemonic's underscore.
+    GtkWidget* child = gtk_bin_get_child(GTK_BIN(widget));
+    if (child && GTK_IS_LABEL(child)) {
+      const char* text = gtk_label_get_text(GTK_LABEL(child));
+      item.label = text ? text : "";
+    } else if (const char* label = gtk_menu_item_get_label(menu_item)) {
+      std::string text = label;
+      if (gtk_menu_item_get_use_underline(menu_item)) {
+        std::string plain;
+        for (size_t i = 0; i < text.size(); ++i) {
+          if (text[i] == '_' && i + 1 < text.size())
+            ++i;
+          plain.push_back(text[i]);
+        }
+        text = plain;
+      }
+      item.label = text;
+    }
+    item.checked = GTK_IS_CHECK_MENU_ITEM(widget) &&
+                   gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(widget));
+    auto data = [widget](const char* key) {
+      const char* value =
+          static_cast<const char*>(g_object_get_data(G_OBJECT(widget), key));
+      return std::string(value ? value : "");
+    };
+    item.id = data(kGtkMenuItemIdKey);
+    item.role = data(kGtkMenuItemRoleKey);
+    item.accelerator = data(kGtkMenuItemAcceleratorKey);
+    if (GtkWidget* submenu = gtk_menu_item_get_submenu(menu_item)) {
+      item.type = laufey_common::MenuSnapshotItem::Type::kSubmenu;
+      SnapshotGtkMenu(submenu, &item.children, depth + 1);
+    }
+    out->push_back(std::move(item));
+  }
+  g_list_free(children);
+}
+
+std::string WebKitGTKBackend::MenuSnapshot(int32_t kind, uint32_t id) {
+  if (kind != LAUFEY_MENU_KIND_APPLICATION)
+    return std::string();
+  std::string json;
+  gtk_invoke_sync([&] {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    auto* state = GetWindow(id);
+    if (!state || !state->menu_bar)
+      return;
+    std::vector<laufey_common::MenuSnapshotItem> items;
+    SnapshotGtkMenu(state->menu_bar, &items, 0);
+    json = laufey_common::MenuSnapshotJson(items);
+  });
+  return json;
 }
 
 void WebKitGTKBackend::ShowContextMenu(uint32_t window_id, int x, int y,
