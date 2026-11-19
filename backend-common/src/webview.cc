@@ -752,7 +752,7 @@ bool IsValidWebViewDownloadPath(const std::string& path, std::string* error) {
   };
   std::error_code ec;
 #ifdef _WIN32
-  std::filesystem::path p(Utf8ToWide(path));
+  std::filesystem::path p(downloads_internal::Utf8ToWide(path));
 #else
   std::filesystem::path p(path);
 #endif
