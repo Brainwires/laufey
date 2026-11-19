@@ -22,6 +22,19 @@
 // (and emptied under "contextMenu": "app"); "clipboardRead" answers the
 // clipboard permission prompt.
 //
+// Downloads and permission requests the app decides (API 59, "downloads":
+// "app" / "permissions": "app"). A download: OnBeforeDownload keeps the
+// CefBeforeDownloadCallback under a laufey id (the item's GetId() maps CEF's
+// id to it) and sends "requested"; SAVE / SAVE_AS run Continue() with a path
+// (never without one: CEF would save into the Downloads folder unasked);
+// OnDownloadUpdated keeps the latest CefDownloadItemCallback (Cancel / Pause /
+// Resume) and sends "progressing" and the last event. A download laufey ends
+// before CEF has (CANCEL, the view closing, one too many waiting) is never
+// continued: its callback is released and Cancel() runs on its next update
+// (CancelOnUpdate). A permission request: OnRequestMediaAccessPermission (it
+// says which frame asked) and OnShowPermissionPrompt (it doesn't) keep their
+// callback under a laufey id; OnDismissPermissionPrompt withdraws one.
+//
 // Keys (CefKeyboardHandler): OnPreKeyEvent, before the renderer has a
 // keydown, gives it to the app menu (macOS: [NSApp.mainMenu
 // performKeyEquivalent:] with the os_event; Windows / Linux: the window's Views
@@ -42,8 +55,10 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 #include "app.h"
@@ -60,8 +75,10 @@
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
 #include "laufey_backend_common.h"
+#include "laufey_downloads.h"
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
+#include "runtime_loader.h"
 #if defined(_WIN32) || defined(__linux__)
 #include "views_menu.h"
 #endif
@@ -82,6 +99,33 @@ constexpr int kConsolePerSecond = 200;
 constexpr size_t kConsoleMaxBytes = 16 * 1024;
 
 class ChildClient;
+
+// A download of a "downloads": "app" view (API 59).
+struct ChildDownload {
+  uint32_t cef_id = 0;  // CefDownloadItem::GetId()
+  laufey_common::WebViewDownloadPhase phase =
+      laufey_common::WebViewDownloadPhase::kRequested;
+  std::string url;
+  std::string filename;  // the engine's suggestion (sanitized in the JSON)
+  std::string mime_type;
+  int64_t total_bytes = -1;
+  int64_t received_bytes = 0;
+  std::string path;  // once decided
+  // Until SAVE / SAVE_AS continue it; released unrun, CEF cancels it.
+  CefRefPtr<CefBeforeDownloadCallback> before;
+  // The latest OnDownloadUpdated callback (Cancel / Pause / Resume).
+  CefRefPtr<CefDownloadItemCallback> item;
+  laufey_common::WebViewProgressThrottle throttle;
+};
+
+// A permission request of a "permissions": "app" view waiting for
+// webview_permission_respond (API 59): one of the two callbacks.
+struct ChildPermission {
+  CefRefPtr<CefMediaAccessCallback> media;
+  uint32_t media_permissions = 0;  // what Continue() allows
+  CefRefPtr<CefPermissionPromptCallback> prompt;
+  uint64_t prompt_id = 0;
+};
 
 struct ChildView {
   uint32_t id = 0;
@@ -124,6 +168,11 @@ struct ChildView {
   std::string find_text;
   bool find_match_case = false;
   bool devtools_on_create = false;  // open_devtools before the browser
+  // API 59: downloads by laufey id, CEF's download id to laufey's, and the
+  // permission requests waiting for the app.
+  std::map<uint32_t, ChildDownload> downloads;
+  std::map<uint32_t, uint32_t> download_ids;
+  std::map<uint32_t, ChildPermission> permissions;
 };
 
 // UI thread only.
@@ -551,6 +600,308 @@ void AskPermission(uint32_t window_id, const std::string& origin,
   }
 }
 
+// --- Downloads and permission requests the app decides (API 59) ------------
+
+using laufey_common::WebViewDownloadPhase;
+
+// The view even while it closes (its downloads end before CLOSED), or
+// nullptr.
+ChildView* FindForAppEvents(uint32_t id) {
+  auto it = Views().find(id);
+  return it == Views().end() ? nullptr : it->second.get();
+}
+
+// CEF downloads of each view laufey ended before CEF did: OnDownloadUpdated
+// cancels them on their next update, until CEF reports them cancelled or
+// complete. Keyed by view id, as CEF's ids are per request context (a
+// partition), and kept after the view is gone (late updates). UI thread only.
+std::map<uint32_t, std::set<uint32_t>>& CancelOnUpdate() {
+  static auto* cancels = new std::map<uint32_t, std::set<uint32_t>>();
+  return *cancels;
+}
+
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+bool IsWaiting(WebViewDownloadPhase phase) {
+  return phase == WebViewDownloadPhase::kRequested ||
+         phase == WebViewDownloadPhase::kChoosing;
+}
+
+laufey_common::WebViewDownloadFields DownloadFields(uint32_t id,
+                                                    const ChildDownload& d,
+                                                    const char* state) {
+  laufey_common::WebViewDownloadFields f;
+  f.id = id;
+  f.state = state;
+  f.url = d.url;
+  f.filename = d.filename;
+  f.mime_type = d.mime_type;
+  f.total_bytes = d.total_bytes;
+  f.received_bytes = d.received_bytes;
+  f.path = d.path;
+  return f;
+}
+
+void EmitDownload(uint32_t view_id,
+                  const laufey_common::WebViewDownloadFields& f) {
+  Emit(view_id, LAUFEY_WEBVIEW_EVENT_DOWNLOAD,
+       laufey_common::WebViewDownloadJson(f));
+}
+
+// Forgets download `id` of view `view_id` and cancels it in CEF (never
+// continued: its callback released; else Cancel()), then sends its last
+// event: `last` (an "interrupted" already filled), else "cancelled".
+void EndAppDownload(uint32_t view_id, uint32_t id,
+                    const laufey_common::WebViewDownloadFields* last) {
+  ChildView* v = FindForAppEvents(view_id);
+  if (!v)
+    return;
+  auto it = v->downloads.find(id);
+  if (it == v->downloads.end())
+    return;
+  ChildDownload d = std::move(it->second);
+  v->downloads.erase(it);
+  v->download_ids.erase(d.cef_id);
+  CancelOnUpdate()[view_id].insert(d.cef_id);
+  // Forgotten first: Cancel() can report the item back (OnDownloadUpdated)
+  // before it returns.
+  d.before = nullptr;
+  if (d.item)
+    d.item->Cancel();
+  if (last) {
+    EmitDownload(view_id, *last);
+  } else {
+    EmitDownload(view_id, DownloadFields(
+                              id, d, laufey_common::kWebViewDownloadCancelled));
+  }
+}
+
+// Continues a download waiting for its destination (SAVE, or SAVE_AS's
+// panel answered) to `path`.
+void ContinueAppDownload(ChildDownload* d, const std::string& path) {
+  CefRefPtr<CefBeforeDownloadCallback> before = d->before;
+  d->before = nullptr;
+  d->phase = WebViewDownloadPhase::kProgressing;
+  d->path = path;
+  if (before)
+    before->Continue(path, /*show_dialog=*/false);
+}
+
+// The interrupt reason's family (cef_download_interrupt_reason_t numbers
+// them by tens: FILE_ 1.., NETWORK_ 20.., SERVER_ 30.., CRASH 50).
+const char* InterruptReason(cef_download_interrupt_reason_t reason) {
+  int r = static_cast<int>(reason);
+  if (r >= 1 && r < 20)
+    return laufey_common::kWebViewDownloadReasonFile;
+  if (r >= 20 && r < 30)
+    return laufey_common::kWebViewDownloadReasonNetwork;
+  if (r >= 30 && r < 40)
+    return laufey_common::kWebViewDownloadReasonServer;
+  if (reason == CEF_DOWNLOAD_INTERRUPT_REASON_CRASH)
+    return laufey_common::kWebViewDownloadReasonCrash;
+  return laufey_common::kWebViewDownloadReasonFailed;
+}
+
+// Whether Chromium can resume a download interrupted for `reason`
+// (DownloadItemImpl::GetResumeMode is not INVALID): CEF has no CanResume.
+bool InterruptResumable(cef_download_interrupt_reason_t reason) {
+  switch (reason) {
+    case CEF_DOWNLOAD_INTERRUPT_REASON_FILE_ACCESS_DENIED:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_FILE_VIRUS_INFECTED:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_FILE_BLOCKED:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_FILE_SECURITY_CHECK_FAILED:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_FILE_HASH_MISMATCH:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_FILE_SAME_AS_SOURCE:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_NETWORK_INVALID_REQUEST:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_SERVER_BAD_CONTENT:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_SERVER_CROSS_ORIGIN_REDIRECT:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED:
+    case CEF_DOWNLOAD_INTERRUPT_REASON_NONE:
+      return false;
+    default:
+      return true;
+  }
+}
+
+// OnDownloadUpdated for a download the view tracks.
+void UpdateAppDownload(uint32_t view_id, uint32_t id,
+                       CefRefPtr<CefDownloadItem> item) {
+  ChildView* v = FindForAppEvents(view_id);
+  if (!v)
+    return;
+  auto it = v->downloads.find(id);
+  if (it == v->downloads.end())
+    return;
+  ChildDownload& d = it->second;
+  if (item->GetTotalBytes() > 0)
+    d.total_bytes = item->GetTotalBytes();
+  d.received_bytes = item->GetReceivedBytes();
+  if (item->IsComplete()) {
+    laufey_common::WebViewDownloadFields f =
+        DownloadFields(id, d, laufey_common::kWebViewDownloadCompleted);
+    std::string full = item->GetFullPath().ToString();
+    if (!full.empty())
+      f.path = full;
+    v->download_ids.erase(d.cef_id);
+    v->downloads.erase(it);
+    EmitDownload(view_id, f);
+    return;
+  }
+  if (item->IsCanceled()) {
+    laufey_common::WebViewDownloadFields f =
+        DownloadFields(id, d, laufey_common::kWebViewDownloadCancelled);
+    v->download_ids.erase(d.cef_id);
+    v->downloads.erase(it);
+    EmitDownload(view_id, f);
+    return;
+  }
+  if (item->IsInterrupted()) {
+    cef_download_interrupt_reason_t reason = item->GetInterruptReason();
+    if (reason == CEF_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED) {
+      EndAppDownload(view_id, id, nullptr);
+      return;
+    }
+    if (d.phase == WebViewDownloadPhase::kInterrupted)
+      return;  // already reported
+    laufey_common::WebViewDownloadFields f =
+        DownloadFields(id, d, laufey_common::kWebViewDownloadInterrupted);
+    f.reason = InterruptReason(reason);
+    bool resumable = !IsWaiting(d.phase) && InterruptResumable(reason);
+    f.can_resume = resumable ? 1 : 0;
+    if (resumable) {
+      d.phase = WebViewDownloadPhase::kInterrupted;
+      EmitDownload(view_id, f);
+    } else {
+      // Done: cancelled in CEF too, so its partial file goes.
+      EndAppDownload(view_id, id, &f);
+    }
+    return;
+  }
+  if (!item->IsInProgress() || IsWaiting(d.phase))
+    return;  // nothing is reported before the app's answer
+  if (d.phase == WebViewDownloadPhase::kInterrupted) {
+    // Chromium resumed it itself (its automatic retries).
+    d.phase = WebViewDownloadPhase::kProgressing;
+    d.throttle.Ready(NowMs());
+    EmitDownload(
+        view_id,
+        DownloadFields(id, d, laufey_common::kWebViewDownloadProgressing));
+    return;
+  }
+  if (d.phase != WebViewDownloadPhase::kProgressing || item->IsPaused())
+    return;
+  if (d.throttle.Ready(NowMs()))
+    EmitDownload(
+        view_id,
+        DownloadFields(id, d, laufey_common::kWebViewDownloadProgressing));
+}
+
+// Refuses a pending permission request (the page's request ends denied).
+void DenyPermission(const ChildPermission& p) {
+  if (p.media)
+    p.media->Cancel();
+  if (p.prompt)
+    p.prompt->Continue(CEF_PERMISSION_RESULT_DENY);
+}
+
+// Every pending permission request of the view refused, each reported
+// "cancelled" (a main-frame navigation, the view closing).
+void CancelAppPermissions(uint32_t view_id) {
+  for (;;) {
+    ChildView* v = FindForAppEvents(view_id);
+    if (!v || v->permissions.empty())
+      return;
+    auto it = v->permissions.begin();
+    uint32_t id = it->first;
+    ChildPermission p = std::move(it->second);
+    v->permissions.erase(it);
+    DenyPermission(p);
+    Emit(view_id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+         laufey_common::WebViewPermissionCancelledJson(id));
+  }
+}
+
+// The view is closing: every download it has not finished is cancelled and
+// every pending request refused, each reported before CLOSED.
+void EndAppRequests(uint32_t view_id) {
+  for (;;) {
+    ChildView* v = FindForAppEvents(view_id);
+    if (!v || v->downloads.empty())
+      break;
+    EndAppDownload(view_id, v->downloads.begin()->first, nullptr);
+  }
+  CancelAppPermissions(view_id);
+}
+
+// Sends a request to the app: false (refuse it at once, no event) when the
+// view already has LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS waiting.
+bool RequestAppPermission(ChildView* v, ChildPermission pending,
+                          laufey_common::WebViewPermissionFields f) {
+  if (v->permissions.size() >= LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS) {
+    std::cerr << "laufey: web view " << v->id << ": more than "
+              << LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS
+              << " permission requests wait for an answer; refusing one"
+              << std::endl;
+    return false;
+  }
+  uint32_t id = laufey_common::NextWebViewPermissionId();
+  v->permissions[id] = std::move(pending);
+  f.id = id;
+  Emit(v->id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+       laufey_common::WebViewPermissionRequestJson(f));
+  return true;
+}
+
+// OnShowPermissionPrompt's kinds as PERMISSION_REQUEST names; false when one
+// has no name (the request is then refused without an event). Clipboard is
+// taken out before ("clipboardRead" decides it).
+bool PromptPermissionNames(uint32_t requested, std::vector<std::string>* out) {
+  struct Kind {
+    uint32_t bits;
+    const char* name;
+  };
+  static const Kind kKinds[] = {
+      {CEF_PERMISSION_TYPE_CAMERA_STREAM |
+           CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM,
+       laufey_common::kWebViewPermissionCamera},
+      {CEF_PERMISSION_TYPE_MIC_STREAM,
+       laufey_common::kWebViewPermissionMicrophone},
+      {CEF_PERMISSION_TYPE_GEOLOCATION,
+       laufey_common::kWebViewPermissionGeolocation},
+      {CEF_PERMISSION_TYPE_NOTIFICATIONS,
+       laufey_common::kWebViewPermissionNotifications},
+      {CEF_PERMISSION_TYPE_MIDI_SYSEX, laufey_common::kWebViewPermissionMidi},
+      {CEF_PERMISSION_TYPE_POINTER_LOCK,
+       laufey_common::kWebViewPermissionPointerLock},
+      {CEF_PERMISSION_TYPE_STORAGE_ACCESS |
+           CEF_PERMISSION_TYPE_TOP_LEVEL_STORAGE_ACCESS,
+       laufey_common::kWebViewPermissionStorageAccess},
+#if CEF_API_ADDED(14700)
+      {CEF_PERMISSION_TYPE_SENSORS, laufey_common::kWebViewPermissionSensors},
+#endif
+      {CEF_PERMISSION_TYPE_WINDOW_MANAGEMENT,
+       laufey_common::kWebViewPermissionWindowManagement},
+      {CEF_PERMISSION_TYPE_LOCAL_FONTS,
+       laufey_common::kWebViewPermissionLocalFonts},
+      {CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS,
+       laufey_common::kWebViewPermissionFileSystem},
+      {CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS,
+       laufey_common::kWebViewPermissionMultipleDownloads},
+  };
+  uint32_t named = 0;
+  for (const Kind& k : kKinds) {
+    if (requested & k.bits) {
+      out->push_back(k.name);
+      named |= k.bits;
+    }
+  }
+  return !out->empty() && (requested & ~named) == 0;
+}
+
 // Windows whose close waits for their child views' browsers to close
 // (CloseBeforeWindow). UI thread only.
 std::map<uint32_t, CefRefPtr<CefWindow>>& PendingWindowCloses() {
@@ -694,6 +1045,13 @@ class ChildClient : public CefClient,
       return;
     ChildView* v = it->second.get();
     FailPending(v, "the web view is closed");
+    // Closed by the browser itself: its downloads and requests end before
+    // CLOSED (after Close they already have).
+    EndAppRequests(id_);
+    it = Views().find(id_);
+    if (it == Views().end())
+      return;
+    v = it->second.get();
     v->devtools = nullptr;
     // The browser has closed: its view and overlay can go now.
     if (v->overlay && v->overlay->IsValid())
@@ -822,6 +1180,13 @@ class ChildClient : public CefClient,
     std::string url = request->GetURL().ToString();
     if (!laufey_common::IsAllowedWebViewNavigation(url))
       return true;  // cancel: file:, data:, javascript:, app schemes...
+    if (!is_redirect) {
+      // A new document: what the old one asked for goes unanswered.
+      CancelAppPermissions(id_);
+      v = Find(id_);
+      if (!v)
+        return true;
+    }
     if (!is_redirect && url != "about:blank") {
       v->suppress_load_events = false;
       SetLoad(v, "loading", url);
@@ -848,6 +1213,7 @@ class ChildClient : public CefClient,
       return false;
     switch (v->options.downloads) {
       case laufey_common::WebViewDownloads::kAsk:
+      case laufey_common::WebViewDownloads::kApp:
         return true;
       case laufey_common::WebViewDownloads::kBrowser:
         OpenInBrowser(url.ToString());
@@ -859,22 +1225,63 @@ class ChildClient : public CefClient,
   }
 
   bool OnBeforeDownload(
-      CefRefPtr<CefBrowser>, CefRefPtr<CefDownloadItem>, const CefString&,
+      CefRefPtr<CefBrowser>, CefRefPtr<CefDownloadItem> download_item,
+      const CefString& suggested_name,
       CefRefPtr<CefBeforeDownloadCallback> callback) override {
     ChildView* v = Find(id_);
+    if (v && v->options.downloads == laufey_common::WebViewDownloads::kApp)
+      return BeginAppDownload(v, download_item, suggested_name.ToString(),
+                              callback);
     if (!v || v->options.downloads != laufey_common::WebViewDownloads::kAsk)
       return false;
     callback->Continue("", true);  // the OS save dialog
     return true;
   }
 
+  void OnDownloadUpdated(CefRefPtr<CefBrowser>,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         CefRefPtr<CefDownloadItemCallback> callback) override {
+    uint32_t cef_id = download_item->GetId();
+    // One laufey ended before CEF did: cancelled until CEF says so.
+    auto c = CancelOnUpdate().find(id_);
+    if (c != CancelOnUpdate().end() && c->second.count(cef_id)) {
+      if (download_item->IsCanceled() || download_item->IsComplete()) {
+        c->second.erase(cef_id);
+        if (c->second.empty())
+          CancelOnUpdate().erase(c);
+      } else {
+        callback->Cancel();  // may report the item back before it returns
+      }
+      return;
+    }
+    // Chromium may report a download after its view closed: by id only.
+    ChildView* v = FindForAppEvents(id_);
+    if (!v)
+      return;
+    auto m = v->download_ids.find(cef_id);
+    if (m == v->download_ids.end())
+      return;
+    uint32_t id = m->second;
+    auto d = v->downloads.find(id);
+    if (d == v->downloads.end())
+      return;
+    d->second.item = callback;
+    UpdateAppDownload(id_, id, download_item);
+  }
+
   // --- CefPermissionHandler ---
 
   bool OnRequestMediaAccessPermission(
-      CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>,
+      CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
       const CefString& requesting_origin, uint32_t requested_permissions,
       CefRefPtr<CefMediaAccessCallback> callback) override {
     ChildView* v = Find(id_);
+    if (v &&
+        v->options.permissions == laufey_common::WebViewPermissions::kApp) {
+      AskAppMedia(v, frame, requesting_origin.ToString(), requested_permissions,
+                  callback);
+      return true;
+    }
     if (!v ||
         v->options.permissions != laufey_common::WebViewPermissions::kAsk) {
       callback->Cancel();
@@ -892,8 +1299,8 @@ class ChildClient : public CefClient,
   }
 
   bool OnShowPermissionPrompt(
-      CefRefPtr<CefBrowser>, uint64_t, const CefString& requesting_origin,
-      uint32_t requested_permissions,
+      CefRefPtr<CefBrowser>, uint64_t prompt_id,
+      const CefString& requesting_origin, uint32_t requested_permissions,
       CefRefPtr<CefPermissionPromptCallback> callback) override {
     ChildView* v = Find(id_);
     if (!v) {
@@ -914,6 +1321,19 @@ class ChildClient : public CefClient,
         return true;
       }
     }
+    if (v->options.permissions == laufey_common::WebViewPermissions::kApp) {
+      AskAppPrompt(v, prompt_id, requesting_origin.ToString(),
+                   requested_permissions, callback);
+      return true;
+    }
+    // "downloads": "app" decides each download itself: Chromium's "download
+    // multiple files" prompt (a page's later downloads without a click)
+    // must not refuse them before the app hears of them.
+    if (requested_permissions == CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS &&
+        v->options.downloads == laufey_common::WebViewDownloads::kApp) {
+      callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+      return true;
+    }
     if (v->options.permissions != laufey_common::WebViewPermissions::kAsk) {
       callback->Continue(CEF_PERMISSION_RESULT_DENY);
       return true;
@@ -925,6 +1345,24 @@ class ChildClient : public CefClient,
                                                : CEF_PERMISSION_RESULT_DENY);
                   });
     return true;
+  }
+
+  // Chromium withdrew a prompt (the page navigated, the request was
+  // dropped): one still waiting for the app is reported cancelled.
+  void OnDismissPermissionPrompt(CefRefPtr<CefBrowser>, uint64_t prompt_id,
+                                 cef_permission_request_result_t) override {
+    ChildView* v = Find(id_);
+    if (!v)
+      return;
+    for (auto it = v->permissions.begin(); it != v->permissions.end(); ++it) {
+      if (it->second.prompt && it->second.prompt_id == prompt_id) {
+        uint32_t id = it->first;
+        v->permissions.erase(it);
+        Emit(id_, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+             laufey_common::WebViewPermissionCancelledJson(id));
+        return;
+      }
+    }
   }
 
   // --- CefContextMenuHandler ---
@@ -1035,6 +1473,99 @@ class ChildClient : public CefClient,
   }
 
  private:
+  // "downloads": "app": keeps the download waiting under a laufey id and
+  // sends "requested".
+  bool BeginAppDownload(ChildView* v, CefRefPtr<CefDownloadItem> item,
+                        const std::string& suggested_name,
+                        CefRefPtr<CefBeforeDownloadCallback> callback) {
+    uint32_t cef_id = item->GetId();
+    std::string url = item->GetURL().ToString();
+    if (url.empty())
+      url = item->GetOriginalUrl().ToString();
+    size_t waiting = 0;
+    for (const auto& kv : v->downloads) {
+      if (IsWaiting(kv.second.phase))
+        ++waiting;
+    }
+    if (waiting >= LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS) {
+      std::string shown = url.size() > 200 ? url.substr(0, 200) + "..." : url;
+      std::cerr << "laufey: not downloading " << shown << ": "
+                << LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS
+                << " downloads of the web view already wait for an answer"
+                << std::endl;
+      // Never continued (the callback released): cancelled.
+      CancelOnUpdate()[id_].insert(cef_id);
+      return true;
+    }
+    ChildDownload d;
+    d.cef_id = cef_id;
+    d.url = url;
+    d.filename = suggested_name.empty()
+                     ? item->GetSuggestedFileName().ToString()
+                     : suggested_name;
+    d.mime_type = item->GetMimeType().ToString();
+    if (item->GetTotalBytes() > 0)
+      d.total_bytes = item->GetTotalBytes();
+    d.before = callback;
+    uint32_t id = laufey_common::NextWebViewDownloadId();
+    v->download_ids[cef_id] = id;
+    laufey_common::WebViewDownloadFields f =
+        DownloadFields(id, d, laufey_common::kWebViewDownloadRequested);
+    f.received_bytes = 0;
+    v->downloads[id] = std::move(d);
+    EmitDownload(id_, f);
+    return true;
+  }
+
+  // "permissions": "app": getUserMedia / getDisplayMedia.
+  void AskAppMedia(ChildView* v, CefRefPtr<CefFrame> frame,
+                   const std::string& requesting_origin, uint32_t requested,
+                   CefRefPtr<CefMediaAccessCallback> callback) {
+    const uint32_t screen = CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE |
+                            CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE;
+    const uint32_t known = CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE |
+                           CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE | screen;
+    laufey_common::WebViewPermissionFields f;
+    if (requested & CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE)
+      f.permissions.push_back(laufey_common::kWebViewPermissionCamera);
+    if (requested & CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE)
+      f.permissions.push_back(laufey_common::kWebViewPermissionMicrophone);
+    if (requested & screen)
+      f.permissions.push_back(laufey_common::kWebViewPermissionScreen);
+    if (f.permissions.empty() || (requested & ~known)) {
+      callback->Cancel();
+      return;
+    }
+    f.origin = laufey_common::WebViewOriginOf(requesting_origin);
+    if (frame) {
+      f.frame_is_main = frame->IsMain() ? 1 : 0;
+      f.frame_origin =
+          laufey_common::WebViewOriginOf(frame->GetURL().ToString());
+    }
+    ChildPermission p;
+    p.media = callback;
+    p.media_permissions = requested;
+    if (!RequestAppPermission(v, std::move(p), std::move(f)))
+      callback->Cancel();
+  }
+
+  // "permissions": "app": a Chromium permission prompt (no frame).
+  void AskAppPrompt(ChildView* v, uint64_t prompt_id,
+                    const std::string& requesting_origin, uint32_t requested,
+                    CefRefPtr<CefPermissionPromptCallback> callback) {
+    laufey_common::WebViewPermissionFields f;
+    if (!PromptPermissionNames(requested, &f.permissions)) {
+      callback->Continue(CEF_PERMISSION_RESULT_DENY);
+      return;
+    }
+    f.origin = laufey_common::WebViewOriginOf(requesting_origin);
+    ChildPermission p;
+    p.prompt = callback;
+    p.prompt_id = prompt_id;
+    if (!RequestAppPermission(v, std::move(p), std::move(f)))
+      callback->Continue(CEF_PERMISSION_RESULT_DENY);
+  }
+
   uint32_t id_;
   IMPLEMENT_REFCOUNTING(ChildClient);
 };
@@ -1138,6 +1669,11 @@ uint32_t Capabilities() {
          LAUFEY_WEBVIEW_CAP_ZOOM | LAUFEY_WEBVIEW_CAP_FIND |
          LAUFEY_WEBVIEW_CAP_DEVTOOLS | LAUFEY_WEBVIEW_CAP_CONTEXT_MENU |
          LAUFEY_WEBVIEW_CAP_PRINT |
+         // API 59: CefDownloadHandler / CefPermissionHandler (ChildClient);
+         // pause and resume through CefDownloadItemCallback.
+         LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS |
+         LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE |
+         LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS |
          // "clipboardRead" is applied; "clipboardWrite": false is not (no
          // CEF switch: writes on a user gesture stay allowed).
          LAUFEY_WEBVIEW_CAP_CLIPBOARD |
@@ -1528,6 +2064,11 @@ bool Close(uint32_t id) {
     return false;
   v->closing = true;
   FailPending(v, "the web view is closed");
+  // Its downloads and requests end ("cancelled") before CLOSED.
+  EndAppRequests(id);
+  v = FindForAppEvents(id);
+  if (!v)
+    return true;
   WebViewSinks::Instance().Close(id);
   if (v->browser) {
     // The browser closes first; OnBeforeClose then destroys its overlay and
@@ -1648,19 +2189,102 @@ bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
   return true;
 }
 
-// API 59. Not implemented on this engine yet: Capabilities() reports neither
-// LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS nor _PERMISSION_REQUESTS, so no view
-// has a download or a request to answer.
-int32_t DownloadControl(uint32_t id, uint32_t /*download_id*/,
-                        int32_t /*action*/, const std::string& /*path*/) {
+int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
+                        const std::string& path) {
   CEF_REQUIRE_UI_THREAD();
-  return Find(id) ? LAUFEY_WEBVIEW_UNSUPPORTED : LAUFEY_WEBVIEW_CLOSED;
+  ChildView* v = Find(id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  auto it = v->downloads.find(download_id);
+  if (it == v->downloads.end())
+    return LAUFEY_WEBVIEW_INVALID;
+  ChildDownload& d = it->second;
+  int32_t accepted =
+      laufey_common::WebViewDownloadAccepts(d.phase, action, true);
+  if (accepted != LAUFEY_WEBVIEW_OK)
+    return accepted;
+  switch (action) {
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE:
+      ContinueAppDownload(&d, path);
+      return LAUFEY_WEBVIEW_OK;
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS: {
+      // The save panel the window's own downloads ask with
+      // (laufey_downloads.h), seeded with the sanitized name; dismissed, the
+      // download is cancelled.
+      d.phase = WebViewDownloadPhase::kChoosing;
+      uint32_t window_id = v->window_id;
+      laufey_common::AskDownloadDestination(
+          d.filename,
+          [window_id](const laufey_file_dialog_options_t* options,
+                      laufey_file_dialog_result_fn result, void* user_data) {
+            return LaufeyShowFileDialog(window_id, options, result, user_data);
+          },
+          [id, download_id](std::string chosen) {
+            CefPostTask(
+                TID_UI,
+                base::BindOnce(
+                    [](uint32_t view_id, uint32_t did, std::string chosen) {
+                      ChildView* view = Find(view_id);
+                      if (!view)
+                        return;  // closed: already cancelled
+                      auto dl = view->downloads.find(did);
+                      if (dl == view->downloads.end() ||
+                          dl->second.phase != WebViewDownloadPhase::kChoosing)
+                        return;  // cancelled while the panel was up
+                      if (chosen.empty())
+                        EndAppDownload(view_id, did, nullptr);
+                      else
+                        ContinueAppDownload(&dl->second, chosen);
+                    },
+                    id, download_id, std::move(chosen)));
+          });
+      return LAUFEY_WEBVIEW_OK;
+    }
+    case LAUFEY_WEBVIEW_DOWNLOAD_CANCEL:
+      EndAppDownload(id, download_id, nullptr);
+      return LAUFEY_WEBVIEW_OK;
+    case LAUFEY_WEBVIEW_DOWNLOAD_PAUSE:
+    case LAUFEY_WEBVIEW_DOWNLOAD_RESUME: {
+      CefRefPtr<CefDownloadItemCallback> item = d.item;
+      if (!item)
+        return LAUFEY_WEBVIEW_FAILED;  // CEF has not reported it yet
+      bool pause = action == LAUFEY_WEBVIEW_DOWNLOAD_PAUSE;
+      // The state first: Pause() / Resume() can report the item back before
+      // they return.
+      d.phase = pause ? WebViewDownloadPhase::kPaused
+                      : WebViewDownloadPhase::kProgressing;
+      laufey_common::WebViewDownloadFields f = DownloadFields(
+          download_id, d, laufey_common::kWebViewDownloadProgressing);
+      f.paused = pause;
+      EmitDownload(id, f);
+      if (pause)
+        item->Pause();
+      else
+        item->Resume();
+      return LAUFEY_WEBVIEW_OK;
+    }
+  }
+  return LAUFEY_WEBVIEW_INVALID;
 }
 
-int32_t PermissionRespond(uint32_t id, uint32_t /*request_id*/,
-                          bool /*allow*/) {
+int32_t PermissionRespond(uint32_t id, uint32_t request_id, bool allow) {
   CEF_REQUIRE_UI_THREAD();
-  return Find(id) ? LAUFEY_WEBVIEW_UNSUPPORTED : LAUFEY_WEBVIEW_CLOSED;
+  ChildView* v = Find(id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  auto it = v->permissions.find(request_id);
+  if (it == v->permissions.end())
+    return LAUFEY_WEBVIEW_INVALID;
+  ChildPermission p = std::move(it->second);
+  v->permissions.erase(it);
+  if (!allow) {
+    DenyPermission(p);
+  } else if (p.media) {
+    p.media->Continue(p.media_permissions);
+  } else if (p.prompt) {
+    p.prompt->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+  }
+  return LAUFEY_WEBVIEW_OK;
 }
 
 bool Print(uint32_t id) {
