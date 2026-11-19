@@ -538,13 +538,19 @@ NSMenu* BuildNSMenuFromValue(laufey_value_t* val,
                                 on_click_data, window_id);
 }
 
-std::string MenuSnapshotMac(int32_t kind) {
+std::string MenuSnapshotMac(int32_t kind, uint32_t window_id) {
   __block std::string json;
   RunOnMainSync(^{
     NSMenu* menu = nil;
-    if (kind == LAUFEY_MENU_KIND_APPLICATION)
-      menu = [NSApp mainMenu];
-    else if (kind == LAUFEY_MENU_KIND_DOCK)
+    if (kind == LAUFEY_MENU_KIND_APPLICATION) {
+      if (window_id == 0) {
+        menu = [NSApp mainMenu];
+      } else {
+        auto it = WindowMenus().find(window_id);
+        if (it != WindowMenus().end())
+          menu = it->second;
+      }
+    } else if (kind == LAUFEY_MENU_KIND_DOCK)
       menu = GetDockMenuMac();
     if (menu)
       json = MenuSnapshotJson(SnapshotNSMenu(menu, 0));

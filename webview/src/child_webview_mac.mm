@@ -49,11 +49,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "laufey_backend_common.h"
+#include "laufey_downloads.h"
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
 #include "laufey_window.h"
@@ -266,6 +269,284 @@ id InspectorOf(WKWebView* webview) {
 
 void Emit(uint32_t id, int32_t kind, const std::string& detail) {
   WebViewSinks::Instance().Emit(id, kind, detail);
+}
+
+// --- Downloads and permission requests the app decides (API 59) -----------
+//
+// "downloads": "app": each WKDownload of the view gets an id and a record
+// here; its DOWNLOAD events tell the app, which answers through
+// DownloadControl. "permissions": "app": each capture request WebKit raises
+// waits here for PermissionRespond. Main thread only.
+
+struct AppDownload {
+  uint32_t id = 0;
+  uint32_t view_id = 0;
+  NSObject* download = nil;  // WKDownload (macOS 11.3+)
+  // WebKit's decideDestination handler, held while the app decides.
+  void (^decide)(NSURL*) = nil;
+  // True once "requested" went out (until then the app does not know the id).
+  bool announced = false;
+  laufey_common::WebViewDownloadPhase phase =
+      laufey_common::WebViewDownloadPhase::kRequested;
+  std::string url;
+  std::string filename;
+  std::string mime_type;
+  std::string path;
+  int64_t total_bytes = -1;
+  int64_t received_bytes = 0;
+  laufey_common::WebViewProgressThrottle throttle;
+  NSTimer* poll = nil;
+  NSSavePanel* panel = nil;  // SAVE_AS: the sheet that is up
+};
+
+std::map<uint32_t, AppDownload>& AppDownloads() {
+  static auto* downloads = new std::map<uint32_t, AppDownload>();
+  return *downloads;
+}
+
+AppDownload* FindAppDownload(uint32_t download_id) {
+  auto it = AppDownloads().find(download_id);
+  return it == AppDownloads().end() ? nullptr : &it->second;
+}
+
+AppDownload* FindAppDownloadFor(NSObject* download) {
+  for (auto& kv : AppDownloads()) {
+    if (kv.second.download == download)
+      return &kv.second;
+  }
+  return nullptr;
+}
+
+int64_t NowMs() {
+  return static_cast<int64_t>([NSProcessInfo processInfo].systemUptime * 1000);
+}
+
+laufey_common::WebViewDownloadFields DownloadFields(const AppDownload& d,
+                                                    const char* state) {
+  laufey_common::WebViewDownloadFields f;
+  f.id = d.id;
+  f.state = state;
+  f.url = d.url;
+  f.filename = d.filename;
+  f.mime_type = d.mime_type;
+  f.total_bytes = d.total_bytes;
+  f.received_bytes = d.received_bytes;
+  f.path = d.path;
+  return f;
+}
+
+void EmitDownload(const AppDownload& d, const char* state,
+                  const char* reason = nullptr) {
+  laufey_common::WebViewDownloadFields f = DownloadFields(d, state);
+  if (std::strcmp(state, laufey_common::kWebViewDownloadInterrupted) == 0) {
+    f.reason = reason;
+    f.can_resume = 0;  // WKDownload can't be resumed in place
+  }
+  Emit(d.view_id, LAUFEY_WEBVIEW_EVENT_DOWNLOAD,
+       laufey_common::WebViewDownloadJson(f));
+}
+
+// Removes what a download that did not complete left at its path: only a
+// regular file, never a directory or a link.
+void RemovePartialFile(const std::string& path) {
+  if (path.empty())
+    return;
+  NSString* ns = [NSString stringWithUTF8String:path.c_str()];
+  if (!ns)
+    return;
+  NSDictionary* attrs =
+      [[NSFileManager defaultManager] attributesOfItemAtPath:ns error:nil];
+  if ([attrs[NSFileType] isEqualToString:NSFileTypeRegular])
+    [[NSFileManager defaultManager] removeItemAtPath:ns error:nil];
+}
+
+// Forgets a download after its last event. The record is gone when this
+// returns: late WebKit callbacks for it find nothing.
+void ForgetAppDownload(uint32_t download_id) {
+  auto it = AppDownloads().find(download_id);
+  if (it == AppDownloads().end())
+    return;
+  [it->second.poll invalidate];
+  if (@available(macOS 11.3, *))
+    [(WKDownload*)it->second.download setDelegate:nil];
+  AppDownloads().erase(it);
+}
+
+size_t WaitingAppDownloads(uint32_t view_id) {
+  size_t n = 0;
+  for (const auto& kv : AppDownloads()) {
+    const AppDownload& d = kv.second;
+    if (d.view_id == view_id && d.announced &&
+        (d.phase == laufey_common::WebViewDownloadPhase::kRequested ||
+         d.phase == laufey_common::WebViewDownloadPhase::kChoosing))
+      ++n;
+  }
+  return n;
+}
+
+// "progressing" from the download's NSProgress, at the throttle's pace.
+void PollAppDownload(uint32_t download_id) {
+  AppDownload* d = FindAppDownload(download_id);
+  if (!d || d->phase != laufey_common::WebViewDownloadPhase::kProgressing)
+    return;
+  if (@available(macOS 11.3, *)) {
+    NSProgress* progress = [(WKDownload*)d->download progress];
+    int64_t received = progress.completedUnitCount;
+    int64_t total = progress.totalUnitCount;
+    if (total > 0)
+      d->total_bytes = total;
+    if (received == d->received_bytes || received < 0)
+      return;
+    d->received_bytes = received;
+    if (d->throttle.Ready(NowMs()))
+      EmitDownload(*d, laufey_common::kWebViewDownloadProgressing);
+  }
+}
+
+// The app chose `path` (SAVE, or the save panel's answer): WebKit refuses to
+// write over a file, so an existing regular file goes first.
+void StartAppDownload(AppDownload* d, const std::string& path) {
+  RemovePartialFile(path);
+  d->path = path;
+  d->phase = laufey_common::WebViewDownloadPhase::kProgressing;
+  void (^decide)(NSURL*) = d->decide;
+  d->decide = nil;
+  uint32_t download_id = d->id;
+  d->poll = [NSTimer
+      timerWithTimeInterval:laufey_common::kWebViewDownloadProgressIntervalMs /
+                            1000.0
+                    repeats:YES
+                      block:^(NSTimer*) {
+                        PollAppDownload(download_id);
+                      }];
+  [[NSRunLoop mainRunLoop] addTimer:d->poll forMode:NSRunLoopCommonModes];
+  d->throttle.Ready(NowMs());
+  EmitDownload(*d, laufey_common::kWebViewDownloadProgressing);
+  if (decide)
+    decide(
+        [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]]);
+}
+
+// Cancels a download in any phase and sends its "cancelled" (the last
+// event), leaving nothing at its path.
+void CancelAppDownload(uint32_t download_id) {
+  AppDownload* d = FindAppDownload(download_id);
+  if (!d)
+    return;
+  AppDownload copy = *d;
+  bool announced = d->announced;
+  ForgetAppDownload(download_id);
+  if (copy.decide) {
+    // Not decided yet: no destination cancels it in WebKit.
+    copy.decide(nil);
+  } else if (@available(macOS 11.3, *)) {
+    std::string path = copy.path;
+    [(WKDownload*)copy.download cancel:^(NSData*) {
+      RemovePartialFile(path);
+    }];
+  }
+  if (copy.panel) {
+    NSWindow* sheet_parent = copy.panel.sheetParent;
+    if (sheet_parent)
+      [sheet_parent endSheet:copy.panel returnCode:NSModalResponseCancel];
+    else
+      [copy.panel cancel:nil];
+  }
+  if (announced)
+    EmitDownload(copy, laufey_common::kWebViewDownloadCancelled);
+}
+
+void CancelAppDownloadsOfView(uint32_t view_id) {
+  std::vector<uint32_t> ids;
+  for (const auto& kv : AppDownloads()) {
+    if (kv.second.view_id == view_id)
+      ids.push_back(kv.first);
+  }
+  for (uint32_t download_id : ids)
+    CancelAppDownload(download_id);
+}
+
+// What WebKit said went wrong, as an "interrupted" reason; nullptr for a
+// cancellation.
+const char* DownloadFailureReason(NSError* error) {
+  if (!error)
+    return laufey_common::kWebViewDownloadReasonFailed;
+  if ([error.domain isEqualToString:NSURLErrorDomain]) {
+    switch (error.code) {
+      case NSURLErrorCancelled:
+        return nullptr;
+      case NSURLErrorCannotCreateFile:
+      case NSURLErrorCannotOpenFile:
+      case NSURLErrorCannotCloseFile:
+      case NSURLErrorCannotWriteToFile:
+      case NSURLErrorCannotRemoveFile:
+      case NSURLErrorCannotMoveFile:
+        return laufey_common::kWebViewDownloadReasonFile;
+      case NSURLErrorBadServerResponse:
+      case NSURLErrorHTTPTooManyRedirects:
+      case NSURLErrorUserAuthenticationRequired:
+      case NSURLErrorZeroByteResource:
+        return laufey_common::kWebViewDownloadReasonServer;
+      default:
+        return laufey_common::kWebViewDownloadReasonNetwork;
+    }
+  }
+  if ([error.domain isEqualToString:NSCocoaErrorDomain] ||
+      [error.domain isEqualToString:NSPOSIXErrorDomain])
+    return laufey_common::kWebViewDownloadReasonFile;
+  return laufey_common::kWebViewDownloadReasonFailed;
+}
+
+struct AppPermission {
+  uint32_t id = 0;
+  uint32_t view_id = 0;
+  void (^decide)(BOOL allow) = nil;
+};
+
+std::map<uint32_t, AppPermission>& AppPermissions() {
+  static auto* permissions = new std::map<uint32_t, AppPermission>();
+  return *permissions;
+}
+
+size_t WaitingAppPermissions(uint32_t view_id) {
+  size_t n = 0;
+  for (const auto& kv : AppPermissions()) {
+    if (kv.second.view_id == view_id)
+      ++n;
+  }
+  return n;
+}
+
+// Refuses every request of the view that is still waiting and reports each
+// as cancelled: its page is going away (a new main-frame navigation, the
+// view closing).
+void CancelAppPermissionsOfView(uint32_t view_id) {
+  std::vector<AppPermission> gone;
+  for (auto it = AppPermissions().begin(); it != AppPermissions().end();) {
+    if (it->second.view_id == view_id) {
+      gone.push_back(it->second);
+      it = AppPermissions().erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (const AppPermission& p : gone) {
+    if (p.decide)
+      p.decide(NO);
+    Emit(view_id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+         laufey_common::WebViewPermissionCancelledJson(p.id));
+  }
+}
+
+// "scheme://host[:port]" of a WKSecurityOrigin, through WebViewOriginOf.
+std::string SecurityOriginString(WKSecurityOrigin* origin) {
+  if (!origin || origin.host.length == 0)
+    return std::string();
+  std::string url = std::string(origin.protocol.UTF8String ?: "") + "://" +
+                    std::string(origin.host.UTF8String ?: "");
+  if (origin.port > 0)
+    url += ":" + std::to_string(origin.port);
+  return laufey_common::WebViewOriginOf(url);
 }
 
 void SetLoad(ChildView* v, const char* state, const std::string& url,
@@ -735,10 +1016,88 @@ API_AVAILABLE(macos(11.3))
 
 @end
 
+// The downloads of a view created with "downloads": "app" (API 59).
+API_AVAILABLE(macos(11.3))
+@interface LaufeyChildAppDownloadDelegate : NSObject <WKDownloadDelegate>
+@end
+
+@implementation LaufeyChildAppDownloadDelegate
+
+- (void)download:(WKDownload*)download
+    decideDestinationUsingResponse:(NSURLResponse*)response
+                 suggestedFilename:(NSString*)suggestedFilename
+                 completionHandler:(void (^)(NSURL*))completionHandler {
+  AppDownload* d = FindAppDownloadFor(download);
+  if (!d || d->announced || !Find(d->view_id)) {
+    // Its view closed, or WebKit asked twice: no destination cancels it.
+    completionHandler(nil);
+    return;
+  }
+  if (WaitingAppDownloads(d->view_id) >= LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS) {
+    std::cerr << "laufey: web view " << d->view_id << " has "
+              << LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS
+              << " downloads waiting for the app; cancelling one more"
+              << std::endl;
+    ForgetAppDownload(d->id);
+    completionHandler(nil);
+    return;
+  }
+  std::string response_url = Utf8(response.URL.absoluteString);
+  if (!response_url.empty())
+    d->url = response_url;
+  d->filename = Utf8(suggestedFilename);
+  d->mime_type = Utf8(response.MIMEType);
+  if (response.expectedContentLength > 0)
+    d->total_bytes = response.expectedContentLength;
+  d->decide = [completionHandler copy];
+  d->announced = true;
+  d->phase = laufey_common::WebViewDownloadPhase::kRequested;
+  EmitDownload(*d, laufey_common::kWebViewDownloadRequested);
+}
+
+- (void)downloadDidFinish:(WKDownload*)download {
+  AppDownload* d = FindAppDownloadFor(download);
+  if (!d)
+    return;
+  NSDictionary* attrs =
+      [[NSFileManager defaultManager] attributesOfItemAtPath:NS(d->path)
+                                                       error:nil];
+  if (attrs)
+    d->received_bytes = static_cast<int64_t>([attrs fileSize]);
+  if (d->total_bytes < 0)
+    d->total_bytes = d->received_bytes;
+  AppDownload copy = *d;
+  ForgetAppDownload(copy.id);
+  EmitDownload(copy, laufey_common::kWebViewDownloadCompleted);
+}
+
+- (void)download:(WKDownload*)download
+    didFailWithError:(NSError*)error
+          resumeData:(NSData*)resumeData {
+  AppDownload* d = FindAppDownloadFor(download);
+  if (!d)
+    return;  // cancelled by the app: its "cancelled" already went out
+  AppDownload copy = *d;
+  ForgetAppDownload(copy.id);
+  if (copy.decide)
+    copy.decide(nil);
+  RemovePartialFile(copy.path);
+  if (!copy.announced)
+    return;
+  const char* reason = DownloadFailureReason(error);
+  if (reason)
+    EmitDownload(copy, laufey_common::kWebViewDownloadInterrupted, reason);
+  else
+    EmitDownload(copy, laufey_common::kWebViewDownloadCancelled);
+}
+
+@end
+
 @interface LaufeyChildWebViewDelegate
     : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler>
 @property(nonatomic, assign) uint32_t viewId;
 @property(nonatomic, strong) id downloadDelegate;
+@property(nonatomic, strong) id appDownloadDelegate;
 @end
 
 @implementation LaufeyChildWebViewDelegate
@@ -770,6 +1129,7 @@ API_AVAILABLE(macos(11.3))
   }
   switch (v->options.downloads) {
     case laufey_common::WebViewDownloads::kAsk:
+    case laufey_common::WebViewDownloads::kApp:
       if (@available(macOS 11.3, *)) {
         allowDownload();
         return;
@@ -784,6 +1144,27 @@ API_AVAILABLE(macos(11.3))
       cancel();
       return;
   }
+}
+
+// A navigation became a download: "ask" gets the save panel's delegate,
+// "app" a record the app decides (API 59).
+- (void)adoptDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
+  ChildView* v = Find(self.viewId);
+  if (v && v->options.downloads == laufey_common::WebViewDownloads::kApp) {
+    if (!self.appDownloadDelegate)
+      self.appDownloadDelegate = [[LaufeyChildAppDownloadDelegate alloc] init];
+    AppDownload d;
+    d.id = laufey_common::NextWebViewDownloadId();
+    d.view_id = v->id;
+    d.download = download;
+    d.url = Utf8(download.originalRequest.URL.absoluteString);
+    AppDownloads()[d.id] = d;
+    download.delegate = self.appDownloadDelegate;
+    return;
+  }
+  if (!self.downloadDelegate)
+    self.downloadDelegate = [[LaufeyChildDownloadDelegate alloc] init];
+  download.delegate = self.downloadDelegate;
 }
 
 - (void)webView:(WKWebView*)webView
@@ -833,23 +1214,23 @@ API_AVAILABLE(macos(11.3))
 - (void)webView:(WKWebView*)webView
      navigationAction:(WKNavigationAction*)navigationAction
     didBecomeDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
-  if (!self.downloadDelegate)
-    self.downloadDelegate = [[LaufeyChildDownloadDelegate alloc] init];
-  download.delegate = self.downloadDelegate;
+  [self adoptDownload:download];
 }
 
 - (void)webView:(WKWebView*)webView
     navigationResponse:(WKNavigationResponse*)navigationResponse
      didBecomeDownload:(WKDownload*)download API_AVAILABLE(macos(11.3)) {
-  if (!self.downloadDelegate)
-    self.downloadDelegate = [[LaufeyChildDownloadDelegate alloc] init];
-  download.delegate = self.downloadDelegate;
+  [self adoptDownload:download];
 }
 
 - (void)webView:(WKWebView*)webView
     didStartProvisionalNavigation:(WKNavigation*)navigation {
-  if (ChildView* v = Find(self.viewId))
+  if (ChildView* v = Find(self.viewId)) {
+    // The page that asked is going away: its unanswered permission requests
+    // are refused (API 59).
+    CancelAppPermissionsOfView(v->id);
     SetLoad(v, "loading", Utf8(webView.URL.absoluteString));
+  }
 }
 
 - (void)webView:(WKWebView*)webView didCommitNavigation:(WKNavigation*)nav {
@@ -941,6 +1322,47 @@ API_AVAILABLE(macos(11.3))
                                (void (^)(WKPermissionDecision))decisionHandler
     API_AVAILABLE(macos(12.0)) {
   ChildView* v = Find(self.viewId);
+  if (v && v->options.permissions == laufey_common::WebViewPermissions::kApp) {
+    // The app answers (API 59); WebKit's own prompt never shows.
+    if (WaitingAppPermissions(v->id) >=
+        LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS) {
+      decisionHandler(WKPermissionDecisionDeny);
+      return;
+    }
+    laufey_common::WebViewPermissionFields f;
+    f.id = laufey_common::NextWebViewPermissionId();
+    f.origin = SecurityOriginString(origin);
+    switch (type) {
+      case WKMediaCaptureTypeCamera:
+        f.permissions = {laufey_common::kWebViewPermissionCamera};
+        break;
+      case WKMediaCaptureTypeMicrophone:
+        f.permissions = {laufey_common::kWebViewPermissionMicrophone};
+        break;
+      case WKMediaCaptureTypeCameraAndMicrophone:
+        f.permissions = {laufey_common::kWebViewPermissionCamera,
+                         laufey_common::kWebViewPermissionMicrophone};
+        break;
+      default:
+        decisionHandler(WKPermissionDecisionDeny);
+        return;
+    }
+    if (frame) {
+      f.frame_is_main = frame.isMainFrame ? 1 : 0;
+      f.frame_origin = SecurityOriginString(frame.securityOrigin);
+    }
+    AppPermission p;
+    p.id = f.id;
+    p.view_id = v->id;
+    p.decide = ^(BOOL allow) {
+      decisionHandler(allow ? WKPermissionDecisionGrant
+                            : WKPermissionDecisionDeny);
+    };
+    AppPermissions()[p.id] = p;
+    Emit(v->id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+         laufey_common::WebViewPermissionRequestJson(f));
+    return;
+  }
   bool ask =
       v && v->options.permissions == laufey_common::WebViewPermissions::kAsk;
   decisionHandler(ask ? WKPermissionDecisionPrompt : WKPermissionDecisionDeny);
@@ -1133,8 +1555,17 @@ uint32_t Capabilities() {
           LAUFEY_WEBVIEW_CAP_KEY_UP | LAUFEY_WEBVIEW_CAP_BLUR;
   if (HasPersistentStores())
     caps |= LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS;
-  if (@available(macOS 12.0, *))
-    caps |= LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS;
+  if (@available(macOS 12.0, *)) {
+    // requestMediaCapturePermissionForOrigin: the prompt, or the app's
+    // answer (API 59).
+    caps |= LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
+            LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS;
+  }
+  // WKDownload (API 59). No LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE: a WKDownload
+  // can only be cancelled with resume data, which resumes only where the
+  // server allows ranges, so a pause could lose the download.
+  if (@available(macOS 11.3, *))
+    caps |= LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS;
   return caps;
 }
 
@@ -1570,6 +2001,9 @@ bool Close(uint32_t id) {
       [v.view.window makeFirstResponder:v.view.superview];
     [v.view removeFromSuperview];
   }
+  // API 59: what the app was deciding ends before CLOSED.
+  CancelAppDownloadsOfView(id);
+  CancelAppPermissionsOfView(id);
   WebViewSinks::Instance().Close(id);
   return true;
 }
@@ -1718,6 +2152,72 @@ bool Print(uint32_t view_id) {
     return true;
   }
   return false;
+}
+
+int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
+                        const std::string& path) {
+  ChildView* v = Find(id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  if (v->options.downloads != laufey_common::WebViewDownloads::kApp)
+    return LAUFEY_WEBVIEW_UNSUPPORTED;
+  AppDownload* d = FindAppDownload(download_id);
+  if (!d || d->view_id != id || !d->announced)
+    return LAUFEY_WEBVIEW_INVALID;
+  int32_t status =
+      laufey_common::WebViewDownloadAccepts(d->phase, action, false);
+  if (status != LAUFEY_WEBVIEW_OK)
+    return status;
+  switch (action) {
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE:
+      StartAppDownload(d, path);
+      return LAUFEY_WEBVIEW_OK;
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS: {
+      // The save panel "downloads": "ask" shows, as a sheet on the window.
+      d->phase = laufey_common::WebViewDownloadPhase::kChoosing;
+      NSSavePanel* panel = [NSSavePanel savePanel];
+      std::string name = laufey_common::SanitizeDownloadFileName(d->filename);
+      panel.nameFieldStringValue = NS(name);
+      d->panel = panel;
+      void (^done)(NSModalResponse) = ^(NSModalResponse result) {
+        AppDownload* chosen = FindAppDownload(download_id);
+        if (!chosen ||
+            chosen->phase != laufey_common::WebViewDownloadPhase::kChoosing)
+          return;  // cancelled while the panel was up
+        chosen->panel = nil;
+        std::string chosen_path =
+            result == NSModalResponseOK ? Utf8(panel.URL.path) : std::string();
+        if (chosen_path.empty())
+          CancelAppDownload(download_id);
+        else
+          StartAppDownload(chosen, chosen_path);
+      };
+      NSWindow* window = v->view.window;
+      if (window)
+        [panel beginSheetModalForWindow:window completionHandler:done];
+      else
+        [panel beginWithCompletionHandler:done];
+      return LAUFEY_WEBVIEW_OK;
+    }
+    case LAUFEY_WEBVIEW_DOWNLOAD_CANCEL:
+      CancelAppDownload(download_id);
+      return LAUFEY_WEBVIEW_OK;
+    default:
+      return LAUFEY_WEBVIEW_INVALID;
+  }
+}
+
+int32_t PermissionRespond(uint32_t id, uint32_t request_id, bool allow) {
+  if (!Find(id))
+    return LAUFEY_WEBVIEW_CLOSED;
+  auto it = AppPermissions().find(request_id);
+  if (it == AppPermissions().end() || it->second.view_id != id)
+    return LAUFEY_WEBVIEW_INVALID;
+  AppPermission p = it->second;
+  AppPermissions().erase(it);
+  if (p.decide)
+    p.decide(allow ? YES : NO);
+  return LAUFEY_WEBVIEW_OK;
 }
 
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {

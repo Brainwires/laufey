@@ -184,9 +184,13 @@ pub struct WebViewOptions {
   pub visible: Option<bool>,
   /// `"same-view"` (default), `"browser"` or `"deny"`.
   pub allow_popups: Option<String>,
-  /// `"deny"` (default), `"ask"` or `"browser"`.
+  /// `"deny"` (default), `"ask"`, `"browser"` or `"app"` (API 59:
+  /// [`WebViewEventKind::Download`] events the app decides, where
+  /// [`WebViewCapabilities::download_events`]).
   pub downloads: Option<String>,
-  /// `"deny"` (default) or `"ask"`.
+  /// `"deny"` (default), `"ask"` or `"app"` (API 59:
+  /// [`WebViewEventKind::PermissionRequest`] events the app answers, where
+  /// [`WebViewCapabilities::permission_requests`]).
   pub permissions: Option<String>,
   pub user_agent: Option<String>,
   /// `"native"` (default) or `"app"`.

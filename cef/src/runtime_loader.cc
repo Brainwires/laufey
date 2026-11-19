@@ -3742,8 +3742,7 @@ static int32_t Backend_WebViewPermissionRespond(void* /*data*/,
 // Windows and Linux have no read-back of the Views menu bar yet.
 static char* Backend_MenuSnapshot(void* /*data*/, int32_t kind, uint32_t id) {
 #if defined(__APPLE__)
-  (void)id;
-  return CopyJsonOrNull(laufey_common::MenuSnapshotMac(kind));
+  return CopyJsonOrNull(laufey_common::MenuSnapshotMac(kind, id));
 #else
   (void)kind;
   (void)id;

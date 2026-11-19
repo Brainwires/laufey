@@ -84,6 +84,7 @@ pub async fn run() {
     .unwrap_or_else(|_| "accel,context,notify".into());
   if parts.contains("accel") {
     accelerator_checks(&w, &mcaps).await;
+    snapshot_checks(&w, &mcaps).await;
   }
   if parts.contains("context") {
     context_menu_checks(&w, &mcaps).await;
@@ -252,6 +253,239 @@ async fn accelerator_checks(w: &Window, caps: &laufey::MenuCapabilities) {
     !clicks.lock().unwrap().iter().any(|c| c == "disabled-item"),
   );
   real_key_press_check(w, &clicks).await;
+}
+
+/// The items of a snapshot (or of a submenu) by label.
+fn snapshot_item<'a>(
+  items: &'a serde_json::Value,
+  label: &str,
+) -> Option<&'a serde_json::Value> {
+  items
+    .as_array()?
+    .iter()
+    .find(|i| i["label"].as_str() == Some(label))
+}
+
+fn read_snapshot(kind: laufey::MenuKind) -> Option<serde_json::Value> {
+  serde_json::from_str(&laufey::menu_snapshot(kind)?).ok()
+}
+
+/// menu_snapshot (API 59): the application menu, read back from the native
+/// menu objects, holds what set_menu was given (labels, ids, enabled,
+/// checked, accelerators, separators, nested submenus, roles); on macOS also
+/// the Edit submenu laufey adds, and the Dock menu with its checkmarks and
+/// submenus, whose items report their ids when chosen.
+async fn snapshot_checks(w: &Window, caps: &laufey::MenuCapabilities) {
+  let app = laufey::MenuKind::Application { window_id: w.id() };
+  if !caps.snapshot() {
+    na("menu read-back (not supported by this backend)");
+    return;
+  }
+  // The menu accelerator_checks left: File > Accelerated, Disabled.
+  let snapshot = read_snapshot(app);
+  check(
+    "the application menu reads back as JSON",
+    snapshot.is_some(),
+  );
+  let Some(snapshot) = snapshot else {
+    return;
+  };
+  eprintln!("[e2e] INFO application menu snapshot: {snapshot}");
+  let file = snapshot_item(&snapshot, "File");
+  check(
+    "the read-back has the File submenu",
+    file.is_some_and(|f| f["type"].as_str() == Some("submenu")),
+  );
+  let empty = serde_json::Value::Null;
+  let file_items = file.map(|f| &f["submenu"]).unwrap_or(&empty);
+  let accelerated = snapshot_item(file_items, "Accelerated");
+  check(
+    "a custom item reads back with its id, enabled, with its accelerator",
+    accelerated.is_some_and(|i| {
+      i["type"].as_str() == Some("item")
+        && i["id"].as_str() == Some("accel-item")
+        && i["enabled"].as_bool() == Some(true)
+        && i["checked"].as_bool() == Some(false)
+        && i["visible"].as_bool() == Some(true)
+        && i["accelerator"].as_str().is_some_and(|a| a.contains('+'))
+    }),
+  );
+  check(
+    "a disabled item reads back disabled",
+    snapshot_item(file_items, "Disabled").is_some_and(|i| {
+      i["id"].as_str() == Some("disabled-item")
+        && i["enabled"].as_bool() == Some(false)
+    }),
+  );
+
+  // A second menu: a checkmark, a separator, a nested submenu, a role.
+  let item = |label: &str, id: &str, checked: bool| MenuItem::Item {
+    label: label.into(),
+    id: Some(id.into()),
+    accelerator: None,
+    enabled: true,
+    checked,
+    icon: None,
+    tooltip: None,
+    destructive: false,
+  };
+  w.set_menu(
+    &[MenuItem::Submenu {
+      label: "View".into(),
+      items: vec![
+        item("Wrap", "wrap", true),
+        MenuItem::Separator,
+        MenuItem::Submenu {
+          label: "Zoom".into(),
+          items: vec![item("In", "zoom-in", false)],
+        },
+        MenuItem::Role {
+          role: "copy".into(),
+        },
+      ],
+    }],
+    |_| {},
+  );
+  let mut view = None;
+  for _ in 0..50 {
+    view = read_snapshot(app).and_then(|s| snapshot_item(&s, "View").cloned());
+    if view.is_some() {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  check("a replaced menu reads back", view.is_some());
+  if let Some(view) = view {
+    eprintln!("[e2e] INFO View submenu snapshot: {view}");
+    let items = &view["submenu"];
+    check(
+      "a checked item reads back checked",
+      snapshot_item(items, "Wrap").is_some_and(|i| {
+        i["checked"].as_bool() == Some(true) && i["id"].as_str() == Some("wrap")
+      }),
+    );
+    check(
+      "a separator reads back",
+      items.as_array().is_some_and(|a| {
+        a.get(1).and_then(|i| i["type"].as_str()) == Some("separator")
+      }),
+    );
+    check(
+      "a nested submenu reads back with its items",
+      snapshot_item(items, "Zoom").is_some_and(|z| {
+        z["type"].as_str() == Some("submenu")
+          && snapshot_item(&z["submenu"], "In")
+            .is_some_and(|i| i["id"].as_str() == Some("zoom-in"))
+      }),
+    );
+    check(
+      "a role item reads back with its role",
+      items.as_array().is_some_and(|a| {
+        a.iter().any(|i| {
+          i["role"]
+            .as_str()
+            .is_some_and(|r| r.eq_ignore_ascii_case("copy"))
+        })
+      }),
+    );
+  }
+  check(
+    "an unknown window has no application menu to read",
+    laufey::menu_snapshot(laufey::MenuKind::Application {
+      window_id: 0x7fff_fff0,
+    })
+    .is_none(),
+  );
+
+  // The Dock menu (macOS).
+  if !cfg!(target_os = "macos") {
+    check(
+      "no Dock menu to read off macOS",
+      laufey::menu_snapshot(laufey::MenuKind::Dock).is_none(),
+    );
+    return;
+  }
+  check(
+    "macOS: the menu bar has the Edit submenu laufey adds",
+    read_snapshot(app).is_some_and(|s| {
+      snapshot_item(&s, "Edit").is_some_and(|e| {
+        e["submenu"].as_array().is_some_and(|a| {
+          a.iter()
+            .any(|i| i["accelerator"].as_str() == Some("Super+C"))
+        })
+      })
+    }),
+  );
+  let dock_clicks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+  {
+    let dock_clicks = dock_clicks.clone();
+    laufey::set_dock_menu(
+      &[
+        item("New Window", "dock-new", false),
+        item("Pinned", "dock-pinned", true),
+        MenuItem::Separator,
+        MenuItem::Submenu {
+          label: "Recent".into(),
+          items: vec![item("One", "dock-recent-1", false)],
+        },
+      ],
+      move |id| dock_clicks.lock().unwrap().push(id.to_string()),
+    );
+  }
+  let mut dock = None;
+  for _ in 0..50 {
+    dock = read_snapshot(laufey::MenuKind::Dock);
+    if dock.is_some() {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  check("macOS: the Dock menu reads back", dock.is_some());
+  if let Some(dock) = dock {
+    eprintln!("[e2e] INFO Dock menu snapshot: {dock}");
+    check(
+      "macOS: the Dock menu holds a checkmark, a separator and a submenu",
+      snapshot_item(&dock, "New Window")
+        .is_some_and(|i| i["checked"].as_bool() == Some(false))
+        && snapshot_item(&dock, "Pinned").is_some_and(|i| {
+          i["checked"].as_bool() == Some(true)
+            && i["id"].as_str() == Some("dock-pinned")
+        })
+        && dock.as_array().is_some_and(|a| {
+          a.get(2).and_then(|i| i["type"].as_str()) == Some("separator")
+        })
+        && snapshot_item(&dock, "Recent").is_some_and(|r| {
+          snapshot_item(&r["submenu"], "One")
+            .is_some_and(|i| i["id"].as_str() == Some("dock-recent-1"))
+        }),
+    );
+  }
+  check(
+    "macOS: choosing a Dock menu item reports its id",
+    laufey::test_click_menu_item("dock-recent-1")
+      && wait_for(
+        || {
+          dock_clicks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "dock-recent-1")
+        },
+        50,
+        20,
+      )
+      .await,
+  );
+  laufey::clear_dock_menu();
+  check(
+    "macOS: a cleared Dock menu reads back as none",
+    wait_for(
+      || laufey::menu_snapshot(laufey::MenuKind::Dock).is_none(),
+      50,
+      50,
+    )
+    .await,
+  );
 }
 
 /// Windows: a real key press, injected with SendInput while the window has

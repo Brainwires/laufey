@@ -337,12 +337,14 @@ NSMenu* GetDockMenuMac();
 #endif
 
 // menu_snapshot (API 59) on macOS, both backends: the JSON
-// (laufey_menu_snapshot.h) of what AppKit holds now for
-// LAUFEY_MENU_KIND_APPLICATION (NSApp.mainMenu: the bar the OS shows, the
-// items laufey and AppKit added included) or LAUFEY_MENU_KIND_DOCK (the menu
-// applicationDockMenu: hands the Dock), or "" when there is none or the kind
-// is unknown. Any thread (it waits for the main thread).
-std::string MenuSnapshotMac(int32_t kind);
+// (laufey_menu_snapshot.h) of what AppKit holds now. For
+// LAUFEY_MENU_KIND_APPLICATION: with `window_id` 0 NSApp.mainMenu (the bar
+// the OS shows now), else the NSMenu that window installs as the main menu
+// while it is key (set_application_menu's, with the items laufey added); for
+// LAUFEY_MENU_KIND_DOCK the menu applicationDockMenu: hands the Dock. "" when
+// there is none or the kind is unknown. Any thread (it waits for the main
+// thread).
+std::string MenuSnapshotMac(int32_t kind, uint32_t window_id);
 
 // Stores the dock-reopen handler set by Backend_SetDockReopenHandler_Mac /
 // WKWebViewBackend::SetDockReopenHandler. AppDelegate calls

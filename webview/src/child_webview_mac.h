@@ -52,6 +52,13 @@ int32_t OpenDevTools(uint32_t id);
 bool Print(uint32_t id);
 // Replaces the view's "forwardKeys" (canonical forms).
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
+// API 59: decide or control a download of a view created with
+// "downloads": "app" (the caller checked the action, and SAVE's path), and
+// answer a permission request of one created with "permissions": "app".
+// LAUFEY_WEBVIEW_OK / CLOSED / INVALID / UNSUPPORTED, as in laufey.h.
+int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
+                        const std::string& path);
+int32_t PermissionRespond(uint32_t id, uint32_t request_id, bool allow);
 // The window is closing: close its views (each fires CLOSED).
 void CloseAllForWindow(uint32_t window_id);
 // Whether `responder` (an NSResponder*) is a child web view or inside one:

@@ -56,6 +56,7 @@ mod stream_checks;
 mod system_checks;
 mod title_bar_checks;
 mod tray_role_checks;
+mod webview_app_checks;
 mod webview_checks;
 mod webview_cursor_checks;
 
@@ -2386,6 +2387,8 @@ async fn window_api_checks() {
   focus_checks::run().await;
   // Child web views (API 58).
   webview_checks::run(&w).await;
+  // Web view downloads and permission requests the app decides (API 59).
+  webview_app_checks::run(&w).await;
   // The cursor over a child web view is its page's (macOS).
   webview_cursor_checks::run(&w, TITLE).await;
   // --hidpi: the rest of this battery then runs at that scale too.

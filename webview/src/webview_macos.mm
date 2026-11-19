@@ -273,8 +273,8 @@ class WKWebViewBackend : public LaufeyBackend {
            LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
            LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT;
   }
-  std::string MenuSnapshot(int32_t kind, uint32_t /*id*/) override {
-    return laufey_common::MenuSnapshotMac(kind);
+  std::string MenuSnapshot(int32_t kind, uint32_t id) override {
+    return laufey_common::MenuSnapshotMac(kind, id);
   }
   void ShowContextMenuEx(uint32_t window_id, int x, int y,
                          laufey_value_t* menu_template,
@@ -443,6 +443,11 @@ class WKWebViewBackend : public LaufeyBackend {
                              const std::vector<std::string>& keys) override;
   bool WebViewRestack(uint32_t window_id,
                       const std::vector<uint32_t>& bottom_to_top) override;
+  int32_t WebViewDownloadControl(uint32_t webview_id, uint32_t download_id,
+                                 int32_t action,
+                                 const std::string& path) override;
+  int32_t WebViewPermissionRespond(uint32_t webview_id, uint32_t request_id,
+                                   bool allow) override;
   bool SetWindowTrafficLightPosition(uint32_t window_id, int x, int y) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
                          int material) override;
@@ -2713,6 +2718,30 @@ bool WKWebViewBackend::WebViewSetForwardKeys(
     ok = laufey_child_webview_mac::SetForwardKeys(webview_id, copy);
   });
   return ok;
+}
+
+int32_t WKWebViewBackend::WebViewDownloadControl(uint32_t webview_id,
+                                                 uint32_t download_id,
+                                                 int32_t action,
+                                                 const std::string& path) {
+  __block int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  std::string copy = path;
+  laufey_common::RunOnMainSync(^{
+    status = laufey_child_webview_mac::DownloadControl(webview_id, download_id,
+                                                       action, copy);
+  });
+  return status;
+}
+
+int32_t WKWebViewBackend::WebViewPermissionRespond(uint32_t webview_id,
+                                                   uint32_t request_id,
+                                                   bool allow) {
+  __block int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  laufey_common::RunOnMainSync(^{
+    status = laufey_child_webview_mac::PermissionRespond(webview_id, request_id,
+                                                         allow);
+  });
+  return status;
 }
 
 void WKWebViewBackend::OpenExternalURL(const std::string& url) {

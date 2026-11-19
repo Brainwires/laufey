@@ -87,8 +87,9 @@ impl MenuCapabilities {
 /// Which menu [`menu_snapshot`] reads (API 59).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuKind {
-  /// The application menu the OS shows: on macOS the menu bar as it is now,
-  /// on Windows and Linux the menu bar of this window.
+  /// The application menu of this window (on macOS the menu the bar shows
+  /// while the window is key; `window_id` 0 there reads the menu bar as it
+  /// is now).
   Application { window_id: u32 },
   /// The Dock menu (macOS).
   Dock,

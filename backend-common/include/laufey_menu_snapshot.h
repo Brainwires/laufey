@@ -25,7 +25,7 @@ struct MenuSnapshotItem {
   std::string id;    // a custom item's id; empty: left out
   std::string role;  // the role laufey built the item from; empty: left out
   // The key the native item is bound to, in the canonical accelerator form
-  // (CanonicalAccelerator: "Cmd+Shift+K", "Ctrl+Shift+K"); empty: left out.
+  // (CanonicalAccelerator: "Shift+Super+K", "Ctrl+Shift+K"); empty: left out.
   std::string accelerator;
   bool enabled = true;
   bool checked = false;

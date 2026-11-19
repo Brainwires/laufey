@@ -474,9 +474,10 @@ typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
   (1u << 7)  // menu_snapshot reads a menu back from the OS (API >= 59)
 
 // Which menu menu_snapshot reads (API >= 59).
-//   APPLICATION  the application menu the OS shows: on macOS the menu bar as
-//                it is now (`id` is ignored), on Windows and Linux the menu
-//                bar of window `id`.
+//   APPLICATION  the application menu: the menu bar of window `id` (on macOS
+//                the menu the bar shows while that window is key). On macOS
+//                `id` 0 reads the menu bar as it is now, whichever window or
+//                the app itself (set_app_menu) owns it.
 //   DOCK         the Dock menu (macOS; `id` is ignored): the items set with
 //                set_dock_menu, as AppKit holds them for
 //                applicationDockMenu:.
@@ -3396,13 +3397,14 @@ struct laufey_backend_api {
   // (LAUFEY_MENU_CAP_SNAPSHOT), for self-tests: what set_application_menu /
   // set_app_menu / set_dock_menu ended up as, including the items laufey or
   // the OS added (the macOS Edit submenu, Close Window). `kind` is
-  // LAUFEY_MENU_KIND_*, `id` the window for APPLICATION on Windows and Linux.
+  // LAUFEY_MENU_KIND_*, `id` the window for APPLICATION.
   // Returns a JSON array of items, each
   //   {"type": "item" | "submenu" | "separator", "label": string,
   //    "id"?: string (a custom item's id), "role"?: string (an item laufey
   //    built from a role), "enabled": bool, "checked": bool,
-  //    "visible": bool, "accelerator"?: string (the canonical form, e.g.
-  //    "Cmd+Shift+K" / "Ctrl+Shift+K"), "submenu"?: [items]}
+  //    "visible": bool, "accelerator"?: string (the canonical form:
+  //    "Ctrl+Alt+Shift+Super+<Key>" with the modifiers present; Command is
+  //    "Super"), "submenu"?: [items]}
   // or NULL when there is no such menu, the kind is unknown or the backend
   // has no read-back. Free with string_free. Any thread (it waits for the UI
   // thread). NULL on Winit.
