@@ -51,6 +51,21 @@ class MenuDelegate : public CefMenuModelDelegate {
     return id;
   }
 
+  // What menu_snapshot reports of a command beyond the model's own state:
+  // the item's id or role, and its accelerator's canonical form.
+  struct Info {
+    std::string id;
+    std::string role;
+    std::string accelerator;
+  };
+  void SetInfo(int command_id, Info info) {
+    info_[command_id] = std::move(info);
+  }
+  const Info* GetInfo(int command_id) const {
+    auto it = info_.find(command_id);
+    return it == info_.end() ? nullptr : &it->second;
+  }
+
   void ExecuteCommand(CefRefPtr<CefMenuModel> /*menu_model*/, int command_id,
                       cef_event_flags_t /*event_flags*/) override {
     auto it = commands_.find(command_id);
@@ -76,6 +91,7 @@ class MenuDelegate : public CefMenuModelDelegate {
   laufey_menu_click_fn on_click_;
   void* on_click_data_;
   std::map<int, std::string> commands_;
+  std::map<int, Info> info_;
   int next_id_ = kFirstMenuCommandId;
   uint64_t session_ = 0;
   IMPLEMENT_REFCOUNTING(MenuDelegate);
@@ -127,8 +143,11 @@ void Fill(CefRefPtr<CefMenuModel> model, const std::vector<MenuEntry>& entries,
       case MenuEntry::Kind::kRole: {
         const char* label =
             e.label.empty() ? RoleLabel(e.role) : e.label.c_str();
-        if (label)
-          model->AddItem(delegate->Add(e.role), label);
+        if (label) {
+          int id = delegate->Add(e.role);
+          model->AddItem(id, label);
+          delegate->SetInfo(id, {std::string(), e.role, std::string()});
+        }
         break;
       }
       case MenuEntry::Kind::kSubmenu: {
@@ -140,6 +159,10 @@ void Fill(CefRefPtr<CefMenuModel> model, const std::vector<MenuEntry>& entries,
       }
       case MenuEntry::Kind::kItem: {
         int id = delegate->Add(e.ClickKey());
+        delegate->SetInfo(
+            id, {e.id, std::string(),
+                 e.has_accel ? laufey_common::CanonicalAccelerator(e.accel)
+                             : std::string()});
         if (e.checked) {
           model->AddCheckItem(id, e.label);
           model->SetChecked(id, true);
@@ -220,8 +243,19 @@ class BarItemButtonDelegate : public CefButtonDelegate {
   IMPLEMENT_REFCOUNTING(BarItemButtonDelegate);
 };
 
+// A button of the menu bar, for menu_snapshot: the menu it drops (with the
+// delegate that knows its commands), or the item / role it runs.
+struct BarButton {
+  CefRefPtr<CefView> view;
+  CefRefPtr<CefMenuModel> model;  // null: a plain item or role
+  CefRefPtr<MenuDelegate> delegate;
+  std::string id;
+  std::string role;
+};
+
 struct WindowMenu {
   CefRefPtr<CefPanel> bar;
+  std::vector<BarButton> buttons;
   CefRefPtr<CefWindow> window;
   std::map<int, std::string> accelerators;  // window command id -> click key
   std::vector<laufey_common::MenuAccelBinding> bindings;
@@ -255,6 +289,7 @@ void SetApplicationMenu(CefRefPtr<CefWindow> window,
     window->RemoveChildView(wm.bar);
     wm.bar = nullptr;
   }
+  wm.buttons.clear();
   wm.on_click = on_click;
   wm.on_click_data = on_click_data;
 
@@ -277,6 +312,8 @@ void SetApplicationMenu(CefRefPtr<CefWindow> window,
       CefRefPtr<CefMenuButton> button = CefMenuButton::CreateMenuButton(
           new BarMenuButtonDelegate(model), e.label);
       bar->AddChildView(button);
+      wm.buttons.push_back(
+          {button, model, delegate, std::string(), std::string()});
     } else if (e.kind == MenuEntry::Kind::kItem ||
                e.kind == MenuEntry::Kind::kRole) {
       std::string key =
@@ -292,6 +329,10 @@ void SetApplicationMenu(CefRefPtr<CefWindow> window,
           label);
       button->SetEnabled(e.enabled);
       bar->AddChildView(button);
+      if (e.kind == MenuEntry::Kind::kRole)
+        wm.buttons.push_back({button, nullptr, nullptr, std::string(), e.role});
+      else
+        wm.buttons.push_back({button, nullptr, nullptr, e.id, std::string()});
     }
   }
   RegisterClicks(entries, window_id, on_click, on_click_data);
@@ -393,6 +434,113 @@ void ShowContextMenu(CefRefPtr<CefWindow> window,
       });
   delegate->SetSession(session);
   window->ShowMenu(model, point, CEF_MENU_ANCHOR_TOPLEFT);
+}
+
+namespace {
+
+// A label as the menu shows it: Views menus take '&' as a mnemonic mark
+// ("&&" is a literal '&').
+std::string StripMnemonics(const std::string& label) {
+  std::string out;
+  for (size_t i = 0; i < label.size(); ++i) {
+    if (label[i] == '&') {
+      if (i + 1 < label.size() && label[i + 1] == '&') {
+        out.push_back('&');
+        ++i;
+      }
+      continue;
+    }
+    out.push_back(label[i]);
+  }
+  return out;
+}
+
+void SnapshotModel(CefRefPtr<CefMenuModel> model, const MenuDelegate* delegate,
+                   int depth,
+                   std::vector<laufey_common::MenuSnapshotItem>* out) {
+  using Item = laufey_common::MenuSnapshotItem;
+  if (!model || depth > 16)
+    return;
+  size_t count = model->GetCount();
+  for (size_t i = 0; i < count; ++i) {
+    Item item;
+    switch (model->GetTypeAt(i)) {
+      case MENUITEMTYPE_SEPARATOR:
+        item.type = Item::Type::kSeparator;
+        break;
+      case MENUITEMTYPE_SUBMENU:
+        item.type = Item::Type::kSubmenu;
+        SnapshotModel(model->GetSubMenuAt(i), delegate, depth + 1,
+                      &item.children);
+        break;
+      default:
+        item.type = Item::Type::kItem;
+        break;
+    }
+    if (item.type != Item::Type::kSeparator)
+      item.label = StripMnemonics(model->GetLabelAt(i).ToString());
+    item.enabled = model->IsEnabledAt(i);
+    item.visible = model->IsVisibleAt(i);
+    if (item.type == Item::Type::kItem) {
+      item.checked = model->IsCheckedAt(i);
+      const MenuDelegate::Info* info =
+          delegate ? delegate->GetInfo(model->GetCommandIdAt(i)) : nullptr;
+      if (info) {
+        item.id = info->id;
+        item.role = info->role;
+        // Only a key the model really holds (one CEF can't bind, a Super
+        // accelerator, is left out of it).
+        int key_code = 0;
+        bool shift = false, ctrl = false, alt = false;
+        if (model->GetAcceleratorAt(i, key_code, shift, ctrl, alt))
+          item.accelerator = info->accelerator;
+      }
+    }
+    out->push_back(std::move(item));
+  }
+}
+
+}  // namespace
+
+bool Snapshot(uint32_t window_id,
+              std::vector<laufey_common::MenuSnapshotItem>* out) {
+  using Item = laufey_common::MenuSnapshotItem;
+  auto it = Menus().find(window_id);
+  if (it == Menus().end() || !it->second.bar)
+    return false;
+  const WindowMenu& wm = it->second;
+  // The bar's buttons as the bar holds them now.
+  size_t count = wm.bar->GetChildViewCount();
+  for (size_t i = 0; i < count; ++i) {
+    CefRefPtr<CefView> view = wm.bar->GetChildViewAt(static_cast<int>(i));
+    if (!view)
+      continue;
+    const BarButton* button = nullptr;
+    for (const BarButton& b : wm.buttons) {
+      if (b.view && b.view->IsSame(view)) {
+        button = &b;
+        break;
+      }
+    }
+    Item item;
+    CefRefPtr<CefButton> as_button = view->AsButton();
+    CefRefPtr<CefLabelButton> label =
+        as_button ? as_button->AsLabelButton() : nullptr;
+    // A bar button shows its text as it is (no mnemonics in a LabelButton).
+    if (label)
+      item.label = label->GetText().ToString();
+    item.enabled = view->IsEnabled();
+    item.visible = view->IsVisible();
+    if (button && button->model) {
+      item.type = Item::Type::kSubmenu;
+      SnapshotModel(button->model, button->delegate.get(), 1, &item.children);
+    } else if (button) {
+      item.id = button->id;
+      item.role = button->role;
+    }
+    out->push_back(std::move(item));
+  }
+  return true;
 }
 
 void ForgetWindow(uint32_t window_id) {

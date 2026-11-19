@@ -1840,7 +1840,9 @@ static bool Backend_TestTriggerMenuAccelerator(void* /*data*/,
 
 static uint32_t Backend_MenuCapabilities(void* /*data*/) {
   uint32_t caps = LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
-                  LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED;
+                  LAUFEY_MENU_CAP_CONTEXT_MENU |
+                  LAUFEY_MENU_CAP_CONTEXT_CLOSED |
+                  LAUFEY_MENU_CAP_SNAPSHOT;  // views_menu.cc Snapshot
 #if defined(_WIN32)
   caps |= LAUFEY_MENU_CAP_ICONS;  // context menus (Win32)
 #else
@@ -3733,14 +3735,21 @@ extern std::string Backend_MenuSnapshot_Mac(int32_t kind, uint32_t id);
 #endif
 
 // menu_snapshot (API 59). macOS reads AppKit's menus (runtime_loader_mac.mm);
-// Windows and Linux have no read-back of the Views menu bar yet.
+// Windows and Linux read window `id`'s Views menu bar (its buttons and the
+// CefMenuModels they drop, views_menu.cc) on the UI thread.
 static char* Backend_MenuSnapshot(void* /*data*/, int32_t kind, uint32_t id) {
 #if defined(__APPLE__)
   return CopyJsonOrNull(Backend_MenuSnapshot_Mac(kind, id));
 #else
-  (void)kind;
-  (void)id;
-  return nullptr;
+  if (kind != LAUFEY_MENU_KIND_APPLICATION || id == 0)
+    return nullptr;
+  std::string json;
+  cef_invoke_sync([&] {
+    std::vector<laufey_common::MenuSnapshotItem> items;
+    if (laufey_cef_menu::Snapshot(id, &items))
+      json = laufey_common::MenuSnapshotJson(items);
+  });
+  return CopyJsonOrNull(json);
 #endif
 }
 

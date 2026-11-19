@@ -24,6 +24,7 @@
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 #include "laufey_menu.h"
+#include "laufey_menu_snapshot.h"
 
 namespace laufey_cef_menu {
 
@@ -57,6 +58,12 @@ void ShowContextMenu(CefRefPtr<CefWindow> window,
                      std::vector<laufey_common::MenuEntry> entries,
                      laufey_menu_click_fn on_click, void* on_click_data,
                      laufey_menu_closed_fn on_closed, void* on_closed_data);
+
+// menu_snapshot (API 59): what window `window_id`'s menu bar holds now,
+// read from the bar's buttons and the CefMenuModels they drop. False when
+// the window has no menu bar.
+bool Snapshot(uint32_t window_id,
+              std::vector<laufey_common::MenuSnapshotItem>* out);
 
 // The window closed.
 void ForgetWindow(uint32_t window_id);
