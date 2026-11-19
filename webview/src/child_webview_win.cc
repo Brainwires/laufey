@@ -41,6 +41,23 @@
 // the controller's GotFocus. Hiding a focused view (and BLUR) moves the focus
 // to the page's controller (MoveFocus, in the foreground window only: no
 // activation): FOCUS false with its "reason".
+//
+// "downloads": "app" (API 59): DownloadStarting is handled (no WebView2 UI)
+// and held open with its deferral until webview_download_control answers:
+// SAVE sets ResultFilePath, SAVE_AS asks with the save dialog the window's
+// "ask" policy uses (AskDownloadDestination), CANCEL cancels the event. Then
+// the ICoreWebView2DownloadOperation's BytesReceivedChanged / StateChanged
+// report it; WebView2 pauses by interrupting with USER_PAUSED, which is
+// reported as paused, not as an interruption.
+//
+// "permissions": "app" (API 59): PermissionRequested is held open with its
+// deferral until webview_permission_respond answers (never remembered in the
+// partition's profile where SavesInProfile exists). A subframe's request is
+// raised first on its ICoreWebView2Frame (FrameCreated +
+// ICoreWebView2Frame3), handled there as the frame's ("isMain": false), so
+// one reaching the CoreWebView2 is the main frame's; when a frame can't take
+// that handler the frame is left out. A new main-frame navigation and closing
+// the view refuse the requests still waiting.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -65,6 +82,7 @@
 #include <vector>
 
 #include "laufey_backend_common.h"
+#include "laufey_downloads.h"
 #include "laufey_json.h"
 #include "laufey_launch_config.h"
 #include "laufey_navigation_guard.h"
@@ -91,6 +109,33 @@ constexpr int kConsolePerSecond = 200;
 constexpr size_t kConsoleMaxBytes = 16 * 1024;
 constexpr wchar_t kHostClass[] = L"LaufeyChildWebViewHost";
 constexpr char kEvalGroup[] = "laufey-webview-eval";
+
+// A download of a view under "downloads": "app" (API 59).
+struct ChildDownload {
+  uint32_t id = 0;
+  laufey_common::WebViewDownloadPhase phase =
+      laufey_common::WebViewDownloadPhase::kRequested;
+  // The DownloadStarting event held open until the download is decided.
+  ComPtr<ICoreWebView2DownloadStartingEventArgs> args;
+  ComPtr<ICoreWebView2Deferral> deferral;
+  ComPtr<ICoreWebView2DownloadOperation> operation;
+  EventRegistrationToken bytes_token = {};
+  EventRegistrationToken state_token = {};
+  bool subscribed = false;
+  std::string url;
+  std::string filename;  // sanitized
+  std::string mime_type;
+  std::string path;          // once decided
+  int64_t total_bytes = -1;  // < 0: unknown
+  laufey_common::WebViewProgressThrottle throttle;
+};
+
+// A permission request of a view under "permissions": "app" (API 59), held
+// open until the app answers.
+struct ChildPermission {
+  ComPtr<ICoreWebView2PermissionRequestedEventArgs> args;
+  ComPtr<ICoreWebView2Deferral> deferral;
+};
 
 struct ChildView {
   uint32_t id = 0;
@@ -135,6 +180,12 @@ struct ChildView {
   int console_count = 0;
   int next_call = 1;
   std::map<int, DevToolsCallback> pending;
+  // "downloads": "app" / "permissions": "app" (API 59), by id.
+  std::map<uint32_t, std::unique_ptr<ChildDownload>> downloads;
+  std::map<uint32_t, ChildPermission> permissions;
+  // Every subframe so far took the frame-level PermissionRequested handler,
+  // so a request reaching the CoreWebView2 is the main frame's.
+  bool frames_attributed = false;
 };
 
 // UI thread only.
@@ -888,6 +939,551 @@ void OnAcceleratorKey(uint32_t id,
   Emit(id, LAUFEY_WEBVIEW_EVENT_KEY, laufey_common::WebViewKeyJson(f));
 }
 
+// --- Downloads the app decides (API 59) --------------------------------------
+
+using laufey_common::WebViewDownloadPhase;
+
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+// The file name of a Windows path (after its last separator).
+std::string FileNameOf(LPCWSTR path) {
+  if (!path)
+    return std::string();
+  std::wstring p(path);
+  size_t sep = p.find_last_of(L"\\/");
+  return Utf8(sep == std::wstring::npos ? p.c_str() : p.c_str() + sep + 1);
+}
+
+ChildDownload* FindDownload(ChildView* v, uint32_t download_id) {
+  auto it = v->downloads.find(download_id);
+  return it == v->downloads.end() ? nullptr : it->second.get();
+}
+
+// Takes the download out of its view (its id is forgotten).
+std::unique_ptr<ChildDownload> TakeDownload(ChildView* v,
+                                            uint32_t download_id) {
+  auto it = v->downloads.find(download_id);
+  if (it == v->downloads.end())
+    return nullptr;
+  std::unique_ptr<ChildDownload> d = std::move(it->second);
+  v->downloads.erase(it);
+  return d;
+}
+
+bool Decided(const ChildDownload& d) {
+  return d.phase != WebViewDownloadPhase::kRequested &&
+         d.phase != WebViewDownloadPhase::kChoosing;
+}
+
+int CanResume(const ChildDownload& d) {
+  BOOL can = FALSE;
+  if (!d.operation || FAILED(d.operation->get_CanResume(&can)))
+    return -1;
+  return can ? 1 : 0;
+}
+
+// The DOWNLOAD event's fields for `state` (receivedBytes from the operation
+// once the download is decided).
+laufey_common::WebViewDownloadFields DownloadFields(const ChildDownload& d,
+                                                    const char* state) {
+  laufey_common::WebViewDownloadFields f;
+  f.id = d.id;
+  f.state = state;
+  f.url = d.url;
+  f.filename = d.filename;
+  f.mime_type = d.mime_type;
+  f.total_bytes = d.total_bytes;
+  f.path = d.path;
+  INT64 received = 0;
+  if (Decided(d) && d.operation &&
+      SUCCEEDED(d.operation->get_BytesReceived(&received)))
+    f.received_bytes = received;
+  if (d.operation && f.total_bytes < 0) {
+    INT64 total = 0;
+    if (SUCCEEDED(d.operation->get_TotalBytesToReceive(&total)) && total > 0)
+      f.total_bytes = total;
+  }
+  return f;
+}
+
+void EmitDownload(uint32_t view_id,
+                  const laufey_common::WebViewDownloadFields& f) {
+  Emit(view_id, LAUFEY_WEBVIEW_EVENT_DOWNLOAD,
+       laufey_common::WebViewDownloadJson(f));
+}
+
+void Unsubscribe(ChildDownload* d) {
+  if (d->subscribed && d->operation) {
+    d->operation->remove_BytesReceivedChanged(d->bytes_token);
+    d->operation->remove_StateChanged(d->state_token);
+  }
+  d->subscribed = false;
+}
+
+// Ends a download that is not done, without an event: refuses the held
+// DownloadStarting (nothing was written), or cancels the operation (WebView2
+// removes its partial file).
+void AbortDownload(ChildDownload* d) {
+  Unsubscribe(d);
+  if (d->deferral) {
+    if (d->args)
+      d->args->put_Cancel(TRUE);
+    d->deferral->Complete();
+    d->deferral.Reset();
+    d->args.Reset();
+  } else if (d->operation) {
+    d->operation->Cancel();
+  }
+  d->phase = WebViewDownloadPhase::kDone;
+}
+
+// Cancels a download of `v` and sends its "cancelled" (its last event).
+void CancelDownload(ChildView* v, uint32_t download_id) {
+  uint32_t view_id = v->id;
+  std::unique_ptr<ChildDownload> d = TakeDownload(v, download_id);
+  if (!d)
+    return;
+  laufey_common::WebViewDownloadFields f =
+      DownloadFields(*d, laufey_common::kWebViewDownloadCancelled);
+  AbortDownload(d.get());
+  EmitDownload(view_id, f);
+}
+
+// COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON to the "interrupted" reasons.
+const char* InterruptReason(COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON reason) {
+  switch (reason) {
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_FAILED:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_ACCESS_DENIED:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_NO_SPACE:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_NAME_TOO_LONG:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TOO_LARGE:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_MALICIOUS:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TRANSIENT_ERROR:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_BLOCKED_BY_POLICY:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_SECURITY_CHECK_FAILED:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TOO_SHORT:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_HASH_MISMATCH:
+      return laufey_common::kWebViewDownloadReasonFile;
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_FAILED:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_TIMEOUT:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_DISCONNECTED:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_SERVER_DOWN:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_INVALID_REQUEST:
+      return laufey_common::kWebViewDownloadReasonNetwork;
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_FAILED:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_NO_RANGE:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_BAD_CONTENT:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNAUTHORIZED:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CERTIFICATE_PROBLEM:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNEXPECTED_RESPONSE:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH:
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CROSS_ORIGIN_REDIRECT:
+      return laufey_common::kWebViewDownloadReasonServer;
+    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_DOWNLOAD_PROCESS_CRASHED:
+      return laufey_common::kWebViewDownloadReasonCrash;
+    default:
+      return laufey_common::kWebViewDownloadReasonFailed;
+  }
+}
+
+// The size of the file at `path`, or -1.
+int64_t FileSize(const std::string& path) {
+  WIN32_FILE_ATTRIBUTE_DATA data = {};
+  std::wstring wpath = Wide(path);
+  if (path.empty() ||
+      !GetFileAttributesExW(wpath.c_str(), GetFileExInfoStandard, &data))
+    return -1;
+  ULARGE_INTEGER size;
+  size.LowPart = data.nFileSizeLow;
+  size.HighPart = data.nFileSizeHigh;
+  return static_cast<int64_t>(size.QuadPart);
+}
+
+void OnDownloadBytes(uint32_t view_id, uint32_t download_id) {
+  ChildView* v = Find(view_id);
+  ChildDownload* d = v ? FindDownload(v, download_id) : nullptr;
+  if (!d || d->phase != WebViewDownloadPhase::kProgressing ||
+      !d->throttle.Ready(NowMs()))
+    return;
+  laufey_common::WebViewDownloadFields f =
+      DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
+  f.can_resume = CanResume(*d);
+  EmitDownload(view_id, f);
+}
+
+void OnDownloadState(uint32_t view_id, uint32_t download_id) {
+  ChildView* v = Find(view_id);
+  ChildDownload* d = v ? FindDownload(v, download_id) : nullptr;
+  if (!d || !d->operation)
+    return;
+  COREWEBVIEW2_DOWNLOAD_STATE state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+  if (FAILED(d->operation->get_State(&state)))
+    return;
+  if (state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS) {
+    // A resume laufey did not ask for (the phase moved with RESUME).
+    if (d->phase == WebViewDownloadPhase::kInterrupted)
+      d->phase = WebViewDownloadPhase::kProgressing;
+    return;
+  }
+  if (state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED) {
+    std::unique_ptr<ChildDownload> owned = TakeDownload(v, download_id);
+    Unsubscribe(owned.get());
+    LPWSTR raw = nullptr;
+    if (SUCCEEDED(owned->operation->get_ResultFilePath(&raw)) && raw && *raw)
+      owned->path = Utf8(raw);
+    if (raw)
+      CoTaskMemFree(raw);
+    owned->deferral.Reset();
+    owned->args.Reset();
+    laufey_common::WebViewDownloadFields f =
+        DownloadFields(*owned, laufey_common::kWebViewDownloadCompleted);
+    int64_t size = FileSize(owned->path);
+    if (size >= 0)
+      f.received_bytes = size;
+    owned->phase = WebViewDownloadPhase::kDone;
+    EmitDownload(view_id, f);
+    return;
+  }
+  // INTERRUPTED.
+  COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON reason =
+      COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE;
+  d->operation->get_InterruptReason(&reason);
+  if (reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED) {
+    // WebView2's pause. PAUSE already reported it; a pause laufey did not
+    // ask for is reported now.
+    if (d->phase == WebViewDownloadPhase::kProgressing) {
+      d->phase = WebViewDownloadPhase::kPaused;
+      laufey_common::WebViewDownloadFields f =
+          DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
+      f.paused = true;
+      f.can_resume = CanResume(*d);
+      EmitDownload(view_id, f);
+    }
+    return;
+  }
+  if (reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED) {
+    CancelDownload(v, download_id);
+    return;
+  }
+  int can_resume = Decided(*d) ? CanResume(*d) : 0;
+  laufey_common::WebViewDownloadFields f =
+      DownloadFields(*d, laufey_common::kWebViewDownloadInterrupted);
+  f.reason = InterruptReason(reason);
+  f.can_resume = can_resume > 0 ? 1 : 0;
+  if (can_resume > 0) {
+    d->phase = WebViewDownloadPhase::kInterrupted;
+    EmitDownload(view_id, f);
+    return;
+  }
+  std::unique_ptr<ChildDownload> owned = TakeDownload(v, download_id);
+  // A download interrupted while it waited still holds its event.
+  AbortDownload(owned.get());
+  EmitDownload(view_id, f);
+}
+
+void Subscribe(uint32_t view_id, ChildDownload* d) {
+  if (!d->operation || d->subscribed)
+    return;
+  uint32_t download_id = d->id;
+  HRESULT bytes = d->operation->add_BytesReceivedChanged(
+      Callback<ICoreWebView2BytesReceivedChangedEventHandler>(
+          [view_id, download_id](ICoreWebView2DownloadOperation*,
+                                 IUnknown*) -> HRESULT {
+            OnDownloadBytes(view_id, download_id);
+            return S_OK;
+          })
+          .Get(),
+      &d->bytes_token);
+  HRESULT state = d->operation->add_StateChanged(
+      Callback<ICoreWebView2StateChangedEventHandler>(
+          [view_id, download_id](ICoreWebView2DownloadOperation*,
+                                 IUnknown*) -> HRESULT {
+            OnDownloadState(view_id, download_id);
+            return S_OK;
+          })
+          .Get(),
+      &d->state_token);
+  d->subscribed = SUCCEEDED(bytes) && SUCCEEDED(state);
+}
+
+// A DownloadStarting of a view under "downloads": "app": held open with its
+// deferral, and DOWNLOAD "requested".
+void OnAppDownloadStarting(ChildView* v,
+                           ICoreWebView2DownloadStartingEventArgs* args) {
+  // WebView2's own download UI never shows.
+  args->put_Handled(TRUE);
+  size_t waiting = 0;
+  for (const auto& kv : v->downloads) {
+    if (!Decided(*kv.second))
+      ++waiting;
+  }
+  if (waiting >= static_cast<size_t>(LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS)) {
+    fprintf(stderr,
+            "laufey: web view %u: %d downloads already wait for an answer; "
+            "a new one is cancelled\n",
+            v->id, LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS);
+    args->put_Cancel(TRUE);
+    return;
+  }
+  ComPtr<ICoreWebView2Deferral> deferral;
+  if (FAILED(args->GetDeferral(&deferral)) || !deferral) {
+    args->put_Cancel(TRUE);
+    return;
+  }
+  auto d = std::make_unique<ChildDownload>();
+  d->id = laufey_common::NextWebViewDownloadId();
+  d->args = args;
+  d->deferral = deferral;
+  args->get_DownloadOperation(&d->operation);
+  if (d->operation) {
+    LPWSTR raw = nullptr;
+    if (SUCCEEDED(d->operation->get_Uri(&raw)) && raw)
+      d->url = Utf8(raw);
+    if (raw)
+      CoTaskMemFree(raw);
+    raw = nullptr;
+    if (SUCCEEDED(d->operation->get_MimeType(&raw)) && raw)
+      d->mime_type = Utf8(raw);
+    if (raw)
+      CoTaskMemFree(raw);
+    INT64 total = 0;
+    if (SUCCEEDED(d->operation->get_TotalBytesToReceive(&total)) && total > 0)
+      d->total_bytes = total;
+  }
+  // ResultFilePath is pre-filled with the suggested name in the default
+  // download folder; only the name is the suggestion.
+  LPWSTR suggested = nullptr;
+  if (SUCCEEDED(args->get_ResultFilePath(&suggested)) && suggested)
+    d->filename =
+        laufey_common::SanitizeDownloadFileName(FileNameOf(suggested));
+  if (suggested)
+    CoTaskMemFree(suggested);
+  uint32_t view_id = v->id;
+  uint32_t download_id = d->id;
+  // Before the answer too: an engine-side end while it waits is reported.
+  Subscribe(view_id, d.get());
+  laufey_common::WebViewDownloadFields f =
+      DownloadFields(*d, laufey_common::kWebViewDownloadRequested);
+  v->downloads[download_id] = std::move(d);
+  EmitDownload(view_id, f);
+}
+
+// SAVE (or the save dialog's answer): the held event writes to `path`.
+// Sends the first "progressing" (with the path).
+int32_t ApplySave(ChildView* v, ChildDownload* d, const std::string& path) {
+  if (!d->args || !d->deferral)
+    return LAUFEY_WEBVIEW_FAILED;
+  std::wstring wpath = Wide(path);
+  // An existing file there is replaced (the app, or the save dialog, asked):
+  // removed first, so WebView2 never saves beside it under another name and
+  // nothing of it stays should the download not complete.
+  if (!DeleteFileW(wpath.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
+    return LAUFEY_WEBVIEW_FAILED;
+  if (FAILED(d->args->put_ResultFilePath(wpath.c_str())))
+    return LAUFEY_WEBVIEW_FAILED;
+  d->path = path;
+  d->phase = WebViewDownloadPhase::kProgressing;
+  ComPtr<ICoreWebView2Deferral> deferral = std::move(d->deferral);
+  d->args.Reset();
+  uint32_t view_id = v->id;
+  d->throttle.Ready(NowMs());
+  laufey_common::WebViewDownloadFields f =
+      DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
+  f.can_resume = CanResume(*d);
+  deferral->Complete();
+  EmitDownload(view_id, f);
+  return LAUFEY_WEBVIEW_OK;
+}
+
+// SAVE_AS: the save dialog answered (UI thread); empty: dismissed.
+void OnSaveAsChosen(uint32_t view_id, uint32_t download_id,
+                    const std::string& chosen) {
+  ChildView* v = Find(view_id);
+  ChildDownload* d = v ? FindDownload(v, download_id) : nullptr;
+  if (!d || d->phase != WebViewDownloadPhase::kChoosing)
+    return;  // cancelled meanwhile, or the view closed
+  if (chosen.empty()) {
+    CancelDownload(v, download_id);
+    return;
+  }
+  if (ApplySave(v, d, chosen) != LAUFEY_WEBVIEW_OK) {
+    if (ChildView* still = Find(view_id))
+      CancelDownload(still, download_id);
+  }
+}
+
+void CancelPermissions(ChildView* v);
+
+// Ends every download and permission request of a closing view, each with
+// its "cancelled" (before CLOSED).
+void EndDownloadsAndPermissions(ChildView* v) {
+  uint32_t view_id = v->id;
+  std::map<uint32_t, std::unique_ptr<ChildDownload>> downloads;
+  downloads.swap(v->downloads);
+  for (auto& kv : downloads) {
+    laufey_common::WebViewDownloadFields f =
+        DownloadFields(*kv.second, laufey_common::kWebViewDownloadCancelled);
+    AbortDownload(kv.second.get());
+    EmitDownload(view_id, f);
+  }
+  CancelPermissions(v);
+}
+
+// --- Permission requests the app answers (API 59) ----------------------------
+
+// The PERMISSION_REQUEST name of a WebView2 permission kind, or nullptr (one
+// laufey can't name: refused without an event).
+const char* PermissionName(COREWEBVIEW2_PERMISSION_KIND kind) {
+  switch (kind) {
+    case COREWEBVIEW2_PERMISSION_KIND_MICROPHONE:
+      return laufey_common::kWebViewPermissionMicrophone;
+    case COREWEBVIEW2_PERMISSION_KIND_CAMERA:
+      return laufey_common::kWebViewPermissionCamera;
+    case COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION:
+      return laufey_common::kWebViewPermissionGeolocation;
+    case COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS:
+      return laufey_common::kWebViewPermissionNotifications;
+    case COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS:
+      return laufey_common::kWebViewPermissionSensors;
+    case COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ:
+      return laufey_common::kWebViewPermissionClipboardRead;
+    case COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS:
+      return laufey_common::kWebViewPermissionMultipleDownloads;
+    case COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE:
+      return laufey_common::kWebViewPermissionFileSystem;
+    case COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY:
+      return laufey_common::kWebViewPermissionAutoplay;
+    case COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS:
+      return laufey_common::kWebViewPermissionLocalFonts;
+    case COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES:
+      return laufey_common::kWebViewPermissionMidi;
+    case COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT:
+      return laufey_common::kWebViewPermissionWindowManagement;
+    default:
+      return nullptr;
+  }
+}
+
+// Sets the answer, never saved in the partition's profile where the runtime
+// lets that be said (ICoreWebView2PermissionRequestedEventArgs3).
+void SetPermissionState(ICoreWebView2PermissionRequestedEventArgs* args,
+                        bool allow) {
+  ComPtr<ICoreWebView2PermissionRequestedEventArgs3> args3;
+  if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args3))) && args3)
+    args3->put_SavesInProfile(FALSE);
+  args->put_State(allow ? COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                        : COREWEBVIEW2_PERMISSION_STATE_DENY);
+}
+
+void ResolvePermission(ChildPermission* p, bool allow) {
+  if (p->args)
+    SetPermissionState(p->args.Get(), allow);
+  if (p->deferral)
+    p->deferral->Complete();
+  p->deferral.Reset();
+  p->args.Reset();
+}
+
+// Refuses every request `v` still waits on, each with its "cancelled".
+void CancelPermissions(ChildView* v) {
+  uint32_t view_id = v->id;
+  std::map<uint32_t, ChildPermission> pending;
+  pending.swap(v->permissions);
+  for (auto& kv : pending) {
+    ResolvePermission(&kv.second, false);
+    Emit(view_id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+         laufey_common::WebViewPermissionCancelledJson(kv.first));
+  }
+}
+
+// A PermissionRequested of a view under "permissions": "app": held open with
+// its deferral, and PERMISSION_REQUEST "requested". `frame_is_main`: 1 the
+// main frame, 0 a subframe, -1 not known.
+void OnAppPermissionRequested(uint32_t id,
+                              ICoreWebView2PermissionRequestedEventArgs* args,
+                              int frame_is_main) {
+  ChildView* v = Find(id);
+  COREWEBVIEW2_PERMISSION_KIND kind =
+      COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+  args->get_PermissionKind(&kind);
+  const char* name = PermissionName(kind);
+  ComPtr<ICoreWebView2Deferral> deferral;
+  if (!v || !name ||
+      v->permissions.size() >=
+          static_cast<size_t>(LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS) ||
+      FAILED(args->GetDeferral(&deferral)) || !deferral) {
+    SetPermissionState(args, false);
+    return;
+  }
+  LPWSTR raw = nullptr;
+  std::string url;
+  if (SUCCEEDED(args->get_Uri(&raw)) && raw)
+    url = Utf8(raw);
+  if (raw)
+    CoTaskMemFree(raw);
+  laufey_common::WebViewPermissionFields f;
+  f.id = laufey_common::NextWebViewPermissionId();
+  f.origin = laufey_common::WebViewOriginOf(url);
+  f.permissions.push_back(name);
+  f.frame_is_main = frame_is_main;
+  if (frame_is_main >= 0)
+    f.frame_origin = f.origin;
+  ChildPermission p;
+  p.args = args;
+  p.deferral = deferral;
+  v->permissions[f.id] = std::move(p);
+  Emit(id, LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST,
+       laufey_common::WebViewPermissionRequestJson(f));
+}
+
+// Under "permissions": "app": each subframe's PermissionRequested is handled
+// on its ICoreWebView2Frame (raised there before the CoreWebView2, for the
+// frame and its descendants), reported as a subframe's.
+void AttributeFrames(ChildView* view, ICoreWebView2_4* webview4) {
+  uint32_t id = view->id;
+  EventRegistrationToken token = {};
+  if (FAILED(webview4->add_FrameCreated(
+          Callback<ICoreWebView2FrameCreatedEventHandler>(
+              [id](ICoreWebView2*,
+                   ICoreWebView2FrameCreatedEventArgs* args) -> HRESULT {
+                ComPtr<ICoreWebView2Frame> frame;
+                ComPtr<ICoreWebView2Frame3> frame3;
+                EventRegistrationToken frame_token = {};
+                bool ok =
+                    SUCCEEDED(args->get_Frame(&frame)) && frame &&
+                    SUCCEEDED(frame.As(&frame3)) && frame3 &&
+                    SUCCEEDED(frame3->add_PermissionRequested(
+                        Callback<
+                            ICoreWebView2FramePermissionRequestedEventHandler>(
+                            [id](ICoreWebView2Frame*,
+                                 ICoreWebView2PermissionRequestedEventArgs2*
+                                     request) -> HRESULT {
+                              // Not raised again on the CoreWebView2.
+                              request->put_Handled(TRUE);
+                              OnAppPermissionRequested(id, request, 0);
+                              return S_OK;
+                            })
+                            .Get(),
+                        &frame_token));
+                // A frame without the handler: its requests reach the
+                // CoreWebView2's, which then can't tell the frames apart.
+                if (!ok) {
+                  if (ChildView* v = Find(id))
+                    v->frames_attributed = false;
+                }
+                return S_OK;
+              })
+              .Get(),
+          &token)))
+    return;
+  view->frames_attributed = true;
+}
+
 // The view's settings and event handlers, before its first navigation.
 void Configure(ChildView* view) {
   uint32_t id = view->id;
@@ -932,6 +1528,9 @@ void Configure(ChildView* view) {
             if (!redirected) {
               v->download_started = false;
               SetLoad(v, "loading", url);
+              // The page goes away: its requests still waiting are refused.
+              if (ChildView* still = Find(id))
+                CancelPermissions(still);
             }
             return S_OK;
           })
@@ -1093,6 +1692,9 @@ void Configure(ChildView* view) {
                 case laufey_common::WebViewDownloads::kDeny:
                   args->put_Cancel(TRUE);
                   return S_OK;
+                case laufey_common::WebViewDownloads::kApp:
+                  OnAppDownloadStarting(v, args);
+                  return S_OK;
               }
               args->put_Cancel(TRUE);
               return S_OK;
@@ -1102,7 +1704,12 @@ void Configure(ChildView* view) {
   }
 
   // "ask": WebView2's own prompt (the default); "deny": refused without
-  // one, and the refusal is not saved in the partition's profile.
+  // one, and the refusal is not saved in the partition's profile; "app":
+  // held for the app (OnAppPermissionRequested), the main frame's when every
+  // subframe has its own handler (AttributeFrames).
+  if (view->options.permissions == laufey_common::WebViewPermissions::kApp &&
+      webview4)
+    AttributeFrames(view, webview4.Get());
   webview->add_PermissionRequested(
       Callback<ICoreWebView2PermissionRequestedEventHandler>(
           [id](ICoreWebView2*,
@@ -1111,17 +1718,20 @@ void Configure(ChildView* view) {
             if (v && v->options.permissions ==
                          laufey_common::WebViewPermissions::kAsk)
               return S_OK;
-            ComPtr<ICoreWebView2PermissionRequestedEventArgs3> args3;
-            if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args3))) && args3)
-              args3->put_SavesInProfile(FALSE);
-            args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
+            if (v && v->options.permissions ==
+                         laufey_common::WebViewPermissions::kApp) {
+              OnAppPermissionRequested(id, args, v->frames_attributed ? 1 : -1);
+              return S_OK;
+            }
+            SetPermissionState(args, false);
             return S_OK;
           })
           .Get(),
       nullptr);
 
   // Screen capture raises no PermissionRequested (WebView2 shows its source
-  // picker): under "deny" it is refused before the picker.
+  // picker): under "deny" and "app" it is refused before the picker (the app
+  // is never asked: no "screen" request on WebView2).
   ComPtr<ICoreWebView2_27> webview27;
   if (view->options.permissions != laufey_common::WebViewPermissions::kAsk &&
       SUCCEEDED(view->webview.As(&webview27)) && webview27) {
@@ -1269,6 +1879,11 @@ uint32_t Capabilities() {
          LAUFEY_WEBVIEW_CAP_KEY_UP | LAUFEY_WEBVIEW_CAP_BLUR |
          LAUFEY_WEBVIEW_CAP_PERSISTENT_PARTITIONS |
          LAUFEY_WEBVIEW_CAP_PERMISSION_PROMPTS |
+         // DownloadStarting (ICoreWebView2_4) and PermissionRequested's
+         // deferral are in every runtime with profiles (110+).
+         LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS |
+         LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE |
+         LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS |
          (LAUFEY_WEBVIEW_ENGINE_WEBVIEW2 << LAUFEY_WEBVIEW_ENGINE_SHIFT);
 }
 
@@ -1658,6 +2273,9 @@ bool Close(uint32_t id) {
   Views().erase(it);
   // Every pending evaluate / capture answers now (CLOSED: the view is gone).
   FailPending(v.get(), "the web view is closed");
+  // Its downloads are cancelled and its permission requests refused, each
+  // with its "cancelled" before CLOSED (late engine callbacks find no view).
+  EndDownloadsAndPermissions(v.get());
   if (v->console_receiver)
     v->console_receiver->remove_DevToolsProtocolEventReceived(v->console_token);
   if (v->exception_receiver)
@@ -1678,6 +2296,90 @@ bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
     return false;
   v->options.forward_keys = keys;
   return true;
+}
+
+int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
+                        const std::string& path, const SaveDialogShow& show,
+                        const UiPost& post) {
+  ChildView* v = Find(id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  ChildDownload* d = FindDownload(v, download_id);
+  if (!d)
+    return LAUFEY_WEBVIEW_INVALID;
+  int32_t accepted =
+      laufey_common::WebViewDownloadAccepts(d->phase, action, true);
+  if (accepted != LAUFEY_WEBVIEW_OK)
+    return accepted;
+  switch (action) {
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE:
+      return ApplySave(v, d, path);
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS: {
+      d->phase = WebViewDownloadPhase::kChoosing;
+      uint32_t window_id = v->window_id;
+      std::string name = d->filename;
+      laufey_common::DownloadDialogShow dialog;
+      if (show) {
+        dialog = [show, window_id](const laufey_file_dialog_options_t* options,
+                                   laufey_file_dialog_result_fn callback,
+                                   void* user_data) {
+          return show(window_id, options, callback, user_data);
+        };
+      }
+      // The dialog answers on laufey's I/O thread; the view's objects
+      // belong to the UI thread. `v` and `d` are not used past this call.
+      UiPost to_ui = post;
+      laufey_common::AskDownloadDestination(
+          name, dialog, [id, download_id, to_ui](std::string chosen) {
+            std::function<void()> task = [id, download_id, chosen] {
+              OnSaveAsChosen(id, download_id, chosen);
+            };
+            if (to_ui)
+              to_ui(std::move(task));
+            else
+              task();
+          });
+      return LAUFEY_WEBVIEW_OK;
+    }
+    case LAUFEY_WEBVIEW_DOWNLOAD_CANCEL:
+      CancelDownload(v, download_id);
+      return LAUFEY_WEBVIEW_OK;
+    case LAUFEY_WEBVIEW_DOWNLOAD_PAUSE: {
+      if (!d->operation || FAILED(d->operation->Pause()))
+        return LAUFEY_WEBVIEW_FAILED;
+      d->phase = WebViewDownloadPhase::kPaused;
+      laufey_common::WebViewDownloadFields f =
+          DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
+      f.paused = true;
+      f.can_resume = CanResume(*d);
+      EmitDownload(id, f);
+      return LAUFEY_WEBVIEW_OK;
+    }
+    case LAUFEY_WEBVIEW_DOWNLOAD_RESUME: {
+      if (!d->operation || FAILED(d->operation->Resume()))
+        return LAUFEY_WEBVIEW_FAILED;
+      d->phase = WebViewDownloadPhase::kProgressing;
+      laufey_common::WebViewDownloadFields f =
+          DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
+      f.can_resume = CanResume(*d);
+      EmitDownload(id, f);
+      return LAUFEY_WEBVIEW_OK;
+    }
+  }
+  return LAUFEY_WEBVIEW_INVALID;
+}
+
+int32_t PermissionRespond(uint32_t id, uint32_t request_id, bool allow) {
+  ChildView* v = Find(id);
+  if (!v)
+    return LAUFEY_WEBVIEW_CLOSED;
+  auto it = v->permissions.find(request_id);
+  if (it == v->permissions.end())
+    return LAUFEY_WEBVIEW_INVALID;
+  ChildPermission p = std::move(it->second);
+  v->permissions.erase(it);
+  ResolvePermission(&p, allow);
+  return LAUFEY_WEBVIEW_OK;
 }
 
 void RelayoutForWindow(uint32_t window_id) {

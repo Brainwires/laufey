@@ -26,6 +26,7 @@
 #include "init_script.h"
 #include "wv2_scheme_stream.h"
 #include <win32_menu.h>
+#include "laufey_menu_snapshot.h"
 #include "laufey_notifications.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -190,6 +191,10 @@ struct WinWindowState {
   // window's life.
   std::vector<ComPtr<ICoreWebView2DevToolsProtocolEventReceiver>>
       trace_receivers;
+  // The entries the window's app menu was last built from
+  // (set_application_menu): menu_snapshot's ids and roles. Under
+  // windows_mutex_.
+  std::shared_ptr<const std::vector<laufey_common::MenuEntry>> app_menu;
 };
 
 // Custom window message for UI tasks
@@ -616,6 +621,12 @@ class WebView2Backend : public LaufeyBackend {
   bool WebViewClose(uint32_t webview_id) override;
   bool WebViewSetForwardKeys(uint32_t webview_id,
                              const std::vector<std::string>& keys) override;
+  int32_t WebViewDownloadControl(uint32_t webview_id, uint32_t download_id,
+                                 int32_t action,
+                                 const std::string& path) override;
+  int32_t WebViewPermissionRespond(uint32_t webview_id, uint32_t request_id,
+                                   bool allow) override;
+  std::string MenuSnapshot(int32_t kind, uint32_t id) override;
   bool WebViewRestack(uint32_t window_id,
                       const std::vector<uint32_t>& bottom_to_top) override;
   bool SetWindowBackdrop(uint32_t window_id, int backdrop,
@@ -849,7 +860,7 @@ class WebView2Backend : public LaufeyBackend {
   uint32_t MenuCapabilities() override {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
-           LAUFEY_MENU_CAP_ICONS;
+           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_SNAPSHOT;
   }
   void ShowContextMenuEx(uint32_t window_id, int x, int y,
                          laufey_value_t* menu_template,
@@ -3729,6 +3740,39 @@ bool WebView2Backend::WebViewSetForwardKeys(
   return ok;
 }
 
+int32_t WebView2Backend::WebViewDownloadControl(uint32_t webview_id,
+                                                uint32_t download_id,
+                                                int32_t action,
+                                                const std::string& path) {
+  // SAVE_AS: the save dialog of the window's own "ask" downloads, whose
+  // answer comes back to the UI thread.
+  laufey_child_webview_win::SaveDialogShow show =
+      [this](uint32_t window_id, const laufey_file_dialog_options_t* options,
+             laufey_file_dialog_result_fn callback, void* user_data) {
+        return ShowFileDialog(window_id, options, callback, user_data);
+      };
+  laufey_child_webview_win::UiPost post = [this](std::function<void()> task) {
+    RunOnUiThread(std::move(task));
+  };
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  RunOnUiThreadSync([&] {
+    status = laufey_child_webview_win::DownloadControl(
+        webview_id, download_id, action, path, show, post);
+  });
+  return status;
+}
+
+int32_t WebView2Backend::WebViewPermissionRespond(uint32_t webview_id,
+                                                  uint32_t request_id,
+                                                  bool allow) {
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  RunOnUiThreadSync([&] {
+    status = laufey_child_webview_win::PermissionRespond(webview_id, request_id,
+                                                         allow);
+  });
+  return status;
+}
+
 bool WebView2Backend::WebViewRestack(
     uint32_t /*window_id*/, const std::vector<uint32_t>& bottom_to_top) {
   bool ok = false;
@@ -3954,14 +3998,182 @@ void WebView2Backend::SetApplicationMenu(uint32_t window_id,
     {
       std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
       auto* state = GetWindow(window_id);
-      if (state)
+      if (state) {
         hwnd = state->hwnd;
+        state->app_menu = entries;
+      }
     }
     if (hwnd) {
       win32_menu::SetApplicationMenu(hwnd, *entries, on_click, on_click_data,
                                      window_id);
     }
   });
+}
+
+namespace {
+
+// What menu_snapshot reports of an app menu item beyond the HMENU: the
+// template's id, or the role it was built from.
+struct MenuItemTag {
+  std::string id;
+  std::string role;
+};
+
+// The command ids win32_menu::BuildMenuFromEntries gave `entries`' items, in
+// the order it allocates them (depth first; a role it doesn't know adds no
+// item), checked against the window's command table: `*consistent` turns
+// false when they don't line up (the ids and roles are then left out).
+void TagMenuCommands(const std::vector<laufey_common::MenuEntry>& entries,
+                     const std::map<UINT, std::string>& commands, UINT* next,
+                     std::map<UINT, MenuItemTag>* tags, bool* consistent) {
+  using laufey_common::MenuEntry;
+  for (const MenuEntry& e : entries) {
+    switch (e.kind) {
+      case MenuEntry::Kind::kSeparator:
+        break;
+      case MenuEntry::Kind::kSubmenu:
+        TagMenuCommands(e.children, commands, next, tags, consistent);
+        break;
+      case MenuEntry::Kind::kRole: {
+        auto it = commands.find(*next);
+        if (it != commands.end() && it->second == e.role) {
+          (*tags)[*next] = MenuItemTag{std::string(), e.role};
+          ++*next;
+        }
+        break;
+      }
+      case MenuEntry::Kind::kItem: {
+        auto it = commands.find(*next);
+        if (it == commands.end() || it->second != e.ClickKey())
+          *consistent = false;
+        // Only a template id: an item without one clicks as its label.
+        (*tags)[*next] = MenuItemTag{e.id, std::string()};
+        ++*next;
+        break;
+      }
+    }
+  }
+}
+
+// A menu item's text as menu_snapshot's label: the "&" mnemonic marks
+// removed ("&&" is a literal "&").
+std::string StripMnemonics(const std::wstring& text) {
+  std::wstring out;
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == L'&') {
+      if (i + 1 < text.size() && text[i + 1] == L'&') {
+        out.push_back(L'&');
+        ++i;
+      }
+      continue;
+    }
+    out.push_back(text[i]);
+  }
+  return WideToUtf8(out);
+}
+
+// Reads `menu` (a menu bar or popup) as it is now. UI thread.
+void ReadMenu(HMENU menu, const std::map<UINT, MenuItemTag>& tags, int depth,
+              std::vector<laufey_common::MenuSnapshotItem>* out) {
+  using laufey_common::MenuSnapshotItem;
+  int count = GetMenuItemCount(menu);
+  if (count <= 0 || depth > 16)
+    return;
+  for (int i = 0; i < count; ++i) {
+    MENUITEMINFOW mii = {};
+    mii.cbSize = sizeof(mii);
+    mii.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_STRING;
+    if (!GetMenuItemInfoW(menu, static_cast<UINT>(i), TRUE, &mii))
+      continue;
+    UINT type = mii.fType;
+    UINT state = mii.fState;
+    UINT command = mii.wID;
+    HMENU submenu = mii.hSubMenu;
+    MenuSnapshotItem item;
+    if (type & MFT_SEPARATOR) {
+      item.type = MenuSnapshotItem::Type::kSeparator;
+      out->push_back(std::move(item));
+      continue;
+    }
+    std::wstring text;
+    if (mii.cch > 0) {
+      std::vector<wchar_t> buf(mii.cch + 1, L'\0');
+      MENUITEMINFOW str = {};
+      str.cbSize = sizeof(str);
+      str.fMask = MIIM_STRING;
+      str.dwTypeData = buf.data();
+      str.cch = static_cast<UINT>(buf.size());
+      if (GetMenuItemInfoW(menu, static_cast<UINT>(i), TRUE, &str))
+        text.assign(buf.data(), str.cch);
+    }
+    // The builder appends "\t<accelerator>" (AcceleratorDisplayText, which
+    // writes the Windows key "Win+" where the canonical form has "Super+").
+    size_t tab = text.find(L'\t');
+    if (tab != std::wstring::npos) {
+      std::string accel = WideToUtf8(text.substr(tab + 1));
+      size_t win = accel.find("Win+");
+      if (win != std::string::npos)
+        accel.replace(win, 4, "Super+");
+      item.accelerator = accel;
+      text.resize(tab);
+    }
+    item.label = StripMnemonics(text);
+    item.enabled = (state & (MFS_DISABLED | MFS_GRAYED)) == 0;
+    item.checked = (state & MFS_CHECKED) != 0;
+    if (submenu) {
+      item.type = MenuSnapshotItem::Type::kSubmenu;
+      ReadMenu(submenu, tags, depth + 1, &item.children);
+    } else {
+      auto it = tags.find(command);
+      if (it != tags.end()) {
+        item.id = it->second.id;
+        item.role = it->second.role;
+      }
+    }
+    out->push_back(std::move(item));
+  }
+}
+
+}  // namespace
+
+std::string WebView2Backend::MenuSnapshot(int32_t kind, uint32_t id) {
+  if (kind != LAUFEY_MENU_KIND_APPLICATION)
+    return std::string();
+  std::string json;
+  RunOnUiThreadSync([&] {
+    HWND hwnd = nullptr;
+    std::shared_ptr<const std::vector<laufey_common::MenuEntry>> entries;
+    {
+      std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+      auto* state = GetWindow(id);
+      if (state) {
+        hwnd = state->hwnd;
+        entries = state->app_menu;
+      }
+    }
+    HMENU menu = hwnd && IsWindow(hwnd) ? GetMenu(hwnd) : nullptr;
+    if (!menu)
+      return;
+    std::map<UINT, std::string> commands;
+    {
+      std::lock_guard<std::recursive_mutex> lock(win32_menu::MenuStatesMutex());
+      auto it = win32_menu::GetMenuStates().find(hwnd);
+      if (it != win32_menu::GetMenuStates().end())
+        commands = it->second.command_to_id;
+    }
+    std::map<UINT, MenuItemTag> tags;
+    if (entries) {
+      UINT next = win32_menu::MenuState().next_command_id;
+      bool consistent = true;
+      TagMenuCommands(*entries, commands, &next, &tags, &consistent);
+      if (!consistent)
+        tags.clear();
+    }
+    std::vector<laufey_common::MenuSnapshotItem> items;
+    ReadMenu(menu, tags, 0, &items);
+    json = laufey_common::MenuSnapshotJson(items);
+  });
+  return json;
 }
 
 // ============================================================================
