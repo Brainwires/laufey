@@ -81,8 +81,28 @@ LaufeyHandler* g_handler = nullptr;
 // non-activating panel. UI thread only.
 std::map<uint32_t, bool> g_unrevealed_hidden_windows;
 
+#if defined(__APPLE__)
+// show() of a non-activating panel (LAUFEY_WINDOW_FLAG_NO_ACTIVATE):
+// Chromium's Show() makes the window key and activates the app, so the panel
+// is ordered in through AppKit instead (Chromium's window class follows its
+// own ordering), and the keyboard stays where it was. False for any other
+// window.
+bool ShowNonActivatingCefWindowMac(CefRefPtr<CefWindow> window) {
+  CefWindowHandle handle = window->GetWindowHandle();
+  void* nswindow = handle ? NSWindowForCefHandle(handle) : nullptr;
+  if (!nswindow || !laufey_common::MacIsNonActivatingWindow(nswindow))
+    return false;
+  laufey_common::MacShowWithoutActivating(nswindow);
+  return true;
+}
+#endif
+
 // A window's first show: Chromium's show, then on macOS the launch reveal.
 void RevealCefWindow(CefRefPtr<CefWindow> window, bool no_activate) {
+#if defined(__APPLE__)
+  if (ShowNonActivatingCefWindowMac(window))
+    return;
+#endif
   window->Show();
 #if defined(__APPLE__)
   // Chromium's show activates the app, which macOS 14+ may decline for an
@@ -140,6 +160,10 @@ int CloseLiveWindowsForShutdown(bool even_closing) {
 void LaufeyShowCefWindow(CefRefPtr<CefWindow> window, uint32_t laufey_id) {
   auto it = g_unrevealed_hidden_windows.find(laufey_id);
   if (it == g_unrevealed_hidden_windows.end()) {
+#if defined(__APPLE__)
+    if (ShowNonActivatingCefWindowMac(window))
+      return;
+#endif
     window->Show();
     return;
   }

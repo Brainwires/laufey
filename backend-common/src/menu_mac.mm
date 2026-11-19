@@ -8,9 +8,11 @@
 
 #include "laufey_backend_common.h"
 #include "laufey_menu.h"
+#include "laufey_menu_snapshot.h"
 #include "laufey_ui_tasks.h"
 
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 
 #include <map>
 #include <memory>
@@ -266,6 +268,156 @@ NSMenuItem* CreateRoleMenuItem(const MenuEntry& entry) {
   return item;
 }
 
+// The role a role item was built from (an NSString, read by menu_snapshot).
+const char kMenuItemRoleKey = 0;
+
+// The accelerator an NSMenuItem's key equivalent is: KeyEquivalentFor's
+// mapping read backwards. False for no key equivalent or one laufey never
+// writes.
+bool AcceleratorFromKeyEquivalent(NSString* key, NSEventModifierFlags mask,
+                                  Accelerator* out) {
+  if (!key || key.length != 1)
+    return false;
+  unichar c = [key characterAtIndex:0];
+  Accelerator a;
+  if (mask & NSEventModifierFlagCommand)
+    a.mods |= kModSuper;
+  if (mask & NSEventModifierFlagControl)
+    a.mods |= kModCtrl;
+  if (mask & NSEventModifierFlagOption)
+    a.mods |= kModAlt;
+  if (mask & NSEventModifierFlagShift)
+    a.mods |= kModShift;
+  const bool numpad = (mask & NSEventModifierFlagNumericPad) != 0;
+  if (c >= NSF1FunctionKey && c <= NSF35FunctionKey) {
+    a.kind = KeyKind::kFunction;
+    a.number = static_cast<int>(c - NSF1FunctionKey) + 1;
+  } else if (numpad && c >= '0' && c <= '9') {
+    a.kind = KeyKind::kNumpad;
+    a.named = NamedKey::kNone;
+    a.number = c - '0';
+  } else if (numpad &&
+             (c == '.' || c == '+' || c == '-' || c == '*' || c == '/')) {
+    a.kind = KeyKind::kNumpad;
+    a.named = c == '.'   ? NamedKey::kNumDecimal
+              : c == '+' ? NamedKey::kNumAdd
+              : c == '-' ? NamedKey::kNumSubtract
+              : c == '*' ? NamedKey::kNumMultiply
+                         : NamedKey::kNumDivide;
+  } else if (c >= 'a' && c <= 'z') {
+    a.kind = KeyKind::kLetter;
+    a.ch = static_cast<char>(c - 'a' + 'A');
+  } else if (c >= 'A' && c <= 'Z') {
+    // An upper-case key equivalent means Shift to AppKit.
+    a.kind = KeyKind::kLetter;
+    a.ch = static_cast<char>(c);
+    a.mods |= kModShift;
+  } else if (c >= '0' && c <= '9') {
+    a.kind = KeyKind::kDigit;
+    a.ch = static_cast<char>(c);
+  } else {
+    a.kind = KeyKind::kNamed;
+    switch (c) {
+      case ' ':
+        a.named = NamedKey::kSpace;
+        break;
+      case '\t':
+        a.named = NamedKey::kTab;
+        break;
+      case NSBackspaceCharacter:
+        a.named = NamedKey::kBackspace;
+        break;
+      case NSDeleteFunctionKey:
+        a.named = NamedKey::kDelete;
+        break;
+      case NSInsertFunctionKey:
+        a.named = NamedKey::kInsert;
+        break;
+      case '\r':
+        a.named = NamedKey::kEnter;
+        break;
+      case 0x1b:
+        a.named = NamedKey::kEscape;
+        break;
+      case NSUpArrowFunctionKey:
+        a.named = NamedKey::kUp;
+        break;
+      case NSDownArrowFunctionKey:
+        a.named = NamedKey::kDown;
+        break;
+      case NSLeftArrowFunctionKey:
+        a.named = NamedKey::kLeft;
+        break;
+      case NSRightArrowFunctionKey:
+        a.named = NamedKey::kRight;
+        break;
+      case NSHomeFunctionKey:
+        a.named = NamedKey::kHome;
+        break;
+      case NSEndFunctionKey:
+        a.named = NamedKey::kEnd;
+        break;
+      case NSPageUpFunctionKey:
+        a.named = NamedKey::kPageUp;
+        break;
+      case NSPageDownFunctionKey:
+        a.named = NamedKey::kPageDown;
+        break;
+      case NSPrintScreenFunctionKey:
+        a.named = NamedKey::kPrintScreen;
+        break;
+      default:
+        if (c <= 0x20 || c >= 0x7f)
+          return false;
+        a.kind = KeyKind::kPunct;
+        a.ch = static_cast<char>(c);
+        break;
+    }
+  }
+  *out = a;
+  return true;
+}
+
+// What `menu` holds now, as menu_snapshot reports it.
+std::vector<MenuSnapshotItem> SnapshotNSMenu(NSMenu* menu, int depth) {
+  std::vector<MenuSnapshotItem> out;
+  if (!menu || depth > 16)
+    return out;
+  for (NSMenuItem* item in [menu itemArray]) {
+    MenuSnapshotItem s;
+    if ([item isSeparatorItem]) {
+      s.type = MenuSnapshotItem::Type::kSeparator;
+      s.visible = ![item isHidden];
+      out.push_back(std::move(s));
+      continue;
+    }
+    NSString* title = [item title];
+    s.label = title ? std::string([title UTF8String] ?: "") : std::string();
+    s.enabled = [item isEnabled];
+    s.checked = [item state] == NSControlStateValueOn;
+    s.visible = ![item isHidden];
+    id rep = [item representedObject];
+    if ([rep isKindOfClass:[LaufeyCommonMenuItem class]]) {
+      NSString* item_id = [(LaufeyCommonMenuItem*)rep itemId];
+      if (item_id)
+        s.id = [item_id UTF8String] ?: "";
+    }
+    id role = objc_getAssociatedObject(item, &kMenuItemRoleKey);
+    if ([role isKindOfClass:[NSString class]])
+      s.role = [(NSString*)role UTF8String] ?: "";
+    Accelerator accel;
+    if (AcceleratorFromKeyEquivalent([item keyEquivalent],
+                                     [item keyEquivalentModifierMask], &accel))
+      s.accelerator = CanonicalAccelerator(accel);
+    if ([item hasSubmenu]) {
+      s.type = MenuSnapshotItem::Type::kSubmenu;
+      s.children = SnapshotNSMenu([item submenu], depth + 1);
+    }
+    out.push_back(std::move(s));
+  }
+  return out;
+}
+
 NSString* NSStr(const std::string& s) {
   NSString* r = [NSString stringWithUTF8String:s.c_str()];
   return r ? r : @"";
@@ -291,8 +443,12 @@ NSMenu* BuildNSMenuFromEntries(const std::vector<MenuEntry>& entries,
         continue;
       case MenuEntry::Kind::kRole: {
         NSMenuItem* roleItem = CreateRoleMenuItem(e);
-        if (roleItem)
+        if (roleItem) {
+          // menu_snapshot reports the role an item was built from.
+          objc_setAssociatedObject(roleItem, &kMenuItemRoleKey, NSStr(e.role),
+                                   OBJC_ASSOCIATION_COPY_NONATOMIC);
           [menu addItem:roleItem];
+        }
         continue;
       }
       case MenuEntry::Kind::kSubmenu: {
@@ -380,6 +536,20 @@ NSMenu* BuildNSMenuFromValue(laufey_value_t* val,
     return nil;
   return BuildNSMenuFromEntries(ParseMenuTemplate(val, api, true), on_click,
                                 on_click_data, window_id);
+}
+
+std::string MenuSnapshotMac(int32_t kind) {
+  __block std::string json;
+  RunOnMainSync(^{
+    NSMenu* menu = nil;
+    if (kind == LAUFEY_MENU_KIND_APPLICATION)
+      menu = [NSApp mainMenu];
+    else if (kind == LAUFEY_MENU_KIND_DOCK)
+      menu = GetDockMenuMac();
+    if (menu)
+      json = MenuSnapshotJson(SnapshotNSMenu(menu, 0));
+  });
+  return json;
 }
 
 void RegisterWindowMenuMac(uint32_t window_id, NSMenu* menu) {

@@ -293,9 +293,23 @@ void MacRevealWindowAtLaunch(void* nswindow);
 // (on quit, or on switching back to Accessory), and macOS has no opt-out.
 // `-[NSApp activate]` (macOS 14+) only asks for activation cooperatively and
 // often leaves an Accessory app's window behind the active app, so this uses
-// the deprecated `activateIgnoringOtherApps:`. A non-activating panel is made
-// key and ordered front without activating the app. Main thread only.
+// the deprecated `activateIgnoringOtherApps:`. A non-activating window
+// (MacIsNonActivatingWindow) is made key and ordered front without
+// activating the app. Main thread only.
 void MacFocusWindow(void* nswindow);
+// Non-activating windows (LAUFEY_WINDOW_FLAG_NO_ACTIVATE): the WebView
+// backend's are NSPanels with NSWindowStyleMaskNonactivatingPanel; CEF's are
+// Chromium's own NSWindow class, which can't take that style, so the CEF
+// backend marks them with MacMarkNonActivatingWindow when it configures them.
+// Main thread only.
+void MacMarkNonActivatingWindow(void* nswindow);
+bool MacIsNonActivatingWindow(void* nswindow);
+// show() of a non-activating window: ordered in, in front of the other
+// windows of its level whatever app is active, and never made key, so the
+// keyboard stays where it was (in another app, or in another window of this
+// one). The same as creating it shown. focus() is how it takes the keyboard
+// (MacFocusWindow: key, without activating the app). Main thread only.
+void MacShowWithoutActivating(void* nswindow);
 // Whether closing the last window should end the loop on macOS:
 // ShouldEndLoopAfterLastWindow(), except that an Accessory-policy app
 // (set_dock_visible(false)) keeps running unless it is quitting.

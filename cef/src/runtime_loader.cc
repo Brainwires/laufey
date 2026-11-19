@@ -1084,27 +1084,37 @@ static void Backend_Focus(void* data, uint32_t window_id) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
   CefRefPtr<CefBrowser> browser = loader->GetBrowserForWindow(window_id);
   if (browser) {
-    CefPostTask(TID_UI,
-                base::BindOnce(
-                    [](CefRefPtr<CefBrowser> b, uint32_t wid) {
-                      auto browser_view = CefBrowserView::GetForBrowser(b);
-                      if (browser_view) {
-                        auto window = browser_view->GetWindow();
-                        if (window) {
-                          LaufeyShowCefWindow(window, wid);
-                          window->Activate();
+    CefPostTask(
+        TID_UI,
+        base::BindOnce(
+            [](CefRefPtr<CefBrowser> b, uint32_t wid) {
+              auto browser_view = CefBrowserView::GetForBrowser(b);
+              if (browser_view) {
+                auto window = browser_view->GetWindow();
+                if (window) {
+                  LaufeyShowCefWindow(window, wid);
 #if defined(__APPLE__)
-                          // As the WKWebView backend: activate
-                          // ignoring other apps, never through the
-                          // activation policy, so an Accessory
-                          // app's window comes to the front.
-                          laufey_common::MacFocusWindow(
-                              NSWindowForCefHandle(window->GetWindowHandle()));
+                  // Chromium's Activate() activates the app: a
+                  // non-activating panel only becomes key
+                  // (MacFocusWindow below).
+                  if (!laufey_common::MacIsNonActivatingWindow(
+                          NSWindowForCefHandle(window->GetWindowHandle())))
+                    window->Activate();
+#else
+                  window->Activate();
 #endif
-                        }
-                      }
-                    },
-                    browser, window_id));
+#if defined(__APPLE__)
+                  // As the WKWebView backend: activate
+                  // ignoring other apps, never through the
+                  // activation policy, so an Accessory
+                  // app's window comes to the front.
+                  laufey_common::MacFocusWindow(
+                      NSWindowForCefHandle(window->GetWindowHandle()));
+#endif
+                }
+              }
+            },
+            browser, window_id));
   }
 }
 
@@ -3728,15 +3738,12 @@ static int32_t Backend_WebViewPermissionRespond(void* /*data*/,
   return status;
 }
 
-#if defined(__APPLE__)
-extern std::string Backend_MenuSnapshot_Mac(int32_t kind, uint32_t id);
-#endif
-
 // menu_snapshot (API 59). macOS reads AppKit's menus (runtime_loader_mac.mm);
 // Windows and Linux have no read-back of the Views menu bar yet.
 static char* Backend_MenuSnapshot(void* /*data*/, int32_t kind, uint32_t id) {
 #if defined(__APPLE__)
-  return CopyJsonOrNull(Backend_MenuSnapshot_Mac(kind, id));
+  (void)id;
+  return CopyJsonOrNull(laufey_common::MenuSnapshotMac(kind));
 #else
   (void)kind;
   (void)id;
@@ -4139,7 +4146,7 @@ void RuntimeLoader::InitializeBackendApi() {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
            LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
-           LAUFEY_MENU_CAP_DESTRUCTIVE;
+           LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT;
   };
   backend_api_.test_trigger_menu_accelerator =
       [](void*, uint32_t window_id, const char* accelerator) -> bool {

@@ -336,6 +336,14 @@ void SetDockMenuMac(NSMenu* menu);
 NSMenu* GetDockMenuMac();
 #endif
 
+// menu_snapshot (API 59) on macOS, both backends: the JSON
+// (laufey_menu_snapshot.h) of what AppKit holds now for
+// LAUFEY_MENU_KIND_APPLICATION (NSApp.mainMenu: the bar the OS shows, the
+// items laufey and AppKit added included) or LAUFEY_MENU_KIND_DOCK (the menu
+// applicationDockMenu: hands the Dock), or "" when there is none or the kind
+// is unknown. Any thread (it waits for the main thread).
+std::string MenuSnapshotMac(int32_t kind);
+
 // Stores the dock-reopen handler set by Backend_SetDockReopenHandler_Mac /
 // WKWebViewBackend::SetDockReopenHandler. AppDelegate calls
 // FireDockReopenMac() from applicationShouldHandleReopen:hasVisibleWindows:.
@@ -399,9 +407,9 @@ void RegisterWindowMenuMac(uint32_t window_id, NSMenu* menu);
 // Gives `menubar` a Close Window item (Cmd+W, performClose:, which asks the
 // key window's close handler as its close button does) unless it already has
 // one: an item that sends performClose: (the "close" role does), or any item
-// whose key equivalent is plain Cmd+W (the app's own Cmd+W wins). It goes at the end of a "File" submenu, else at the top of
-// a "Window" submenu, else in a new "Window" submenu. Main thread. Returns
-// whether it added one.
+// whose key equivalent is plain Cmd+W (the app's own Cmd+W wins). It goes at
+// the end of a "File" submenu, else at the top of a "Window" submenu, else in a
+// new "Window" submenu. Main thread. Returns whether it added one.
 bool EnsureCloseWindowItem(NSMenu* menubar);
 #endif
 
@@ -528,8 +536,8 @@ bool TestTriggerMenuAcceleratorGtk(GtkWidget* window, const char* accelerator);
 // indicator's menu — so on that path SetTrayClickHandlerLinux and
 // SetTrayDoubleClickHandlerLinux accept handlers for API symmetry but
 // don't surface clicks back (platform_features() reports "trayClicks":
-// false). The StatusNotifierItem path (API 50, below) reports them. The tooltip is the indicator's title, which StatusNotifier hosts
-// show on hover.
+// false). The StatusNotifierItem path (API 50, below) reports them. The tooltip
+// is the indicator's title, which StatusNotifier hosts show on hover.
 
 // Whether the appindicator library loads (loads it once). Any thread.
 bool AppIndicatorLibraryAvailableLinux();

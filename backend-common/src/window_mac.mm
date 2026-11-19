@@ -819,11 +819,44 @@ void MacRevealWindowAtLaunch(void* nswindow) {
   [w orderFrontRegardless];
 }
 
+namespace {
+const char kNonActivatingKey = 0;
+}  // namespace
+
+void MacMarkNonActivatingWindow(void* nswindow) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w)
+    return;
+  objc_setAssociatedObject(w, &kNonActivatingKey, @YES,
+                           OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+bool MacIsNonActivatingWindow(void* nswindow) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w)
+    return false;
+  if ([w styleMask] & NSWindowStyleMaskNonactivatingPanel)
+    return true;
+  return objc_getAssociatedObject(w, &kNonActivatingKey) != nil;
+}
+
+void MacShowWithoutActivating(void* nswindow) {
+  NSWindow* w = (__bridge NSWindow*)nswindow;
+  if (!w)
+    return;
+  // -orderWindow:relativeTo: is the ordering primitive a window class may
+  // override to follow its own visibility (Chromium's does);
+  // -orderFrontRegardless then puts it in front of its level's windows while
+  // another app is active. Neither makes the window key.
+  [w orderWindow:NSWindowAbove relativeTo:0];
+  [w orderFrontRegardless];
+}
+
 void MacFocusWindow(void* nswindow) {
   NSWindow* w = (__bridge NSWindow*)nswindow;
   if (!w)
     return;
-  if (!([w styleMask] & NSWindowStyleMaskNonactivatingPanel)) {
+  if (!MacIsNonActivatingWindow(nswindow)) {
     // Never through the activation policy: see laufey_window.h.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"

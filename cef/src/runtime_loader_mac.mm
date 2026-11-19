@@ -127,6 +127,8 @@ void ConfigureNSWindowAsPanelForCefHandle(void* cef_handle) {
     auto prevent = reinterpret_cast<PreventsActivationFn>(objc_msgSend);
     prevent(nswindow, prevent_sel, YES);
   }
+  // show() and focus() treat it as the WebView backend's NSPanel.
+  laufey_common::MacMarkNonActivatingWindow((__bridge void*)nswindow);
 }
 
 void ConfigureNSWindowTransparentTitlebarForCefHandle(void* cef_handle) {

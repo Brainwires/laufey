@@ -208,6 +208,10 @@ pub async fn run(w: &Window, title: &str) {
     if accessory {
       mac_accessory_focus(w, title).await;
     }
+    #[cfg(target_os = "macos")]
+    if backend != "winit" {
+      mac_panel_keeps_the_keyboard(w, title).await;
+    }
     laufey::set_activation_policy(laufey::LAUFEY_ACTIVATION_POLICY_REGULAR);
     let regular = wait_for(
       || {
@@ -474,6 +478,184 @@ async fn mac_accessory_focus(w: &Window, title: &str) {
   );
 }
 
+/// A non-activating panel (`no_activate`) created hidden: show() orders it
+/// in without making it key (the keyboard stays in the window that had it),
+/// as creating it shown does; focus() then makes it key without activating
+/// the app; hiding and showing it again still takes no key. And
+/// set_visible_on_all_workspaces(false) takes the panel's built-in
+/// join-all-Spaces behaviour away (true puts it back).
+#[cfg(target_os = "macos")]
+async fn mac_panel_keeps_the_keyboard(w: &Window, title: &str) {
+  use laufey::WindowOptions;
+  const PANEL: &str = "native-e2e-overlay-panel";
+  // NSWindowCollectionBehaviorCanJoinAllSpaces.
+  const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+
+  // The main window key first, where the session lets the app be active.
+  w.focus();
+  let t = title.to_string();
+  let main_key = wait_for_ui(move || {
+    mac::app_active() && mac::window_flag(&t, c"isKeyWindow") == Some(true)
+  })
+  .await;
+  let was_active = laufey::spawn_on_ui_thread(mac::app_active)
+    .await
+    .unwrap_or(false);
+
+  let panel = Window::new_with_options(
+    240,
+    160,
+    WindowOptions {
+      frameless: true,
+      no_activate: true,
+      hidden: true,
+      ..WindowOptions::default()
+    },
+  )
+  .title(PANEL);
+  panel.set_position(80, 120);
+  let exists =
+    wait_for_ui(|| mac::window_flag(PANEL, c"isVisible").is_some()).await;
+  check("macOS: a hidden non-activating panel exists", exists);
+  if !exists {
+    panel.close();
+    return;
+  }
+  check(
+    "macOS: a panel created hidden is not visible",
+    laufey::spawn_on_ui_thread(|| mac::window_flag(PANEL, c"isVisible"))
+      .await
+      .ok()
+      .flatten()
+      == Some(false),
+  );
+
+  // show(): visible, never key, the app's activation unchanged.
+  panel.show();
+  let shown =
+    wait_for_ui(|| mac::window_flag(PANEL, c"isVisible") == Some(true)).await;
+  check("macOS: show() orders a hidden panel in", shown);
+  // Give a wrongly taken key status time to arrive before reading it.
+  tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+  let t = title.to_string();
+  let (panel_key, main_still_key, active) =
+    laufey::spawn_on_ui_thread(move || {
+      (
+        mac::window_flag(PANEL, c"isKeyWindow"),
+        mac::window_flag(&t, c"isKeyWindow"),
+        mac::app_active(),
+      )
+    })
+    .await
+    .unwrap_or((None, None, false));
+  check(
+    "macOS: show() does not make a non-activating panel key",
+    panel_key == Some(false),
+  );
+  if main_key {
+    check(
+      "macOS: the window that had the keyboard keeps it when a panel shows",
+      main_still_key == Some(true),
+    );
+  } else {
+    na("macOS: the key window keeps the keyboard (the session never made the app active)");
+  }
+  check(
+    "macOS: show() of a panel leaves the app's activation as it was",
+    active == was_active,
+  );
+
+  // set_visible_on_all_workspaces: the panel joins every Space by default.
+  let behaviour = || async {
+    laufey::spawn_on_ui_thread(|| mac::collection_behavior(PANEL))
+      .await
+      .ok()
+      .flatten()
+  };
+  check(
+    "macOS: a non-activating panel joins all Spaces by default",
+    behaviour().await.map(|b| b & CAN_JOIN_ALL_SPACES)
+      == Some(CAN_JOIN_ALL_SPACES),
+  );
+  check(
+    "macOS: set_visible_on_all_workspaces(false) is accepted for a panel",
+    panel.set_visible_on_all_workspaces(false, false),
+  );
+  let left = wait_for_ui(|| {
+    mac::collection_behavior(PANEL).map(|b| b & CAN_JOIN_ALL_SPACES) == Some(0)
+  })
+  .await;
+  check(
+    "macOS: set_visible_on_all_workspaces(false) undoes the panel's join-all-Spaces",
+    left,
+  );
+  panel.set_visible_on_all_workspaces(true, false);
+  let joined = wait_for_ui(|| {
+    mac::collection_behavior(PANEL).map(|b| b & CAN_JOIN_ALL_SPACES)
+      == Some(CAN_JOIN_ALL_SPACES)
+  })
+  .await;
+  check(
+    "macOS: set_visible_on_all_workspaces(true) joins all Spaces again",
+    joined,
+  );
+
+  // focus(): key, without activating the app.
+  panel.focus();
+  let key =
+    wait_for_ui(|| mac::window_flag(PANEL, c"isKeyWindow") == Some(true)).await;
+  check("macOS: focus() makes a non-activating panel key", key);
+  let active_after = laufey::spawn_on_ui_thread(mac::app_active)
+    .await
+    .unwrap_or(false);
+  if was_active {
+    na("macOS: focus() on a panel does not activate the app (the app was already active)");
+  } else {
+    check(
+      "macOS: focus() on a panel does not activate the app",
+      !active_after,
+    );
+  }
+
+  // Hidden and shown again: still no key (the keyboard goes back to the
+  // main window with focus(), then the panel's show() must leave it there).
+  panel.hide();
+  let hidden =
+    wait_for_ui(|| mac::window_flag(PANEL, c"isVisible") == Some(false)).await;
+  check("macOS: hide() orders the panel out", hidden);
+  w.focus();
+  let t = title.to_string();
+  let main_key_again = wait_for_ui(move || {
+    mac::app_active() && mac::window_flag(&t, c"isKeyWindow") == Some(true)
+  })
+  .await;
+  panel.show();
+  let shown_again =
+    wait_for_ui(|| mac::window_flag(PANEL, c"isVisible") == Some(true)).await;
+  check("macOS: show() orders the panel in again", shown_again);
+  tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+  check(
+    "macOS: a second show() does not make the panel key either",
+    laufey::spawn_on_ui_thread(|| mac::window_flag(PANEL, c"isKeyWindow"))
+      .await
+      .ok()
+      .flatten()
+      == Some(false),
+  );
+  if main_key_again {
+    let t = title.to_string();
+    check(
+      "macOS: the main window is still key after the panel's second show()",
+      laufey::spawn_on_ui_thread(move || mac::window_flag(&t, c"isKeyWindow"))
+        .await
+        .ok()
+        .flatten()
+        == Some(true),
+    );
+  }
+  panel.close();
+}
+
 // Only the macOS checks poll the UI thread.
 #[cfg(target_os = "macos")]
 async fn wait_for_ui(
@@ -606,6 +788,12 @@ pub(crate) mod mac {
   pub fn window_flag(title: &str, getter: &CStr) -> Option<bool> {
     let window = window_titled(title)?;
     Some(unsafe { send_bool(window, getter) })
+  }
+
+  /// `-[NSWindow collectionBehavior]` of the window titled `title`.
+  pub fn collection_behavior(title: &str) -> Option<usize> {
+    let window = window_titled(title)?;
+    Some(unsafe { send_usize(window, c"collectionBehavior") })
   }
 
   /// `-[NSWindow alphaValue]` of the window titled `title`.

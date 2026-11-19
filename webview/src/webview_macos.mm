@@ -271,7 +271,10 @@ class WKWebViewBackend : public LaufeyBackend {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
            LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
-           LAUFEY_MENU_CAP_DESTRUCTIVE;
+           LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT;
+  }
+  std::string MenuSnapshot(int32_t kind, uint32_t /*id*/) override {
+    return laufey_common::MenuSnapshotMac(kind);
   }
   void ShowContextMenuEx(uint32_t window_id, int x, int y,
                          laufey_value_t* menu_template,
@@ -3681,9 +3684,11 @@ void WKWebViewBackend::Show(uint32_t window_id) {
       if (!win)
         return;
       laufey_common::MacRestoreFromInvisibleHide((__bridge void*)win);
-      if ([win styleMask] & NSWindowStyleMaskNonactivatingPanel) {
-        // A tray / menu-bar panel never activates the app.
-        [win makeKeyAndOrderFront:nil];
+      if (laufey_common::MacIsNonActivatingWindow((__bridge void*)win)) {
+        // A non-activating panel never activates the app and never takes
+        // the keyboard by being shown, as when it is created shown; focus()
+        // is how it becomes key.
+        laufey_common::MacShowWithoutActivating((__bridge void*)win);
       } else {
         // The reveal of a window created hidden (Deno Desktop shows its
         // first window once the page has loaded): at launch it must come
