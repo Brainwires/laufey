@@ -6,6 +6,8 @@
 
 #include "laufey_webview.h"
 
+#include "laufey_menu_snapshot.h"
+
 #include <clocale>
 #include <cstdio>
 #include <cstdlib>
@@ -778,8 +780,52 @@ static void TestPermissionJson() {
   EXPECT(WebViewOriginOf("").empty());
 }
 
+static const char kMenuSnapshotJson[] =
+    R"([{"type":"submenu","label":"File","enabled":true,"checked":false,)"
+    R"("visible":true,"submenu":[{"type":"item","label":"Open \"it\"",)"
+    R"("id":"open","enabled":false,"checked":true,"visible":true,)"
+    R"("accelerator":"Cmd+O"},{"type":"separator","label":"",)"
+    R"("enabled":true,"checked":false,"visible":true},{"type":"item",)"
+    R"("label":"Quit","role":"quit","enabled":true,"checked":false,)"
+    R"("visible":false}]}])";
+
+static void TestMenuSnapshotJson() {
+  using Item = MenuSnapshotItem;
+  EXPECT(MenuSnapshotJson({}) == "[]");
+  Item open;
+  open.label = "Open \"it\"";
+  open.id = "open";
+  open.enabled = false;
+  open.checked = true;
+  open.accelerator = "Cmd+O";
+  Item sep;
+  sep.type = Item::Type::kSeparator;
+  Item quit;
+  quit.label = "Quit";
+  quit.role = "quit";
+  quit.visible = false;
+  Item file;
+  file.type = Item::Type::kSubmenu;
+  file.label = "File";
+  file.children = {open, sep, quit};
+  EXPECT(MenuSnapshotJson({file}) == kMenuSnapshotJson);
+  EXPECT(LAUFEY_MENU_CAP_SNAPSHOT == (1u << 7));
+  EXPECT(LAUFEY_MENU_KIND_APPLICATION == 0 && LAUFEY_MENU_KIND_DOCK == 1);
+  // A menu that contains itself ends.
+  Item deep;
+  deep.type = Item::Type::kSubmenu;
+  for (int i = 0; i < 40; ++i) {
+    Item outer;
+    outer.type = Item::Type::kSubmenu;
+    outer.children = {deep};
+    deep = outer;
+  }
+  EXPECT(MenuSnapshotJson({deep}).size() < 4096);
+}
+
 int main() {
   TestAbiNumbers();
+  TestMenuSnapshotJson();
   TestAppDecidedOptions();
   TestDownloadJson();
   TestDownloadActions();
