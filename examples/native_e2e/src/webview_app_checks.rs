@@ -30,9 +30,10 @@ use crate::{check, na};
 
 const PAGE: &str = "<!doctype html><title>webview-app</title><p>app</p>";
 const SMALL: &str = "laufey-dl!\n";
-/// The slow attachment: 64 chunks of 64 KiB, one every 100 ms.
-const SLOW_CHUNK: usize = 64 * 1024;
-const SLOW_CHUNKS: usize = 64;
+/// The slow attachment: 400 chunks of 16 KiB, one every 100 ms (40 s: a
+/// pause, a resume and a cancel all land well before its end).
+const SLOW_CHUNK: usize = 16 * 1024;
+const SLOW_CHUNKS: usize = 400;
 
 fn serve() -> Option<String> {
   let listener = TcpListener::bind("127.0.0.1:0").ok()?;
@@ -160,6 +161,17 @@ fn states_of(events: &Events, id: u32) -> Vec<String> {
     .filter(|d| id_of(d) == id)
     .filter_map(|d| d["state"].as_str().map(str::to_string))
     .collect()
+}
+
+/// `path` as a DOWNLOAD event reports it: a canonicalized Windows path
+/// without its `\\?\` prefix, which laufey takes off before the engine
+/// gets the path.
+fn reported(path: &Path) -> String {
+  let text = path.to_string_lossy();
+  match text.strip_prefix(r"\\?\") {
+    Some(rest) => rest.to_string(),
+    None => text.into_owned(),
+  }
 }
 
 async fn gone(path: &Path, secs: u64) -> bool {
@@ -340,7 +352,7 @@ async fn downloads(w: &Window, base: &str) {
   if let Some(completed) = &completed {
     check(
       "completed reports the path and the size",
-      completed["path"].as_str() == Some(&*target.to_string_lossy())
+      completed["path"].as_str() == Some(&*reported(&target))
         && completed["receivedBytes"].as_u64() == Some(SMALL.len() as u64)
         && completed["url"] == requested["url"]
         && completed["filename"] == requested["filename"],
@@ -432,7 +444,7 @@ async fn downloads(w: &Window, base: &str) {
     check(
       "a download in progress reports received bytes and its path",
       progressed.as_ref().is_some_and(|d| {
-        d["path"].as_str() == Some(&*slow.to_string_lossy())
+        d["path"].as_str() == Some(&*reported(&slow))
           && d["receivedBytes"].as_u64().unwrap_or(0)
             < (SLOW_CHUNK * SLOW_CHUNKS) as u64
       }),
