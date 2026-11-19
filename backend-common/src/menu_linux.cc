@@ -50,6 +50,16 @@ void DestroyGtkMenuCallbackData(gpointer user_data, GClosure* /*closure*/) {
   delete static_cast<GtkMenuCallbackData*>(user_data);
 }
 
+// menu_snapshot (API 59) reads these back (webview_linux.cc): a custom
+// item's id (only when the template had one: the click key falls back to the
+// label), the role a role item was built from, and the accelerator the item
+// shows, as AcceleratorDisplayText spells it.
+void TagItem(GtkWidget* item, const char* key, const std::string& value) {
+  if (!value.empty())
+    g_object_set_data_full(G_OBJECT(item), key, g_strdup(value.c_str()),
+                           g_free);
+}
+
 GdkModifierType GdkModsFor(const Accelerator& a) {
   int mods = 0;
   if (a.mods & kModCtrl)
@@ -163,6 +173,7 @@ void ShowAccelerator(GtkWidget* item, const MenuEntry& e,
   guint key = AcceleratorKeysym(e.accel);
   if (!key)
     return;
+  TagItem(item, "laufey-menu-accelerator", AcceleratorDisplayText(e.accel));
   GdkModifierType mods = GdkModsFor(e.accel);
   if (accel_group && e.enabled && gtk_accelerator_valid(key, mods)) {
     // Bound on the window: GtkWindow activates accelerators before the
@@ -197,6 +208,7 @@ GtkWidget* Build(const std::vector<MenuEntry>& entries, uint32_t window_id,
         if (!label)
           break;
         GtkWidget* item = gtk_menu_item_new_with_label(label);
+        TagItem(item, "laufey-menu-role", e.role);
         ConnectClick(item, on_click, on_click_data, window_id, e.role, false);
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
         break;
@@ -212,6 +224,7 @@ GtkWidget* Build(const std::vector<MenuEntry>& entries, uint32_t window_id,
       case MenuEntry::Kind::kItem: {
         GtkWidget* item = NewItem(e);
         ApplyDestructive(item, e);
+        TagItem(item, "laufey-menu-id", e.id);
         const std::string& key = e.ClickKey();
         ConnectClick(item, on_click, on_click_data, window_id, key, e.checked);
         RegisterMenuClick(key, on_click, on_click_data, window_id);
