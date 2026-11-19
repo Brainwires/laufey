@@ -631,6 +631,28 @@ behind the active app's, which is why `focus()` keeps the older call. A
 non-activating panel is made key and ordered front without activating the app.
 On Windows and Linux `focus()` is unchanged.
 
+### Non-activating panels on macOS
+
+A `no_activate` window (a tray popover, a floating companion) never takes the
+keyboard by being shown: `show()` on a hidden panel orders it in front of its
+level's windows and leaves the key window, and the active app, as they were,
+exactly as creating the panel shown does. (Before laufey 0.9.0 `show()` made a
+hidden panel key, so text typed in another app went to the panel.) A panel that
+should take typing calls `focus()`: it becomes key, the app is not activated,
+and the app that was active stays active. A tray popover therefore calls
+`show()` then `focus()`; an overlay that only displays calls `show()` alone.
+
+This holds on both backends. On WKWebView the panel is an `NSPanel` with
+`NSWindowStyleMaskNonactivatingPanel`. On CEF it is Chromium's own window class,
+which cannot take that style: laufey marks it, orders it in through AppKit
+instead of Chromium's `Show()` (which makes a window key and activates the app),
+and skips Chromium's `Activate()` in `focus()`.
+
+A panel joins every Space by default
+(`NSWindowCollectionBehaviorCanJoinAllSpaces`).
+`set_visible_on_all_workspaces(false, …)` takes that away, so the panel stays on
+the Space it was shown on; `true` puts it back.
+
 A tray app should stay Accessory for good and open its windows with `focus()`,
 never by switching to Regular first: see
 [Tray apps and the Dock's recent apps](dock-taskbar.md#tray-apps-and-the-docks-recent-apps).

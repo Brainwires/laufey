@@ -109,6 +109,66 @@ another menu replaces it). Windows and Linux have no app menu bar (a menu bar
 belongs to its window), so it returns `false` there and on Winit: set the menu
 on each window instead.
 
+## Reading a menu back (API 59)
+
+`laufey::menu_snapshot(MenuKind::Application { window_id })` (C ABI:
+`menu_snapshot`, `LAUFEY_MENU_CAP_SNAPSHOT`) returns the application menu as the
+native menu objects hold it now, as a JSON array, so a self-test can check what
+the OS was actually given, including what laufey or the OS added (on macOS the
+Edit submenu and Close Window):
+
+```json
+[{
+  "type": "submenu",
+  "label": "File",
+  "enabled": true,
+  "checked": false,
+  "visible": true,
+  "submenu": [
+    {
+      "type": "item",
+      "label": "Open",
+      "id": "open",
+      "enabled": true,
+      "checked": false,
+      "visible": true,
+      "accelerator": "Super+O"
+    },
+    {
+      "type": "separator",
+      "label": "",
+      "enabled": true,
+      "checked": false,
+      "visible": true
+    },
+    {
+      "type": "item",
+      "label": "Quit",
+      "role": "quit",
+      "enabled": true,
+      "checked": false,
+      "visible": true,
+      "accelerator": "Super+Q"
+    }
+  ]
+}]
+```
+
+`accelerator` is the canonical form (`Ctrl+Alt+Shift+Super+<Key>`, Command being
+`Super`). `id` is a custom item's id; `role` the role an item was built from.
+`None` means there is no such menu or the backend has no read-back.
+
+| Backend          | What is read                                                                                                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS (both)     | the `NSMenu` the window installs as the main menu while it is key (`window_id` 0: `NSApp.mainMenu`, the bar as it is now); key equivalents read back as accelerators |
+| Windows WebView2 | the window's `HMENU` (`GetMenuItemInfoW`); the `\t` suffix of an item's text is its accelerator; ids and roles from the template the menu was built from             |
+| Linux WebKitGTK  | the window's `GtkMenuBar` widgets (label, sensitive, visible, check state); ids, roles and accelerators from data the builder attaches to each item                  |
+| CEF (Win, Linux) | the Views menu bar's buttons and the `CefMenuModel` each one drops; ids and roles from the template                                                                  |
+| Winit            | none                                                                                                                                                                 |
+
+`MenuKind::Dock` reads the Dock menu (macOS): see
+[dock-taskbar.md](dock-taskbar.md).
+
 ## The context menu's close callback
 
 `Window::show_context_menu_with_close` (C ABI: `show_context_menu_ex`, API 41)

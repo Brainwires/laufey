@@ -92,25 +92,105 @@ A web view is a browsing context of its own:
 
 ## Popups, downloads and permissions
 
-| Option        | Values                                                                                                                                                                     |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `allowPopups` | `"same-view"` (default): the popup's URL loads in the view. `"browser"`: it opens in the OS browser. `"deny"`: nothing opens and a `NEW_WINDOW` event says what was asked. |
-| `downloads`   | `"deny"` (default), `"ask"` (a save panel; WebView2's own download UI), `"browser"` (the URL opens in the OS browser).                                                     |
-| `permissions` | `"deny"` (default: refused without a prompt), `"ask"` (the engine's prompt, or a message dialog naming the origin on CEF and WebKitGTK).                                   |
+| Option        | Values                                                                                                                                                                      |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allowPopups` | `"same-view"` (default): the popup's URL loads in the view. `"browser"`: it opens in the OS browser. `"deny"`: nothing opens and a `NEW_WINDOW` event says what was asked.  |
+| `downloads`   | `"deny"` (default), `"ask"` (a save panel; WebView2's own download UI), `"browser"` (the URL opens in the OS browser), `"app"` (API 59: the app decides, below).            |
+| `permissions` | `"deny"` (default: refused without a prompt), `"ask"` (the engine's prompt, or a message dialog naming the origin on CEF and WebKitGTK), `"app"` (API 59: the app answers). |
 
 No second view is ever created for a popup: the page's `window.open()` returns
 `null`.
+
+## Downloads the app decides (API 59)
+
+With `"downloads": "app"` (`LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS`) the view shows
+no download UI and writes nothing by itself. Each download is a series of
+`DOWNLOAD` events with one `id`:
+
+```rust
+use laufey::{DownloadAction, WebViewEventKind};
+
+let view = create_webview(window.id(), &options, move |event| {
+  if event.kind == WebViewEventKind::Download {
+    // {"id": 7, "state": "requested", "url": "...", "filename": "report.pdf",
+    //  "mimeType": "application/pdf", "totalBytes": 48213, "receivedBytes": 0}
+    println!("{}", event.detail_json);
+  }
+})?;
+view.download_control(7, DownloadAction::Save("/Users/me/Downloads/report.pdf"))?;
+```
+
+- `"requested"` is the first event. The download waits until the app answers
+  with `download_control`: `Save(path)` (an absolute path whose directory
+  exists; a regular file there is replaced; a directory or a symbolic link is
+  refused), `SaveAs` (the OS save panel, as `"ask"`; dismissing it cancels the
+  download) or `Cancel`.
+- `"progressing"` then repeats, at most five a second per download, with
+  `receivedBytes`, `totalBytes` where known and `path`.
+- `"completed"`, `"cancelled"` and `"interrupted"` end it. An interrupted
+  download whose `canResume` is true waits for `Resume` or `Cancel`.
+- `Pause` / `Resume` work where `LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE` is reported.
+- `filename` is always a bare, sanitized file name (`SanitizeDownloadFileName`):
+  the page and the server only propose a name, never a path.
+- Closing the view cancels its downloads; their `"cancelled"` events come before
+  `CLOSED`. At most `LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS` (16) may wait for an
+  answer in one view; one more is cancelled without an event.
+- A download that did not complete leaves no file at its path.
+
+An engine without the capability refuses the option (`LAUFEY_WEBVIEW_INVALID`)
+rather than fall back to its default.
+
+| Engine    | Events from                                                                                           | Pause / resume                                                                              | Notes                                                                                                                                                                                                                                    |
+| --------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CEF       | `CefDownloadHandler` (`OnBeforeDownload`, `OnDownloadUpdated`)                                        | yes (`CefDownloadItemCallback::Pause` / `Resume`); `canResume` follows the interrupt reason | Chromium starts receiving into a temporary file of its own while the download waits for the app, and deletes it on cancel; nothing is written to a path the app did not choose. A cancel after `Save` also removes what was at the path. |
+| WKWebView | `WKDownloadDelegate` (macOS 11.3+); progress from the download's `NSProgress`                         | no: a `WKDownload` can only be cancelled with resume data, which a server may not honour    | `Pause` / `Resume` answer `UNSUPPORTED`; `canResume` is always false.                                                                                                                                                                    |
+| WebView2  | `ICoreWebView2_4::DownloadStarting` (held with a deferral), `ICoreWebView2DownloadOperation`'s events | yes (`Pause` / `Resume`, `CanResume`)                                                       | WebView2's own download UI never shows (`Handled`).                                                                                                                                                                                      |
+| WebKitGTK | `WebKitDownload`'s `decide-destination`, `received-data`, `failed`, `finished` (WebKitGTK 2.40+)      | no (WebKitGTK has no pause)                                                                 | `Pause` / `Resume` answer `UNSUPPORTED`; `canResume` is always false.                                                                                                                                                                    |
+
+## Permission requests the app answers (API 59)
+
+With `"permissions": "app"` (`LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS`) the
+engine's own prompt never shows. Each request is a `PERMISSION_REQUEST` event:
+
+```json
+{
+  "id": 3,
+  "state": "requested",
+  "origin": "https://meet.example",
+  "permissions": ["camera", "microphone"],
+  "frame": { "isMain": false, "origin": "https://embed.example" }
+}
+```
+
+`permission_respond(id, allow)` allows or refuses everything the request asked
+for. A request that goes away unanswered (the page navigates, the engine
+withdraws it, the view closes) is refused and reported with
+`{"id": 3, "state": "cancelled"}`. A kind laufey cannot name is refused without
+an event, and at most `LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS` (16) may wait per
+view. An allowed capture still needs the OS's own consent for the app (on macOS
+the camera / microphone prompt and the bundle's usage strings).
+
+| Engine    | Kinds it can raise                                                                                                                                                                   | `frame`                                                                                    | What the engine remembers                                                                                                                                                                         |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CEF       | camera, microphone, screen, geolocation, notifications, midi, pointer-lock, storage-access, sensors, window-management, local-fonts, file-system, multiple-downloads                 | for camera, microphone and screen (`OnRequestMediaAccessPermission`); not for the others   | Chromium stores an allow or a refusal of a prompted kind per origin in the view's partition, so the same origin may not be asked again there; camera, microphone and screen are asked every time. |
+| WKWebView | camera, microphone (macOS 12+). WebKit refuses the others without asking the embedder.                                                                                               | yes (`initiatedByFrame`)                                                                   | WebKit may reuse an answer for the same document.                                                                                                                                                 |
+| WebView2  | camera, microphone, geolocation, notifications, sensors, clipboard-read, multiple-downloads, file-system, autoplay, local-fonts, midi, window-management. Screen capture is refused. | yes, where every frame took the frame-level handler (`ICoreWebView2Frame3`); else left out | nothing where the runtime has `SavesInProfile` (set to false); an older runtime may save the answer in the partition's profile.                                                                   |
+| WebKitGTK | camera, microphone, screen, geolocation, notifications, pointer-lock, storage-access, clipboard-read (2.42+)                                                                         | no; `origin` is the top-level page's (for storage-access, the requesting domain)           | the web process keeps a notification answer per origin while it lives, and geolocation / capture answers per document.                                                                            |
+
+Clipboard reads stay under the `clipboardRead` option where the engine applies
+it (CEF, WKWebView).
 
 ## Events
 
 Every event carries a JSON object; `CLOSED` is the last one and fires exactly
 once, after `webview_close` or when the window closes. See the event kinds in
-`laufey.h`. `CONSOLE` events are capped at 200 per second per view; on WKWebView
-and WebKitGTK they come from a page-world script (WebKit reports no console
-messages to the embedder), which the page could also post to. On WebKitGTK that
-script also tells a refused popup's `NEW_WINDOW` disposition (`"popup"` when
-`window.open()` was given a size or position), since WebKitGTK reports window
-features only to a view it would create.
+`laufey.h` (`DOWNLOAD` and `PERMISSION_REQUEST` are described above). `CONSOLE`
+events are capped at 200 per second per view; on WKWebView and WebKitGTK they
+come from a page-world script (WebKit reports no console messages to the
+embedder), which the page could also post to. On WebKitGTK that script also
+tells a refused popup's `NEW_WINDOW` disposition (`"popup"` when `window.open()`
+was given a size or position), since WebKitGTK reports window features only to a
+view it would create.
 
 ## Evaluate and capture
 

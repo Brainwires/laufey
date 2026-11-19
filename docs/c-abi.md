@@ -122,7 +122,14 @@ The pointers group into:
   `webview_command` (back, forward, reload, stop, focus), `webview_state`,
   `webview_evaluate`, `webview_capture` and `webview_close`; events through one
   `laufey_webview_event_fn` per view, `CLOSED` last. `NULL` on Winit. See
-  [webviews.md](webviews.md).
+  [webviews.md](webviews.md). API 59 adds `"downloads": "app"` with
+  `webview_download_control` (`LAUFEY_WEBVIEW_DOWNLOAD_*`, the `DOWNLOAD` event)
+  and `"permissions": "app"` with `webview_permission_respond` (the
+  `PERMISSION_REQUEST` event), behind `LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS`,
+  `_DOWNLOAD_PAUSE` and `_PERMISSION_REQUESTS`.
+- **Menu read-back** (API ≥ 59) — `menu_snapshot` (`LAUFEY_MENU_KIND_*`,
+  `LAUFEY_MENU_CAP_SNAPSHOT`): the application menu or the Dock menu as JSON,
+  read from the native menu objects. `NULL` on Winit. See [menus.md](menus.md).
 - **Drag and drop** (API ≥ 39) — `set_file_drop_handler` (files dragged over and
   dropped on a window, with native paths; the page keeps its DOM drag events),
   `start_file_drag` (drag files out to other apps), and the

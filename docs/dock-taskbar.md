@@ -33,6 +33,19 @@ on macOS, flashes the taskbar button on Windows, and sets the window's urgency
 hint on Linux. The dock menu, the ability to hide the dock icon, and the reopen
 callback exist only on macOS.
 
+## The Dock menu (macOS)
+
+`set_dock_menu` takes the same template as the application menu, so a Dock menu
+can hold separators, checked items (`checked: true`, an `NSControlStateValueOn`
+item, which the Dock draws with a checkmark) and submenus; icons and tooltips
+are not drawn there. Choosing an item calls `on_click` with its id, with window
+id 0, whether or not a window is open.
+
+`laufey::menu_snapshot(MenuKind::Dock)` (API 59) reads the menu back as AppKit
+holds it for `applicationDockMenu:` (labels, ids, enabled, checked, separators,
+submenus), for self-tests; see [menus.md](menus.md#reading-a-menu-back-api-59).
+`None` with no Dock menu set, and off macOS.
+
 ## Activation policy (API ≥ 50)
 
 A tray / menu-bar app has no Dock icon. `set_dock_visible(false)` switches the
