@@ -422,6 +422,55 @@ monitor signals; CEF on Linux has no such signal and compares the layout every 2
 s instead). Winit reports a screen's work area as its bounds (winit has no
 work-area API) and has no display-changed event.
 
+## Stacking order and the pointer (API ≥ 60)
+
+```rust
+// The app's windows that are on screen, front to back, by id.
+if let Some(order) = laufey::window_z_order() {
+  let front = order.first().copied();
+}
+// Where the pointer is, the buttons held, and the app's window under it.
+if let Some(p) = laufey::pointer_state() {
+  println!("({}, {}) buttons {:#b} over {:?}", p.x, p.y, p.buttons, p.window_id);
+}
+```
+
+`window_z_order()` is the OS's own stacking order, not a record of which window
+was focused last: a window raised without taking focus, an always-on-top window
+and another application's window in between all show in the real order and not
+in a focus history. Only windows that are on screen are listed: not a hidden or
+minimized one, nor one on another Space (macOS), virtual desktop (Windows) or
+workspace (X11). A child web view is not a window.
+
+`pointer_state()` is asked of the OS at the call, so it answers while the
+pointer is outside every window of the app and during a drag that another window
+started, where a page only hears pointer events inside its own window. `x` / `y`
+are in `get_position`'s space. `buttons` are the bits of a DOM
+`MouseEvent.buttons` (`LAUFEY_POINTER_BUTTON_PRIMARY` is the button that clicks,
+for a left-handed user too). `window_id` is the app's window a click at that
+point would go to, counting every application's windows: `None` over another
+application's window, the desktop, a menu, or a window that lets clicks through.
+
+Together they are what a drag between two windows of one app needs: poll
+`pointer_state()` once per frame while a button is held, and the window under
+the pointer and its position inside it (`x - inner_position.x`) are known
+whichever window the gesture started in. It is a query, not an event source.
+
+| OS      | Stacking order                                                          | Pointer and the window under it                                           |
+| ------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| macOS   | `+[NSWindow windowNumbersWithOptions:]` (the active Space)              | `+[NSEvent mouseLocation]`, `windowNumberAtPoint:`, `pressedMouseButtons` |
+| Windows | `EnumWindows`, less hidden, minimized and cloaked windows               | `GetCursorPos`, `WindowFromPoint`, `GetAsyncKeyState`                     |
+| X11     | the root window's children, matched to each window's top-level ancestor | `QueryPointer` on the root window                                         |
+| Wayland | not available                                                           | not available                                                             |
+
+Both answer `None` in a Wayland session (and on Winit), and
+`window_capabilities().z_order()` / `.pointer_state()` are false there. This is
+the protocol's design, not a missing implementation: a Wayland client is told
+neither how the compositor stacks surfaces nor where the pointer is outside its
+own surfaces, and XWayland knows only about X11 windows. An app that needs
+cross-window hit testing there falls back to the order its windows were focused
+in.
+
 ## Restoring a window where the user left it (API ≥ 38)
 
 `get_normal_bounds()` returns the bounds a window returns to when it leaves the
@@ -573,6 +622,7 @@ build), so an app can surface "unsupported" instead of pretending:
 | normal bounds             | ✓         | ✓         | ✓              | ✓           | ✓         | ✓               | ✓                      |
 | keep-alive with no window | ✓         | ✓         | ✓              | ✓           | ✓         | ✓               | ✓                      |
 | set position              | ✓         | ✓         | ✓              | ✓           | X11 only  | X11 only        | not on Wayland         |
+| stacking order, pointer   | ✓         | ✓         | ✓              | ✓           | X11 only  | X11 only        | –                      |
 
 "(WM)": applied by the window manager; nothing changes under a bare X server.
 "(KWin)": while KWin's Blur effect is on, on Wayland or X11 (with Acrylic

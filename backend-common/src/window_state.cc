@@ -257,6 +257,48 @@ int64_t MonotonicMs() {
       .count();
 }
 
+// --- Window stacking and the pointer (API 60) -------------------------------
+
+std::vector<uint32_t> StackedWindowIds(
+    const std::vector<uintptr_t>& stacking,
+    const std::vector<NativeWindow>& windows,
+    uintptr_t (*key_of)(const NativeWindow&)) {
+  std::vector<uint32_t> ids;
+  for (uintptr_t key : stacking) {
+    if (key == 0)
+      continue;
+    for (const NativeWindow& w : windows) {
+      uintptr_t own = key_of ? key_of(w) : w.handle;
+      if (own != key || w.id == 0)
+        continue;
+      if (std::find(ids.begin(), ids.end(), w.id) == ids.end())
+        ids.push_back(w.id);
+    }
+  }
+  return ids;
+}
+
+uint32_t WindowIdForHandle(const std::vector<NativeWindow>& windows,
+                           uintptr_t handle) {
+  if (handle == 0)
+    return 0;
+  for (const NativeWindow& w : windows) {
+    if (w.handle == handle)
+      return w.id;
+  }
+  return 0;
+}
+
+size_t CopyWindowIds(const std::vector<uint32_t>& ids, uint32_t* out,
+                     size_t capacity) {
+  if (out) {
+    size_t n = std::min(capacity, ids.size());
+    for (size_t i = 0; i < n; ++i)
+      out[i] = ids[i];
+  }
+  return ids.size();
+}
+
 // --- Screens ----------------------------------------------------------------
 
 size_t CopyScreens(const std::vector<laufey_screen_t>& screens,

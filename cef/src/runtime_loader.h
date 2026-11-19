@@ -114,6 +114,15 @@ class RuntimeLoader {
     return close_allowed_.count(window_id) > 0;
   }
 
+  // The id of every open window, in creation order.
+  std::vector<uint32_t> GetAllWindowIds() {
+    std::lock_guard<std::mutex> lock(windows_mutex_);
+    std::vector<uint32_t> ids;
+    for (const auto& entry : browsers_)
+      ids.push_back(entry.first);
+    return ids;
+  }
+
   // Every open browser, in window id (creation) order.
   std::vector<CefRefPtr<CefBrowser>> GetAllBrowsers() {
     std::lock_guard<std::mutex> lock(windows_mutex_);

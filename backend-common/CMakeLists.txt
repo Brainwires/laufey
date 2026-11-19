@@ -128,6 +128,7 @@ elseif(UNIX)
     src/overlay_linux.cc
     src/speech_linux.cc
     src/window_linux.cc
+    src/window_stacking_linux.cc
   )
 elseif(WIN32)
   list(APPEND LAUFEY_COMMON_SRCS

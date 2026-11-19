@@ -596,6 +596,10 @@ class WebView2Backend : public LaufeyBackend {
     return laufey_common::CopyScreens(screens, out, capacity);
   }
   int64_t GetWindowScreen(uint32_t window_id) override;
+  size_t GetWindowZOrder(uint32_t* out, size_t capacity) override;
+  bool GetPointerState(laufey_pointer_state_t* out) override;
+  // Every window as laufey_common::NativeWindow. Any thread.
+  std::vector<laufey_common::NativeWindow> NativeWindows();
   void SetDisplayChangedHandler(laufey_display_changed_fn handler,
                                 void* user_data) override;
   bool SetWindowTitleVisibility(uint32_t window_id, int visibility) override;
@@ -3232,6 +3236,9 @@ uint32_t WebView2Backend::WindowCapabilities() {
          LAUFEY_WINDOW_CAP_FILE_DIALOGS | LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL |
          // API 54: TaskDialogIndirect, owned by the window or app-modal.
          LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS |
+         // API 60: EnumWindows is the z-order; GetCursorPos and
+         // WindowFromPoint answer anywhere on the desktop.
+         LAUFEY_WINDOW_CAP_Z_ORDER | LAUFEY_WINDOW_CAP_POINTER_STATE |
          // API 57: SetWindowThemeAttribute hides the caption text.
          (laufey_common::WinTitleVisibilityAvailable()
               ? LAUFEY_WINDOW_CAP_TITLE_HIDDEN
@@ -3490,6 +3497,37 @@ int64_t WebView2Backend::GetWindowScreen(uint32_t window_id) {
   std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
   auto* state = GetWindow(window_id);
   return state ? laufey_common::WinScreenForWindow(state->hwnd) : 0;
+}
+
+std::vector<laufey_common::NativeWindow> WebView2Backend::NativeWindows() {
+  std::vector<laufey_common::NativeWindow> windows;
+  std::lock_guard<std::recursive_mutex> lock(windows_mutex_);
+  for (auto& entry : windows_) {
+    laufey_common::NativeWindow w;
+    w.id = entry.first;
+    w.handle = reinterpret_cast<uintptr_t>(entry.second.hwnd);
+    windows.push_back(w);
+  }
+  return windows;
+}
+
+size_t WebView2Backend::GetWindowZOrder(uint32_t* out, size_t capacity) {
+  return laufey_common::CopyWindowIds(
+      laufey_common::WinWindowZOrder(NativeWindows()), out, capacity);
+}
+
+bool WebView2Backend::GetPointerState(laufey_pointer_state_t* out) {
+  laufey_pointer_state_t state = {};
+  laufey_common::WinPointerState(NativeWindows(), &state);
+  // Physical pixels to the DIP of the monitor the pointer is on, as
+  // get_window_position reports a window there.
+  POINT pt = {state.x, state.y};
+  double scale =
+      WinMonitorScale(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST));
+  state.x = WinToDip(pt.x, scale);
+  state.y = WinToDip(pt.y, scale);
+  *out = state;
+  return true;
 }
 
 void WebView2Backend::SetDisplayChangedHandler(

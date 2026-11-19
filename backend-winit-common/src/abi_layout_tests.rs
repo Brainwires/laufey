@@ -279,7 +279,13 @@ fn vtable_layout_matches_the_header() {
     webview_set_forward_keys,
     webview_download_control,
     webview_permission_respond,
-    menu_snapshot
+    menu_snapshot,
+    get_window_z_order,
+    get_pointer_state
+  );
+  assert_eq!(
+    size_of::<crate::LaufeyPointerState>(),
+    size_of::<laufey::PointerStateRaw>()
   );
   assert_eq!(
     size_of::<crate::LaufeyTrayEvent>(),

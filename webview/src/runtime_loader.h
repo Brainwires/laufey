@@ -838,6 +838,14 @@ class LaufeyBackend {
   }
   virtual void SetDisplayChangedHandler(laufey_display_changed_fn /*handler*/,
                                         void* /*user_data*/) {}
+  // Window stacking and the pointer (API 60): 0 / false where the backend
+  // can't tell (see LAUFEY_WINDOW_CAP_Z_ORDER / _POINTER_STATE).
+  virtual size_t GetWindowZOrder(uint32_t* /*out*/, size_t /*capacity*/) {
+    return 0;
+  }
+  virtual bool GetPointerState(laufey_pointer_state_t* /*out*/) {
+    return false;
+  }
   virtual bool SetWindowTitlebarStyle(uint32_t /*window_id*/, int /*style*/) {
     return false;
   }

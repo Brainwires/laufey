@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 59;
+pub const LAUFEY_API_VERSION: u32 = 60;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -1119,6 +1119,23 @@ pub struct LaufeyBackendApi {
     Option<unsafe extern "C" fn(*mut c_void, u32, u32, bool) -> i32>,
   pub menu_snapshot:
     Option<unsafe extern "C" fn(*mut c_void, i32, u32) -> *mut c_char>,
+  // --- Window stacking and the pointer (API >= 60); NULL on Winit, which
+  // has no window list of the OS's to read (LAUFEY_WINDOW_CAP_Z_ORDER /
+  // _POINTER_STATE are not reported).
+  pub get_window_z_order:
+    Option<unsafe extern "C" fn(*mut c_void, *mut u32, usize) -> usize>,
+  pub get_pointer_state:
+    Option<unsafe extern "C" fn(*mut c_void, *mut LaufeyPointerState) -> bool>,
+}
+
+/// `laufey_pointer_state_t` (API 60).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LaufeyPointerState {
+  pub x: i32,
+  pub y: i32,
+  pub buttons: u32,
+  pub window_id: u32,
 }
 
 /// `laufey_webview_event_fn` (API 58).
@@ -2125,6 +2142,8 @@ pub fn create_api_base() -> LaufeyBackendApi {
     webview_download_control: None,
     webview_permission_respond: None,
     menu_snapshot: None,
+    get_window_z_order: None,
+    get_pointer_state: None,
   }
 }
 

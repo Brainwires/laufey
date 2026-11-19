@@ -69,6 +69,17 @@ pub const LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS: u32 = 1 << 22;
 // API 57: title visibility and toolbar style.
 pub const LAUFEY_WINDOW_CAP_TITLE_HIDDEN: u32 = 1 << 23;
 pub const LAUFEY_WINDOW_CAP_TOOLBAR_STYLE: u32 = 1 << 24;
+// API 60: the stacking order of the app's windows, and the pointer.
+pub const LAUFEY_WINDOW_CAP_Z_ORDER: u32 = 1 << 25;
+pub const LAUFEY_WINDOW_CAP_POINTER_STATE: u32 = 1 << 26;
+
+/// The button that clicks (the right one for a user who swapped them): a
+/// bit of [`PointerState::buttons`], as a DOM `MouseEvent.buttons`.
+pub const LAUFEY_POINTER_BUTTON_PRIMARY: u32 = 1 << 0;
+/// The context-menu button.
+pub const LAUFEY_POINTER_BUTTON_SECONDARY: u32 = 1 << 1;
+/// The middle button (the wheel).
+pub const LAUFEY_POINTER_BUTTON_AUXILIARY: u32 = 1 << 2;
 
 // --- Types ---
 
@@ -288,6 +299,20 @@ impl Backdrop {
   }
 }
 
+/// The pointer, as the OS reports it now ([`pointer_state`], API 60).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PointerState {
+  /// Where it is, in the [`Window::get_position`] space of this backend.
+  pub x: i32,
+  pub y: i32,
+  /// The buttons held (`LAUFEY_POINTER_BUTTON_*`).
+  pub buttons: u32,
+  /// The app's window a click there would go to: `None` over another
+  /// application's window, the desktop, a menu, or a window that lets clicks
+  /// through.
+  pub window_id: Option<u32>,
+}
+
 /// What this backend can do on this OS (see `LAUFEY_WINDOW_CAP_*`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WindowCapabilities {
@@ -384,6 +409,14 @@ impl WindowCapabilities {
   pub fn toolbar_style(&self) -> bool {
     self.has(LAUFEY_WINDOW_CAP_TOOLBAR_STYLE)
   }
+  /// [`window_z_order`] answers (API 60): macOS, Windows, Linux on X11.
+  pub fn z_order(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_Z_ORDER)
+  }
+  /// [`pointer_state`] answers (API 60): macOS, Windows, Linux on X11.
+  pub fn pointer_state(&self) -> bool {
+    self.has(LAUFEY_WINDOW_CAP_POINTER_STATE)
+  }
 }
 
 // --- Free functions ---
@@ -426,6 +459,67 @@ fn screens_with(api: &LaufeyBackendApi) -> Vec<Screen> {
     buf = vec![unsafe { std::mem::zeroed() }; n];
   }
   buf.iter().map(Screen::from).collect()
+}
+
+/// The app's windows as the OS stacks them now, front to back, by id: only
+/// the ones on screen (not a hidden or minimized window, nor one on another
+/// Space / virtual desktop / workspace). `None` where the backend can't tell
+/// ([`WindowCapabilities::z_order`]: a Wayland session, Winit). Any thread
+/// (it waits for the UI thread).
+pub fn window_z_order() -> Option<Vec<u32>> {
+  let api = api();
+  window_z_order_with(api, window_capabilities_with(api))
+}
+
+fn window_z_order_with(
+  api: &LaufeyBackendApi,
+  caps: WindowCapabilities,
+) -> Option<Vec<u32>> {
+  let f = api.get_window_z_order?;
+  if !caps.z_order() {
+    return None;
+  }
+  // A window can open between the two calls; retry with the new size.
+  let mut buf: Vec<u32> = Vec::new();
+  for _ in 0..4 {
+    let cap = buf.len();
+    let n = unsafe { f(api.backend_data, buf.as_mut_ptr(), cap) };
+    if n <= cap {
+      buf.truncate(n);
+      return Some(buf);
+    }
+    buf = vec![0; n];
+  }
+  Some(buf)
+}
+
+/// Where the pointer is, the buttons held and the app's window under it,
+/// asked of the OS now: it answers while the pointer is outside every window
+/// of the app and during a drag another window started. Poll it for the
+/// length of a gesture. `None` where the backend can't tell
+/// ([`WindowCapabilities::pointer_state`]: a Wayland session, Winit). Any
+/// thread (it waits for the UI thread).
+pub fn pointer_state() -> Option<PointerState> {
+  pointer_state_with(api())
+}
+
+fn pointer_state_with(api: &LaufeyBackendApi) -> Option<PointerState> {
+  let f = api.get_pointer_state?;
+  let mut raw = ffi::laufey_pointer_state_t {
+    x: 0,
+    y: 0,
+    buttons: 0,
+    window_id: 0,
+  };
+  if !unsafe { f(api.backend_data, &mut raw) } {
+    return None;
+  }
+  Some(PointerState {
+    x: raw.x,
+    y: raw.y,
+    buttons: raw.buttons,
+    window_id: (raw.window_id != 0).then_some(raw.window_id),
+  })
 }
 
 /// Whether the event loop ends when the last window closes (the default).
@@ -991,6 +1085,115 @@ mod tests {
     assert_eq!(screens[0].work_area.y, 25);
     assert_eq!(screens[0].work_area.height, 1055);
     assert_eq!(screens[0].scale_factor, 2.0);
+  }
+
+  static ORDER: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+  unsafe extern "C" fn fake_z_order(
+    _: *mut c_void,
+    out: *mut u32,
+    cap: usize,
+  ) -> usize {
+    let order = ORDER.lock().unwrap();
+    for (i, id) in order.iter().enumerate().take(cap) {
+      *out.add(i) = *id;
+    }
+    order.len()
+  }
+
+  #[test]
+  fn z_order_is_read_with_a_growing_buffer_and_only_when_reported() {
+    assert_eq!(LAUFEY_WINDOW_CAP_Z_ORDER, ffi::LAUFEY_WINDOW_CAP_Z_ORDER);
+    assert_eq!(
+      LAUFEY_WINDOW_CAP_POINTER_STATE,
+      ffi::LAUFEY_WINDOW_CAP_POINTER_STATE
+    );
+    let caps = WindowCapabilities {
+      bits: LAUFEY_WINDOW_CAP_Z_ORDER,
+    };
+    assert!(caps.z_order() && !caps.pointer_state());
+    let none = WindowCapabilities::default();
+
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    // no function (an older or Winit backend), or no capability (Wayland)
+    assert_eq!(window_z_order_with(&fake, caps), None);
+    fake.get_window_z_order = Some(fake_z_order);
+    assert_eq!(window_z_order_with(&fake, none), None);
+
+    *ORDER.lock().unwrap() = vec![];
+    assert_eq!(window_z_order_with(&fake, caps), Some(vec![]));
+    *ORDER.lock().unwrap() = vec![7, 3, 12];
+    assert_eq!(window_z_order_with(&fake, caps), Some(vec![7, 3, 12]));
+  }
+
+  unsafe extern "C" fn fake_pointer(
+    _: *mut c_void,
+    out: *mut ffi::laufey_pointer_state_t,
+  ) -> bool {
+    let out = &mut *out;
+    out.x = -40;
+    out.y = 900;
+    out.buttons =
+      LAUFEY_POINTER_BUTTON_PRIMARY | LAUFEY_POINTER_BUTTON_AUXILIARY;
+    out.window_id = 5;
+    true
+  }
+
+  unsafe extern "C" fn fake_pointer_outside(
+    _: *mut c_void,
+    out: *mut ffi::laufey_pointer_state_t,
+  ) -> bool {
+    let out = &mut *out;
+    out.x = 10;
+    out.y = 20;
+    true
+  }
+
+  unsafe extern "C" fn fake_pointer_unsupported(
+    _: *mut c_void,
+    _: *mut ffi::laufey_pointer_state_t,
+  ) -> bool {
+    false
+  }
+
+  #[test]
+  fn pointer_state_maps_no_window_and_no_answer() {
+    assert_eq!(
+      LAUFEY_POINTER_BUTTON_PRIMARY,
+      ffi::LAUFEY_POINTER_BUTTON_PRIMARY
+    );
+    assert_eq!(
+      LAUFEY_POINTER_BUTTON_SECONDARY,
+      ffi::LAUFEY_POINTER_BUTTON_SECONDARY
+    );
+    assert_eq!(
+      LAUFEY_POINTER_BUTTON_AUXILIARY,
+      ffi::LAUFEY_POINTER_BUTTON_AUXILIARY
+    );
+    let mut fake: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    assert_eq!(pointer_state_with(&fake), None);
+    fake.get_pointer_state = Some(fake_pointer);
+    assert_eq!(
+      pointer_state_with(&fake),
+      Some(PointerState {
+        x: -40,
+        y: 900,
+        buttons: 5,
+        window_id: Some(5),
+      })
+    );
+    fake.get_pointer_state = Some(fake_pointer_outside);
+    assert_eq!(
+      pointer_state_with(&fake),
+      Some(PointerState {
+        x: 10,
+        y: 20,
+        buttons: 0,
+        window_id: None,
+      })
+    );
+    fake.get_pointer_state = Some(fake_pointer_unsupported);
+    assert_eq!(pointer_state_with(&fake), None);
   }
 
   #[test]

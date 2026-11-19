@@ -232,7 +232,51 @@ static void TestLifetime() {
   SetQuitOnLastWindowClosed(true);
 }
 
+// get_window_z_order's matching (API 60): the OS's stacking list against
+// the app's own windows.
+void TestWindowStacking() {
+  std::vector<NativeWindow> windows = {{1, 0x10}, {2, 0x20}, {3, 0x30}};
+  // The OS lists every application's windows; only ours count, in its order.
+  std::vector<uintptr_t> stacking = {0x99, 0x30, 0x77, 0x10, 0x20};
+  std::vector<uint32_t> ids = StackedWindowIds(stacking, windows);
+  EXPECT(ids == (std::vector<uint32_t>{3, 1, 2}));
+  // A window that is not on screen is not in the OS's list, so not in ours.
+  ids = StackedWindowIds({0x20, 0x10}, windows);
+  EXPECT(ids == (std::vector<uint32_t>{2, 1}));
+  // A key listed twice counts once, at its first (front-most) place; a zero
+  // key and a window with id 0 or no handle never match.
+  ids = StackedWindowIds({0x10, 0, 0x30, 0x10}, windows);
+  EXPECT(ids == (std::vector<uint32_t>{1, 3}));
+  std::vector<NativeWindow> odd = {{0, 0x10}, {4, 0}, {5, 0x50}};
+  ids = StackedWindowIds({0x10, 0, 0x50}, odd);
+  EXPECT(ids == (std::vector<uint32_t>{5}));
+  EXPECT(StackedWindowIds({}, windows).empty());
+  EXPECT(StackedWindowIds(stacking, {}).empty());
+  // A backend whose stacking keys are not the handles (macOS: window
+  // numbers) maps each window itself; 0 means "not on screen".
+  ids = StackedWindowIds({7, 5, 6}, windows, [](const NativeWindow& w) {
+    return w.id == 2 ? uintptr_t{0} : static_cast<uintptr_t>(w.id + 4);
+  });
+  EXPECT(ids == (std::vector<uint32_t>{3, 1}));
+
+  EXPECT(WindowIdForHandle(windows, 0x20) == 2);
+  EXPECT(WindowIdForHandle(windows, 0x21) == 0);
+  EXPECT(WindowIdForHandle(windows, 0) == 0);
+  EXPECT(WindowIdForHandle({{9, 0}}, 0) == 0);
+
+  // The get_window_z_order contract: the count, and as many ids as fit.
+  std::vector<uint32_t> order = {3, 1, 2};
+  EXPECT(CopyWindowIds(order, nullptr, 0) == 3);
+  uint32_t out[4] = {77, 77, 77, 77};
+  EXPECT(CopyWindowIds(order, out, 2) == 3);
+  EXPECT(out[0] == 3 && out[1] == 1 && out[2] == 77);
+  EXPECT(CopyWindowIds(order, out, 4) == 3);
+  EXPECT(out[0] == 3 && out[1] == 1 && out[2] == 2 && out[3] == 77);
+  EXPECT(CopyWindowIds({}, out, 4) == 0);
+}
+
 int main() {
+  TestWindowStacking();
   TestStateDiffing();
   TestSizeConstraints();
   TestNormalBounds();

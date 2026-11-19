@@ -371,6 +371,79 @@ void WinSubclassForStateChanges(void* hwnd, uint32_t window_id,
 void WinUnsubclassForStateChanges(void* hwnd);
 #endif
 
+// --- Window stacking and the pointer (API 60) -------------------------------
+//
+// get_window_z_order / get_pointer_state. Each backend lists its windows as
+// NativeWindow (its id and the OS's own key for the window) and the per-OS
+// functions below ask the OS; the matching is portable (window_state.cc).
+
+// One of the app's windows: the laufey id and the OS's handle for it
+// (macOS: the NSWindow*; Windows: the top-level HWND; Linux X11: the
+// window's XID).
+struct NativeWindow {
+  uint32_t id = 0;
+  uintptr_t handle = 0;
+};
+
+// The ids of `windows` in the order their keys appear in `stacking` (the
+// OS's list, front to back, which also names windows that are not the app's
+// and leaves out the app's windows that are not on screen). A key listed
+// twice counts once; `key_of` maps a NativeWindow to its key in that list
+// (0: not on screen).
+std::vector<uint32_t> StackedWindowIds(
+    const std::vector<uintptr_t>& stacking,
+    const std::vector<NativeWindow>& windows,
+    uintptr_t (*key_of)(const NativeWindow&) = nullptr);
+
+// The id of the window whose handle is `handle`, 0 for none (and for a zero
+// handle).
+uint32_t WindowIdForHandle(const std::vector<NativeWindow>& windows,
+                           uintptr_t handle);
+
+// Copies `ids` into `out` (up to `capacity`) and returns the count, the
+// get_window_z_order contract.
+size_t CopyWindowIds(const std::vector<uint32_t>& ids, uint32_t* out,
+                     size_t capacity);
+
+#if defined(__APPLE__)
+// The app's on-screen windows on the active Space, front to back
+// (+[NSWindow windowNumbersWithOptions:]). Main thread only.
+std::vector<uint32_t> MacWindowZOrder(const std::vector<NativeWindow>& windows);
+// The pointer in get_window_position's screen space (points, top-left
+// origin), the buttons held, and the app's window a click there would reach
+// (+[NSWindow windowNumberAtPoint:belowWindowWithWindowNumber:], which looks
+// at every application's windows). Main thread only.
+void MacPointerState(const std::vector<NativeWindow>& windows,
+                     laufey_pointer_state_t* out);
+#elif defined(_WIN32)
+// The app's visible, not minimized, not cloaked (another virtual desktop)
+// top-level windows, front to back (EnumWindows). Any thread.
+std::vector<uint32_t> WinWindowZOrder(const std::vector<NativeWindow>& windows);
+// The pointer in physical pixels (GetCursorPos), the buttons held (the
+// swapped-buttons setting applied) and the app's window under it
+// (WindowFromPoint's top-level ancestor). Any thread.
+void WinPointerState(const std::vector<NativeWindow>& windows,
+                     laufey_pointer_state_t* out);
+#else
+// Whether the X server can be asked: the session's display is X11
+// (DisplayBackend(): never under Wayland, where XWayland knows neither the
+// stacking of native windows nor the pointer outside X11 windows) and a
+// connection opens. Any thread.
+bool LinuxX11StackingAvailable();
+// The app's viewable windows, front to back: the root window's children
+// (the window manager's frames, in stacking order) matched to each window's
+// top-level ancestor. Empty where LinuxX11StackingAvailable() is false. Any
+// thread (its own X connection).
+std::vector<uint32_t> LinuxX11WindowZOrder(
+    const std::vector<NativeWindow>& windows);
+// The pointer in X root-window pixels (xcb_query_pointer), the buttons held
+// and the app's window whose frame is under it. False where
+// LinuxX11StackingAvailable() is false or the server does not answer. Any
+// thread.
+bool LinuxX11PointerState(const std::vector<NativeWindow>& windows,
+                          laufey_pointer_state_t* out);
+#endif
+
 }  // namespace laufey_common
 
 #endif  // LAUFEY_WINDOW_H_

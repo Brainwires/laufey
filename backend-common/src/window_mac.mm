@@ -882,4 +882,58 @@ void MacFocusWindow(void* nswindow) {
   [w orderFrontRegardless];
 }
 
+// --- Window stacking and the pointer (API 60) -------------------------------
+
+std::vector<uint32_t> MacWindowZOrder(
+    const std::vector<NativeWindow>& windows) {
+  // The app's on-screen windows on the active Space, front to back. (Not
+  // -[NSApplication orderedWindows], which is the scripting list and leaves
+  // out panels: a non-activating window is a panel.)
+  std::vector<uintptr_t> stacking;
+  for (NSNumber* number in [NSWindow windowNumbersWithOptions:0])
+    stacking.push_back(static_cast<uintptr_t>(number.integerValue));
+  return StackedWindowIds(stacking, windows, [](const NativeWindow& w) {
+    NSWindow* window = (__bridge NSWindow*)reinterpret_cast<void*>(w.handle);
+    NSInteger number = window ? window.windowNumber : 0;
+    return number > 0 ? static_cast<uintptr_t>(number) : uintptr_t{0};
+  });
+}
+
+void MacPointerState(const std::vector<NativeWindow>& windows,
+                     laufey_pointer_state_t* out) {
+  NSPoint p = [NSEvent mouseLocation];
+  out->x = static_cast<int32_t>(std::floor(p.x));
+  // Cocoa's y grows upwards from the primary screen's bottom edge.
+  out->y = static_cast<int32_t>(std::floor(PrimaryScreenHeight() - p.y));
+  // Bit 0 left, bit 1 right, bit 2 middle: the DOM's `buttons` order. AppKit
+  // reports the buttons as the user has them (a swapped mouse is swapped
+  // before it gets here).
+  NSUInteger pressed = [NSEvent pressedMouseButtons];
+  out->buttons = 0;
+  if (pressed & (1u << 0))
+    out->buttons |= LAUFEY_POINTER_BUTTON_PRIMARY;
+  if (pressed & (1u << 1))
+    out->buttons |= LAUFEY_POINTER_BUTTON_SECONDARY;
+  if (pressed & (1u << 2))
+    out->buttons |= LAUFEY_POINTER_BUTTON_AUXILIARY;
+  // The window of any application a mouse-down here would go to.
+  NSInteger top = [NSWindow windowNumberAtPoint:p
+                    belowWindowWithWindowNumber:0];
+  out->window_id = 0;
+  if (top <= 0)
+    return;
+  // One of ours, or a child window of one (a sheet, an attached panel):
+  // its parent chain leads to the app window the user sees it as part of.
+  NSWindow* hit = [NSApp windowWithWindowNumber:top];
+  for (int depth = 0; hit && depth < 8; ++depth) {
+    for (const NativeWindow& w : windows) {
+      if ((__bridge NSWindow*)reinterpret_cast<void*>(w.handle) == hit) {
+        out->window_id = w.id;
+        return;
+      }
+    }
+    hit = hit.sheetParent ?: hit.parentWindow;
+  }
+}
+
 }  // namespace laufey_common

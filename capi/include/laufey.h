@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 59
+#define LAUFEY_API_VERSION 60
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -239,6 +239,12 @@ extern "C" {
 #define LAUFEY_WINDOW_CAP_TITLE_HIDDEN (1u << 23)
 // API >= 57: set_window_toolbar_style works (macOS 11+).
 #define LAUFEY_WINDOW_CAP_TOOLBAR_STYLE (1u << 24)
+
+// get_window_z_order answers (API 60): the app's windows front to back.
+#define LAUFEY_WINDOW_CAP_Z_ORDER (1u << 25)
+// get_pointer_state answers (API 60): where the pointer is on the screen,
+// the buttons held and the app's window under it.
+#define LAUFEY_WINDOW_CAP_POINTER_STATE (1u << 26)
 
 // --- Drag and drop (API >= 39) ----------------------------------------------
 //
@@ -576,6 +582,26 @@ typedef void (*laufey_notification_response_fn)(void* user_data,
 //   "data" string or null; "actions" [{"id", "title"}].
 typedef void (*laufey_notification_list_fn)(void* user_data,
                                             const char* list_json);
+
+// Mouse buttons held, in laufey_pointer_state_t.buttons (API 60): the bits
+// of a DOM MouseEvent's `buttons`. PRIMARY is the button that clicks, which
+// is the right one for a user who swapped them.
+#define LAUFEY_POINTER_BUTTON_PRIMARY (1u << 0)
+#define LAUFEY_POINTER_BUTTON_SECONDARY (1u << 1)
+#define LAUFEY_POINTER_BUTTON_AUXILIARY (1u << 2)
+
+// The pointer, as get_pointer_state reports it (API 60). `x`, `y` are in the
+// same top-left-origin screen space and units as get_window_position /
+// get_screens. `window_id` is the app's window a click at that point would
+// go to: the window of ANY application that is topmost there, when it is one
+// of this app's; 0 over another application's window, the desktop, a menu or
+// a window that lets clicks through.
+typedef struct laufey_pointer_state {
+  int32_t x;
+  int32_t y;
+  uint32_t buttons;
+  uint32_t window_id;
+} laufey_pointer_state_t;
 
 // One display, as reported by get_screens. Every rectangle is in the same
 // top-left-origin screen space and units as get_window_position /
@@ -3409,6 +3435,31 @@ struct laufey_backend_api {
   // has no read-back. Free with string_free. Any thread (it waits for the UI
   // thread). NULL on Winit.
   char* (*menu_snapshot)(void* backend_data, int32_t kind, uint32_t id);
+
+  // --- Window stacking and the pointer (API >= 60) ---------------------------
+  //
+  // The app's windows as the OS stacks them now, front to back
+  // (LAUFEY_WINDOW_CAP_Z_ORDER): fills up to `capacity` ids of `out` and
+  // returns how many there are (which may be more than `capacity`: call again
+  // with a bigger buffer). `out` may be NULL when `capacity` is 0. Only
+  // windows that are on screen are listed: not a hidden or minimized one, nor
+  // one on another Space / virtual desktop / workspace. Child web views are
+  // not windows and never listed. 0 where the capability is not reported (a
+  // Wayland session, where no client can see the stacking order; Winit). Any
+  // thread (it waits for the UI thread).
+  size_t (*get_window_z_order)(void* backend_data, uint32_t* out,
+                               size_t capacity);
+
+  // Where the pointer is, which buttons are held and which of the app's
+  // windows is under it (LAUFEY_WINDOW_CAP_POINTER_STATE), asked of the OS at
+  // the call: it answers while the pointer is outside every window of the
+  // app and during a drag another window started, which is what a drag
+  // between two windows needs. Poll it for the length of a gesture (once per
+  // frame is cheap); it is not an event source. Returns false, leaving `out`
+  // untouched, where the capability is not reported (a Wayland session, where
+  // a client learns the pointer's position only inside its own surfaces;
+  // Winit). Any thread (it waits for the UI thread).
+  bool (*get_pointer_state)(void* backend_data, laufey_pointer_state_t* out);
 };
 
 #ifdef __cplusplus

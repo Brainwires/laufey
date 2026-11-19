@@ -407,6 +407,10 @@ class WKWebViewBackend : public LaufeyBackend {
                                 int* max_height) override;
   size_t GetScreens(laufey_screen_t* out, size_t capacity) override;
   int64_t GetWindowScreen(uint32_t window_id) override;
+  size_t GetWindowZOrder(uint32_t* out, size_t capacity) override;
+  bool GetPointerState(laufey_pointer_state_t* out) override;
+  // Every window as laufey_common::NativeWindow. Main thread.
+  std::vector<laufey_common::NativeWindow> NativeWindows();
   void SetDisplayChangedHandler(laufey_display_changed_fn handler,
                                 void* user_data) override;
   bool SetWindowTitlebarStyle(uint32_t window_id, int style) override;
@@ -4308,6 +4312,9 @@ uint32_t WKWebViewBackend::WindowCapabilities() {
          LAUFEY_WINDOW_CAP_FILE_DIALOG_FILES_AND_DIRECTORIES |
          LAUFEY_WINDOW_CAP_FILE_DIALOG_MODAL |
          LAUFEY_WINDOW_CAP_MESSAGE_DIALOGS |
+         // API 60: AppKit lists the app's windows front to back and tells
+         // the pointer and the window under it anywhere on screen.
+         LAUFEY_WINDOW_CAP_Z_ORDER | LAUFEY_WINDOW_CAP_POINTER_STATE |
          // API 57: NSWindow.titleVisibility; toolbarStyle on macOS 11+.
          LAUFEY_WINDOW_CAP_TITLE_HIDDEN |
          (laufey_common::MacToolbarStyleAvailable()
@@ -4405,6 +4412,36 @@ int64_t WKWebViewBackend::GetWindowScreen(uint32_t window_id) {
       result = laufey_common::MacScreenForWindow((__bridge void*)window);
   });
   return result;
+}
+
+std::vector<laufey_common::NativeWindow> WKWebViewBackend::NativeWindows() {
+  std::vector<laufey_common::NativeWindow> windows;
+  std::lock_guard<std::mutex> lock(windows_mutex_);
+  for (auto& entry : windows_) {
+    laufey_common::NativeWindow w;
+    w.id = entry.first;
+    w.handle = reinterpret_cast<uintptr_t>((__bridge void*)entry.second.window);
+    windows.push_back(w);
+  }
+  return windows;
+}
+
+size_t WKWebViewBackend::GetWindowZOrder(uint32_t* out, size_t capacity) {
+  __block std::vector<uint32_t> ids;
+  laufey_common::RunOnMainSync(^{
+    ids = laufey_common::MacWindowZOrder(NativeWindows());
+  });
+  return laufey_common::CopyWindowIds(ids, out, capacity);
+}
+
+bool WKWebViewBackend::GetPointerState(laufey_pointer_state_t* out) {
+  __block laufey_pointer_state_t state = {};
+  bool ok = laufey_common::RunOnMainSync(^{
+    laufey_common::MacPointerState(NativeWindows(), &state);
+  });
+  if (ok)
+    *out = state;
+  return ok;
 }
 
 void WKWebViewBackend::SetDisplayChangedHandler(

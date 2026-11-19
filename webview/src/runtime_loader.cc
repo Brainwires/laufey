@@ -1255,6 +1255,23 @@ static int64_t Backend_GetWindowScreen(void* data, uint32_t window_id) {
   return 0;
 }
 
+static size_t Backend_GetWindowZOrder(void* data, uint32_t* out,
+                                      size_t capacity) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->GetWindowZOrder(out, capacity);
+  return 0;
+}
+
+static bool Backend_GetPointerState(void* data, laufey_pointer_state_t* out) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  if (!out)
+    return false;
+  if (LaufeyBackend* backend = loader->GetBackend())
+    return backend->GetPointerState(out);
+  return false;
+}
+
 static void Backend_SetDisplayChangedHandler(void* data,
                                              laufey_display_changed_fn handler,
                                              void* user_data) {
@@ -2067,6 +2084,8 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.get_window_size_constraints = Backend_GetWindowSizeConstraints;
   backend_api_.get_screens = Backend_GetScreens;
   backend_api_.get_window_screen = Backend_GetWindowScreen;
+  backend_api_.get_window_z_order = Backend_GetWindowZOrder;
+  backend_api_.get_pointer_state = Backend_GetPointerState;
   backend_api_.set_display_changed_handler = Backend_SetDisplayChangedHandler;
   backend_api_.window_capabilities = Backend_WindowCapabilities;
   backend_api_.set_window_titlebar_style = Backend_SetWindowTitlebarStyle;

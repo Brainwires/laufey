@@ -3212,6 +3212,14 @@ static uint32_t Backend_WindowCapabilities(void* /*data*/) {
   if (laufey_common::DisplayBackend() != "wayland")
     caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
 #endif
+  // API 60: the stacking order and the pointer, from AppKit / user32 / the
+  // X server (no Wayland compositor tells a client either).
+#if defined(__APPLE__) || defined(_WIN32)
+  caps |= LAUFEY_WINDOW_CAP_Z_ORDER | LAUFEY_WINDOW_CAP_POINTER_STATE;
+#else
+  if (CefOnX11())
+    caps |= LAUFEY_WINDOW_CAP_Z_ORDER | LAUFEY_WINDOW_CAP_POINTER_STATE;
+#endif
   // Drag and drop and file dialogs (API >= 39). The paths of an external
   // drop come from the OS's drag data when the drag enters (CEF calls
   // OnDragEnter only for Alloy-style browsers; see LaufeyNativeDragFilePaths).
@@ -3445,6 +3453,103 @@ static void CefPollDisplays(std::string last) {
   CefPostDelayedTask(TID_UI, base::BindOnce(&CefPollDisplays, now), 2000);
 }
 #endif
+
+// --- Window stacking and the pointer (API 60) -------------------------------
+
+// Every open window as laufey_common::NativeWindow: the NSWindow* (macOS),
+// the top-level HWND (Windows) or the X11 window (Linux). UI thread.
+static std::vector<laufey_common::NativeWindow> CefNativeWindows() {
+  std::vector<laufey_common::NativeWindow> windows;
+  for (uint32_t id : RuntimeLoader::GetInstance()->GetAllWindowIds()) {
+    CefRefPtr<CefWindow> window = CefWindowForId(id);
+    if (!window || window->IsClosed())
+      continue;
+    laufey_common::NativeWindow w;
+    w.id = id;
+#if defined(__APPLE__)
+    w.handle = reinterpret_cast<uintptr_t>(
+        NSWindowForCefHandle(window->GetWindowHandle()));
+#elif defined(_WIN32)
+    w.handle = reinterpret_cast<uintptr_t>(window->GetWindowHandle());
+#else
+    w.handle = static_cast<uintptr_t>(window->GetWindowHandle());
+#endif
+    if (w.handle)
+      windows.push_back(w);
+  }
+  return windows;
+}
+
+#if !defined(__APPLE__) && !defined(_WIN32)
+// Chromium draws on X11 unless a Wayland display is there (main_linux.cc
+// picks Ozone's platform the same way).
+static bool CefOnX11() {
+  return laufey_common::DisplayBackend() == "x11" &&
+         laufey_common::LinuxX11StackingAvailable();
+}
+#endif
+
+static size_t Backend_GetWindowZOrder(void* /*data*/, uint32_t* out,
+                                      size_t capacity) {
+  std::vector<uint32_t> ids;
+#if defined(__APPLE__)
+  cef_invoke_sync(
+      [&] { ids = laufey_common::MacWindowZOrder(CefNativeWindows()); });
+#elif defined(_WIN32)
+  cef_invoke_sync(
+      [&] { ids = laufey_common::WinWindowZOrder(CefNativeWindows()); });
+#else
+  if (CefOnX11()) {
+    std::vector<laufey_common::NativeWindow> windows;
+    cef_invoke_sync([&] { windows = CefNativeWindows(); });
+    ids = laufey_common::LinuxX11WindowZOrder(windows);
+  }
+#endif
+  return laufey_common::CopyWindowIds(ids, out, capacity);
+}
+
+static bool Backend_GetPointerState(void* /*data*/,
+                                    laufey_pointer_state_t* out) {
+  if (!out)
+    return false;
+  laufey_pointer_state_t state = {};
+  bool ok = false;
+#if defined(__APPLE__)
+  // Points from the primary screen's top-left: the DIP space CefWindow's
+  // GetPosition uses.
+  ok = cef_invoke_sync(
+      [&] { laufey_common::MacPointerState(CefNativeWindows(), &state); });
+#elif defined(_WIN32)
+  ok = cef_invoke_sync([&] {
+    laufey_common::WinPointerState(CefNativeWindows(), &state);
+    // Physical pixels to the DIP screen space of CEF Views.
+    CefPoint dip =
+        CefDisplay::ConvertScreenPointFromPixels(CefPoint(state.x, state.y));
+    state.x = dip.x;
+    state.y = dip.y;
+  });
+#else
+  if (CefOnX11()) {
+    std::vector<laufey_common::NativeWindow> windows;
+    float scale = 1.0f;
+    cef_invoke_sync([&] {
+      windows = CefNativeWindows();
+      // X pixels to DIP: Chromium scales the whole X screen by one factor.
+      CefRefPtr<CefDisplay> primary = CefDisplay::GetPrimaryDisplay();
+      if (primary && primary->GetDeviceScaleFactor() > 0)
+        scale = primary->GetDeviceScaleFactor();
+    });
+    ok = laufey_common::LinuxX11PointerState(windows, &state);
+    if (ok) {
+      state.x = static_cast<int32_t>(std::lround(state.x / scale));
+      state.y = static_cast<int32_t>(std::lround(state.y / scale));
+    }
+  }
+#endif
+  if (ok)
+    *out = state;
+  return ok;
+}
 
 static void Backend_SetDisplayChangedHandler(void* /*data*/,
                                              laufey_display_changed_fn handler,
@@ -4093,6 +4198,8 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.get_window_size_constraints = Backend_GetWindowSizeConstraints;
   backend_api_.get_screens = Backend_GetScreens;
   backend_api_.get_window_screen = Backend_GetWindowScreen;
+  backend_api_.get_window_z_order = Backend_GetWindowZOrder;
+  backend_api_.get_pointer_state = Backend_GetPointerState;
   backend_api_.set_display_changed_handler = Backend_SetDisplayChangedHandler;
   backend_api_.window_capabilities = Backend_WindowCapabilities;
   backend_api_.set_window_titlebar_style = Backend_SetWindowTitlebarStyle;

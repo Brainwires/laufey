@@ -115,6 +115,10 @@ The pointers group into:
   keep the native title bar; macOS, Windows, Linux under client-side
   decorations; `LAUFEY_WINDOW_CAP_TITLE_HIDDEN`) and `set_window_toolbar_style`
   (`LAUFEY_TOOLBAR_STYLE_*`, macOS 11+; `LAUFEY_WINDOW_CAP_TOOLBAR_STYLE`),
+  `NULL` on Winit. API 60 adds `get_window_z_order` (the app's on-screen windows
+  front to back; `LAUFEY_WINDOW_CAP_Z_ORDER`) and `get_pointer_state` (the
+  pointer on the screen, the buttons held and the app's window under it;
+  `LAUFEY_WINDOW_CAP_POINTER_STATE`): macOS, Windows and X11, not Wayland;
   `NULL` on Winit.
 - **Child web views** (API ≥ 58) — `webview_capabilities`, `create_webview` (a
   native browser view over a window's page, options as JSON),

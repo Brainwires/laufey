@@ -52,6 +52,7 @@ mod quit_request_checks;
 mod sandbox_checks;
 mod secret_checks;
 mod share_checks;
+mod stacking_checks;
 mod stream_checks;
 mod system_checks;
 mod title_bar_checks;
@@ -2385,6 +2386,8 @@ async fn window_api_checks() {
   background_checks::run().await;
   // Focus / blur follow the window's activation (WebView2).
   focus_checks::run().await;
+  // The stacking order of the app's windows and the pointer (API 60).
+  stacking_checks::run().await;
   // Child web views (API 58).
   webview_checks::run(&w).await;
   // Web view downloads and permission requests the app decides (API 59).

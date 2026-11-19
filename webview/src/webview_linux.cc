@@ -1436,6 +1436,11 @@ class WebKitGTKBackend : public LaufeyBackend {
                                 int* max_height) override;
   size_t GetScreens(laufey_screen_t* out, size_t capacity) override;
   int64_t GetWindowScreen(uint32_t window_id) override;
+  size_t GetWindowZOrder(uint32_t* out, size_t capacity) override;
+  bool GetPointerState(laufey_pointer_state_t* out) override;
+  // Every realized window as laufey_common::NativeWindow (its XID), and the
+  // GDK scale (X pixels per GDK unit). Empty off X11. GTK thread.
+  std::vector<laufey_common::NativeWindow> NativeX11Windows(int* scale);
   void SetDisplayChangedHandler(laufey_display_changed_fn handler,
                                 void* user_data) override;
   bool GetWindowNormalBounds(uint32_t window_id, int* x, int* y, int* width,
@@ -2952,6 +2957,10 @@ uint32_t WebKitGTKBackend::WindowCapabilities() {
   // Wayland clients can't place their windows.
   if (!wayland)
     caps |= LAUFEY_WINDOW_CAP_SET_POSITION;
+  // API 60: the X server tells the stacking order and the pointer; a
+  // Wayland compositor tells a client neither.
+  if (!wayland && laufey_common::LinuxX11StackingAvailable())
+    caps |= LAUFEY_WINDOW_CAP_Z_ORDER | LAUFEY_WINDOW_CAP_POINTER_STATE;
   // Drag and drop and file dialogs (API >= 39). Drag-out uses the window as
   // the drag source, so it works on X11 and Wayland alike.
   caps |= LAUFEY_WINDOW_CAP_FILE_DROP |
@@ -3267,6 +3276,70 @@ int64_t WebKitGTKBackend::GetWindowScreen(uint32_t window_id) {
       result = LaufeyMonitorId(display, m);
   });
   return result;
+}
+
+std::vector<laufey_common::NativeWindow> WebKitGTKBackend::NativeX11Windows(
+    int* scale) {
+  std::vector<laufey_common::NativeWindow> windows;
+  *scale = 1;
+#ifdef GDK_WINDOWING_X11
+  GdkDisplay* display = gdk_display_get_default();
+  if (!display || LaufeyIsWaylandDisplay(display))
+    return windows;
+  std::lock_guard<std::mutex> lock(windows_mutex_);
+  for (auto& entry : windows_) {
+    GdkWindow* gw = entry.second.window
+                        ? gtk_widget_get_window(entry.second.window)
+                        : nullptr;
+    if (!gw)
+      continue;
+    // One scale for the whole X screen (GDK's X11 backend has no
+    // per-monitor scale).
+    *scale = std::max(1, gdk_window_get_scale_factor(gw));
+    laufey_common::NativeWindow w;
+    w.id = entry.first;
+    w.handle = static_cast<uintptr_t>(gdk_x11_window_get_xid(gw));
+    windows.push_back(w);
+  }
+#endif
+  return windows;
+}
+
+size_t WebKitGTKBackend::GetWindowZOrder(uint32_t* out, size_t capacity) {
+  std::vector<laufey_common::NativeWindow> windows;
+  int scale = 1;
+  gtk_invoke_sync([&] { windows = NativeX11Windows(&scale); });
+  return laufey_common::CopyWindowIds(
+      laufey_common::LinuxX11WindowZOrder(windows), out, capacity);
+}
+
+bool WebKitGTKBackend::GetPointerState(laufey_pointer_state_t* out) {
+  std::vector<laufey_common::NativeWindow> windows;
+  int scale = 1;
+  bool x11 = false;
+  gtk_invoke_sync([&] {
+    GdkDisplay* display = gdk_display_get_default();
+    x11 = display && !LaufeyIsWaylandDisplay(display);
+    windows = NativeX11Windows(&scale);
+    if (windows.empty() && display) {
+      // No window yet: the scale of the primary monitor.
+      GdkMonitor* m = gdk_display_get_primary_monitor(display);
+      if (!m)
+        m = gdk_display_get_monitor(display, 0);
+      if (m)
+        scale = std::max(1, gdk_monitor_get_scale_factor(m));
+    }
+  });
+  if (!x11)
+    return false;
+  laufey_pointer_state_t state = {};
+  if (!laufey_common::LinuxX11PointerState(windows, &state))
+    return false;
+  // X pixels to GDK units, as gtk_window_get_position reports a window.
+  state.x /= scale;
+  state.y /= scale;
+  *out = state;
+  return true;
 }
 
 void WebKitGTKBackend::SetDisplayChangedHandler(

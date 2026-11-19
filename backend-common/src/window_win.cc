@@ -501,4 +501,70 @@ void WinUnsubclassForStateChanges(void* hwnd_ptr) {
   g_subclasses.erase(it);
 }
 
+// --- Window stacking and the pointer (API 60) -------------------------------
+
+namespace {
+
+// On screen: shown, not minimized, and not cloaked (DWM cloaks the windows
+// of the other virtual desktops, which stay "visible").
+bool WinOnScreen(HWND hwnd) {
+  if (!IsWindowVisible(hwnd) || IsIconic(hwnd))
+    return false;
+  DWORD cloaked = 0;
+  if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked,
+                                      sizeof(cloaked))) &&
+      cloaked != 0)
+    return false;
+  return true;
+}
+
+BOOL CALLBACK CollectStacking(HWND hwnd, LPARAM param) {
+  auto* stacking = reinterpret_cast<std::vector<uintptr_t>*>(param);
+  if (WinOnScreen(hwnd))
+    stacking->push_back(reinterpret_cast<uintptr_t>(hwnd));
+  return TRUE;
+}
+
+bool WinButtonDown(int vk) {
+  return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+}  // namespace
+
+std::vector<uint32_t> WinWindowZOrder(
+    const std::vector<NativeWindow>& windows) {
+  // EnumWindows walks the top-level windows from the top of the z-order down.
+  std::vector<uintptr_t> stacking;
+  EnumWindows(CollectStacking, reinterpret_cast<LPARAM>(&stacking));
+  return StackedWindowIds(stacking, windows);
+}
+
+void WinPointerState(const std::vector<NativeWindow>& windows,
+                     laufey_pointer_state_t* out) {
+  POINT pt = {};
+  GetCursorPos(&pt);
+  out->x = pt.x;
+  out->y = pt.y;
+  // GetAsyncKeyState reports the physical buttons: with the buttons swapped
+  // the right one is the primary.
+  bool swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
+  bool left = WinButtonDown(VK_LBUTTON);
+  bool right = WinButtonDown(VK_RBUTTON);
+  out->buttons = 0;
+  if (swapped ? right : left)
+    out->buttons |= LAUFEY_POINTER_BUTTON_PRIMARY;
+  if (swapped ? left : right)
+    out->buttons |= LAUFEY_POINTER_BUTTON_SECONDARY;
+  if (WinButtonDown(VK_MBUTTON))
+    out->buttons |= LAUFEY_POINTER_BUTTON_AUXILIARY;
+  // The window under the point (of any process; a click-through window is
+  // skipped by the OS), then its top-level window.
+  out->window_id = 0;
+  HWND under = WindowFromPoint(pt);
+  HWND root = under ? GetAncestor(under, GA_ROOT) : nullptr;
+  if (root && WinOnScreen(root))
+    out->window_id =
+        WindowIdForHandle(windows, reinterpret_cast<uintptr_t>(root));
+}
+
 }  // namespace laufey_common
