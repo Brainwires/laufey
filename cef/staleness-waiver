@@ -1,0 +1,3 @@
+pin: 156.0.31+ge603d97+chromium-156.0.8078.100
+expires: 2026-12-17
+reason: Chrome stable is 159 but CEF has published no stable build past 156 for any platform (158.0.3 is beta only; https://cef-builds.spotifycdn.com/index.html, checked 2026-11-19)

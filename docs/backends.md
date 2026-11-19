@@ -19,7 +19,7 @@ There is also an **iOS** backend (UIKit + WKWebView, statically linked) — see
 
 ## CEF
 
-Embeds Chromium 156 (CEF 156.0.30, Chromium 156.0.8078.96) through the Chromium
+Embeds Chromium 156 (CEF 156.0.31, Chromium 156.0.8078.100) through the Chromium
 Embedded Framework and runs Chromium's real multi-process architecture — a
 browser process plus renderer, GPU, and utility subprocesses, with the same
 rendering and DevTools you get in Chrome. The engine is bundled into the app, so
@@ -369,6 +369,16 @@ fix for a bug Google reported as exploited in the wild. CEF 156.0.28 to 156.0.30
 is two CEF commits; `include/` differs only in `cef_version.h` and the dates in
 `cef_api_versions.h`.
 
+It then moved to CEF 156.0.31 (Chromium 156.0.8078.100, the same branch and API
+version), the newest CEF stable build for all six platforms, for Chrome's
+security fixes in 156.0.8078.100. CEF 156.0.30 to 156.0.31 is one CEF commit,
+the Chromium version update alone (`CHROMIUM_BUILD_COMPATIBILITY.txt` and the
+tarball patch); Chromium's `chrome_main_delegate.cc` (de-elevation),
+`spellcheck_common.cc` and `hunspell_dictionaries` pin are the same at both
+tags. Chrome stable is 159 while CEF has published no stable build past 156 (158
+is beta only), so `cef/staleness-waiver` covers this pin until CEF ships one for
+every platform.
+
 The hashes were checked against the `.sha1` and `.sha256` files CEF publishes
 beside each archive. What CEF 151 to 156 changed for the host:
 
@@ -445,7 +455,7 @@ When a bump is blocked (no CEF build for every platform yet, a regression the
 host must work around first), commit a waiver as `cef/staleness-waiver`:
 
 ```text
-pin: 156.0.30+g6028375+chromium-156.0.8078.96
+pin: 156.0.31+ge603d97+chromium-156.0.8078.100
 expires: 2026-12-01
 reason: CEF 159 has no Windows arm64 build yet (tracking issue link)
 ```
