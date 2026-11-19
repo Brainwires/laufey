@@ -836,14 +836,28 @@ jobs:
       # Every e2e step has a timeout: a backend that hangs would otherwise
       # hold the runner for the 6-hour job limit. native-e2e-run.sh's own
       # watchdog (5 min) fires first and prints the hung process's stacks.
-      # GitHub's windows-11-arm image opens a topmost "Microsoft account"
-      # window over the desktop some time after the job starts; it covered
-      # the click points of the navigation guard and the pointer checks.
-      # Close it (and log it) before the e2e runs.
-      - name: Close system windows over the desktop (Windows)
+      # GitHub's windows-11-arm image shows Windows' "finish setting up your
+      # device" prompt ("Microsoft account", a CoreWindow above every topmost
+      # window) at any time during the run; it covered the click points of
+      # the navigation guard and the pointer checks. Turn it off for the
+      # runner's user, close what is already up, and keep a watcher stopping
+      # it for the rest of the e2e (stopped, and its log shown, after the
+      # last e2e step). scripts/ci-close-system-windows.ps1 says how.
+      - name: Keep Windows' setup prompts off the desktop (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: scripts/ci-close-system-windows.ps1 -Seconds 30
+        run: |
+          scripts/ci-close-system-windows.ps1 -OptOut
+          scripts/ci-close-system-windows.ps1 -Seconds 30
+          $stop = Join-Path $env:RUNNER_TEMP 'system-windows.stop'
+          $log = Join-Path $env:RUNNER_TEMP 'system-windows.log'
+          Remove-Item -Force -ErrorAction SilentlyContinue $stop, $log
+          $script = Join-Path $PWD 'scripts/ci-close-system-windows.ps1'
+          $watcher = Start-Process pwsh -WindowStyle Hidden -PassThru -ArgumentList @(
+            '-NoProfile', '-File', $script, '-Watch', '-Interval', '2',
+            '-StopFile', $stop, '-LogFile', $log)
+          "LAUFEY_SYSTEM_WINDOWS_WATCHER=$($watcher.Id)" >> $env:GITHUB_ENV
+          Write-Host "system-window watcher: pid $($watcher.Id), log $log"
 
       - name: Layer 0 — readback / events / clipboard / menu+tray clicks
         if: ${{ !matrix.layer0_excluded }}
@@ -1276,6 +1290,20 @@ jobs:
 
       # A backend that crashed mid-run leaves only "exited before reporting
       # an overall result"; print the crash report it left (any e2e step).
+      - name: Stop the system-window watcher (Windows)
+        if: ${{ always() && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $stop = Join-Path $env:RUNNER_TEMP 'system-windows.stop'
+          $log = Join-Path $env:RUNNER_TEMP 'system-windows.log'
+          New-Item -ItemType File -Force $stop | Out-Null
+          $id = $env:LAUFEY_SYSTEM_WINDOWS_WATCHER
+          if ($id) {
+            $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($p -and -not $p.WaitForExit(10000)) { Stop-Process -Id $id -Force }
+          }
+          if (Test-Path $log) { Get-Content $log } else { Write-Host "no watcher log" }
+
       - name: Crash reports (macOS)
         if: failure() && runner.os == 'macOS'
         shell: bash

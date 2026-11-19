@@ -14,6 +14,7 @@
 
 use std::io::Write;
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -103,9 +104,14 @@ fn ws_accept(key: &str) -> String {
   ))
 }
 
+/// How many WebSocket upgrade requests the loopback echo server got (for
+/// the log when the page's socket reports no message).
+static WS_UPGRADES: AtomicU32 = AtomicU32::new(0);
+
 /// Answers a WebSocket upgrade request (`head` is its header block): the
 /// handshake, one text frame with [`WS_MESSAGE`], then a close frame.
 pub fn serve_ws(mut stream: TcpStream, head: &str) {
+  WS_UPGRADES.fetch_add(1, Ordering::SeqCst);
   let Some(key) = head.lines().find_map(|l| {
     let (name, value) = l.split_once(':')?;
     name
@@ -130,16 +136,35 @@ pub fn serve_ws(mut stream: TcpStream, head: &str) {
   let _ = stream.write_all(&[0x88, 0x00]);
 }
 
+/// How long the page's WebSocket probe may take before it reports
+/// `pending` (ms), and how long the harness waits for its report (the
+/// latter a little longer). The probe ends on the socket's own events; the
+/// bound only stops a socket that never settles (a cold CEF start on a busy
+/// Windows runner took more than the 8 s this once allowed).
+pub const WS_PROBE_LIMIT_MS: u64 = 45_000;
+pub const WS_PROBE_WAIT_POLLS: u32 = 500; // of 100 ms: 50 s
+
 /// Script run in the custom-scheme window: open a WebSocket to `url` and
-/// report through the `schemeProbe` binding what happened
-/// (`message:<data>`, `error`, `closed`, or `pending` after 8 s).
+/// report through the `schemeProbe` binding what happened: `message:<data>`
+/// when its message arrives, else, at its error or close or after
+/// [`WS_PROBE_LIMIT_MS`], what it got to (`error`, `closed` or `pending`),
+/// its readyState and the timeline of its events.
 pub fn ws_probe_js(label: &str, url: &str) -> String {
+  let limit = WS_PROBE_LIMIT_MS;
   format!(
     r#"(() => {{
   let done = false;
-  const report = async (out) => {{
+  let ws = null;
+  const t0 = performance.now();
+  const events = [];
+  const note = (what) => events.push(what + '@' + Math.round(performance.now() - t0) + 'ms');
+  const report = async (out, settled) => {{
     if (done) return;
     done = true;
+    if (!settled) {{
+      out += '; readyState ' + (ws ? ws.readyState : 'none') +
+        '; events ' + (events.join(' ') || 'none');
+    }}
     for (let i = 0; i < 100; i++) {{
       if (typeof Laufey !== 'undefined' &&
           typeof Laufey.schemeProbe === 'function') break;
@@ -147,12 +172,14 @@ pub fn ws_probe_js(label: &str, url: &str) -> String {
     }}
     Laufey.schemeProbe({label:?}, out);
   }};
-  setTimeout(() => report('pending'), 8000);
+  setTimeout(() => report('pending'), {limit});
   try {{
-    const ws = new WebSocket({url:?});
-    ws.onmessage = (e) => {{ report('message:' + e.data); ws.close(); }};
-    ws.onerror = () => report('error');
-    ws.onclose = () => report('closed');
+    ws = new WebSocket({url:?});
+    note('created');
+    ws.onopen = () => note('open');
+    ws.onmessage = (e) => {{ note('message'); report('message:' + e.data, true); ws.close(); }};
+    ws.onerror = () => {{ note('error'); report('error'); }};
+    ws.onclose = (e) => {{ note('close ' + e.code); report('closed'); }};
   }} catch (e) {{
     report('threw: ' + (e && e.message));
   }}
@@ -270,7 +297,7 @@ pub async fn run(echo_url: Option<&str>) {
   }
   wait_for(
     || probes.lock().unwrap().contains_key("websocket"),
-    100,
+    WS_PROBE_WAIT_POLLS,
     100,
   )
   .await;
@@ -487,12 +514,20 @@ pub fn check_app_origin_websocket(echo_url: Option<&str>, got: &str) {
     na("a WebSocket to loopback (could not bind a loopback echo server)");
     return;
   }
+  let ok = got == format!("message:{WS_MESSAGE}");
+  if !ok {
+    eprintln!(
+      "[e2e] INFO the loopback echo server got {} WebSocket upgrade request(s)",
+      WS_UPGRADES.load(Ordering::SeqCst)
+    );
+    log_loopback_connections(echo_url);
+  }
   check(
     &format!(
       "a WebSocket from the custom-scheme page to a loopback server gets \
        its message (got {got:?})"
     ),
-    got == format!("message:{WS_MESSAGE}"),
+    ok,
   );
 }
 

@@ -2092,7 +2092,7 @@ fn e2e_main() {
       let got = {
         wait_for(
           || scheme_probes.lock().unwrap().contains_key("websocket"),
-          100,
+          lna_checks::WS_PROBE_WAIT_POLLS,
           100,
         )
         .await;
