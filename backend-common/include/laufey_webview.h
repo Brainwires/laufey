@@ -295,6 +295,11 @@ int32_t WebViewDownloadAccepts(WebViewDownloadPhase phase, int32_t action,
 // separator, in a directory that exists, and not itself a directory or a
 // symbolic link (the engine would write through it). `error` says which.
 bool IsValidWebViewDownloadPath(const std::string& path, std::string* error);
+// SAVE's path as the engines take it: a Windows verbatim path
+// ("\\\\?\\C:\\dir\\f", "\\\\?\\UNC\\server\\share\\f"; what a path
+// canonicalized by Rust or Win32 looks like) without its prefix, which the
+// engines' own path handling refuses. Any other path is returned unchanged.
+std::string NormalizeWebViewDownloadPath(const std::string& path);
 // The same without touching the file system (the syntax rules only), for
 // tests of the other platform's rules.
 bool IsWellFormedWebViewDownloadPath(const std::string& path, bool windows,

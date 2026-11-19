@@ -1425,11 +1425,14 @@ static int32_t CheckWebViewDownloadAction(int32_t action, const char* path,
     return LAUFEY_WEBVIEW_INVALID;
   if (action == LAUFEY_WEBVIEW_DOWNLOAD_SAVE) {
     std::string error;
-    if (!path || !laufey_common::IsValidWebViewDownloadPath(path, &error)) {
+    std::string normal = path
+                             ? laufey_common::NormalizeWebViewDownloadPath(path)
+                             : std::string();
+    if (!path || !laufey_common::IsValidWebViewDownloadPath(normal, &error)) {
       std::cerr << "laufey: webview_download_control: " << error << std::endl;
       return LAUFEY_WEBVIEW_INVALID;
     }
-    *path_out = path;
+    *path_out = normal;
   }
   return LAUFEY_WEBVIEW_OK;
 }

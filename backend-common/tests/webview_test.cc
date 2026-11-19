@@ -715,6 +715,13 @@ static void TestDownloadPaths() {
   EXPECT(!IsWellFormedWebViewDownloadPath("/tmp/a.txt", true, &e));
   EXPECT(!IsWellFormedWebViewDownloadPath("C:\\Users\\a\\", true, &e));
   EXPECT(!IsWellFormedWebViewDownloadPath("C:\\Users\\..", true, &e));
+  // A Windows verbatim path loses its prefix; nothing else changes.
+  EXPECT(NormalizeWebViewDownloadPath("\\\\?\\C:\\a\\f.txt") == "C:\\a\\f.txt");
+  EXPECT(NormalizeWebViewDownloadPath("\\\\?\\UNC\\srv\\share\\f") ==
+         "\\\\srv\\share\\f");
+  EXPECT(NormalizeWebViewDownloadPath("C:\\a\\f.txt") == "C:\\a\\f.txt");
+  EXPECT(NormalizeWebViewDownloadPath("/tmp/f.txt") == "/tmp/f.txt");
+  EXPECT(NormalizeWebViewDownloadPath("").empty());
   // The file system half: the directory must exist, the path may not be one.
   namespace fs = std::filesystem;
   std::error_code ec;

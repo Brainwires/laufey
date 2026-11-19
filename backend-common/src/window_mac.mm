@@ -822,6 +822,15 @@ void MacRevealWindowAtLaunch(void* nswindow) {
 namespace {
 const char kNonActivatingKey = 0;
 }  // namespace
+}  // namespace laufey_common
+
+// Declared so the selector is known here; LaufeyPanel (webview_macos.mm)
+// implements it.
+@interface NSObject (LaufeyPanelKey)
+- (void)setLaufeyAllowKey:(BOOL)allow;
+@end
+
+namespace laufey_common {
 
 void MacMarkNonActivatingWindow(void* nswindow) {
   NSWindow* w = (__bridge NSWindow*)nswindow;
@@ -863,6 +872,10 @@ void MacFocusWindow(void* nswindow) {
     [NSApp activateIgnoringOtherApps:YES];
 #pragma clang diagnostic pop
   }
+  // A frameless panel may only become key on an explicit focus (the WebView
+  // backend's LaufeyPanel).
+  if ([w respondsToSelector:@selector(setLaufeyAllowKey:)])
+    [w setValue:@YES forKey:@"laufeyAllowKey"];
   [w makeKeyAndOrderFront:nil];
   // In front of the active app's windows even when the activation is
   // declined (makeKeyAndOrderFront: orders within this app only).

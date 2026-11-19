@@ -737,6 +737,16 @@ bool IsWellFormedWebViewDownloadPath(const std::string& path, bool windows,
   return true;
 }
 
+std::string NormalizeWebViewDownloadPath(const std::string& path) {
+  static const char kVerbatimUnc[] = "\\\\?\\UNC\\";
+  static const char kVerbatim[] = "\\\\?\\";
+  if (path.rfind(kVerbatimUnc, 0) == 0)
+    return "\\\\" + path.substr(sizeof(kVerbatimUnc) - 1);
+  if (path.rfind(kVerbatim, 0) == 0)
+    return path.substr(sizeof(kVerbatim) - 1);
+  return path;
+}
+
 bool IsValidWebViewDownloadPath(const std::string& path, std::string* error) {
 #ifdef _WIN32
   const bool windows = true;

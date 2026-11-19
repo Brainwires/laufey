@@ -332,6 +332,10 @@ async fn downloads(w: &Window, base: &str) {
     id_of(d) == first && state_is(d, "completed")
   })
   .await;
+  eprintln!(
+    "[e2e] INFO download events after SAVE: {:?}",
+    details(&events, WebViewEventKind::Download)
+  );
   check("the saved download completes", completed.is_some());
   if let Some(completed) = &completed {
     check(

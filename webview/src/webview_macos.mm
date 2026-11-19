@@ -543,6 +543,26 @@ static void UnregisterNSWindow(NSWindow* win) {
 // never takes key focus and its WKWebView never becomes first responder —
 // killing all keyboard and mouse input. This subclass forces both to YES so
 // frameless windows behave like normal ones.
+// A non-activating panel (LAUFEY_WINDOW_FLAG_NO_ACTIVATE). AppKit lets a
+// panel without a title bar (a frameless overlay) never become key, so
+// focus() could not give it the keyboard. laufeyAllowKey is set by an
+// explicit focus() (MacFocusWindow) and cleared when the panel gives the
+// key status up, so a click alone still never takes the keyboard from the
+// window that has it.
+@interface LaufeyPanel : NSPanel
+@property(nonatomic, assign) BOOL laufeyAllowKey;
+@end
+
+@implementation LaufeyPanel
+- (BOOL)canBecomeKeyWindow {
+  return self.laufeyAllowKey || [super canBecomeKeyWindow];
+}
+- (void)resignKeyWindow {
+  [super resignKeyWindow];
+  self.laufeyAllowKey = NO;
+}
+@end
+
 @interface LaufeyKeyableWindow : NSWindow
 @end
 
@@ -2183,10 +2203,10 @@ void WKWebViewBackend::CreateWindowEx(uint32_t window_id, int width, int height,
         // tray popover behavior.
         style |= NSWindowStyleMaskNonactivatingPanel;
         NSPanel* panel =
-            [[NSPanel alloc] initWithContentRect:frame
-                                       styleMask:style
-                                         backing:NSBackingStoreBuffered
-                                           defer:NO];
+            [[LaufeyPanel alloc] initWithContentRect:frame
+                                           styleMask:style
+                                             backing:NSBackingStoreBuffered
+                                               defer:NO];
         [panel setBecomesKeyOnlyIfNeeded:YES];
         [panel setFloatingPanel:YES];
         [panel setHidesOnDeactivate:NO];
