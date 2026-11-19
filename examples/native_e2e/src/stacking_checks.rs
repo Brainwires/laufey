@@ -26,6 +26,51 @@ fn order() -> Vec<u32> {
 }
 
 /// Whether `(x, y)` is inside the window's outer frame.
+const STACKING_B: &str = "laufey e2e stacking b";
+
+/// Windows: a point of `win` (titled `title`) that no other window covers
+/// (WindowFromPoint), trying it where it is and then in each corner of the
+/// primary screen; Err names what covers its centre when no point of it is
+/// free anywhere.
+#[cfg(windows)]
+async fn windows_free_point(
+  win: &Window,
+  title: &str,
+) -> Result<(i32, i32), String> {
+  use crate::io_checks::ole_input;
+  let hwnd = ole_input::hwnd_of(title);
+  if hwnd.is_null() {
+    return Err(format!("no top-level window titled {title:?}"));
+  }
+  let free_here = || {
+    let (x, y) = win.get_position();
+    let (w, h) = win.get_outer_size();
+    ole_input::free_point(hwnd, x, y, w, h)
+  };
+  if let Some(pt) = free_here() {
+    return Ok(pt);
+  }
+  let (x, y) = win.get_position();
+  let (w, h) = win.get_outer_size();
+  let cover = ole_input::window_at(x + w / 2, y + h / 2);
+  let (sw, sh) = ole_input::screen_size();
+  for (cx, cy) in [
+    (16, 16),
+    (sw - w - 16, 16),
+    (16, sh - h - 64),
+    (sw - w - 16, sh - h - 64),
+  ] {
+    win.set_position(cx, cy);
+    win.focus();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    if let Some(pt) = free_here() {
+      eprintln!("[e2e] INFO {cover} covers the window where it was: moved to ({cx}, {cy})");
+      return Ok(pt);
+    }
+  }
+  Err(cover)
+}
+
 fn frame_contains(win: &Window, x: i32, y: i32) -> bool {
   let (wx, wy) = win.get_position();
   let (ww, wh) = win.get_outer_size();
@@ -52,7 +97,7 @@ pub async fn run() {
   }
 
   let a = Window::new(320, 240).title("laufey e2e stacking a");
-  let b = Window::new(320, 240).title("laufey e2e stacking b");
+  let b = Window::new(320, 240).title(STACKING_B);
   a.set_position(80, 120);
   b.set_position(460, 120);
   a.show();
@@ -183,30 +228,42 @@ pub async fn run() {
         b.set_position(p.x - 100, p.y - 100);
         b.focus();
         let placed = wait_for(|| frame_contains(&b, p.x, p.y), 100, 50).await;
-        // Windows: a window that holds the point over ours (a CI image's
-        // sign-in prompt, which focus() can't raise ours over) is passed
-        // over by making ours topmost for the check.
+        // Where the pointer is checked: where it is, or, on Windows, a point
+        // of the window that nothing covers, the pointer moved there
+        // (SendInput). A CI image's "Microsoft account" CoreWindow sits
+        // above every topmost window, over the screen centre where the
+        // pointer starts; Err names what covers every point tried.
         #[cfg(windows)]
-        let mut raised = false;
-        #[cfg(windows)]
-        if placed {
-          let hwnd =
-            crate::io_checks::ole_input::hwnd_of("laufey e2e stacking b");
-          if !hwnd.is_null() {
-            crate::io_checks::ole_input::raise_for_click(
-              hwnd,
-              p.x,
-              p.y,
-              &mut raised,
-            );
-          }
-        }
+        let target: Result<(i32, i32), String> = if placed {
+          windows_free_point(&b, STACKING_B).await
+        } else {
+          Ok((p.x, p.y))
+        };
+        #[cfg(not(windows))]
+        let target: Result<(i32, i32), String> = Ok((p.x, p.y));
         if !placed {
           // A window manager that keeps windows on screen can refuse the
           // spot (the pointer in a corner), and a session can refuse to
           // place windows at all.
           na("pointer_state names the window under the pointer (the window could not be placed there)");
-        } else {
+        } else if let Err(cover) = &target {
+          check(
+            &format!(
+              "pointer_state names the window under the pointer (no point of the window is uncovered: {cover})"
+            ),
+            false,
+          );
+        } else if let Ok((tx, ty)) = target {
+          #[cfg(windows)]
+          if (tx, ty) != (p.x, p.y) {
+            eprintln!(
+              "[e2e] INFO pointer check at ({tx}, {ty}): ({}, {}) is under {}",
+              p.x,
+              p.y,
+              crate::io_checks::ole_input::window_at(p.x, p.y)
+            );
+            crate::io_checks::ole_input::move_to(tx, ty);
+          }
           let named = wait_for(
             || {
               laufey::pointer_state()
@@ -217,12 +274,14 @@ pub async fn run() {
           )
           .await;
           let moved =
-            laufey::pointer_state().is_some_and(|q| (q.x, q.y) != (p.x, p.y));
+            laufey::pointer_state().is_some_and(|q| (q.x, q.y) != (tx, ty));
           if named {
             check("pointer_state names the window under the pointer", true);
           } else if moved {
             na("pointer_state names the window under the pointer (the pointer moved during the check)");
           } else {
+            let seen = laufey::pointer_state();
+            eprintln!("[e2e] INFO pointer_state at ({tx}, {ty}): {seen:?}");
             check("pointer_state names the window under the pointer", false);
           }
           // ...and not once it is hidden.
@@ -237,12 +296,6 @@ pub async fn run() {
           )
           .await;
           check("pointer_state stops naming a hidden window", unnamed);
-          #[cfg(windows)]
-          if raised {
-            let hwnd =
-              crate::io_checks::ole_input::hwnd_of("laufey e2e stacking b");
-            crate::menu_notification_checks::win::set_topmost(hwnd, false);
-          }
         }
       }
     }

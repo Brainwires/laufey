@@ -28,6 +28,13 @@
 #               exists, for the whole e2e, started detached before it and
 #               stopped by creating the file after it. Logs to -LogFile.
 #
+# Windows are found by title among EnumWindows' top-level windows and, since
+# the SCOOBE CoreWindow is not among them, by WindowFromPoint at the screen
+# centre and the quarters' centres when WWAHost owns what is there. The
+# native e2e doesn't depend on this: its pointer and click checks look for a
+# point of the test window nothing covers (WindowFromPoint) and fail, naming
+# the cover, only when there is none.
+#
 # A window owned by the shell or the session (explorer, dwm, ...) is never
 # stopped: the tray and focus checks need them; it is logged once.
 param(
@@ -81,6 +88,14 @@ public static extern int GetClassNameW(System.IntPtr hwnd, System.Text.StringBui
 public static extern uint GetWindowThreadProcessId(System.IntPtr hwnd, out uint pid);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool IsWindowVisible(System.IntPtr hwnd);
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct POINT { public int X; public int Y; }
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr WindowFromPoint(POINT point);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr GetAncestor(System.IntPtr hwnd, uint flags);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern int GetSystemMetrics(int index);
 '@
 
 # Every visible top-level window whose title is in $Titles: Pid, Title, Class, Name.
@@ -108,7 +123,30 @@ function Find-SystemWindows {
     return $true
   }
   [void][LaufeyCi.User32]::EnumWindows($callback, [System.IntPtr]::Zero)
-  $found | Sort-Object Pid, Class -Unique
+  # The SCOOBE CoreWindow on windows-11-arm is not among EnumWindows'
+  # windows (it showed in none of its passes while it covered the screen
+  # centre): what WindowFromPoint finds at the centre and the quarters'
+  # centres, when its process is WWAHost (the host of that prompt).
+  $sw = [LaufeyCi.User32]::GetSystemMetrics(0)
+  $sh = [LaufeyCi.User32]::GetSystemMetrics(1)
+  foreach ($pt in @(@(0.5, 0.5), @(0.25, 0.25), @(0.75, 0.25), @(0.25, 0.75), @(0.75, 0.75))) {
+    $p = New-Object LaufeyCi.User32+POINT
+    $p.X = [int]($sw * $pt[0]); $p.Y = [int]($sh * $pt[1])
+    $hwnd = [LaufeyCi.User32]::WindowFromPoint($p)
+    if ($hwnd -eq [System.IntPtr]::Zero) { continue }
+    $root = [LaufeyCi.User32]::GetAncestor($hwnd, 2) # GA_ROOT
+    if ($root -ne [System.IntPtr]::Zero) { $hwnd = $root }
+    $windowPid = [uint32]0
+    [void][LaufeyCi.User32]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+    $name = (Get-Process -Id $windowPid -ErrorAction SilentlyContinue).ProcessName
+    if ($name -ne 'WWAHost') { continue }
+    $title = New-Object System.Text.StringBuilder 256
+    [void][LaufeyCi.User32]::GetWindowTextW($hwnd, $title, 256)
+    $class = New-Object System.Text.StringBuilder 256
+    [void][LaufeyCi.User32]::GetClassNameW($hwnd, $class, 256)
+    $found.Add([pscustomobject]@{ Pid = [int]$windowPid; Title = "$title"; Class = "$class at ($($p.X), $($p.Y))"; Name = $name })
+  }
+  $found | Sort-Object Pid -Unique
 }
 
 $script:kept = @{}

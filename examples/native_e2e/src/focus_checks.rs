@@ -134,6 +134,61 @@ mod imp {
     Some((pt.x, pt.y))
   }
 
+  /// The client area (the page) in screen pixels: x, y, width, height.
+  fn page_rect(hwnd: Hwnd) -> Option<(i32, i32, i32, i32)> {
+    let mut rc = Rect {
+      left: 0,
+      top: 0,
+      right: 0,
+      bottom: 0,
+    };
+    if unsafe { GetClientRect(hwnd, &mut rc) } == 0 || rc.right <= 0 {
+      return None;
+    }
+    let mut pt = Point { x: 0, y: 0 };
+    if unsafe { ClientToScreen(hwnd, &mut pt) } == 0 {
+      return None;
+    }
+    Some((pt.x, pt.y, rc.right, rc.bottom))
+  }
+
+  /// A point of the page that no other window covers (WindowFromPoint): a
+  /// CI image's "Microsoft account" CoreWindow sits above every topmost
+  /// window, over the screen centre. Tried where the window is, then with
+  /// it in each corner of the screen; Err names what covers the page centre
+  /// when no point is free anywhere.
+  async fn free_page_point(
+    w: &Window,
+    hwnd: Hwnd,
+  ) -> Result<(i32, i32), String> {
+    let free_here = || {
+      page_rect(hwnd)
+        .and_then(|(x, y, pw, ph)| ole_input::free_point(hwnd, x, y, pw, ph))
+    };
+    if let Some(pt) = free_here() {
+      return Ok(pt);
+    }
+    let cover = page_centre(hwnd)
+      .map(|(x, y)| ole_input::window_at(x, y))
+      .unwrap_or_else(|| "no client rect".into());
+    let (sw, sh) = ole_input::screen_size();
+    let (ww, wh) = w.get_outer_size();
+    for (cx, cy) in [
+      (16, 16),
+      (sw - ww - 16, 16),
+      (16, sh - wh - 64),
+      (sw - ww - 16, sh - wh - 64),
+    ] {
+      w.set_position(cx, cy);
+      tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+      if let Some(pt) = free_here() {
+        eprintln!("[e2e] INFO {cover} covers the page where it was: moved to ({cx}, {cy})");
+        return Ok(pt);
+      }
+    }
+    Err(cover)
+  }
+
   fn is_foreground(hwnd: Hwnd) -> bool {
     let fg = unsafe { GetForegroundWindow() };
     !fg.is_null() && unsafe { GetAncestor(fg, 2) } == hwnd // GA_ROOT
@@ -182,14 +237,29 @@ mod imp {
       w.close();
       return;
     };
-    if !ole_input::ours_at(x, y) {
-      na(&format!(
-        "focus follows activation (the page centre is under {})",
-        ole_input::window_at(x, y)
-      ));
-      w.close();
-      return;
-    }
+    // Clicks go to a point of the page nothing covers (the centre when
+    // free); a page covered everywhere fails, naming the cover.
+    let (x, y) = if ole_input::ours_at(x, y) {
+      (x, y)
+    } else {
+      match free_page_point(&w, hwnd).await {
+        Ok(pt) => {
+          eprintln!(
+            "[e2e] INFO focus clicks at {pt:?}: the page centre is under {}",
+            ole_input::window_at(x, y)
+          );
+          pt
+        }
+        Err(cover) => {
+          check(
+            &format!("focus follows activation (no point of the page is uncovered: {cover})"),
+            false,
+          );
+          w.close();
+          return;
+        }
+      }
+    };
 
     // 1. Clicks in the page: the window becomes / stays the active one and
     //    its focus moves into WebView2's child window. No blur.

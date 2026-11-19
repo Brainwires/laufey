@@ -785,6 +785,43 @@ pub(crate) mod ole_input {
     false
   }
 
+  /// A point of the screen rectangle (x, y, w, h) whose top-level window
+  /// (WindowFromPoint's root) is `target`'s: grid points 16 px apart, 12 px
+  /// in from the edges, nearest the centre first. None when another window
+  /// holds every one (a CoreWindow such as a CI image's sign-in prompt,
+  /// which no z-order change of ours passes, can cover part of a window).
+  pub fn free_point(
+    target: Hwnd,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+  ) -> Option<(i32, i32)> {
+    let root = unsafe { GetAncestor(target, 2) }; // GA_ROOT
+    let root = if root.is_null() { target } else { root };
+    const INSET: i32 = 12;
+    const STEP: i32 = 16;
+    let (cx, cy) = (x + w / 2, y + h / 2);
+    let mut points = Vec::new();
+    let mut py = y + INSET;
+    while py < y + h - INSET {
+      let mut px = x + INSET;
+      while px < x + w - INSET {
+        points.push((px, py));
+        px += STEP;
+      }
+      py += STEP;
+    }
+    points.push((cx, cy));
+    points.sort_by_key(|&(px, py)| (px - cx).pow(2) + (py - cy).pow(2));
+    points.into_iter().find(|&(px, py)| root_at(px, py) == root)
+  }
+
+  /// The primary screen's size in pixels.
+  pub fn screen_size() -> (i32, i32) {
+    unsafe { (GetSystemMetrics(0), GetSystemMetrics(1)) } // SM_CX/CYSCREEN
+  }
+
   /// The top-level window at (x, y) (null when none).
   pub fn root_at(x: i32, y: i32) -> Hwnd {
     unsafe {
