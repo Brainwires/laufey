@@ -128,6 +128,15 @@ struct ChildDownload {
   std::string path;          // once decided
   int64_t total_bytes = -1;  // < 0: unknown
   laufey_common::WebViewProgressThrottle throttle;
+  // Pause() is asynchronous: WebView2 pauses by interrupting with
+  // USER_PAUSED some time later, and a Resume() before that does nothing.
+  // pause_in_flight: PAUSE was asked and its interruption not seen yet;
+  // resume_pending: RESUME came meanwhile, applied when it is;
+  // resume_in_flight: Resume() was called and the download is not back in
+  // progress yet (an interruption state seen meanwhile is the old pause).
+  bool pause_in_flight = false;
+  bool resume_pending = false;
+  bool resume_in_flight = false;
 };
 
 // A permission request of a view under "permissions": "app" (API 59), held
@@ -1125,8 +1134,12 @@ void OnDownloadState(uint32_t view_id, uint32_t download_id) {
   if (FAILED(d->operation->get_State(&state)))
     return;
   if (state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS) {
-    // A resume laufey did not ask for (the phase moved with RESUME).
-    if (d->phase == WebViewDownloadPhase::kInterrupted)
+    d->resume_in_flight = false;
+    // A resume laufey did not ask for (the phase moved with RESUME), after
+    // an interruption or a pause; never while a PAUSE is still on its way
+    // (this is then the state change of an earlier resume).
+    if (d->phase == WebViewDownloadPhase::kInterrupted ||
+        (d->phase == WebViewDownloadPhase::kPaused && !d->pause_in_flight))
       d->phase = WebViewDownloadPhase::kProgressing;
     return;
   }
@@ -1155,7 +1168,22 @@ void OnDownloadState(uint32_t view_id, uint32_t download_id) {
   d->operation->get_InterruptReason(&reason);
   if (reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED) {
     // WebView2's pause. PAUSE already reported it; a pause laufey did not
-    // ask for is reported now.
+    // ask for is reported now. A RESUME that came before the pause took
+    // effect (its Resume() would have done nothing) is applied now; a
+    // Resume() on its way makes this the old pause's state.
+    if (d->resume_in_flight && !d->pause_in_flight)
+      return;
+    d->pause_in_flight = false;
+    if (d->resume_pending) {
+      d->resume_pending = false;
+      if (SUCCEEDED(d->operation->Resume())) {
+        d->resume_in_flight = true;
+        d->phase = WebViewDownloadPhase::kProgressing;
+        return;
+      }
+      // It stays paused: report it.
+      d->phase = WebViewDownloadPhase::kProgressing;
+    }
     if (d->phase == WebViewDownloadPhase::kProgressing) {
       d->phase = WebViewDownloadPhase::kPaused;
       laufey_common::WebViewDownloadFields f =
@@ -2348,6 +2376,9 @@ int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
       if (!d->operation || FAILED(d->operation->Pause()))
         return LAUFEY_WEBVIEW_FAILED;
       d->phase = WebViewDownloadPhase::kPaused;
+      d->pause_in_flight = true;
+      d->resume_pending = false;
+      d->resume_in_flight = false;
       laufey_common::WebViewDownloadFields f =
           DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
       f.paused = true;
@@ -2356,8 +2387,21 @@ int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
       return LAUFEY_WEBVIEW_OK;
     }
     case LAUFEY_WEBVIEW_DOWNLOAD_RESUME: {
-      if (!d->operation || FAILED(d->operation->Resume()))
+      if (!d->operation)
         return LAUFEY_WEBVIEW_FAILED;
+      COREWEBVIEW2_DOWNLOAD_STATE state =
+          COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+      if (d->pause_in_flight && SUCCEEDED(d->operation->get_State(&state)) &&
+          state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED)
+        d->pause_in_flight = false;  // it took effect; its event is queued
+      if (d->pause_in_flight) {
+        // The pause hasn't taken effect yet: resumed once it has.
+        d->resume_pending = true;
+      } else if (FAILED(d->operation->Resume())) {
+        return LAUFEY_WEBVIEW_FAILED;
+      } else {
+        d->resume_in_flight = true;
+      }
       d->phase = WebViewDownloadPhase::kProgressing;
       laufey_common::WebViewDownloadFields f =
           DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);

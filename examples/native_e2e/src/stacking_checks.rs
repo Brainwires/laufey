@@ -183,6 +183,24 @@ pub async fn run() {
         b.set_position(p.x - 100, p.y - 100);
         b.focus();
         let placed = wait_for(|| frame_contains(&b, p.x, p.y), 100, 50).await;
+        // Windows: a window that holds the point over ours (a CI image's
+        // sign-in prompt, which focus() can't raise ours over) is passed
+        // over by making ours topmost for the check.
+        #[cfg(windows)]
+        let mut raised = false;
+        #[cfg(windows)]
+        if placed {
+          let hwnd =
+            crate::io_checks::ole_input::hwnd_of("laufey e2e stacking b");
+          if !hwnd.is_null() {
+            crate::io_checks::ole_input::raise_for_click(
+              hwnd,
+              p.x,
+              p.y,
+              &mut raised,
+            );
+          }
+        }
         if !placed {
           // A window manager that keeps windows on screen can refuse the
           // spot (the pointer in a corner), and a session can refuse to
@@ -200,22 +218,10 @@ pub async fn run() {
           .await;
           let moved =
             laufey::pointer_state().is_some_and(|q| (q.x, q.y) != (p.x, p.y));
-          // Another program's window can stay above ours at the point
-          // (Windows: a system window such as a sign-in prompt, which a
-          // focus() can't raise ours over), as focus_checks finds too.
-          #[cfg(windows)]
-          let foreign = (!crate::io_checks::ole_input::ours_at(p.x, p.y))
-            .then(|| crate::io_checks::ole_input::window_at(p.x, p.y));
-          #[cfg(not(windows))]
-          let foreign: Option<String> = None;
           if named {
             check("pointer_state names the window under the pointer", true);
           } else if moved {
             na("pointer_state names the window under the pointer (the pointer moved during the check)");
-          } else if let Some(other) = foreign {
-            na(&format!(
-              "pointer_state names the window under the pointer (the point is under {other})"
-            ));
           } else {
             check("pointer_state names the window under the pointer", false);
           }
@@ -231,6 +237,12 @@ pub async fn run() {
           )
           .await;
           check("pointer_state stops naming a hidden window", unnamed);
+          #[cfg(windows)]
+          if raised {
+            let hwnd =
+              crate::io_checks::ole_input::hwnd_of("laufey e2e stacking b");
+            crate::menu_notification_checks::win::set_topmost(hwnd, false);
+          }
         }
       }
     }

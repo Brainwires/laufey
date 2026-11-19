@@ -836,6 +836,15 @@ jobs:
       # Every e2e step has a timeout: a backend that hangs would otherwise
       # hold the runner for the 6-hour job limit. native-e2e-run.sh's own
       # watchdog (5 min) fires first and prints the hung process's stacks.
+      # GitHub's windows-11-arm image opens a topmost "Microsoft account"
+      # window over the desktop some time after the job starts; it covered
+      # the click points of the navigation guard and the pointer checks.
+      # Close it (and log it) before the e2e runs.
+      - name: Close system windows over the desktop (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/ci-close-system-windows.ps1 -Seconds 30
+
       - name: Layer 0 — readback / events / clipboard / menu+tray clicks
         if: ${{ !matrix.layer0_excluded }}
         timeout-minutes: 10

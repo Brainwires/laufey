@@ -147,6 +147,11 @@ rather than fall back to its default.
 | WebView2  | `ICoreWebView2_4::DownloadStarting` (held with a deferral), `ICoreWebView2DownloadOperation`'s events | yes (`Pause` / `Resume`, `CanResume`)                                                       | WebView2's own download UI never shows (`Handled`).                                                                                                                                                                                      |
 | WebKitGTK | `WebKitDownload`'s `decide-destination`, `received-data`, `failed`, `finished` (WebKitGTK 2.40+)      | no (WebKitGTK has no pause)                                                                 | `Pause` / `Resume` answer `UNSUPPORTED`; `canResume` is always false.                                                                                                                                                                    |
 
+WebView2 pauses a download asynchronously (`Pause` interrupts it with
+`USER_PAUSED` a moment later, and a `Resume` before that does nothing): a
+`RESUME` that comes before the pause has taken effect is applied once it has, so
+a pause followed at once by a resume leaves the download running.
+
 ## Permission requests the app answers (API 59)
 
 With `"permissions": "app"` (`LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS`) the

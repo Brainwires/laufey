@@ -618,9 +618,18 @@ async fn ole_drop_run(source: &str) {
   let (fx, fy) = (sx + sw / 2, sy + sh / 2);
   let (gx, gy) = (tx + tw / 2, ty + th / 2);
   // Some runners show a system window above everything (the
-  // windows-11-arm image's "Microsoft account" prompt); a drop there can't
-  // reach the app, whatever the backend does.
-  if !ole_input::ours_at(gx, gy) {
+  // windows-11-arm image's "Microsoft account" prompt; CI closes it before
+  // the e2e, scripts/ci-close-system-windows.ps1): the test window is raised
+  // over whatever holds the drop point, and only if that fails can a drop
+  // not reach the app, whatever the backend does.
+  let target = ole_input::hwnd_of(TITLE);
+  let mut raised = false;
+  if target.is_null()
+    || !ole_input::raise_for_click(target, gx, gy, &mut raised)
+  {
+    if raised {
+      crate::menu_notification_checks::win::set_topmost(target, false);
+    }
     na(&format!(
       "a real OLE drop (another window covers the drop target: {})",
       ole_input::window_at(gx, gy)
@@ -667,6 +676,9 @@ async fn ole_drop_run(source: &str) {
     ole_input::window_at(rx, ry)
   );
   driven &= ole_input::button(false);
+  if raised {
+    crate::menu_notification_checks::win::set_topmost(target, false);
+  }
   check("SendInput drove the drag", driven);
   let dropped = wait_for(|| has(FileDragPhase::Drop), 100, 50).await;
   let ev = events.lock().unwrap().clone();
@@ -720,6 +732,14 @@ pub(crate) mod ole_input {
     fn GetWindowTextW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
     fn GetClassNameW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
     fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
+    fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+  }
+
+  /// The top-level window titled `title` (null when none).
+  pub fn hwnd_of(title: &str) -> Hwnd {
+    let wide: Vec<u16> =
+      title.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) as Hwnd }
   }
 
   /// Whether the window at (x, y) is one of this process's.
@@ -731,6 +751,38 @@ pub(crate) mod ole_input {
         && GetWindowThreadProcessId(GetAncestor(hwnd, 2), &mut pid) != 0
         && pid == std::process::id()
     }
+  }
+
+  /// Just before a real click or drop at (x, y) on `target`'s window: when
+  /// another window holds the point, raises the target over it (topmost,
+  /// without activating it: a focus check must still see the click do
+  /// that) and looks again. Whether the point is the target's now; logs
+  /// what was there. The caller ends the topmost state with
+  /// `win::set_topmost(target, false)` when this returns true after a raise
+  /// (`raised`).
+  pub fn raise_for_click(
+    target: Hwnd,
+    x: i32,
+    y: i32,
+    raised: &mut bool,
+  ) -> bool {
+    let root = unsafe { GetAncestor(target, 2) }; // GA_ROOT
+    let ours = |at: Hwnd| at == root || at.is_null();
+    if ours(root_at(x, y)) {
+      return true;
+    }
+    eprintln!(
+      "[e2e] INFO {} holds ({x}, {y}) before the click: raising the test window",
+      window_at(x, y)
+    );
+    *raised = crate::menu_notification_checks::win::set_topmost(target, true);
+    for _ in 0..10 {
+      std::thread::sleep(std::time::Duration::from_millis(100));
+      if ours(root_at(x, y)) {
+        return true;
+      }
+    }
+    false
   }
 
   /// The top-level window at (x, y) (null when none).

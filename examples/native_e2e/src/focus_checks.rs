@@ -139,12 +139,21 @@ mod imp {
     !fg.is_null() && unsafe { GetAncestor(fg, 2) } == hwnd // GA_ROOT
   }
 
-  async fn click(x: i32, y: i32) {
+  /// A real click at (x, y) on `hwnd`'s window: just before the press, a
+  /// window that came over the point since (a CI image's sign-in prompt) is
+  /// passed over by raising ours, without activating it (the click must
+  /// still be what activates and focuses it).
+  async fn click(hwnd: Hwnd, x: i32, y: i32) {
     ole_input::move_to(x, y);
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let mut raised = false;
+    ole_input::raise_for_click(hwnd, x, y, &mut raised);
     ole_input::button(true);
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     ole_input::button(false);
+    if raised {
+      crate::menu_notification_checks::win::set_topmost(hwnd, false);
+    }
   }
 
   fn focus_window(title: &str, events: &Arc<Mutex<Vec<bool>>>) -> Window {
@@ -185,9 +194,9 @@ mod imp {
     // 1. Clicks in the page: the window becomes / stays the active one and
     //    its focus moves into WebView2's child window. No blur.
     events.lock().unwrap().clear();
-    click(x, y).await;
+    click(hwnd, x, y).await;
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    click(x, y).await;
+    click(hwnd, x, y).await;
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     if !is_foreground(hwnd) {
       na("focus follows activation (the click left another window active)");
@@ -277,7 +286,7 @@ mod imp {
         if is_foreground(panel_hwnd) && ole_input::ours_at(px, py) =>
       {
         panel_events.lock().unwrap().clear();
-        click(px, py).await;
+        click(panel_hwnd, px, py).await;
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         let seen = panel_events.lock().unwrap().clone();
         eprintln!("[e2e] INFO focus events of the panel click: {seen:?}");
