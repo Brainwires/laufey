@@ -410,6 +410,10 @@ std::vector<MenuSnapshotItem> SnapshotNSMenu(NSMenu* menu, int depth) {
                                      [item keyEquivalentModifierMask], &accel))
       s.accelerator = CanonicalAccelerator(accel);
     if ([item hasSubmenu]) {
+      // The menu bar shows a submenu under its own title when the item has
+      // none (laufey's Edit menu).
+      if (s.label.empty() && [[item submenu] title])
+        s.label = [[[item submenu] title] UTF8String] ?: "";
       s.type = MenuSnapshotItem::Type::kSubmenu;
       s.children = SnapshotNSMenu([item submenu], depth + 1);
     }

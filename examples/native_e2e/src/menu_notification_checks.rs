@@ -318,6 +318,19 @@ async fn snapshot_checks(w: &Window, caps: &laufey::MenuCapabilities) {
     }),
   );
 
+  // A menu with no Copy item gets laufey's Edit submenu on macOS.
+  if cfg!(target_os = "macos") {
+    check(
+      "macOS: the menu reads back with the Edit submenu laufey adds",
+      snapshot_item(&snapshot, "Edit").is_some_and(|e| {
+        e["submenu"].as_array().is_some_and(|a| {
+          a.iter()
+            .any(|i| i["accelerator"].as_str() == Some("Super+C"))
+        })
+      }),
+    );
+  }
+
   // A second menu: a checkmark, a separator, a nested submenu, a role.
   let item = |label: &str, id: &str, checked: bool| MenuItem::Item {
     label: label.into(),
@@ -405,17 +418,6 @@ async fn snapshot_checks(w: &Window, caps: &laufey::MenuCapabilities) {
     );
     return;
   }
-  check(
-    "macOS: the menu bar has the Edit submenu laufey adds",
-    read_snapshot(app).is_some_and(|s| {
-      snapshot_item(&s, "Edit").is_some_and(|e| {
-        e["submenu"].as_array().is_some_and(|a| {
-          a.iter()
-            .any(|i| i["accelerator"].as_str() == Some("Super+C"))
-        })
-      })
-    }),
-  );
   let dock_clicks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
   {
     let dock_clicks = dock_clicks.clone();
