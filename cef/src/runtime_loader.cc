@@ -3179,6 +3179,15 @@ void CefScheduleWindowStateRecheck(uint32_t window_id) {
   }
 }
 
+#if !defined(__APPLE__) && !defined(_WIN32)
+// Chromium draws on X11 unless a Wayland display is there (main_linux.cc
+// picks Ozone's platform the same way).
+static bool CefOnX11() {
+  return laufey_common::DisplayBackend() == "x11" &&
+         laufey_common::LinuxX11StackingAvailable();
+}
+#endif
+
 static uint32_t Backend_WindowCapabilities(void* /*data*/) {
   uint32_t caps = LAUFEY_WINDOW_CAP_STATE | LAUFEY_WINDOW_CAP_STATE_EVENTS |
                   LAUFEY_WINDOW_CAP_SIZE_CONSTRAINTS |
@@ -3479,15 +3488,6 @@ static std::vector<laufey_common::NativeWindow> CefNativeWindows() {
   }
   return windows;
 }
-
-#if !defined(__APPLE__) && !defined(_WIN32)
-// Chromium draws on X11 unless a Wayland display is there (main_linux.cc
-// picks Ozone's platform the same way).
-static bool CefOnX11() {
-  return laufey_common::DisplayBackend() == "x11" &&
-         laufey_common::LinuxX11StackingAvailable();
-}
-#endif
 
 static size_t Backend_GetWindowZOrder(void* /*data*/, uint32_t* out,
                                       size_t capacity) {
