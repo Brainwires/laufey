@@ -200,10 +200,22 @@ pub async fn run() {
           .await;
           let moved =
             laufey::pointer_state().is_some_and(|q| (q.x, q.y) != (p.x, p.y));
+          // Another program's window can stay above ours at the point
+          // (Windows: a system window such as a sign-in prompt, which a
+          // focus() can't raise ours over), as focus_checks finds too.
+          #[cfg(windows)]
+          let foreign = (!crate::io_checks::ole_input::ours_at(p.x, p.y))
+            .then(|| crate::io_checks::ole_input::window_at(p.x, p.y));
+          #[cfg(not(windows))]
+          let foreign: Option<String> = None;
           if named {
             check("pointer_state names the window under the pointer", true);
           } else if moved {
             na("pointer_state names the window under the pointer (the pointer moved during the check)");
+          } else if let Some(other) = foreign {
+            na(&format!(
+              "pointer_state names the window under the pointer (the point is under {other})"
+            ));
           } else {
             check("pointer_state names the window under the pointer", false);
           }

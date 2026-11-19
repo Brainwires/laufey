@@ -476,16 +476,25 @@ async fn downloads(w: &Window, base: &str) {
         "RESUME is accepted for a paused download",
         view.download_control(third, DownloadAction::Resume) == Ok(()),
       );
-      check(
-        "a resumed download receives more",
-        wait_event(&events, WebViewEventKind::Download, 30, |d| {
-          id_of(d) == third
-            && d.get("paused").is_none()
-            && d["receivedBytes"].as_u64().unwrap_or(0) > at_pause
-        })
-        .await
-        .is_some(),
-      );
+      let resumed = wait_event(&events, WebViewEventKind::Download, 30, |d| {
+        id_of(d) == third
+          && d.get("paused").is_none()
+          && d["receivedBytes"].as_u64().unwrap_or(0) > at_pause
+      })
+      .await
+      .is_some();
+      if !resumed {
+        // What the engine reported for it, for the log (a resume that
+        // restarted, an interruption, events that stopped).
+        let seen: Vec<_> = details(&events, WebViewEventKind::Download)
+          .into_iter()
+          .filter(|d| id_of(d) == third)
+          .collect();
+        println!(
+          "[e2e] INFO the resumed download's events (at pause {at_pause} bytes): {seen:?}"
+        );
+      }
+      check("a resumed download receives more", resumed);
     } else {
       check(
         "PAUSE is unsupported where the engine has no pause",
