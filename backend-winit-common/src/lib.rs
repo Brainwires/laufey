@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 58;
+pub const LAUFEY_API_VERSION: u32 = 59;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -1110,6 +1110,15 @@ pub struct LaufeyBackendApi {
   pub webview_print: Option<unsafe extern "C" fn(*mut c_void, u32) -> bool>,
   pub webview_set_forward_keys:
     Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char) -> bool>,
+  // --- Web view downloads and permission requests, menu read-back
+  // (API >= 59); NULL on Winit.
+  pub webview_download_control: Option<
+    unsafe extern "C" fn(*mut c_void, u32, u32, i32, *const c_char) -> i32,
+  >,
+  pub webview_permission_respond:
+    Option<unsafe extern "C" fn(*mut c_void, u32, u32, bool) -> i32>,
+  pub menu_snapshot:
+    Option<unsafe extern "C" fn(*mut c_void, i32, u32) -> *mut c_char>,
 }
 
 /// `laufey_webview_event_fn` (API 58).
@@ -2113,6 +2122,9 @@ pub fn create_api_base() -> LaufeyBackendApi {
     webview_open_devtools: None,
     webview_print: None,
     webview_set_forward_keys: None,
+    webview_download_control: None,
+    webview_permission_respond: None,
+    menu_snapshot: None,
   }
 }
 

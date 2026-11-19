@@ -5,11 +5,15 @@
 #include "laufey_webview.h"
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <system_error>
 
 #include "json_reader.h"
+#include "laufey_downloads.h"
 #include "laufey_external_links.h"
 
 namespace laufey_common {
@@ -415,8 +419,11 @@ int32_t ParseWebViewOptions(const std::string& text, WebViewOptions* out,
       o.downloads = WebViewDownloads::kAsk;
     } else if (value == "browser") {
       o.downloads = WebViewDownloads::kBrowser;
+    } else if (value == "app") {
+      o.downloads = WebViewDownloads::kApp;
     } else {
-      *error = "\"downloads\" must be \"deny\", \"ask\" or \"browser\"";
+      *error =
+          "\"downloads\" must be \"deny\", \"ask\", \"browser\" or \"app\"";
       return LAUFEY_WEBVIEW_INVALID;
     }
   }
@@ -427,8 +434,10 @@ int32_t ParseWebViewOptions(const std::string& text, WebViewOptions* out,
       o.permissions = WebViewPermissions::kDeny;
     } else if (value == "ask") {
       o.permissions = WebViewPermissions::kAsk;
+    } else if (value == "app") {
+      o.permissions = WebViewPermissions::kApp;
     } else {
-      *error = "\"permissions\" must be \"deny\" or \"ask\"";
+      *error = "\"permissions\" must be \"deny\", \"ask\" or \"app\"";
       return LAUFEY_WEBVIEW_INVALID;
     }
   }
@@ -572,6 +581,277 @@ std::string WebViewFindResultJson(int matches, int active_match) {
     active_match = 0;
   return "{\"matches\":" + std::to_string(matches) +
          ",\"activeMatch\":" + std::to_string(active_match) + "}";
+}
+
+int32_t CheckWebViewOptionsSupported(const WebViewOptions& options,
+                                     uint32_t capabilities,
+                                     std::string* error) {
+  if (options.downloads == WebViewDownloads::kApp &&
+      !(capabilities & LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS)) {
+    if (error)
+      *error = "\"downloads\": \"app\" is not supported by this engine";
+    return LAUFEY_WEBVIEW_INVALID;
+  }
+  if (options.permissions == WebViewPermissions::kApp &&
+      !(capabilities & LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS)) {
+    if (error)
+      *error = "\"permissions\": \"app\" is not supported by this engine";
+    return LAUFEY_WEBVIEW_INVALID;
+  }
+  return LAUFEY_WEBVIEW_OK;
+}
+
+// --- Downloads the app decides (API 59) ------------------------------------
+
+namespace {
+std::atomic<uint32_t> g_next_download_id{1};
+std::atomic<uint32_t> g_next_permission_id{1};
+
+uint32_t NextId(std::atomic<uint32_t>* counter) {
+  uint32_t id = counter->fetch_add(1, std::memory_order_relaxed);
+  // 2^32 ids later the counter wraps: skip 0, which means "none".
+  if (id == 0)
+    id = counter->fetch_add(1, std::memory_order_relaxed);
+  return id;
+}
+
+bool HasControlByte(const std::string& s) {
+  for (unsigned char c : s) {
+    if (c < 0x20 || c == 0x7f)
+      return true;
+  }
+  return false;
+}
+
+// Valid UTF-8 with no bidirectional override (Utf8SequenceLength's rule).
+bool IsPlainUtf8(const std::string& s) {
+  for (size_t i = 0; i < s.size();) {
+    size_t n = downloads_internal::Utf8SequenceLength(s, i);
+    if (n == 0)
+      return false;
+    i += n;
+  }
+  return true;
+}
+
+bool IsAsciiAlpha(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+}  // namespace
+
+uint32_t NextWebViewDownloadId() {
+  return NextId(&g_next_download_id);
+}
+
+uint32_t NextWebViewPermissionId() {
+  return NextId(&g_next_permission_id);
+}
+
+std::string WebViewDownloadJson(const WebViewDownloadFields& f) {
+  std::string state = f.state ? f.state : kWebViewDownloadRequested;
+  std::string out =
+      "{\"id\":" + std::to_string(f.id) + ",\"state\":" + JsonQuote(state) +
+      ",\"url\":" + JsonQuote(f.url) +
+      ",\"filename\":" + JsonQuote(SanitizeDownloadFileName(f.filename));
+  if (!f.mime_type.empty())
+    out += ",\"mimeType\":" + JsonQuote(f.mime_type);
+  if (f.total_bytes >= 0)
+    out += ",\"totalBytes\":" + std::to_string(f.total_bytes);
+  out += ",\"receivedBytes\":" +
+         std::to_string(f.received_bytes < 0 ? 0 : f.received_bytes);
+  if (!f.path.empty())
+    out += ",\"path\":" + JsonQuote(f.path);
+  if (f.paused)
+    out += ",\"paused\":true";
+  bool interrupted = state == kWebViewDownloadInterrupted;
+  if (f.can_resume >= 0 &&
+      (interrupted || state == kWebViewDownloadProgressing))
+    out += std::string(",\"canResume\":") + Bool(f.can_resume > 0);
+  if (interrupted) {
+    out += ",\"reason\":" +
+           JsonQuote(f.reason ? f.reason : kWebViewDownloadReasonFailed);
+  }
+  return out + "}";
+}
+
+int32_t WebViewDownloadAccepts(WebViewDownloadPhase phase, int32_t action,
+                               bool can_pause) {
+  switch (action) {
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE:
+    case LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS:
+      return phase == WebViewDownloadPhase::kRequested ? LAUFEY_WEBVIEW_OK
+                                                       : LAUFEY_WEBVIEW_INVALID;
+    case LAUFEY_WEBVIEW_DOWNLOAD_CANCEL:
+      return phase == WebViewDownloadPhase::kDone ? LAUFEY_WEBVIEW_INVALID
+                                                  : LAUFEY_WEBVIEW_OK;
+    case LAUFEY_WEBVIEW_DOWNLOAD_PAUSE:
+      if (!can_pause)
+        return LAUFEY_WEBVIEW_UNSUPPORTED;
+      return phase == WebViewDownloadPhase::kProgressing
+                 ? LAUFEY_WEBVIEW_OK
+                 : LAUFEY_WEBVIEW_INVALID;
+    case LAUFEY_WEBVIEW_DOWNLOAD_RESUME:
+      if (!can_pause)
+        return LAUFEY_WEBVIEW_UNSUPPORTED;
+      return phase == WebViewDownloadPhase::kPaused ||
+                     phase == WebViewDownloadPhase::kInterrupted
+                 ? LAUFEY_WEBVIEW_OK
+                 : LAUFEY_WEBVIEW_INVALID;
+    default:
+      return LAUFEY_WEBVIEW_INVALID;
+  }
+}
+
+bool IsWellFormedWebViewDownloadPath(const std::string& path, bool windows,
+                                     std::string* error) {
+  auto fail = [error](const char* why) {
+    if (error)
+      *error = why;
+    return false;
+  };
+  if (path.empty())
+    return fail("the path is empty");
+  if (path.size() > 4096)
+    return fail("the path is longer than 4096 bytes");
+  if (HasControlByte(path) || !IsPlainUtf8(path))
+    return fail("the path has control characters or is not UTF-8");
+  char last = path.back();
+  if (last == '/' || (windows && last == '\\'))
+    return fail("the path names a directory");
+  if (windows) {
+    bool drive = path.size() >= 3 && IsAsciiAlpha(path[0]) && path[1] == ':' &&
+                 (path[2] == '\\' || path[2] == '/');
+    bool unc = path.size() >= 5 && (path[0] == '\\' || path[0] == '/') &&
+               (path[1] == '\\' || path[1] == '/') && path[2] != '\\' &&
+               path[2] != '/';
+    if (!drive && !unc)
+      return fail("the path is not absolute");
+  } else if (path[0] != '/') {
+    return fail("the path is not absolute");
+  }
+  // The file name itself: not "." or "..".
+  size_t slash = path.find_last_of(windows ? "/\\" : "/");
+  std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+  if (name == "." || name == "..")
+    return fail("the path names a directory");
+  return true;
+}
+
+bool IsValidWebViewDownloadPath(const std::string& path, std::string* error) {
+#ifdef _WIN32
+  const bool windows = true;
+#else
+  const bool windows = false;
+#endif
+  if (!IsWellFormedWebViewDownloadPath(path, windows, error))
+    return false;
+  auto fail = [error](const char* why) {
+    if (error)
+      *error = why;
+    return false;
+  };
+  std::error_code ec;
+#ifdef _WIN32
+  std::filesystem::path p(Utf8ToWide(path));
+#else
+  std::filesystem::path p(path);
+#endif
+  std::filesystem::path parent = p.parent_path();
+  if (parent.empty() || !std::filesystem::is_directory(parent, ec) || ec)
+    return fail("the path's directory does not exist");
+  ec.clear();
+  std::filesystem::file_status st = std::filesystem::symlink_status(p, ec);
+  if (!ec && std::filesystem::exists(st)) {
+    if (std::filesystem::is_symlink(st))
+      return fail("the path is a symbolic link");
+    if (!std::filesystem::is_regular_file(st))
+      return fail("the path is not a regular file");
+  }
+  return true;
+}
+
+bool WebViewProgressThrottle::Ready(int64_t now_ms) {
+  if (sent_ && now_ms - last_ms_ < kWebViewDownloadProgressIntervalMs &&
+      now_ms >= last_ms_)
+    return false;
+  sent_ = true;
+  last_ms_ = now_ms;
+  return true;
+}
+
+// --- Permission requests the app answers (API 59) ----------------------------
+
+std::string WebViewPermissionRequestJson(const WebViewPermissionFields& f) {
+  std::string out =
+      "{\"id\":" + std::to_string(f.id) +
+      ",\"state\":\"requested\",\"origin\":" + JsonQuote(f.origin) +
+      ",\"permissions\":[";
+  for (size_t i = 0; i < f.permissions.size(); ++i) {
+    if (i)
+      out += ",";
+    out += JsonQuote(f.permissions[i]);
+  }
+  out += "]";
+  if (f.frame_is_main >= 0) {
+    out += std::string(",\"frame\":{\"isMain\":") + Bool(f.frame_is_main > 0);
+    if (!f.frame_origin.empty())
+      out += ",\"origin\":" + JsonQuote(f.frame_origin);
+    out += "}";
+  }
+  return out + "}";
+}
+
+std::string WebViewPermissionCancelledJson(uint32_t id) {
+  return "{\"id\":" + std::to_string(id) + ",\"state\":\"cancelled\"}";
+}
+
+std::string WebViewOriginOf(const std::string& url) {
+  size_t colon = url.find(':');
+  if (colon == std::string::npos || colon == 0)
+    return std::string();
+  std::string scheme = Lower(url.substr(0, colon));
+  for (char c : scheme) {
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' ||
+          c == '-' || c == '.'))
+      return std::string();
+  }
+  if (url.compare(colon, 3, "://") != 0)
+    return std::string();
+  size_t start = colon + 3;
+  size_t end = url.find_first_of("/?#", start);
+  std::string authority = url.substr(
+      start, end == std::string::npos ? std::string::npos : end - start);
+  size_t at = authority.rfind('@');
+  if (at != std::string::npos)
+    authority = authority.substr(at + 1);
+  if (authority.empty() || HasControlByte(authority))
+    return std::string();
+  std::string host = authority;
+  std::string port;
+  // A bracketed IPv6 literal keeps its colons.
+  size_t bracket = authority.rfind(']');
+  size_t port_colon = authority.rfind(':');
+  if (port_colon != std::string::npos &&
+      (bracket == std::string::npos || port_colon > bracket)) {
+    host = authority.substr(0, port_colon);
+    port = authority.substr(port_colon + 1);
+  }
+  if (host.empty())
+    return std::string();
+  for (char c : port) {
+    if (c < '0' || c > '9')
+      return std::string();
+  }
+  while (port.size() > 1 && port[0] == '0')
+    port.erase(0, 1);
+  if ((scheme == "http" && port == "80") ||
+      (scheme == "https" && port == "443") ||
+      (scheme == "ws" && port == "80") || (scheme == "wss" && port == "443"))
+    port.clear();
+  std::string out = scheme + "://" + Lower(host);
+  if (!port.empty())
+    out += ":" + port;
+  return out;
 }
 
 std::string WebViewContextMenuJson(const WebViewContextMenuFields& f) {

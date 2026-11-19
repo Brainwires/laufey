@@ -1416,6 +1416,67 @@ static bool Backend_WebViewPrint(void* data, uint32_t webview_id) {
   return backend && backend->WebViewPrint(webview_id);
 }
 
+// API 59: what every backend checks before a download action reaches it.
+// OK with `*path_out` set (SAVE only), or the status to answer.
+static int32_t CheckWebViewDownloadAction(int32_t action, const char* path,
+                                          std::string* path_out) {
+  if (action < LAUFEY_WEBVIEW_DOWNLOAD_SAVE ||
+      action > LAUFEY_WEBVIEW_DOWNLOAD_RESUME)
+    return LAUFEY_WEBVIEW_INVALID;
+  if (action == LAUFEY_WEBVIEW_DOWNLOAD_SAVE) {
+    std::string error;
+    if (!path || !laufey_common::IsValidWebViewDownloadPath(path, &error)) {
+      std::cerr << "laufey: webview_download_control: " << error << std::endl;
+      return LAUFEY_WEBVIEW_INVALID;
+    }
+    *path_out = path;
+  }
+  return LAUFEY_WEBVIEW_OK;
+}
+
+static char* CopyJsonOrNull(const std::string& text) {
+  if (text.empty())
+    return nullptr;
+  char* copy = static_cast<char*>(malloc(text.size() + 1));
+  if (copy)
+    memcpy(copy, text.c_str(), text.size() + 1);
+  return copy;
+}
+
+static int32_t Backend_WebViewDownloadControl(void* data, uint32_t webview_id,
+                                              uint32_t download_id,
+                                              int32_t action,
+                                              const char* path) {
+  std::string checked;
+  int32_t status = CheckWebViewDownloadAction(action, path, &checked);
+  if (status != LAUFEY_WEBVIEW_OK)
+    return status;
+  if (!download_id)
+    return LAUFEY_WEBVIEW_INVALID;
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend ? backend->WebViewDownloadControl(webview_id, download_id,
+                                                   action, checked)
+                 : LAUFEY_WEBVIEW_UNSUPPORTED;
+}
+
+static int32_t Backend_WebViewPermissionRespond(void* data, uint32_t webview_id,
+                                                uint32_t request_id,
+                                                bool allow) {
+  if (!request_id)
+    return LAUFEY_WEBVIEW_INVALID;
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  return backend
+             ? backend->WebViewPermissionRespond(webview_id, request_id, allow)
+             : LAUFEY_WEBVIEW_UNSUPPORTED;
+}
+
+static char* Backend_MenuSnapshot(void* data, int32_t kind, uint32_t id) {
+  LaufeyBackend* backend = static_cast<RuntimeLoader*>(data)->GetBackend();
+  if (!backend)
+    return nullptr;
+  return CopyJsonOrNull(backend->MenuSnapshot(kind, id));
+}
+
 static bool Backend_WebViewSetForwardKeys(void* data, uint32_t webview_id,
                                           const char* keys_json) {
   if (!keys_json)
@@ -2082,6 +2143,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_open_devtools = Backend_WebViewOpenDevTools;
   backend_api_.webview_print = Backend_WebViewPrint;
   backend_api_.webview_set_forward_keys = Backend_WebViewSetForwardKeys;
+  backend_api_.webview_download_control = Backend_WebViewDownloadControl;
+  backend_api_.webview_permission_respond = Backend_WebViewPermissionRespond;
+  backend_api_.menu_snapshot = Backend_MenuSnapshot;
   backend_api_.clipboard_capabilities = Backend_ClipboardCapabilities;
   backend_api_.read_clipboard_html = Backend_ReadClipboardHtml;
   backend_api_.write_clipboard_html = Backend_WriteClipboardHtml;

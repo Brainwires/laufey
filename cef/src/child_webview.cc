@@ -1648,6 +1648,21 @@ bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys) {
   return true;
 }
 
+// API 59. Not implemented on this engine yet: Capabilities() reports neither
+// LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS nor _PERMISSION_REQUESTS, so no view
+// has a download or a request to answer.
+int32_t DownloadControl(uint32_t id, uint32_t /*download_id*/,
+                        int32_t /*action*/, const std::string& /*path*/) {
+  CEF_REQUIRE_UI_THREAD();
+  return Find(id) ? LAUFEY_WEBVIEW_UNSUPPORTED : LAUFEY_WEBVIEW_CLOSED;
+}
+
+int32_t PermissionRespond(uint32_t id, uint32_t /*request_id*/,
+                          bool /*allow*/) {
+  CEF_REQUIRE_UI_THREAD();
+  return Find(id) ? LAUFEY_WEBVIEW_UNSUPPORTED : LAUFEY_WEBVIEW_CLOSED;
+}
+
 bool Print(uint32_t id) {
   CEF_REQUIRE_UI_THREAD();
   ChildView* v = Find(id);

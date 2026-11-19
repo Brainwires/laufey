@@ -3566,6 +3566,12 @@ uint32_t WebView2Backend::CreateWebView(uint32_t window_id,
   std::string error;
   int32_t status =
       laufey_common::ParseWebViewOptions(options_json, &options, &error);
+  // "downloads": "app" / "permissions": "app" (API 59) are refused where the
+  // engine can't hand them to the app.
+  if (status == LAUFEY_WEBVIEW_OK) {
+    status = laufey_common::CheckWebViewOptionsSupported(
+        options, WebViewCapabilities(), &error);
+  }
   if (status != LAUFEY_WEBVIEW_OK) {
     *status_out = status;
     return 0;

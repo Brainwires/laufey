@@ -929,6 +929,27 @@ class LaufeyBackend {
                                      const std::vector<std::string>& /*keys*/) {
     return false;
   }
+  // API 59 (laufey.h). The trampolines checked the action (and SAVE's path,
+  // IsValidWebViewDownloadPath) and the ids' ranges; the backend answers
+  // with WebViewDownloadAccepts for the download's phase. The defaults are
+  // an engine without LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS /
+  // _PERMISSION_REQUESTS.
+  virtual int32_t WebViewDownloadControl(uint32_t /*webview_id*/,
+                                         uint32_t /*download_id*/,
+                                         int32_t /*action*/,
+                                         const std::string& /*path*/) {
+    return LAUFEY_WEBVIEW_UNSUPPORTED;
+  }
+  virtual int32_t WebViewPermissionRespond(uint32_t /*webview_id*/,
+                                           uint32_t /*request_id*/,
+                                           bool /*allow*/) {
+    return LAUFEY_WEBVIEW_UNSUPPORTED;
+  }
+  // menu_snapshot (API 59, LAUFEY_MENU_CAP_SNAPSHOT): the JSON array, or ""
+  // for no such menu / no read-back. Called on any thread.
+  virtual std::string MenuSnapshot(int32_t /*kind*/, uint32_t /*id*/) {
+    return std::string();
+  }
   // Puts the window's views in this order, bottom to top (WebViewSinks keeps
   // the z orders; LAUFEY_WEBVIEW_CAP_Z_ORDER backends override it).
   virtual bool WebViewRestack(uint32_t /*window_id*/,

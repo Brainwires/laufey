@@ -22,6 +22,13 @@
 //     (a keydown, as DOM `code` and modifiers, against them), the KEY event's
 //     JSON, and WebViewHeldKeys (the forwarded keydowns whose keyup is owed
 //     to the app).
+//   - Downloads and permission requests the app decides (API 59,
+//     "downloads": "app" / "permissions": "app"): CheckWebViewOptionsSupported
+//     (an engine without them refuses the option), the DOWNLOAD and
+//     PERMISSION_REQUEST events' JSON, the ids, which
+//     webview_download_control action each download phase takes
+//     (WebViewDownloadAccepts), the SAVE path check
+//     (IsValidWebViewDownloadPath) and the progress throttle.
 //   - WebViewSinks: id allocation, each view's window and event sink, the
 //     per-window limit, and the exactly-once CLOSED.
 
@@ -42,8 +49,10 @@
 namespace laufey_common {
 
 enum class WebViewPopups { kSameView, kBrowser, kDeny };
-enum class WebViewDownloads { kDeny, kAsk, kBrowser };
-enum class WebViewPermissions { kDeny, kAsk };
+// kApp (API 59): the app decides each download / permission request from the
+// view's DOWNLOAD / PERMISSION_REQUEST events.
+enum class WebViewDownloads { kDeny, kAsk, kBrowser, kApp };
+enum class WebViewPermissions { kDeny, kAsk, kApp };
 
 constexpr const char* kDefaultWebViewPartition = "webview:default";
 
@@ -93,6 +102,15 @@ int32_t ParseWebViewForwardKeys(const std::string& json_array,
 // LAUFEY_WEBVIEW_NOT_ALLOWED_URL.
 int32_t ParseWebViewOptions(const std::string& json, WebViewOptions* out,
                             std::string* error);
+
+// LAUFEY_WEBVIEW_OK, or LAUFEY_WEBVIEW_INVALID with a message when the
+// options ask for "downloads": "app" or "permissions": "app" and
+// `capabilities` (the backend's webview_capabilities) lacks
+// LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS / _PERMISSION_REQUESTS: an app that
+// meant to decide them itself must never get the engine's default instead.
+// Every backend calls it right after ParseWebViewOptions.
+int32_t CheckWebViewOptionsSupported(const WebViewOptions& options,
+                                     uint32_t capabilities, std::string* error);
 
 // Finite, width / height >= 0, and every value within +-1e6 CSS pixels.
 bool IsValidWebViewBounds(double x, double y, double width, double height);
@@ -213,6 +231,130 @@ class WebViewHeldKeys {
  private:
   std::vector<std::pair<std::string, std::string>> keys_;  // code, key
 };
+
+// --- Downloads the app decides (API 59) ------------------------------------
+
+// A process-unique download id (never 0, never reused). Any thread.
+uint32_t NextWebViewDownloadId();
+
+// The DOWNLOAD event's "state".
+constexpr const char* kWebViewDownloadRequested = "requested";
+constexpr const char* kWebViewDownloadProgressing = "progressing";
+constexpr const char* kWebViewDownloadCompleted = "completed";
+constexpr const char* kWebViewDownloadCancelled = "cancelled";
+constexpr const char* kWebViewDownloadInterrupted = "interrupted";
+// The "reason" of an interrupted download.
+constexpr const char* kWebViewDownloadReasonNetwork = "network";
+constexpr const char* kWebViewDownloadReasonServer = "server";
+constexpr const char* kWebViewDownloadReasonFile = "file";
+constexpr const char* kWebViewDownloadReasonCrash = "crash";
+constexpr const char* kWebViewDownloadReasonFailed = "failed";
+
+struct WebViewDownloadFields {
+  uint32_t id = 0;
+  const char* state = kWebViewDownloadRequested;
+  std::string url;
+  // The engine's suggestion; written through SanitizeDownloadFileName
+  // (laufey_downloads.h), so always a bare file name.
+  std::string filename;
+  std::string mime_type;       // empty: left out
+  int64_t total_bytes = -1;    // < 0: unknown, left out
+  int64_t received_bytes = 0;  // < 0 is written as 0
+  std::string path;            // empty: left out
+  bool paused = false;         // false: left out
+  // "canResume": written for "progressing" (where it is known) and
+  // "interrupted"; < 0: left out.
+  int can_resume = -1;
+  const char* reason = nullptr;  // "interrupted" only; nullptr: "failed"
+};
+std::string WebViewDownloadJson(const WebViewDownloadFields& f);
+
+// Where a download the app decides is in its life, as
+// webview_download_control sees it.
+enum class WebViewDownloadPhase {
+  kRequested,    // "requested" sent; waiting for SAVE / SAVE_AS / CANCEL
+  kChoosing,     // SAVE_AS: the save panel is up
+  kProgressing,  // being written
+  kPaused,       // paused by PAUSE
+  kInterrupted,  // "interrupted" with "canResume": true
+  kDone,         // its last event was sent
+};
+// LAUFEY_WEBVIEW_OK when a download in `phase` takes `action`
+// (LAUFEY_WEBVIEW_DOWNLOAD_*), LAUFEY_WEBVIEW_UNSUPPORTED for PAUSE / RESUME
+// when `can_pause` is false (the engine lacks
+// LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE), else LAUFEY_WEBVIEW_INVALID:
+//   SAVE, SAVE_AS  kRequested
+//   CANCEL         every phase but kDone
+//   PAUSE          kProgressing
+//   RESUME         kPaused, kInterrupted
+int32_t WebViewDownloadAccepts(WebViewDownloadPhase phase, int32_t action,
+                               bool can_pause);
+
+// What SAVE's `path` must be: UTF-8 without control characters, absolute
+// (a drive or UNC path on Windows), at most 4096 bytes, not ending in a
+// separator, in a directory that exists, and not itself a directory or a
+// symbolic link (the engine would write through it). `error` says which.
+bool IsValidWebViewDownloadPath(const std::string& path, std::string* error);
+// The same without touching the file system (the syntax rules only), for
+// tests of the other platform's rules.
+bool IsWellFormedWebViewDownloadPath(const std::string& path, bool windows,
+                                     std::string* error);
+
+// "progressing" events: at most one per kWebViewDownloadProgressInterval
+// per download. Ready() is true the first time and then once the interval
+// has passed since the last true; a pause, resume or final event is sent
+// without asking.
+constexpr int kWebViewDownloadProgressIntervalMs = 200;
+class WebViewProgressThrottle {
+ public:
+  bool Ready(int64_t now_ms);
+
+ private:
+  bool sent_ = false;
+  int64_t last_ms_ = 0;
+};
+
+// --- Permission requests the app answers (API 59) ----------------------------
+
+// A process-unique permission request id (never 0, never reused). Any thread.
+uint32_t NextWebViewPermissionId();
+
+// The names in PERMISSION_REQUEST's "permissions".
+constexpr const char* kWebViewPermissionCamera = "camera";
+constexpr const char* kWebViewPermissionMicrophone = "microphone";
+constexpr const char* kWebViewPermissionScreen = "screen";
+constexpr const char* kWebViewPermissionGeolocation = "geolocation";
+constexpr const char* kWebViewPermissionNotifications = "notifications";
+constexpr const char* kWebViewPermissionMidi = "midi";
+constexpr const char* kWebViewPermissionPointerLock = "pointer-lock";
+constexpr const char* kWebViewPermissionStorageAccess = "storage-access";
+constexpr const char* kWebViewPermissionSensors = "sensors";
+constexpr const char* kWebViewPermissionClipboardRead = "clipboard-read";
+constexpr const char* kWebViewPermissionWindowManagement = "window-management";
+constexpr const char* kWebViewPermissionLocalFonts = "local-fonts";
+constexpr const char* kWebViewPermissionFileSystem = "file-system";
+constexpr const char* kWebViewPermissionMultipleDownloads =
+    "multiple-downloads";
+constexpr const char* kWebViewPermissionAutoplay = "autoplay";
+
+struct WebViewPermissionFields {
+  uint32_t id = 0;
+  std::string origin;  // the requesting origin ("https://example.com")
+  std::vector<std::string> permissions;  // kWebViewPermission*, in this order
+  // The frame that asked, where the engine says: < 0 unknown ("frame" is
+  // left out), 0 a subframe, 1 the main frame.
+  int frame_is_main = -1;
+  std::string frame_origin;  // empty: left out
+};
+std::string WebViewPermissionRequestJson(const WebViewPermissionFields& f);
+// {"id": id, "state": "cancelled"}
+std::string WebViewPermissionCancelledJson(uint32_t id);
+
+// The origin of an absolute URL as PERMISSION_REQUEST reports it:
+// "scheme://host[:port]" in lower case with the scheme's default port left
+// out, the URL's path, query, fragment and credentials dropped. "" when
+// `url` has no host (about:blank, data:).
+std::string WebViewOriginOf(const std::string& url);
 
 // Zoom factors webview_set_zoom accepts.
 bool IsValidWebViewZoom(double factor);

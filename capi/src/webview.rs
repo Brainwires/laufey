@@ -117,6 +117,22 @@ impl WebViewCapabilities {
     self.has(ffi::LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU)
   }
   /// The engine, `None` when unsupported.
+  /// `downloads: "app"` works: downloads come as
+  /// [`WebViewEventKind::Download`] events the app decides
+  /// ([`WebView::download_control`]).
+  pub fn download_events(&self) -> bool {
+    self.0 & ffi::LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS != 0
+  }
+  /// [`DownloadAction::Pause`] / [`DownloadAction::Resume`] work.
+  pub fn download_pause(&self) -> bool {
+    self.0 & ffi::LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE != 0
+  }
+  /// `permissions: "app"` works: requests come as
+  /// [`WebViewEventKind::PermissionRequest`] events the app answers
+  /// ([`WebView::permission_respond`]).
+  pub fn permission_requests(&self) -> bool {
+    self.0 & ffi::LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS != 0
+  }
   pub fn engine(&self) -> Option<WebViewEngine> {
     let raw = (self.0 & ffi::LAUFEY_WEBVIEW_ENGINE_MASK)
       >> ffi::LAUFEY_WEBVIEW_ENGINE_SHIFT;
@@ -269,6 +285,11 @@ pub enum WebViewEventKind {
   FindResult,
   ContextMenu,
   Key,
+  /// A download of a view created with `downloads: "app"` (API 59).
+  Download,
+  /// A permission request of a view created with `permissions: "app"`
+  /// (API 59).
+  PermissionRequest,
 }
 
 impl WebViewEventKind {
@@ -284,13 +305,17 @@ impl WebViewEventKind {
       ffi::LAUFEY_WEBVIEW_EVENT_FIND_RESULT => WebViewEventKind::FindResult,
       ffi::LAUFEY_WEBVIEW_EVENT_CONTEXT_MENU => WebViewEventKind::ContextMenu,
       ffi::LAUFEY_WEBVIEW_EVENT_KEY => WebViewEventKind::Key,
+      ffi::LAUFEY_WEBVIEW_EVENT_DOWNLOAD => WebViewEventKind::Download,
+      ffi::LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST => {
+        WebViewEventKind::PermissionRequest
+      }
       _ => return None,
     })
   }
 
   /// `"title"`, `"url"`, `"load"`, `"console"`, `"focus-change"`,
-  /// `"new-window"`, `"closed"`, `"find-result"`, `"context-menu"` or
-  /// `"key"`.
+  /// `"new-window"`, `"closed"`, `"find-result"`, `"context-menu"`,
+  /// `"key"`, `"download"` or `"permission-request"`.
   pub fn name(&self) -> &'static str {
     match self {
       WebViewEventKind::Title => "title",
@@ -303,6 +328,8 @@ impl WebViewEventKind {
       WebViewEventKind::FindResult => "find-result",
       WebViewEventKind::ContextMenu => "context-menu",
       WebViewEventKind::Key => "key",
+      WebViewEventKind::Download => "download",
+      WebViewEventKind::PermissionRequest => "permission-request",
     }
   }
 }
@@ -725,6 +752,30 @@ impl WebView {
     }
   }
 
+  /// Decide or control a download of a view created with
+  /// `downloads: "app"` (`id`: the `"id"` of its
+  /// [`WebViewEventKind::Download`] events). `Err(Invalid)` for an unknown
+  /// or finished download, an action its state does not take or a bad
+  /// path; `Err(Unsupported)` where the engine can't.
+  pub fn download_control(
+    &self,
+    id: u32,
+    action: DownloadAction<'_>,
+  ) -> Result<(), WebViewError> {
+    download_control_with(api(), self.id, id, action)
+  }
+
+  /// Allow or refuse a permission request of a view created with
+  /// `permissions: "app"` (`id`: the `"id"` of its
+  /// [`WebViewEventKind::PermissionRequest`] event).
+  pub fn permission_respond(
+    &self,
+    id: u32,
+    allow: bool,
+  ) -> Result<(), WebViewError> {
+    permission_respond_with(api(), self.id, id, allow)
+  }
+
   /// Replace the view's forward keys (`forward_keys`; empty clears them).
   /// False where unsupported, closed, or for an invalid accelerator.
   pub fn set_forward_keys(&self, keys: &[String]) -> bool {
@@ -769,6 +820,70 @@ impl WebView {
       Some(f) => unsafe { f(api.backend_data, self.id) },
       None => false,
     }
+  }
+}
+
+/// What [`WebView::download_control`] does to a download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadAction<'a> {
+  /// Answer a requested download: write it to this absolute path (an
+  /// existing regular file is replaced; its directory must exist).
+  Save(&'a str),
+  /// Answer a requested download with the OS save panel.
+  SaveAs,
+  /// Cancel it (any state before its last event).
+  Cancel,
+  /// Pause a progressing download
+  /// ([`WebViewCapabilities::download_pause`]).
+  Pause,
+  /// Resume a paused download, or an interrupted one that can resume.
+  Resume,
+}
+
+fn download_control_with(
+  api: &LaufeyBackendApi,
+  view: u32,
+  id: u32,
+  action: DownloadAction<'_>,
+) -> Result<(), WebViewError> {
+  let Some(f) = api.webview_download_control else {
+    return Err(WebViewError::Unsupported);
+  };
+  let (code, path) = match action {
+    DownloadAction::Save(path) => {
+      let Ok(path) = CString::new(path) else {
+        return Err(WebViewError::Invalid);
+      };
+      (ffi::LAUFEY_WEBVIEW_DOWNLOAD_SAVE, Some(path))
+    }
+    DownloadAction::SaveAs => (ffi::LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS, None),
+    DownloadAction::Cancel => (ffi::LAUFEY_WEBVIEW_DOWNLOAD_CANCEL, None),
+    DownloadAction::Pause => (ffi::LAUFEY_WEBVIEW_DOWNLOAD_PAUSE, None),
+    DownloadAction::Resume => (ffi::LAUFEY_WEBVIEW_DOWNLOAD_RESUME, None),
+  };
+  let path_ptr = path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
+  let status = unsafe { f(api.backend_data, view, id, code as i32, path_ptr) };
+  if status as u32 == ffi::LAUFEY_WEBVIEW_OK {
+    Ok(())
+  } else {
+    Err(WebViewError::from_status(status))
+  }
+}
+
+fn permission_respond_with(
+  api: &LaufeyBackendApi,
+  view: u32,
+  id: u32,
+  allow: bool,
+) -> Result<(), WebViewError> {
+  let Some(f) = api.webview_permission_respond else {
+    return Err(WebViewError::Unsupported);
+  };
+  let status = unsafe { f(api.backend_data, view, id, allow) };
+  if status as u32 == ffi::LAUFEY_WEBVIEW_OK {
+    Ok(())
+  } else {
+    Err(WebViewError::from_status(status))
   }
 }
 
@@ -976,6 +1091,118 @@ mod tests {
   ) -> bool {
     let keys = unsafe { CStr::from_ptr(keys) }.to_str().unwrap();
     id == 4 && keys == r#"["Ctrl+L","F5"]"#
+  }
+
+  unsafe extern "C" fn fake_download_control(
+    _: *mut c_void,
+    view: u32,
+    id: u32,
+    action: i32,
+    path: *const c_char,
+  ) -> i32 {
+    let path = if path.is_null() {
+      None
+    } else {
+      Some(unsafe { CStr::from_ptr(path) }.to_str().unwrap())
+    };
+    let ok = view == 4
+      && id == 9
+      && match action as u32 {
+        ffi::LAUFEY_WEBVIEW_DOWNLOAD_SAVE => path == Some("/tmp/a.bin"),
+        ffi::LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS
+        | ffi::LAUFEY_WEBVIEW_DOWNLOAD_CANCEL
+        | ffi::LAUFEY_WEBVIEW_DOWNLOAD_RESUME => path.is_none(),
+        _ => return ffi::LAUFEY_WEBVIEW_UNSUPPORTED as i32,
+      };
+    if ok {
+      ffi::LAUFEY_WEBVIEW_OK as i32
+    } else {
+      ffi::LAUFEY_WEBVIEW_INVALID as i32
+    }
+  }
+
+  unsafe extern "C" fn fake_permission_respond(
+    _: *mut c_void,
+    view: u32,
+    id: u32,
+    allow: bool,
+  ) -> i32 {
+    if view != 4 {
+      ffi::LAUFEY_WEBVIEW_CLOSED as i32
+    } else if id == 2 && allow {
+      ffi::LAUFEY_WEBVIEW_OK as i32
+    } else {
+      ffi::LAUFEY_WEBVIEW_INVALID as i32
+    }
+  }
+
+  #[test]
+  fn download_control_and_permission_respond_map_the_abi() {
+    let mut api: LaufeyBackendApi = unsafe { std::mem::zeroed() };
+    assert_eq!(
+      download_control_with(&api, 4, 9, DownloadAction::Cancel),
+      Err(WebViewError::Unsupported)
+    );
+    assert_eq!(
+      permission_respond_with(&api, 4, 2, true),
+      Err(WebViewError::Unsupported)
+    );
+    api.webview_download_control = Some(fake_download_control);
+    api.webview_permission_respond = Some(fake_permission_respond);
+    assert_eq!(
+      download_control_with(&api, 4, 9, DownloadAction::Save("/tmp/a.bin")),
+      Ok(())
+    );
+    assert_eq!(
+      download_control_with(&api, 4, 9, DownloadAction::Save("/tmp/b.bin")),
+      Err(WebViewError::Invalid)
+    );
+    assert_eq!(
+      download_control_with(&api, 4, 9, DownloadAction::Save("/tmp/\0")),
+      Err(WebViewError::Invalid)
+    );
+    for action in [
+      DownloadAction::SaveAs,
+      DownloadAction::Cancel,
+      DownloadAction::Resume,
+    ] {
+      assert_eq!(download_control_with(&api, 4, 9, action), Ok(()));
+    }
+    assert_eq!(
+      download_control_with(&api, 4, 9, DownloadAction::Pause),
+      Err(WebViewError::Unsupported)
+    );
+    assert_eq!(
+      download_control_with(&api, 4, 8, DownloadAction::Cancel),
+      Err(WebViewError::Invalid)
+    );
+    assert_eq!(permission_respond_with(&api, 4, 2, true), Ok(()));
+    assert_eq!(
+      permission_respond_with(&api, 4, 2, false),
+      Err(WebViewError::Invalid)
+    );
+    assert_eq!(
+      permission_respond_with(&api, 5, 2, true),
+      Err(WebViewError::Closed)
+    );
+    assert_eq!(
+      WebViewEventKind::from_raw(ffi::LAUFEY_WEBVIEW_EVENT_DOWNLOAD as i32)
+        .map(|k| k.name()),
+      Some("download")
+    );
+    assert_eq!(
+      WebViewEventKind::from_raw(
+        ffi::LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST as i32
+      )
+      .map(|k| k.name()),
+      Some("permission-request")
+    );
+    let caps = WebViewCapabilities(
+      ffi::LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS
+        | ffi::LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS,
+    );
+    assert!(caps.download_events() && caps.permission_requests());
+    assert!(!caps.download_pause());
   }
 
   #[test]

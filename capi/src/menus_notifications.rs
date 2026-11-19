@@ -23,6 +23,9 @@ pub const LAUFEY_MENU_CAP_CONTEXT_CLOSED: u32 = 1 << 3;
 pub const LAUFEY_MENU_CAP_ICONS: u32 = 1 << 4;
 pub const LAUFEY_MENU_CAP_TOOLTIPS: u32 = 1 << 5;
 pub const LAUFEY_MENU_CAP_DESTRUCTIVE: u32 = 1 << 6;
+pub const LAUFEY_MENU_CAP_SNAPSHOT: u32 = 1 << 7;
+pub const LAUFEY_MENU_KIND_APPLICATION: i32 = 0;
+pub const LAUFEY_MENU_KIND_DOCK: i32 = 1;
 
 pub const LAUFEY_NOTIFICATION_CAP_SHOW: u32 = 1 << 0;
 pub const LAUFEY_NOTIFICATION_CAP_SCHEDULE: u32 = 1 << 1;
@@ -75,6 +78,43 @@ impl MenuCapabilities {
   pub fn destructive(&self) -> bool {
     self.bits & LAUFEY_MENU_CAP_DESTRUCTIVE != 0
   }
+  /// [`menu_snapshot`] reads a menu back from the OS (API 59).
+  pub fn snapshot(&self) -> bool {
+    self.bits & LAUFEY_MENU_CAP_SNAPSHOT != 0
+  }
+}
+
+/// Which menu [`menu_snapshot`] reads (API 59).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+  /// The application menu the OS shows: on macOS the menu bar as it is now,
+  /// on Windows and Linux the menu bar of this window.
+  Application { window_id: u32 },
+  /// The Dock menu (macOS).
+  Dock,
+}
+
+/// Read a menu back from the native menu objects the OS shows, as a JSON
+/// array of items (`menu_snapshot` in laufey.h): what `set_menu` /
+/// `set_app_menu` / `set_dock_menu` ended up as, the items laufey or the OS
+/// added included. `None` when there is no such menu or the backend has no
+/// read-back ([`MenuCapabilities::snapshot`]). For self-tests.
+pub fn menu_snapshot(kind: MenuKind) -> Option<String> {
+  menu_snapshot_with(api(), kind)
+}
+
+fn menu_snapshot_with(
+  api: &crate::LaufeyBackendApi,
+  kind: MenuKind,
+) -> Option<String> {
+  let f = api.menu_snapshot?;
+  let (kind, id) = match kind {
+    MenuKind::Application { window_id } => {
+      (LAUFEY_MENU_KIND_APPLICATION, window_id)
+    }
+    MenuKind::Dock => (LAUFEY_MENU_KIND_DOCK, 0),
+  };
+  unsafe { crate::io::take_backend_string(api, f(api.backend_data, kind, id)) }
 }
 
 /// The menu capabilities of this backend.

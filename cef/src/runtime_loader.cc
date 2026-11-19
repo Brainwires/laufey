@@ -3540,6 +3540,12 @@ static uint32_t Backend_CreateWebView(void* data, uint32_t window_id,
   std::string error;
   int32_t status =
       laufey_common::ParseWebViewOptions(options_json, &options, &error);
+  // "downloads": "app" / "permissions": "app" (API 59) are refused where the
+  // engine can't hand them to the app.
+  if (status == LAUFEY_WEBVIEW_OK) {
+    status = laufey_common::CheckWebViewOptionsSupported(
+        options, Backend_WebViewCapabilities(data), &error);
+  }
   if (status != LAUFEY_WEBVIEW_OK) {
     *status_out = status;
     return 0;
@@ -3660,6 +3666,82 @@ static bool Backend_WebViewPrint(void* /*data*/, uint32_t webview_id) {
   bool ok = false;
   cef_invoke_sync([&] { ok = laufey_cef_child_webview::Print(webview_id); });
   return ok;
+}
+
+// API 59: what every backend checks before a download action reaches it.
+// OK with `*path_out` set (SAVE only), or the status to answer.
+static int32_t CheckWebViewDownloadAction(int32_t action, const char* path,
+                                          std::string* path_out) {
+  if (action < LAUFEY_WEBVIEW_DOWNLOAD_SAVE ||
+      action > LAUFEY_WEBVIEW_DOWNLOAD_RESUME)
+    return LAUFEY_WEBVIEW_INVALID;
+  if (action == LAUFEY_WEBVIEW_DOWNLOAD_SAVE) {
+    std::string error;
+    if (!path || !laufey_common::IsValidWebViewDownloadPath(path, &error)) {
+      std::cerr << "laufey: webview_download_control: " << error << std::endl;
+      return LAUFEY_WEBVIEW_INVALID;
+    }
+    *path_out = path;
+  }
+  return LAUFEY_WEBVIEW_OK;
+}
+
+static char* CopyJsonOrNull(const std::string& text) {
+  if (text.empty())
+    return nullptr;
+  char* copy = static_cast<char*>(malloc(text.size() + 1));
+  if (copy)
+    memcpy(copy, text.c_str(), text.size() + 1);
+  return copy;
+}
+
+static int32_t Backend_WebViewDownloadControl(void* /*data*/,
+                                              uint32_t webview_id,
+                                              uint32_t download_id,
+                                              int32_t action,
+                                              const char* path) {
+  std::string checked;
+  int32_t status = CheckWebViewDownloadAction(action, path, &checked);
+  if (status != LAUFEY_WEBVIEW_OK)
+    return status;
+  if (!download_id)
+    return LAUFEY_WEBVIEW_INVALID;
+  status = LAUFEY_WEBVIEW_CLOSED;
+  cef_invoke_sync([&] {
+    status = laufey_cef_child_webview::DownloadControl(webview_id, download_id,
+                                                       action, checked);
+  });
+  return status;
+}
+
+static int32_t Backend_WebViewPermissionRespond(void* /*data*/,
+                                                uint32_t webview_id,
+                                                uint32_t request_id,
+                                                bool allow) {
+  if (!request_id)
+    return LAUFEY_WEBVIEW_INVALID;
+  int32_t status = LAUFEY_WEBVIEW_CLOSED;
+  cef_invoke_sync([&] {
+    status = laufey_cef_child_webview::PermissionRespond(webview_id, request_id,
+                                                         allow);
+  });
+  return status;
+}
+
+#if defined(__APPLE__)
+extern std::string Backend_MenuSnapshot_Mac(int32_t kind, uint32_t id);
+#endif
+
+// menu_snapshot (API 59). macOS reads AppKit's menus (runtime_loader_mac.mm);
+// Windows and Linux have no read-back of the Views menu bar yet.
+static char* Backend_MenuSnapshot(void* /*data*/, int32_t kind, uint32_t id) {
+#if defined(__APPLE__)
+  return CopyJsonOrNull(Backend_MenuSnapshot_Mac(kind, id));
+#else
+  (void)kind;
+  (void)id;
+  return nullptr;
+#endif
 }
 
 static bool Backend_WebViewSetForwardKeys(void* /*data*/, uint32_t webview_id,
@@ -4018,6 +4100,9 @@ void RuntimeLoader::InitializeBackendApi() {
   backend_api_.webview_open_devtools = Backend_WebViewOpenDevTools;
   backend_api_.webview_print = Backend_WebViewPrint;
   backend_api_.webview_set_forward_keys = Backend_WebViewSetForwardKeys;
+  backend_api_.webview_download_control = Backend_WebViewDownloadControl;
+  backend_api_.webview_permission_respond = Backend_WebViewPermissionRespond;
+  backend_api_.menu_snapshot = Backend_MenuSnapshot;
   backend_api_.set_window_traffic_light_position =
       Backend_SetWindowTrafficLightPosition;
   backend_api_.set_window_backdrop = Backend_SetWindowBackdrop;

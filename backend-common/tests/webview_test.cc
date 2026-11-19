@@ -9,9 +9,12 @@
 #include <clocale>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <set>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #define EXPECT(cond)                                                         \
@@ -550,8 +553,238 @@ static void TestHeldKeys() {
   EXPECT(held.ReleaseAll().empty());
 }
 
+static const char kDownloadRequestedJson[] =
+    R"({"id":7,"state":"requested","url":"https://a/f?x=1",)"
+    R"("filename":"evil.txt","mimeType":"text/plain","totalBytes":10,)"
+    R"("receivedBytes":0})";
+static const char kPermissionJson[] =
+    R"({"id":3,"state":"requested","origin":"https://a.example",)"
+    R"("permissions":["camera","microphone"],)"
+    R"("frame":{"isMain":false,"origin":"https://b.example"}})";
+
+static void TestAppDecidedOptions() {
+  WebViewOptions o;
+  std::string error;
+  EXPECT(Parse(R"({"url":"https://a/","x":0,"y":0,"width":1,"height":1,)"
+               R"("downloads":"app","permissions":"app"})",
+               &o, &error) == LAUFEY_WEBVIEW_OK);
+  EXPECT(o.downloads == WebViewDownloads::kApp);
+  EXPECT(o.permissions == WebViewPermissions::kApp);
+  // An engine without the capability refuses the option: never its default.
+  EXPECT(CheckWebViewOptionsSupported(o, LAUFEY_WEBVIEW_CAP_SUPPORTED,
+                                      &error) == LAUFEY_WEBVIEW_INVALID);
+  EXPECT(error.find("downloads") != std::string::npos);
+  EXPECT(CheckWebViewOptionsSupported(
+             o,
+             LAUFEY_WEBVIEW_CAP_SUPPORTED | LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS,
+             &error) == LAUFEY_WEBVIEW_INVALID);
+  EXPECT(error.find("permissions") != std::string::npos);
+  EXPECT(
+      CheckWebViewOptionsSupported(o,
+                                   LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS |
+                                       LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS,
+                                   &error) == LAUFEY_WEBVIEW_OK);
+  WebViewOptions plain;
+  EXPECT(CheckWebViewOptionsSupported(plain, 0, &error) == LAUFEY_WEBVIEW_OK);
+  // The numbers are the ABI.
+  EXPECT(LAUFEY_WEBVIEW_EVENT_DOWNLOAD == 11);
+  EXPECT(LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST == 12);
+  EXPECT(LAUFEY_WEBVIEW_DOWNLOAD_SAVE == 1 &&
+         LAUFEY_WEBVIEW_DOWNLOAD_RESUME == 5);
+  EXPECT(LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS == (1u << 18));
+  EXPECT(LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE == (1u << 19));
+  EXPECT(LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS == (1u << 20));
+}
+
+static void TestDownloadJson() {
+  WebViewDownloadFields f;
+  f.id = 7;
+  f.url = "https://a/f?x=1";
+  f.filename = "../../evil.txt";  // only ever a bare name
+  f.mime_type = "text/plain";
+  f.total_bytes = 10;
+  EXPECT(WebViewDownloadJson(f) == kDownloadRequestedJson);
+  WebViewDownloadFields p;
+  p.id = 8;
+  p.state = kWebViewDownloadProgressing;
+  p.url = "https://a/f";
+  p.filename = "f.bin";
+  p.received_bytes = 5;
+  p.path = "/tmp/f.bin";
+  p.paused = true;
+  p.can_resume = 1;
+  EXPECT(WebViewDownloadJson(p) ==
+         R"({"id":8,"state":"progressing","url":"https://a/f",)"
+         R"("filename":"f.bin","receivedBytes":5,"path":"/tmp/f.bin",)"
+         R"("paused":true,"canResume":true})");
+  p.state = kWebViewDownloadInterrupted;
+  p.paused = false;
+  p.can_resume = 0;
+  p.reason = kWebViewDownloadReasonNetwork;
+  p.received_bytes = -4;
+  EXPECT(WebViewDownloadJson(p) ==
+         R"({"id":8,"state":"interrupted","url":"https://a/f",)"
+         R"("filename":"f.bin","receivedBytes":0,"path":"/tmp/f.bin",)"
+         R"("canResume":false,"reason":"network"})");
+  // "canResume" and "reason" belong to no other state.
+  p.state = kWebViewDownloadCompleted;
+  p.received_bytes = 9;
+  EXPECT(WebViewDownloadJson(p) ==
+         R"({"id":8,"state":"completed","url":"https://a/f",)"
+         R"("filename":"f.bin","receivedBytes":9,"path":"/tmp/f.bin"})");
+  uint32_t a = NextWebViewDownloadId();
+  uint32_t b = NextWebViewDownloadId();
+  EXPECT(a != 0 && b == a + 1);
+}
+
+static void TestDownloadActions() {
+  using P = WebViewDownloadPhase;
+  const int32_t ok = LAUFEY_WEBVIEW_OK;
+  const int32_t invalid = LAUFEY_WEBVIEW_INVALID;
+  EXPECT(WebViewDownloadAccepts(P::kRequested, LAUFEY_WEBVIEW_DOWNLOAD_SAVE,
+                                false) == ok);
+  EXPECT(WebViewDownloadAccepts(P::kRequested, LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS,
+                                false) == ok);
+  EXPECT(WebViewDownloadAccepts(P::kProgressing, LAUFEY_WEBVIEW_DOWNLOAD_SAVE,
+                                true) == invalid);
+  EXPECT(WebViewDownloadAccepts(P::kChoosing, LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS,
+                                true) == invalid);
+  for (P phase : {P::kRequested, P::kChoosing, P::kProgressing, P::kPaused,
+                  P::kInterrupted}) {
+    EXPECT(WebViewDownloadAccepts(phase, LAUFEY_WEBVIEW_DOWNLOAD_CANCEL,
+                                  false) == ok);
+  }
+  EXPECT(WebViewDownloadAccepts(P::kDone, LAUFEY_WEBVIEW_DOWNLOAD_CANCEL,
+                                true) == invalid);
+  EXPECT(WebViewDownloadAccepts(P::kProgressing, LAUFEY_WEBVIEW_DOWNLOAD_PAUSE,
+                                true) == ok);
+  EXPECT(WebViewDownloadAccepts(P::kPaused, LAUFEY_WEBVIEW_DOWNLOAD_PAUSE,
+                                true) == invalid);
+  EXPECT(WebViewDownloadAccepts(P::kPaused, LAUFEY_WEBVIEW_DOWNLOAD_RESUME,
+                                true) == ok);
+  EXPECT(WebViewDownloadAccepts(P::kInterrupted, LAUFEY_WEBVIEW_DOWNLOAD_RESUME,
+                                true) == ok);
+  EXPECT(WebViewDownloadAccepts(P::kProgressing, LAUFEY_WEBVIEW_DOWNLOAD_RESUME,
+                                true) == invalid);
+  EXPECT(WebViewDownloadAccepts(P::kProgressing, LAUFEY_WEBVIEW_DOWNLOAD_PAUSE,
+                                false) == LAUFEY_WEBVIEW_UNSUPPORTED);
+  EXPECT(WebViewDownloadAccepts(P::kPaused, LAUFEY_WEBVIEW_DOWNLOAD_RESUME,
+                                false) == LAUFEY_WEBVIEW_UNSUPPORTED);
+  EXPECT(WebViewDownloadAccepts(P::kRequested, 0, true) == invalid);
+  EXPECT(WebViewDownloadAccepts(P::kRequested, 6, true) == invalid);
+
+  WebViewProgressThrottle t;
+  EXPECT(t.Ready(1000));
+  EXPECT(!t.Ready(1100));
+  EXPECT(!t.Ready(1199));
+  EXPECT(t.Ready(1200));
+  EXPECT(!t.Ready(1201));
+  // A clock that went back never mutes the download.
+  EXPECT(t.Ready(10));
+}
+
+// A path as UTF-8, under C++17 (std::string) and C++20 (std::u8string).
+static std::string PathUtf8(const std::filesystem::path& p) {
+  auto u = p.u8string();
+  return std::string(u.begin(), u.end());
+}
+
+static void TestDownloadPaths() {
+  std::string e;
+  EXPECT(IsWellFormedWebViewDownloadPath("/tmp/a.txt", false, &e));
+  EXPECT(IsWellFormedWebViewDownloadPath("/tmp/\xc3\xa9.txt", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("a.txt", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("./a.txt", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("/tmp/", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("/tmp/..", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("/tmp/.", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("/tmp/a\nb", false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("/tmp/\xff", false, &e));
+  EXPECT(
+      !IsWellFormedWebViewDownloadPath(std::string("/tmp/a\0b", 8), false, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("/" + std::string(4096, 'a'), false,
+                                          &e));
+  EXPECT(IsWellFormedWebViewDownloadPath("C:\\Users\\a\\f.txt", true, &e));
+  EXPECT(IsWellFormedWebViewDownloadPath("c:/Users/a/f.txt", true, &e));
+  EXPECT(IsWellFormedWebViewDownloadPath("\\\\server\\share\\f.txt", true, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("C:f.txt", true, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("\\Users\\f.txt", true, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("/tmp/a.txt", true, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("C:\\Users\\a\\", true, &e));
+  EXPECT(!IsWellFormedWebViewDownloadPath("C:\\Users\\..", true, &e));
+  // The file system half: the directory must exist, the path may not be one.
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path dir =
+      fs::temp_directory_path(ec) /
+      ("laufey-webview-test-" + std::to_string(NextWebViewDownloadId()));
+  fs::create_directories(dir, ec);
+  EXPECT(!ec);
+  EXPECT(IsValidWebViewDownloadPath(PathUtf8(dir / "new.bin"), &e));
+  EXPECT(!IsValidWebViewDownloadPath(PathUtf8(dir), &e));
+  EXPECT(!IsValidWebViewDownloadPath(PathUtf8(dir / "missing" / "x.bin"), &e));
+  {
+    std::ofstream f(dir / "old.bin", std::ios::binary);
+    EXPECT(f.good());
+  }
+  EXPECT(IsValidWebViewDownloadPath(PathUtf8(dir / "old.bin"), &e));
+#ifndef _WIN32
+  fs::create_symlink(dir / "old.bin", dir / "link.bin", ec);
+  if (!ec)
+    EXPECT(!IsValidWebViewDownloadPath(PathUtf8(dir / "link.bin"), &e));
+#endif
+  fs::remove_all(dir, ec);
+}
+
+static void TestPermissionJson() {
+  WebViewPermissionFields f;
+  f.id = 3;
+  f.origin = "https://a.example";
+  f.permissions = {kWebViewPermissionCamera, kWebViewPermissionMicrophone};
+  f.frame_is_main = 0;
+  f.frame_origin = "https://b.example";
+  EXPECT(WebViewPermissionRequestJson(f) == kPermissionJson);
+  WebViewPermissionFields g;
+  g.id = 4;
+  g.origin = "https://a.example";
+  g.permissions = {kWebViewPermissionGeolocation};
+  EXPECT(WebViewPermissionRequestJson(g) ==
+         R"({"id":4,"state":"requested","origin":"https://a.example",)"
+         R"("permissions":["geolocation"]})");
+  g.frame_is_main = 1;
+  EXPECT(WebViewPermissionRequestJson(g) ==
+         R"({"id":4,"state":"requested","origin":"https://a.example",)"
+         R"("permissions":["geolocation"],"frame":{"isMain":true}})");
+  EXPECT(WebViewPermissionCancelledJson(9) ==
+         R"({"id":9,"state":"cancelled"})");
+  uint32_t a = NextWebViewPermissionId();
+  EXPECT(a != 0 && NextWebViewPermissionId() == a + 1);
+
+  EXPECT(WebViewOriginOf("https://Example.COM/a/b?c#d") ==
+         "https://example.com");
+  EXPECT(WebViewOriginOf("https://example.com:443/") == "https://example.com");
+  EXPECT(WebViewOriginOf("http://example.com:8080") ==
+         "http://example.com:8080");
+  EXPECT(WebViewOriginOf("http://example.com:80/x") == "http://example.com");
+  EXPECT(WebViewOriginOf("https://user:pw@example.com/") ==
+         "https://example.com");
+  EXPECT(WebViewOriginOf("http://[::1]:8080/x") == "http://[::1]:8080");
+  EXPECT(WebViewOriginOf("http://[::1]/x") == "http://[::1]");
+  EXPECT(WebViewOriginOf("about:blank").empty());
+  EXPECT(WebViewOriginOf("data:text/plain,x").empty());
+  EXPECT(WebViewOriginOf("https:///x").empty());
+  EXPECT(WebViewOriginOf("https://a:b1/").empty());
+  EXPECT(WebViewOriginOf("").empty());
+}
+
 int main() {
   TestAbiNumbers();
+  TestAppDecidedOptions();
+  TestDownloadJson();
+  TestDownloadActions();
+  TestDownloadPaths();
+  TestPermissionJson();
   TestOptionsDefaults();
   TestOptionsAll();
   TestOptionsRefused();

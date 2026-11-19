@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 58
+#define LAUFEY_API_VERSION 59
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -470,6 +470,18 @@ typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
 #define LAUFEY_MENU_CAP_DESTRUCTIVE \
   (1u << 6)  // item "destructive": true is drawn as a destructive action
              // (red text; API >= 49)
+#define LAUFEY_MENU_CAP_SNAPSHOT \
+  (1u << 7)  // menu_snapshot reads a menu back from the OS (API >= 59)
+
+// Which menu menu_snapshot reads (API >= 59).
+//   APPLICATION  the application menu the OS shows: on macOS the menu bar as
+//                it is now (`id` is ignored), on Windows and Linux the menu
+//                bar of window `id`.
+//   DOCK         the Dock menu (macOS; `id` is ignored): the items set with
+//                set_dock_menu, as AppKit holds them for
+//                applicationDockMenu:.
+#define LAUFEY_MENU_KIND_APPLICATION 0
+#define LAUFEY_MENU_KIND_DOCK 1
 
 // --- The share sheet (API >= 49) -----------------------------------------
 //
@@ -1245,6 +1257,19 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 // A "forwardKeys" entry with a leading '!' ("!CmdOrCtrl+W") is matched before
 // the app menu's accelerators (the others after them).
 #define LAUFEY_WEBVIEW_CAP_FORWARD_KEYS_BEFORE_MENU (1u << 17)
+// "downloads": "app" (API >= 59): each download comes as DOWNLOAD events and
+// the app decides it with webview_download_control (else create_webview
+// refuses the option as INVALID).
+#define LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS (1u << 18)
+// webview_download_control PAUSE / RESUME work (else they answer
+// UNSUPPORTED). An engine that can only resume what the server lets it
+// reports the bit and says "canResume" per download.
+#define LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE (1u << 19)
+// "permissions": "app" (API >= 59): each permission request comes as a
+// PERMISSION_REQUEST event and the app answers it with
+// webview_permission_respond (else create_webview refuses the option as
+// INVALID).
+#define LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS (1u << 20)
 // Bits 24..27: the engine (LAUFEY_WEBVIEW_ENGINE_*), 0 when unsupported.
 #define LAUFEY_WEBVIEW_ENGINE_SHIFT 24
 #define LAUFEY_WEBVIEW_ENGINE_MASK (0xfu << 24)
@@ -1337,6 +1362,65 @@ typedef void (*laufey_will_navigate_fn)(void* user_data, uint32_t window_id,
 //               forwarded keys still down, their keyups come then. "metaKey"
 //               is Command on macOS, the Windows / Super key elsewhere.
 #define LAUFEY_WEBVIEW_EVENT_KEY 10
+//   DOWNLOAD    (API >= 59, under "downloads": "app") {"id": number,
+//               "state": "requested" | "progressing" | "completed" |
+//               "cancelled" | "interrupted", "url": string, "filename":
+//               string (the engine's suggestion as a bare, sanitized file
+//               name), "mimeType"?: string, "totalBytes"?: number (left out
+//               while unknown), "receivedBytes": number, "path"?: string
+//               (where it is being saved, once decided), "paused"?: true,
+//               "canResume"?: bool, "reason"?: string}.
+//               "requested" is the first event of an id: the download waits
+//               (nothing is written) until webview_download_control SAVE,
+//               SAVE_AS or CANCEL answers it. "progressing" then repeats (at
+//               most 5 a second per download, and once on each pause /
+//               resume). "completed" and "cancelled" are the last event of
+//               an id. "interrupted" ("reason": "network", "server", "file",
+//               "crash" or "failed") is the last one too unless "canResume"
+//               is true, in which case RESUME or CANCEL ends the wait.
+//               Closing the view cancels its downloads ("cancelled" comes
+//               before CLOSED). At most
+//               LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS may wait for an answer
+//               per view; one more is cancelled without an event.
+//   PERMISSION_REQUEST (API >= 59, under "permissions": "app") {"id": number,
+//               "state": "requested" | "cancelled", "origin": string (the
+//               requesting origin), "permissions": [string] ("camera",
+//               "microphone", "screen", "geolocation", "notifications",
+//               "midi", "pointer-lock", "storage-access", "sensors",
+//               "clipboard-read", "window-management", "local-fonts",
+//               "file-system", "multiple-downloads", "autoplay"; one request
+//               may name several), "frame"?: {"isMain": bool, "origin"?:
+//               string} (left out where the engine does not say which frame
+//               asked)}. "requested" waits for webview_permission_respond;
+//               until then the page's request is pending. "cancelled" (only
+//               "id" and "state") says a request went away unanswered: the
+//               page navigated, the engine withdrew it, or the view closed
+//               (laufey refuses it). A kind the engine can't name is refused
+//               without an event. At most
+//               LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS may wait per view; one
+//               more is refused without an event.
+#define LAUFEY_WEBVIEW_EVENT_DOWNLOAD 11
+#define LAUFEY_WEBVIEW_EVENT_PERMISSION_REQUEST 12
+
+#define LAUFEY_WEBVIEW_MAX_PENDING_DOWNLOADS 16
+#define LAUFEY_WEBVIEW_MAX_PENDING_PERMISSIONS 16
+
+// Actions for webview_download_control.
+//   SAVE     answer a "requested" download: write it to `path` (absolute; an
+//            existing regular file there is replaced, the app having asked
+//            the user if it wanted to; its directory must exist)
+//   SAVE_AS  answer a "requested" download with the OS save panel, as
+//            "downloads": "ask" does (dismissing it cancels the download)
+//   CANCEL   cancel a download in any state before its last event; nothing
+//            stays at "path" for one that did not complete
+//   PAUSE / RESUME  (LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE) a progressing
+//            download; RESUME also restarts an interrupted one whose
+//            "canResume" is true
+#define LAUFEY_WEBVIEW_DOWNLOAD_SAVE 1
+#define LAUFEY_WEBVIEW_DOWNLOAD_SAVE_AS 2
+#define LAUFEY_WEBVIEW_DOWNLOAD_CANCEL 3
+#define LAUFEY_WEBVIEW_DOWNLOAD_PAUSE 4
+#define LAUFEY_WEBVIEW_DOWNLOAD_RESUME 5
 
 // webview_find flags.
 #define LAUFEY_WEBVIEW_FIND_FORWARD (1u << 0)
@@ -3165,9 +3249,14 @@ struct laufey_backend_api {
   //                  view), "browser" (it opens in the OS browser), "deny"
   //                  (nothing opens; a NEW_WINDOW event fires)
   //   "downloads"    "deny" (default), "ask" (a save panel), "browser" (the
-  //                  URL opens in the OS browser)
+  //                  URL opens in the OS browser), "app" (API >= 59,
+  //                  LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS: DOWNLOAD events, and
+  //                  the app decides each with webview_download_control)
   //   "permissions"  "deny" (default: camera, microphone, geolocation,
-  //                  notifications, ... are refused without a prompt), "ask"
+  //                  notifications, ... are refused without a prompt), "ask",
+  //                  "app" (API >= 59, LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS:
+  //                  PERMISSION_REQUEST events, answered with
+  //                  webview_permission_respond)
   //   "userAgent"    string: replaces the engine's user agent
   //   "contextMenu"  "native" (default: the engine's menu) or "app" (no
   //                  engine menu; the CONTEXT_MENU event lets the app show
@@ -3276,6 +3365,48 @@ struct laufey_backend_api {
   // reported. Any thread.
   bool (*webview_set_forward_keys)(void* backend_data, uint32_t webview_id,
                                    const char* keys_json);
+
+  // --- Web view downloads and permission requests (API >= 59) --------------
+  //
+  // Decide or control download `download_id` (a DOWNLOAD event's "id") of a
+  // view created with "downloads": "app": LAUFEY_WEBVIEW_DOWNLOAD_*. `path`
+  // is read only for SAVE (UTF-8, absolute; NULL otherwise). Returns OK,
+  // CLOSED (unknown view), INVALID (unknown or finished download, an action
+  // its state does not take, a bad path) or UNSUPPORTED (PAUSE / RESUME
+  // without LAUFEY_WEBVIEW_CAP_DOWNLOAD_PAUSE, or no
+  // LAUFEY_WEBVIEW_CAP_DOWNLOAD_EVENTS). The download's next DOWNLOAD event
+  // reports the result. Any thread. NULL on Winit.
+  int32_t (*webview_download_control)(void* backend_data, uint32_t webview_id,
+                                      uint32_t download_id, int32_t action,
+                                      const char* path);
+
+  // Answer permission request `request_id` (a PERMISSION_REQUEST event's
+  // "id") of a view created with "permissions": "app": allow or refuse
+  // everything it asked for. Returns OK, CLOSED (unknown view), INVALID
+  // (unknown, answered or cancelled request) or UNSUPPORTED. An allowed
+  // capture still needs the OS's own consent for the app (the macOS camera
+  // / microphone prompt and usage strings, as for the window's page). Any
+  // thread. NULL on Winit.
+  int32_t (*webview_permission_respond)(void* backend_data, uint32_t webview_id,
+                                        uint32_t request_id, bool allow);
+
+  // --- Menu read-back (API >= 59) -------------------------------------------
+  //
+  // Read a menu back from the native menu objects the OS shows
+  // (LAUFEY_MENU_CAP_SNAPSHOT), for self-tests: what set_application_menu /
+  // set_app_menu / set_dock_menu ended up as, including the items laufey or
+  // the OS added (the macOS Edit submenu, Close Window). `kind` is
+  // LAUFEY_MENU_KIND_*, `id` the window for APPLICATION on Windows and Linux.
+  // Returns a JSON array of items, each
+  //   {"type": "item" | "submenu" | "separator", "label": string,
+  //    "id"?: string (a custom item's id), "role"?: string (an item laufey
+  //    built from a role), "enabled": bool, "checked": bool,
+  //    "visible": bool, "accelerator"?: string (the canonical form, e.g.
+  //    "Cmd+Shift+K" / "Ctrl+Shift+K"), "submenu"?: [items]}
+  // or NULL when there is no such menu, the kind is unknown or the backend
+  // has no read-back. Free with string_free. Any thread (it waits for the UI
+  // thread). NULL on Winit.
+  char* (*menu_snapshot)(void* backend_data, int32_t kind, uint32_t id);
 };
 
 #ifdef __cplusplus
