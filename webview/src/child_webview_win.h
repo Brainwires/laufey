@@ -20,6 +20,7 @@
 #include <wrl.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,25 @@ bool Restack(const std::vector<uint32_t>& bottom_to_top);
 bool Close(uint32_t id);
 // Replaces the view's "forwardKeys" (canonical forms).
 bool SetForwardKeys(uint32_t id, const std::vector<std::string>& keys);
+
+// Shows the OS save dialog over window `window_id` (WebView2Backend::
+// ShowFileDialog): what SAVE_AS opens, as the "ask" policy of the window's
+// own page does.
+using SaveDialogShow = std::function<uint32_t(
+    uint32_t window_id, const laufey_file_dialog_options_t* options,
+    laufey_file_dialog_result_fn callback, void* user_data)>;
+// Runs a task on the UI thread (the save dialog answers on laufey's I/O
+// thread).
+using UiPost = std::function<void(std::function<void()>)>;
+
+// webview_download_control for a view created with "downloads": "app"
+// (API 59): LAUFEY_WEBVIEW_OK, CLOSED, INVALID, UNSUPPORTED or FAILED.
+int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
+                        const std::string& path, const SaveDialogShow& show,
+                        const UiPost& post);
+// webview_permission_respond for a view created with "permissions": "app"
+// (API 59): LAUFEY_WEBVIEW_OK, CLOSED or INVALID.
+int32_t PermissionRespond(uint32_t id, uint32_t request_id, bool allow);
 
 // The window resized or changed its scale: lays its views out again.
 void RelayoutForWindow(uint32_t window_id);
