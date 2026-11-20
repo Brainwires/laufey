@@ -332,8 +332,9 @@ class LaufeyCombinedApp : public CefApp, public CefBrowserProcessHandler {
 
     LaufeyWarmUpProxyResolution();
 
-    // backend-common's I/O thread (file dialogs, drag-out, clipboard change
-    // events; its own STA thread, see laufey_io.h).
+    // backend-common's I/O thread (drag-out, message dialogs, clipboard
+    // change events; its own STA thread, see laufey_io.h). File dialogs run on
+    // a second thread of the same shape, started on the first dialog.
     laufey_common::WinIoInit();
 
     // Keep the handler alive for the lifetime of the app.

@@ -789,6 +789,42 @@ bool WebViewProgressThrottle::Ready(int64_t now_ms) {
   return true;
 }
 
+void WebViewDownloadPoll::Touch(int64_t now_ms) {
+  armed_ = true;
+  until_ms_ = now_ms + kWebViewDownloadPollGraceMs;
+}
+
+void WebViewDownloadPoll::Stop() {
+  armed_ = false;
+}
+
+bool WebViewDownloadPoll::Due(int64_t now_ms) {
+  if (!armed_)
+    return false;
+  if (now_ms > until_ms_) {
+    armed_ = false;
+    return false;
+  }
+  return true;
+}
+
+bool WebViewDownloadPollReports(WebViewDownloadPhase phase,
+                                WebViewEngineDownloadState state,
+                                bool user_paused, bool pause_in_flight) {
+  using P = WebViewDownloadPhase;
+  if (phase == P::kRequested || phase == P::kChoosing || phase == P::kDone)
+    return false;
+  switch (state) {
+    case WebViewEngineDownloadState::kCompleted:
+      return true;
+    case WebViewEngineDownloadState::kInterrupted:
+      return !user_paused && phase == P::kProgressing && !pause_in_flight;
+    case WebViewEngineDownloadState::kInProgress:
+      return false;
+  }
+  return false;
+}
+
 // --- Permission requests the app answers (API 59) ----------------------------
 
 std::string WebViewPermissionRequestJson(const WebViewPermissionFields& f) {

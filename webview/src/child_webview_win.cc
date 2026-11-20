@@ -48,7 +48,10 @@
 // "ask" policy uses (AskDownloadDestination), CANCEL cancels the event. Then
 // the ICoreWebView2DownloadOperation's BytesReceivedChanged / StateChanged
 // report it; WebView2 pauses by interrupting with USER_PAUSED, which is
-// reported as paused, not as an interruption.
+// reported as paused, not as an interruption. StateChanged can come late or
+// never on a loaded machine, so a decided download's state is also polled
+// (OnDownloadPoll) and its end reported once, whichever sees it first; the
+// view's SmartScreen reputation check (which holds a completion) is off.
 //
 // "permissions": "app" (API 59): PermissionRequested is held open with its
 // deferral until webview_permission_respond answers (never remembered in the
@@ -128,6 +131,9 @@ struct ChildDownload {
   std::string path;          // once decided
   int64_t total_bytes = -1;  // < 0: unknown
   laufey_common::WebViewProgressThrottle throttle;
+  // The state poll behind StateChanged (see OnDownloadPoll), armed once the
+  // download is decided.
+  laufey_common::WebViewDownloadPoll poll;
   // Pause() is asynchronous: WebView2 pauses by interrupting with
   // USER_PAUSED some time later, and a Resume() before that does nothing.
   // pause_in_flight: PAUSE was asked and its interruption not seen yet;
@@ -1113,11 +1119,17 @@ int64_t FileSize(const std::string& path) {
   return static_cast<int64_t>(size.QuadPart);
 }
 
+void ArmDownloadPoll(ChildDownload* d, int64_t now_ms);
+
 void OnDownloadBytes(uint32_t view_id, uint32_t download_id) {
   ChildView* v = Find(view_id);
   ChildDownload* d = v ? FindDownload(v, download_id) : nullptr;
-  if (!d || d->phase != WebViewDownloadPhase::kProgressing ||
-      !d->throttle.Ready(NowMs()))
+  if (!d || d->phase != WebViewDownloadPhase::kProgressing)
+    return;
+  int64_t now = NowMs();
+  // A sign of life: the poll's grace starts again.
+  ArmDownloadPoll(d, now);
+  if (!d->throttle.Ready(now))
     return;
   laufey_common::WebViewDownloadFields f =
       DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
@@ -1198,6 +1210,11 @@ void OnDownloadState(uint32_t view_id, uint32_t download_id) {
     CancelDownload(v, download_id);
     return;
   }
+  // Reported already ("interrupted" with "canResume": true) and not resumed
+  // since: the same interruption seen again (by the poll, then by its
+  // StateChanged), never sent twice.
+  if (d->phase == WebViewDownloadPhase::kInterrupted)
+    return;
   int can_resume = Decided(*d) ? CanResume(*d) : 0;
   laufey_common::WebViewDownloadFields f =
       DownloadFields(*d, laufey_common::kWebViewDownloadInterrupted);
@@ -1237,6 +1254,75 @@ void Subscribe(uint32_t view_id, ChildDownload* d) {
           .Get(),
       &d->state_token);
   d->subscribed = SUCCEEDED(bytes) && SUCCEEDED(state);
+}
+
+// WebView2 has been seen to raise a download's StateChanged 20+ s late, or
+// not at all, on a loaded machine (the completion the app waits on never
+// came). So while a decided download may still end, the UI thread reads its
+// state every kWebViewDownloadPollIntervalMs (one thread timer for every
+// view) and hands a completion, or an interruption StateChanged has not
+// reported, to OnDownloadState: its event goes once whichever comes first.
+// Each download's poll ends kWebViewDownloadPollGraceMs after its last sign
+// of life; the timer stops when no download polls. UI thread only.
+UINT_PTR g_download_poll_timer = 0;
+
+void CALLBACK OnDownloadPoll(HWND /*hwnd*/, UINT /*msg*/, UINT_PTR /*timer*/,
+                             DWORD /*time*/) {
+  int64_t now = NowMs();
+  std::vector<std::pair<uint32_t, uint32_t>> due;
+  for (auto& kv : Views()) {
+    for (auto& dk : kv.second->downloads) {
+      if (dk.second->poll.Due(now))
+        due.emplace_back(kv.first, dk.first);
+    }
+  }
+  if (due.empty()) {
+    if (g_download_poll_timer)
+      KillTimer(nullptr, g_download_poll_timer);
+    g_download_poll_timer = 0;
+    return;
+  }
+  for (const auto& [view_id, download_id] : due) {
+    ChildView* v = Find(view_id);
+    ChildDownload* d = v ? FindDownload(v, download_id) : nullptr;
+    if (!d || !d->operation)
+      continue;  // ended by an earlier one's event handler
+    COREWEBVIEW2_DOWNLOAD_STATE state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+    if (FAILED(d->operation->get_State(&state)))
+      continue;
+    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON reason =
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE;
+    laufey_common::WebViewEngineDownloadState read =
+        laufey_common::WebViewEngineDownloadState::kInProgress;
+    if (state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED) {
+      read = laufey_common::WebViewEngineDownloadState::kCompleted;
+    } else if (state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED) {
+      read = laufey_common::WebViewEngineDownloadState::kInterrupted;
+      d->operation->get_InterruptReason(&reason);
+    }
+    if (!laufey_common::WebViewDownloadPollReports(
+            d->phase, read,
+            reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED,
+            d->pause_in_flight))
+      continue;
+    fprintf(stderr,
+            "laufey: web view %u: download %u %s with no StateChanged from "
+            "WebView2 yet; reported from its state poll\n",
+            view_id, download_id,
+            read == laufey_common::WebViewEngineDownloadState::kCompleted
+                ? "completed"
+                : "was interrupted");
+    OnDownloadState(view_id, download_id);
+  }
+}
+
+// Arms (or extends) `d`'s poll and starts the timer if it is not running.
+void ArmDownloadPoll(ChildDownload* d, int64_t now_ms) {
+  d->poll.Touch(now_ms);
+  if (!g_download_poll_timer)
+    g_download_poll_timer =
+        SetTimer(nullptr, 0, laufey_common::kWebViewDownloadPollIntervalMs,
+                 &OnDownloadPoll);
 }
 
 // A DownloadStarting of a view under "downloads": "app": held open with its
@@ -1319,7 +1405,10 @@ int32_t ApplySave(ChildView* v, ChildDownload* d, const std::string& path) {
   ComPtr<ICoreWebView2Deferral> deferral = std::move(d->deferral);
   d->args.Reset();
   uint32_t view_id = v->id;
-  d->throttle.Ready(NowMs());
+  int64_t now = NowMs();
+  d->throttle.Ready(now);
+  // Its end is read from the operation too, should StateChanged not come.
+  ArmDownloadPoll(d, now);
   laufey_common::WebViewDownloadFields f =
       DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
   f.can_resume = CanResume(*d);
@@ -1530,6 +1619,15 @@ void Configure(ChildView* view) {
       std::wstring ua = Wide(view->options.user_agent);
       settings2->put_UserAgent(ua.c_str());
     }
+    // "downloads": "app": the app decides each download and where it goes,
+    // so WebView2's SmartScreen reputation check (which can hold a
+    // download's completion while it answers) is off for this view
+    // (ICoreWebView2Settings8; an older runtime keeps it). WebView2 has the
+    // setting per web view only, so it covers the view's navigations too.
+    ComPtr<ICoreWebView2Settings8> settings8;
+    if (view->options.downloads == laufey_common::WebViewDownloads::kApp &&
+        SUCCEEDED(settings.As(&settings8)) && settings8)
+      settings8->put_IsReputationCheckingRequired(FALSE);
   }
 
   webview->add_NavigationStarting(
@@ -2354,7 +2452,7 @@ int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
           return show(window_id, options, callback, user_data);
         };
       }
-      // The dialog answers on laufey's I/O thread; the view's objects
+      // The dialog answers on laufey's dialog thread; the view's objects
       // belong to the UI thread. `v` and `d` are not used past this call.
       UiPost to_ui = post;
       laufey_common::AskDownloadDestination(
@@ -2403,6 +2501,7 @@ int32_t DownloadControl(uint32_t id, uint32_t download_id, int32_t action,
         d->resume_in_flight = true;
       }
       d->phase = WebViewDownloadPhase::kProgressing;
+      ArmDownloadPoll(d, NowMs());
       laufey_common::WebViewDownloadFields f =
           DownloadFields(*d, laufey_common::kWebViewDownloadProgressing);
       f.can_resume = CanResume(*d);

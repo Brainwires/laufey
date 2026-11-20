@@ -4,12 +4,20 @@
 // (IFileOpenDialog / IFileSaveDialog), shared by the WebView2 and CEF
 // backends, plus the I/O window both use.
 //
-// The I/O window is a message-only window on the backend's UI thread. Work is
-// posted to it as a window message, which every modal loop on that thread (a
-// file dialog's, DoDragDrop's, a MessageBox's) dispatches, so cancel_file_
-// dialog and the test hook reach an open dialog even while the backend's own
-// task queue (CEF's) is not running tasks inside the native modal loop. It is
-// also the clipboard format listener.
+// The I/O window is a message-only window on a thread of laufey's own (the
+// I/O thread). Work is posted to it as a window message, which every modal
+// loop on that thread (DoDragDrop's, a MessageBox's) dispatches. It is also
+// the clipboard format listener.
+//
+// File dialogs run on a second thread of the same shape (the dialog thread),
+// started on the first file dialog. Setting a file dialog up (creating the
+// COM dialog, the shell namespace behind SetFolder) does not dispatch
+// messages and can block for many seconds on a cold machine; on the I/O
+// thread that held back every drag (and clipboard change) posted meanwhile.
+// On its own thread a drag never waits on a dialog. The dialog thread's
+// window is where cancel_file_dialog and the test hook reach the dialog: its
+// modal loop dispatches them, even while the backend's own task queue (CEF's)
+// is not running tasks inside the native modal loop.
 
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
@@ -41,12 +49,21 @@ namespace {
 
 constexpr UINT kRunTask = WM_APP + 71;
 
-HWND g_io_hwnd = nullptr;
-DWORD g_io_thread = 0;
+// A thread of laufey's own with a message-only window: an STA with OLE (for
+// IFileDialog and DoDragDrop) and its own message loop, so a native modal
+// loop running there never stalls the engine's UI thread, whatever that
+// thread's own pump does with foreign windows.
+struct TaskThread {
+  HWND hwnd = nullptr;
+  DWORD thread = 0;
+  // RunOnTaskThreadAfter's tasks, by timer id (this thread only).
+  std::map<UINT_PTR, std::function<void()>> timers;
+  UINT_PTR next_timer = 0x4C00;
+};
+
+TaskThread g_io;      // drags, message dialogs, the clipboard listener
+TaskThread g_dialog;  // file dialogs
 bool g_clipboard_listening = false;
-// WinRunOnIoThreadAfter's tasks, by timer id (I/O thread only).
-std::map<UINT_PTR, std::function<void()>> g_timers;
-UINT_PTR g_next_timer = 0x4C00;
 
 LRESULT CALLBACK IoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == kRunTask) {
@@ -56,82 +73,112 @@ LRESULT CALLBACK IoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       (*task)();
     return 0;
   }
-  if (msg == WM_TIMER) {
+  auto* owner =
+      reinterpret_cast<TaskThread*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  if (msg == WM_TIMER && owner) {
     KillTimer(hwnd, wp);
-    auto it = g_timers.find(wp);
-    if (it != g_timers.end()) {
+    auto it = owner->timers.find(wp);
+    if (it != owner->timers.end()) {
       std::function<void()> task = std::move(it->second);
-      g_timers.erase(it);
+      owner->timers.erase(it);
       if (task)
         task();
     }
     return 0;
   }
-  if (msg == WM_CLIPBOARDUPDATE) {
+  if (msg == WM_CLIPBOARDUPDATE && owner == &g_io) {
     FireClipboardChange();
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-}  // namespace
-
-void WinIoInit() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    // The I/O thread: an STA with OLE (for IFileDialog and DoDragDrop) and its
-    // own message loop, so a native modal loop running there (a file dialog,
-    // a drag) never stalls the engine's UI thread, whatever that thread's own
-    // pump does with foreign windows.
-    // `started` lives in this frame; Done() is the thread's last access to
-    // it (laufey_sync_call.h).
-    SyncCall started;
-    std::thread([&started] {
-      OleInitialize(nullptr);
-      WNDCLASSEXW wc = {};
-      wc.cbSize = sizeof(wc);
-      wc.lpfnWndProc = IoWndProc;
-      wc.hInstance = GetModuleHandleW(nullptr);
-      wc.lpszClassName = L"LaufeyIoWindow";
-      RegisterClassExW(&wc);
-      HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
-                                  HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
-      g_io_thread = GetCurrentThreadId();
-      g_io_hwnd = hwnd;
-      started.Done();
-      if (!hwnd)
-        return;
-      MSG msg;
-      while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-      }
-    }).detach();
-    started.Wait();
-  });
+// Starts `t`'s thread and waits until its window exists (or failed to).
+void StartTaskThread(TaskThread* t) {
+  // `started` lives in this frame; Done() is the thread's last access to
+  // it (laufey_sync_call.h).
+  SyncCall started;
+  std::thread([t, &started] {
+    OleInitialize(nullptr);
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = IoWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"LaufeyIoWindow";
+    // The second thread finds the class registered already.
+    RegisterClassExW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
+                                HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+    if (hwnd)
+      SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(t));
+    t->thread = GetCurrentThreadId();
+    t->hwnd = hwnd;
+    started.Done();
+    if (!hwnd)
+      return;
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+      TranslateMessage(&msg);
+      DispatchMessageW(&msg);
+    }
+  }).detach();
+  started.Wait();
 }
 
-bool WinRunOnIoThread(std::function<void()> task) {
-  if (!g_io_hwnd)
+bool RunOnTaskThread(TaskThread& t, std::function<void()> task) {
+  if (!t.hwnd)
     return false;
-  if (GetCurrentThreadId() == g_io_thread) {
+  if (GetCurrentThreadId() == t.thread) {
     task();
     return true;
   }
   auto* heap = new std::function<void()>(std::move(task));
-  if (!PostMessageW(g_io_hwnd, kRunTask, 0, reinterpret_cast<LPARAM>(heap))) {
+  if (!PostMessageW(t.hwnd, kRunTask, 0, reinterpret_cast<LPARAM>(heap))) {
     delete heap;
     return false;
   }
   return true;
 }
 
-void WinRunOnIoThreadAfter(unsigned ms, std::function<void()> task) {
-  WinRunOnIoThread([ms, task = std::move(task)]() mutable {
-    UINT_PTR id = ++g_next_timer;
-    g_timers[id] = std::move(task);
-    SetTimer(g_io_hwnd, id, ms, nullptr);
+void RunOnTaskThreadAfter(TaskThread& t, unsigned ms,
+                          std::function<void()> task) {
+  TaskThread* tp = &t;
+  RunOnTaskThread(t, [tp, ms, task = std::move(task)]() mutable {
+    UINT_PTR id = ++tp->next_timer;
+    tp->timers[id] = std::move(task);
+    SetTimer(tp->hwnd, id, ms, nullptr);
   });
+}
+
+// The dialog thread, started on first use (idempotent, any thread). False
+// when it could not be started.
+bool EnsureDialogThread() {
+  static std::once_flag once;
+  std::call_once(once, [] { StartTaskThread(&g_dialog); });
+  return g_dialog.hwnd != nullptr;
+}
+
+bool RunOnDialogThread(std::function<void()> task) {
+  return RunOnTaskThread(g_dialog, std::move(task));
+}
+
+void RunOnDialogThreadAfter(unsigned ms, std::function<void()> task) {
+  RunOnTaskThreadAfter(g_dialog, ms, std::move(task));
+}
+
+}  // namespace
+
+void WinIoInit() {
+  static std::once_flag once;
+  std::call_once(once, [] { StartTaskThread(&g_io); });
+}
+
+bool WinRunOnIoThread(std::function<void()> task) {
+  return RunOnTaskThread(g_io, std::move(task));
+}
+
+void WinRunOnIoThreadAfter(unsigned ms, std::function<void()> task) {
+  RunOnTaskThreadAfter(g_io, ms, std::move(task));
 }
 
 void ClipboardWatchWin(bool on) {
@@ -139,9 +186,9 @@ void ClipboardWatchWin(bool on) {
     if (on == g_clipboard_listening)
       return;
     if (on) {
-      g_clipboard_listening = AddClipboardFormatListener(g_io_hwnd) != FALSE;
+      g_clipboard_listening = AddClipboardFormatListener(g_io.hwnd) != FALSE;
     } else {
-      RemoveClipboardFormatListener(g_io_hwnd);
+      RemoveClipboardFormatListener(g_io.hwnd);
       g_clipboard_listening = false;
     }
   });
@@ -398,9 +445,10 @@ void StartFileDragWin(void* hwnd, DragOutRequest* req) {
 
 namespace {
 
-const UiRunner& IoRunner() {
+// File dialogs run on the dialog thread (see the top of this file).
+const UiRunner& DialogRunner() {
   static const UiRunner runner = [](std::function<void()> fn) {
-    WinRunOnIoThread(std::move(fn));
+    RunOnDialogThread(std::move(fn));
   };
   return runner;
 }
@@ -498,9 +546,9 @@ class WinFileDialog : public FileDialogPlatform {
     if (accept_requested_)
       ScheduleAccept(accept_path_, 0);
     HWND owner = parent_ && IsWindow(parent_) ? parent_ : nullptr;
-    // Show runs the dialog's own modal loop on this thread; the I/O window's
-    // messages (cancel, the test hook, their retry timers) are dispatched
-    // inside it.
+    // Show runs the dialog's own modal loop on this thread; the dialog
+    // thread window's messages (cancel, the test hook, their retry timers) are
+    // dispatched inside it.
     hr = dialog_->Show(owner);
     shown_ = true;
     std::vector<std::string> paths;
@@ -586,13 +634,14 @@ class WinFileDialog : public FileDialogPlatform {
     if (attempt >= 5)
       return;
     uint32_t id = id_;
-    WinRunOnIoThreadAfter(attempt == 0 ? 400 : 1200, [this, id, path, attempt] {
-      if (!FileDialogIsOpen(id) || shown_)
-        return;
-      if (DialogWindow())
-        DoAccept(path);
-      ScheduleAccept(path, attempt + 1);
-    });
+    RunOnDialogThreadAfter(attempt == 0 ? 400 : 1200,
+                           [this, id, path, attempt] {
+                             if (!FileDialogIsOpen(id) || shown_)
+                               return;
+                             if (DialogWindow())
+                               DoAccept(path);
+                             ScheduleAccept(path, attempt + 1);
+                           });
   }
 
   // Test hook (LAUFEY_TEST_WIN_DIALOG_SETUP_PUMP_MS=<ms>): before creating
@@ -639,7 +688,7 @@ class WinFileDialog : public FileDialogPlatform {
   // limit: a cancel must settle the dialog however long it takes to go.
   void RetryLater(std::function<void()> fn) {
     uint32_t id = id_;
-    WinRunOnIoThreadAfter(700, [this, id, fn = std::move(fn)] {
+    RunOnDialogThreadAfter(700, [this, id, fn = std::move(fn)] {
       if (FileDialogIsOpen(id) && !shown_)
         fn();
     });
@@ -660,7 +709,7 @@ class WinFileDialog : public FileDialogPlatform {
           dialog_->SetFolder(folder.Get());
         dialog_->SetFileName(L"");
       }
-      WinRunOnIoThreadAfter(400, [hwnd] {
+      RunOnDialogThreadAfter(400, [hwnd] {
         if (IsWindow(hwnd))
           PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
       });
@@ -693,13 +742,15 @@ uint32_t ShowFileDialogWin(ParentResolver parent,
                            const laufey_file_dialog_options_t* options,
                            laufey_file_dialog_result_fn callback,
                            void* user_data) {
-  if (!g_io_hwnd) {
+  // No I/O thread: the backend never set up laufey's Windows I/O (as before
+  // the dialog thread existed, the dialog fails).
+  if (!g_io.hwnd || !EnsureDialogThread()) {
     if (callback)
       callback(user_data, 0, LAUFEY_FILE_DIALOG_FAILED, nullptr, 0);
     return 0;
   }
   return ShowFileDialogCommon(
-      options, callback, user_data, IoRunner(),
+      options, callback, user_data, DialogRunner(),
       [parent](uint32_t id, const FileDialogRequest& request) {
         HWND owner = parent ? static_cast<HWND>(parent()) : nullptr;
         auto* dialog = new WinFileDialog(id, owner, request);
@@ -710,11 +761,11 @@ uint32_t ShowFileDialogWin(ParentResolver parent,
 }
 
 bool CancelFileDialogWin(uint32_t dialog_id) {
-  return FileDialogCancel(dialog_id, IoRunner());
+  return FileDialogCancel(dialog_id, DialogRunner());
 }
 
 bool TestFileDialogRespondWin(int action, const char* path) {
-  return FileDialogTestRespond(action, path, IoRunner());
+  return FileDialogTestRespond(action, path, DialogRunner());
 }
 
 }  // namespace laufey_common

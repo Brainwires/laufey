@@ -125,9 +125,9 @@ URL to the same save, proposing the link's `download` name.
   cancelled: its callback is released and `Cancel()` is called on its next
   update. `CanDownload` refuses another origin's download before it starts.
 - **WebView2**: WebView2's own download UI never shows. The event is held open
-  with a deferral while the dialog (on laufey's I/O thread) is up; the answer is
-  applied on the UI thread. A runtime without `ICoreWebView2_4` keeps WebView2's
-  default handling.
+  with a deferral while the dialog (on laufey's dialog thread) is up; the answer
+  is applied on the UI thread. A runtime without `ICoreWebView2_4` keeps
+  WebView2's default handling.
 - **WebKitGTK**: the destination is decided asynchronously, which needs
   WebKitGTK 2.40; an older WebKitGTK cancels page downloads rather than save
   them unasked (it would otherwise save into the Downloads folder).

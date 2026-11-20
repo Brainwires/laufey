@@ -1332,8 +1332,9 @@ WebView2Backend::WebView2Backend() {
   };
   laufey_wv2::InitSchemeStreams(std::move(stream_hooks));
 
-  // backend-common's I/O thread (file dialogs, drag-out, clipboard change
-  // events; its own STA thread, see laufey_io.h).
+  // backend-common's I/O thread (drag-out, message dialogs, clipboard
+  // change events; its own STA thread, see laufey_io.h). File dialogs run on
+  // a second thread of the same shape, started on the first dialog.
   laufey_common::WinIoInit();
 
   // 256 random bits from two v4 GUIDs (CoCreateGuid draws them from the
@@ -2437,7 +2438,7 @@ void WebView2Backend::OnEnvironmentReady(uint32_t window_id, HWND hwnd,
             // (ICoreWebView2_4) suppresses the default UI; the download
             // policy decides whether to ask at all (the app's origins only,
             // a few prompts a window at a time); the backend's save dialog
-            // (one file dialog at a time, on laufey's I/O thread) decides
+            // (one file dialog at a time, on laufey's dialog thread) decides
             // where, the event held open by a deferral meanwhile. Dismissing
             // the dialog cancels the download. On older WebView2 runtimes
             // the QueryInterface fails and the default handling stays.
@@ -3393,7 +3394,7 @@ HRESULT WebView2Backend::OnDownloadStarting(
         return ShowFileDialog(window_id, options, callback, user_data);
       },
       [this, held, deferral](std::string path) {
-        // The dialog answers on the I/O thread; WebView2's objects belong
+        // The dialog answers on its own thread; WebView2's objects belong
         // to the UI thread.
         RunOnUiThread([held, deferral, path] {
           if (path.empty())

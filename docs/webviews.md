@@ -152,6 +152,16 @@ WebView2 pauses a download asynchronously (`Pause` interrupts it with
 `RESUME` that comes before the pause has taken effect is applied once it has, so
 a pause followed at once by a resume leaves the download running.
 
+WebView2 has been seen to raise a download's `StateChanged` 20 s or more late,
+or not at all, on a loaded machine. So once a download is saved (or resumed),
+laufey also reads its state every second, until 5 minutes after its last sign of
+life (the save, a resume, received bytes), and reports a completion or an
+interruption `StateChanged` has not: each event still goes once, whichever sees
+it first. A view with `"downloads": "app"` also turns WebView2's SmartScreen
+reputation check off (`ICoreWebView2Settings8::IsReputationCheckingRequired`,
+where the runtime has it), as the app decides each download; WebView2 has that
+setting per web view only, so the view's navigations go unchecked too.
+
 ## Permission requests the app answers (API 59)
 
 With `"permissions": "app"` (`LAUFEY_WEBVIEW_CAP_PERMISSION_REQUESTS`) the

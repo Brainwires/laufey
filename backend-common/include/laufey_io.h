@@ -230,7 +230,9 @@ bool TestFileDialogRespondMac(int action, const char* path);
 
 #ifdef _WIN32
 // IFileOpenDialog / IFileSaveDialog, owned by the HWND `parent` returns, shown
-// on the I/O window's thread (see WinIoInit).
+// on laufey's dialog thread (an STA like the I/O thread, started on the first
+// dialog), so a dialog being set up never holds back a drag on the I/O thread.
+// Fails when WinIoInit was never called.
 uint32_t ShowFileDialogWin(ParentResolver parent,
                            const laufey_file_dialog_options_t* options,
                            laufey_file_dialog_result_fn callback,
@@ -331,12 +333,13 @@ char* ClipboardReadFormatsWin();
 void ClipboardWatchWin(bool on);
 
 // The I/O thread: laufey's own STA thread (OLE initialized) with a
-// message-only window and a message loop. File dialogs and drags out run
-// there, so their native modal loops never stall the engine's UI thread, and
-// its window is the clipboard format listener (so change events fire on it).
-// WinIoInit starts it (idempotent, any thread). WinRunOnIoThread runs `task`
-// there (inline when already there); it returns false when WinIoInit was
-// never called.
+// message-only window and a message loop. Drags out and message dialogs run
+// there (file dialogs on a thread of their own, see ShowFileDialogWin), so
+// their native modal loops never stall the engine's UI thread, and its window
+// is the clipboard format listener (so change events fire on it). WinIoInit
+// starts it (idempotent, any thread). WinRunOnIoThread runs `task` there
+// (inline when already there); it returns false when WinIoInit was never
+// called.
 void WinIoInit();
 bool WinRunOnIoThread(std::function<void()> task);
 // Runs `task` on the I/O thread after `ms` milliseconds (a window timer, so
