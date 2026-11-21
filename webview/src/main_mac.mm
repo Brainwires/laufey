@@ -8,6 +8,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_launch_args.h"
 #include "laufey_notifications.h"
+#include "laufey_runtime_prestart.h"
 #include "laufey_single_instance.h"
 #include "laufey_overlay.h"
 #include "laufey_hidden_window_mac.h"
@@ -284,6 +285,16 @@ int main(int argc, char* argv[]) {
   unsetenv("LAUFEY_CWD");
 
   const std::string runtimePath = ResolveMacRuntimePath(argc, argv);
+
+  // The runtime's prestart (laufey_runtime_prestart.h): before the
+  // single-instance check, AppKit and WebKit. A headless worker gets it too.
+  {
+    int prestart_exit = 0;
+    if (!laufey_common::RuntimePrestart(runtimePath, LAUFEY_ENGINE_WEBVIEW,
+                                        &prestart_exit)) {
+      return prestart_exit;
+    }
+  }
 
   // Forked worker processes should not create a window.
   if (laufey_common::IsHeadlessWorkerLaunch(

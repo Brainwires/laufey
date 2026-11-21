@@ -811,6 +811,20 @@ typedef int (*laufey_runtime_init_fn)(const laufey_backend_api_t* api);
 typedef int (*laufey_runtime_start_fn)(void);
 #define LAUFEY_RUNTIME_START_SYMBOL "laufey_runtime_start"
 
+// Optional: a runtime library may export it, and a host that knows it calls
+// it first thing in main(), before the single-instance check, the toolkit,
+// the web engine and any thread (backend-common's
+// laufey_runtime_prestart.h). The runtime uses it for what must happen while
+// the process has one thread, such as confining it with the OS's sandbox.
+// `engine` is the host's own (LAUFEY_ENGINE_*). Returns nonzero when the
+// host goes on starting; zero, with `*exit_code` set, when the process must
+// exit now with that code. Called before laufey_runtime_init: no backend
+// API is available in it.
+typedef int (*laufey_runtime_prestart_fn)(int engine, int* exit_code);
+#define LAUFEY_RUNTIME_PRESTART_SYMBOL "laufey_runtime_prestart"
+#define LAUFEY_ENGINE_WEBVIEW 1
+#define LAUFEY_ENGINE_CEF 2
+
 typedef void (*laufey_runtime_shutdown_fn)(void);
 #define LAUFEY_RUNTIME_SHUTDOWN_SYMBOL "laufey_runtime_shutdown"
 

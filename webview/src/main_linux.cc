@@ -6,6 +6,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_platform_features.h"
+#include "laufey_runtime_prestart.h"
 #include "laufey_single_instance.h"
 #include "laufey_window.h"
 #include "runtime_loader.h"
@@ -121,6 +122,17 @@ int main(int argc, char* argv[]) {
     return laufey_common::kMissingRuntimeExitCode;
   }
   std::string runtimePath = runtimeChoice.path;
+
+  // The runtime's prestart (laufey_runtime_prestart.h): before the
+  // single-instance check, GTK and WebKit, while this process has one
+  // thread. A headless worker gets it too.
+  {
+    int prestart_exit = 0;
+    if (!laufey_common::RuntimePrestart(runtimePath, LAUFEY_ENGINE_WEBVIEW,
+                                        &prestart_exit)) {
+      return prestart_exit;
+    }
+  }
 
   // A headless worker (`<exe> run <script>`, a forked worker) runs before the
   // single-instance check: forwarded to a running instance it would never

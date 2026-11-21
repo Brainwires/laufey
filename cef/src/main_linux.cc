@@ -30,6 +30,7 @@
 #include "laufey_auth_session.h"
 #include "laufey_notifications.h"
 #include "laufey_platform_features.h"
+#include "laufey_runtime_prestart.h"
 #include "laufey_single_instance.h"
 #include "renderer_app.h"
 #include "laufey_window.h"
@@ -1131,6 +1132,20 @@ int main(int argc, char* argv[]) {
       if (*app_name) {
         g_app_id = app_name;
       }
+    }
+  }
+
+  // The runtime's prestart (laufey_runtime_prestart.h): in the browser
+  // process only (a CEF subprocess returned above), before the
+  // single-instance check and CefInitialize, while this process has one
+  // thread. A headless worker gets it too. The sandbox choice below is made
+  // after it, so it sees what the runtime did to this process (no_new_privs
+  // rules the setuid helper out).
+  {
+    int prestart_exit = 0;
+    if (!laufey_common::RuntimePrestart(g_runtime_path, LAUFEY_ENGINE_CEF,
+                                        &prestart_exit)) {
+      return prestart_exit;
     }
   }
 

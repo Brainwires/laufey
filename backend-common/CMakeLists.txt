@@ -594,6 +594,31 @@ if(LAUFEY_BUILD_TESTS)
                      --x --laufey-dbus-activated --y)
   endif()
 
+  # The runtime's prestart call (laufey_runtime_prestart.h), against a
+  # stand-in runtime that exports the symbol and one that doesn't. POSIX: the
+  # call does nothing on Windows.
+  if(UNIX)
+    add_library(laufey_prestart_probe MODULE tests/runtime_prestart_lib.cc)
+    target_compile_definitions(laufey_prestart_probe PRIVATE
+      LAUFEY_TEST_PRESTART)
+    add_library(laufey_prestart_probe_control MODULE
+      tests/runtime_prestart_lib.cc)
+    add_executable(laufey_runtime_prestart_test
+                   tests/runtime_prestart_test.cc)
+    target_link_libraries(laufey_runtime_prestart_test PRIVATE
+      laufey_backend_common
+      ${CMAKE_DL_LIBS}
+    )
+    target_compile_definitions(laufey_runtime_prestart_test PRIVATE
+      LAUFEY_PRESTART_LIB="$<TARGET_FILE:laufey_prestart_probe>"
+      LAUFEY_PRESTART_CONTROL_LIB="$<TARGET_FILE:laufey_prestart_probe_control>"
+    )
+    add_dependencies(laufey_runtime_prestart_test
+      laufey_prestart_probe laufey_prestart_probe_control)
+    add_test(NAME laufey_runtime_prestart_test
+             COMMAND laufey_runtime_prestart_test)
+  endif()
+
   # UI-thread task dispatch (the delivery guarantee, over a fake queue) and
   # the auth session core: argument validation, the one-session slot and
   # the exactly-once result (no OS API).

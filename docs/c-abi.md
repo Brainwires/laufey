@@ -27,6 +27,19 @@ A runtime is a `.dylib`/`.so`/`.dll` that exports three symbols:
 | `laufey_runtime_start`    | `int(void)`                            | Run application setup (create windows, register handlers). Returns when ready. |
 | `laufey_runtime_shutdown` | `void(void)`                           | Tear down before the process exits.                                            |
 
+A runtime may also export `laufey_runtime_prestart`
+(`int(int engine, int* exit_code)`, `LAUFEY_RUNTIME_PRESTART_SYMBOL`). A host
+that knows it (the WebView hosts on Linux and macOS, the CEF host on Linux)
+calls it first thing in `main()`: before the single-instance check, the
+toolkit, the web engine and any thread, and before `init` (no API table is
+available in it). `engine` is the host's own (`LAUFEY_ENGINE_WEBVIEW`,
+`LAUFEY_ENGINE_CEF`). It is for what must happen while the process has one
+thread, such as a runtime confining the process with the OS's sandbox
+(Landlock holds only the threads made after it). It returns nonzero for the
+host to go on, or zero with `*exit_code` set for the process to exit with that
+code. A headless worker launch gets the call too; a CEF subprocess, a
+notification launch and Windows don't.
+
 The backend `dlopen`s the runtime, resolves these symbols, calls `init` then
 `start`, and drives the OS event loop. Control flows backend → runtime through
 the API table, and runtime → backend through the registered callbacks.
