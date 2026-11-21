@@ -50,8 +50,7 @@
 // report it; WebView2 pauses by interrupting with USER_PAUSED, which is
 // reported as paused, not as an interruption. StateChanged can come late or
 // never on a loaded machine, so a decided download's state is also polled
-// (OnDownloadPoll) and its end reported once, whichever sees it first; the
-// view's SmartScreen reputation check (which holds a completion) is off.
+// (OnDownloadPoll) and its end reported once, whichever sees it first.
 //
 // "permissions": "app" (API 59): PermissionRequested is held open with its
 // deferral until webview_permission_respond answers (never remembered in the
@@ -1619,15 +1618,6 @@ void Configure(ChildView* view) {
       std::wstring ua = Wide(view->options.user_agent);
       settings2->put_UserAgent(ua.c_str());
     }
-    // "downloads": "app": the app decides each download and where it goes,
-    // so WebView2's SmartScreen reputation check (which can hold a
-    // download's completion while it answers) is off for this view
-    // (ICoreWebView2Settings8; an older runtime keeps it). WebView2 has the
-    // setting per web view only, so it covers the view's navigations too.
-    ComPtr<ICoreWebView2Settings8> settings8;
-    if (view->options.downloads == laufey_common::WebViewDownloads::kApp &&
-        SUCCEEDED(settings.As(&settings8)) && settings8)
-      settings8->put_IsReputationCheckingRequired(FALSE);
   }
 
   webview->add_NavigationStarting(

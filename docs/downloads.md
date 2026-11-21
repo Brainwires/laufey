@@ -127,7 +127,11 @@ URL to the same save, proposing the link's `download` name.
 - **WebView2**: WebView2's own download UI never shows. The event is held open
   with a deferral while the dialog (on laufey's dialog thread) is up; the answer
   is applied on the UI thread. A runtime without `ICoreWebView2_4` keeps
-  WebView2's default handling.
+  WebView2's default handling. A download's completion can lag on Windows (the
+  mark of the web and a Defender scan of the finished file); for a child web
+  view's app-handled downloads laufey also polls the download's state, so a
+  completion WebView2 reports late is still reported (see
+  [Web views](webviews.md)).
 - **WebKitGTK**: the destination is decided asynchronously, which needs
   WebKitGTK 2.40; an older WebKitGTK cancels page downloads rather than save
   them unasked (it would otherwise save into the Downloads folder).
