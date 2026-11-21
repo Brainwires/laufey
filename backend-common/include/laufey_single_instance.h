@@ -243,13 +243,23 @@ void SetSecondInstanceUiHooks(const SecondInstanceUiHooks& hooks);
 void SetSecondInstanceHandler(laufey_second_instance_fn handler,
                               void* user_data);
 
+// Called first for every message that reaches the UI thread, before the
+// activate hook and the handler. Returns true when it took the message, which
+// then goes no further (no activation, no handler, not buffered). One at a
+// time; NULL removes it. Thread-safe. The Windows jump list
+// (laufey_jump_list.h) installs one for its tasks' launches.
+using SecondInstanceInterceptor =
+    bool (*)(const SecondInstanceMessage& message);
+void SetSecondInstanceInterceptor(SecondInstanceInterceptor interceptor);
+
 // Queues `message` for delivery: posts it to the UI thread if the hooks are
 // installed, else holds it until they are. Thread-safe. The server calls
 // this; exposed for tests.
 void QueueSecondInstance(SecondInstanceMessage message);
 
-// Delivers `message` on the current thread: runs the activate hook, then the
-// handler, or buffers the message if there is none. Exposed for tests.
+// Delivers `message` on the current thread: offers it to the interceptor,
+// then runs the activate hook and the handler, or buffers the message if
+// there is none. Exposed for tests.
 void DeliverSecondInstance(const SecondInstanceMessage& message);
 
 #ifdef __APPLE__

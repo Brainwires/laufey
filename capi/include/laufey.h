@@ -478,6 +478,16 @@ typedef void (*laufey_shortcut_result_fn)(void* user_data, int status,
              // (red text; API >= 49)
 #define LAUFEY_MENU_CAP_SNAPSHOT \
   (1u << 7)  // menu_snapshot reads a menu back from the OS (API >= 59)
+#define LAUFEY_MENU_CAP_DOCK_MENU \
+  (1u << 8)  // set_dock_menu shows the menu: the macOS Dock menu, or the
+             // Windows jump list's Tasks (API >= 60; older backends leave it
+             // clear)
+#define LAUFEY_MENU_CAP_JUMP_LIST \
+  (1u << 9)  // the dock menu is a Windows jump list: flat (submenus are
+             // inlined between separators), disabled items and roles left
+             // out, no checkmarks; a click starts the executable with
+             // "--laufey-dock-item=<id>", which the single-instance lock
+             // turns into on_click (docs/dock-taskbar.md)
 
 // Which menu menu_snapshot reads (API >= 59).
 //   APPLICATION  the application menu: the menu bar of window `id` (on macOS
@@ -1732,10 +1742,12 @@ struct laufey_backend_api {
   // urgency hint (Linux). `type` is LAUFEY_DOCK_BOUNCE_*.
   void (*bounce_dock)(void* backend_data, int type);
 
-  // Set a custom menu for the app's dock icon (macOS only).
-  // menu_template uses the same format as set_application_menu. on_click is
-  // called with the id of the clicked item. window_id in the callback will
-  // be 0 since the menu is app-scoped. Windows/Linux: leave NULL.
+  // Set a custom menu for the app's dock icon: the macOS Dock menu, or on
+  // Windows the "Tasks" of the taskbar button's jump list
+  // (LAUFEY_MENU_CAP_JUMP_LIST). menu_template uses the same format as
+  // set_application_menu (the caller's only for this call); NULL removes the
+  // menu. on_click is called with the id of the clicked item. window_id in
+  // the callback will be 0 since the menu is app-scoped. Linux: leave NULL.
   void (*set_dock_menu)(void* backend_data, laufey_value_t* menu_template,
                         laufey_menu_click_fn on_click, void* on_click_data);
 

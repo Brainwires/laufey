@@ -8,6 +8,7 @@
 #include "laufey_media_capture.h"
 #include "laufey_will_navigate.h"
 #include "laufey_io.h"
+#include "laufey_jump_list.h"
 #include "laufey_message_dialog.h"
 #include "laufey_platform_features.h"
 #include "laufey_launch_args.h"
@@ -808,6 +809,14 @@ class WebView2Backend : public LaufeyBackend {
 
   void BounceDock(int type) override;
   void SetDockBadge(const char* badge_or_null) override;
+  // The jump list's Tasks (laufey_jump_list.h); parsed here, written on a
+  // worker thread of its own.
+  void SetDockMenu(laufey_value_t* menu_template,
+                   const laufey_backend_api_t* api,
+                   laufey_menu_click_fn on_click,
+                   void* on_click_data) override {
+    laufey_common::SetDockMenuWin(menu_template, api, on_click, on_click_data);
+  }
 
   uint32_t CreateTrayIcon() override;
   void DestroyTrayIcon(uint32_t tray_id) override;
@@ -864,7 +873,8 @@ class WebView2Backend : public LaufeyBackend {
   uint32_t MenuCapabilities() override {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
-           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_SNAPSHOT;
+           LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_SNAPSHOT |
+           LAUFEY_MENU_CAP_DOCK_MENU | LAUFEY_MENU_CAP_JUMP_LIST;
   }
   void ShowContextMenuEx(uint32_t window_id, int x, int y,
                          laufey_value_t* menu_template,

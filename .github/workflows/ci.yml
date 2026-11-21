@@ -310,6 +310,20 @@ jobs:
             backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
             -o "$RUNNER_TEMP/single_instance_test"
           "$RUNNER_TEMP/single_instance_test"
+      # The Windows jump list's portable half: the dock menu flattened into
+      # tasks, the task's argument and quoting, a forwarded task launch
+      # turned into the dock menu's click.
+      - name: backend-common jump_list_test
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -pthread \
+            -Ibackend-common/include -Icapi/include \
+            backend-common/tests/jump_list_test.cc \
+            backend-common/src/jump_list.cc \
+            backend-common/src/single_instance.cc \
+            backend-common/src/single_instance_posix.cc \
+            backend-common/src/launch_config.cc backend-common/src/data_dir.cc \
+            -o "$RUNNER_TEMP/jump_list_test"
+          "$RUNNER_TEMP/jump_list_test"
 
       # The CEF host's network-quiet defaults: the features it disables, an
       # app's own --enable-features winning, the Hunspell files it keeps.

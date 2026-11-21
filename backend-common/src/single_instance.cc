@@ -103,6 +103,7 @@ struct DeliveryState {
   std::vector<SecondInstanceMessage> before_ui;
   laufey_second_instance_fn handler = nullptr;
   void* handler_data = nullptr;
+  SecondInstanceInterceptor interceptor = nullptr;
   // Reached the UI thread while no handler was registered.
   std::deque<SecondInstanceMessage> unhandled;
 };
@@ -446,8 +447,22 @@ void QueueSecondInstance(SecondInstanceMessage message) {
   Post(hooks, std::move(message));
 }
 
+void SetSecondInstanceInterceptor(SecondInstanceInterceptor interceptor) {
+  DeliveryState& state = Delivery();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.interceptor = interceptor;
+}
+
 void DeliverSecondInstance(const SecondInstanceMessage& message) {
   DeliveryState& state = Delivery();
+  SecondInstanceInterceptor interceptor = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    interceptor = state.interceptor;
+  }
+  // Outside the lock: the interceptor calls embedder code.
+  if (interceptor && interceptor(message))
+    return;
   laufey_second_instance_fn handler = nullptr;
   void* data = nullptr;
   void (*activate)(void*) = nullptr;

@@ -16,6 +16,7 @@
 #include "custom_schemes.h"
 #include "laufey_backend_common.h"
 #include "laufey_io.h"
+#include "laufey_jump_list.h"
 #include "laufey_launch_config.h"
 #include "laufey_menu.h"
 #include "laufey_notifications.h"
@@ -1855,6 +1856,8 @@ static uint32_t Backend_MenuCapabilities(void* /*data*/) {
                   LAUFEY_MENU_CAP_SNAPSHOT;  // views_menu.cc Snapshot
 #if defined(_WIN32)
   caps |= LAUFEY_MENU_CAP_ICONS;  // context menus (Win32)
+  // set_dock_menu: the jump list's Tasks (laufey_jump_list.h).
+  caps |= LAUFEY_MENU_CAP_DOCK_MENU | LAUFEY_MENU_CAP_JUMP_LIST;
 #else
   caps |= LAUFEY_MENU_CAP_DESTRUCTIVE;  // Views menus (SetColor)
 #endif
@@ -2063,6 +2066,16 @@ static void Backend_SetDockBadge_TitlePrefix(void* data,
 #include <wincodec.h>
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "windowscodecs.lib")
+
+// The jump list's Tasks (laufey_jump_list.h): parsed here (the template is
+// the caller's only for this call), written on a worker thread of its own.
+static void Backend_SetDockMenu_Win(void* data, laufey_value_t* menu_template,
+                                    laufey_menu_click_fn on_click,
+                                    void* on_click_data) {
+  RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
+  laufey_common::SetDockMenuWin(menu_template, &loader->GetBackendApi(),
+                                on_click, on_click_data);
+}
 
 static void Backend_BounceDock_Win(void* data, int type) {
   RuntimeLoader* loader = static_cast<RuntimeLoader*>(data);
@@ -4264,7 +4277,8 @@ void RuntimeLoader::InitializeBackendApi() {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
            LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
-           LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT;
+           LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT |
+           LAUFEY_MENU_CAP_DOCK_MENU;
   };
   backend_api_.test_trigger_menu_accelerator =
       [](void*, uint32_t window_id, const char* accelerator) -> bool {
@@ -4335,8 +4349,10 @@ void RuntimeLoader::InitializeBackendApi() {
 #elif defined(_WIN32)
   backend_api_.bounce_dock = Backend_BounceDock_Win;
   backend_api_.set_dock_badge = Backend_SetDockBadge_TitlePrefix;
-  // Menu/visible/reopen have no Windows analog — left nullptr; the
-  // runtime-side Rust wrapper silently no-ops when the pointer is missing.
+  // The dock menu is the jump list's Tasks. Visible/reopen have no Windows
+  // analog: left nullptr; the runtime-side Rust wrapper silently no-ops when
+  // the pointer is missing.
+  backend_api_.set_dock_menu = Backend_SetDockMenu_Win;
 #elif defined(__linux__)
   backend_api_.bounce_dock = Backend_BounceDock_Linux;
   backend_api_.set_dock_badge = Backend_SetDockBadge_TitlePrefix;

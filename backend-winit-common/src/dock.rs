@@ -438,7 +438,10 @@ fn apply_set_menu(pm: Option<PendingDockMenu>) {
 
 #[cfg(not(target_os = "macos"))]
 fn apply_set_menu(_pm: Option<PendingDockMenu>) {
-  // No dock-menu analog on Windows (Jump List) or Linux.
+  // Linux has no dock-menu analog. The Windows one, the jump list's Tasks,
+  // is in the CEF and WebView2 backends (backend-common's jump_list_win.cc):
+  // its clicks arrive as forwarded launches, and this backend has no
+  // single-instance lock to forward them.
 }
 
 // --- Reopen handler (macOS only) ---
