@@ -54,8 +54,8 @@ typedef void (*laufey_message_dialog_result_fn)(void* user_data,
 ```
 
 - Any thread. The backend shows the dialog on its UI thread (on Windows on its
-  I/O thread, as the file dialogs, so the dialog's modal loop never stalls the
-  engine) and returns its id at once.
+  I/O thread, so the dialog's modal loop never stalls the engine) and returns
+  its id at once.
 - `callback` fires exactly once: `LAUFEY_MESSAGE_DIALOG_ANSWERED` with the
   pressed button's index, `LAUFEY_MESSAGE_DIALOG_CANCELLED` (dismissed without a
   button) or `LAUFEY_MESSAGE_DIALOG_FAILED` (bad options, no display). Bad

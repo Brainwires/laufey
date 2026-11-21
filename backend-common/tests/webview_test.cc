@@ -685,6 +685,54 @@ static void TestDownloadActions() {
   EXPECT(t.Ready(10));
 }
 
+static void TestDownloadPoll() {
+  WebViewDownloadPoll poll;
+  EXPECT(!poll.Armed());
+  EXPECT(!poll.Due(0));
+  poll.Touch(1000);
+  EXPECT(poll.Armed());
+  EXPECT(poll.Due(1000));
+  EXPECT(poll.Due(1000 + kWebViewDownloadPollGraceMs));
+  // Received bytes extend it.
+  poll.Touch(5000);
+  EXPECT(poll.Due(1001 + kWebViewDownloadPollGraceMs));
+  EXPECT(poll.Due(5000 + kWebViewDownloadPollGraceMs));
+  // Past the grace it disarms itself, for good.
+  EXPECT(!poll.Due(5001 + kWebViewDownloadPollGraceMs));
+  EXPECT(!poll.Armed());
+  EXPECT(!poll.Due(5000));
+  poll.Touch(0);
+  poll.Stop();
+  EXPECT(!poll.Armed());
+  EXPECT(!poll.Due(0));
+
+  using P = WebViewDownloadPhase;
+  using S = WebViewEngineDownloadState;
+  // A completion is reported whatever the decided phase.
+  for (P phase : {P::kProgressing, P::kPaused, P::kInterrupted}) {
+    EXPECT(WebViewDownloadPollReports(phase, S::kCompleted, false, false));
+    EXPECT(WebViewDownloadPollReports(phase, S::kCompleted, false, true));
+    EXPECT(!WebViewDownloadPollReports(phase, S::kInProgress, false, false));
+  }
+  // Never for a download that is not decided, or already done.
+  for (P phase : {P::kRequested, P::kChoosing, P::kDone}) {
+    EXPECT(!WebViewDownloadPollReports(phase, S::kCompleted, false, false));
+    EXPECT(!WebViewDownloadPollReports(phase, S::kInterrupted, false, false));
+  }
+  // An interruption once, while still progressing.
+  EXPECT(WebViewDownloadPollReports(P::kProgressing, S::kInterrupted, false,
+                                    false));
+  EXPECT(!WebViewDownloadPollReports(P::kInterrupted, S::kInterrupted, false,
+                                     false));
+  EXPECT(
+      !WebViewDownloadPollReports(P::kPaused, S::kInterrupted, false, false));
+  // The engine's pause, or a PAUSE on its way, is not an interruption.
+  EXPECT(!WebViewDownloadPollReports(P::kProgressing, S::kInterrupted, true,
+                                     false));
+  EXPECT(!WebViewDownloadPollReports(P::kProgressing, S::kInterrupted, false,
+                                     true));
+}
+
 // A path as UTF-8, under C++17 (std::string) and C++20 (std::u8string).
 static std::string PathUtf8(const std::filesystem::path& p) {
   auto u = p.u8string();
@@ -836,6 +884,7 @@ int main() {
   TestAppDecidedOptions();
   TestDownloadJson();
   TestDownloadActions();
+  TestDownloadPoll();
   TestDownloadPaths();
   TestPermissionJson();
   TestOptionsDefaults();

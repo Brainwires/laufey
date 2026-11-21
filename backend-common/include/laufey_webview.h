@@ -319,6 +319,46 @@ class WebViewProgressThrottle {
   int64_t last_ms_ = 0;
 };
 
+// A fallback for an engine whose download state change can come late or not
+// at all (WebView2's StateChanged on a loaded machine): while a decided
+// download may still end, its state is read every
+// kWebViewDownloadPollIntervalMs, until kWebViewDownloadPollGraceMs after its
+// last sign of life (SAVE, RESUME, bytes received). Touch() arms or extends
+// it; Due() is true while armed and inside the grace, and disarms it past
+// the grace; Stop() disarms it.
+constexpr int kWebViewDownloadPollIntervalMs = 1000;
+constexpr int64_t kWebViewDownloadPollGraceMs = 5 * 60 * 1000;
+class WebViewDownloadPoll {
+ public:
+  void Touch(int64_t now_ms);
+  void Stop();
+  bool Due(int64_t now_ms);
+  bool Armed() const {
+    return armed_;
+  }
+
+ private:
+  bool armed_ = false;
+  int64_t until_ms_ = 0;
+};
+
+// A download's state as the engine reports it.
+enum class WebViewEngineDownloadState {
+  kInProgress,
+  kInterrupted,
+  kCompleted,
+};
+// Whether a poll that read `state` hands the download to the engine's state
+// change handling (which sends its last event, or "interrupted"): a
+// completed download always (the handler takes it out, so the event goes
+// once); an interruption that is not the engine's pause (`user_paused`) only
+// while the download is still progressing with no PAUSE on its way (the
+// handler then moves it out of kProgressing, so again once); never a
+// download still in progress, or one that is not decided.
+bool WebViewDownloadPollReports(WebViewDownloadPhase phase,
+                                WebViewEngineDownloadState state,
+                                bool user_paused, bool pause_in_flight);
+
 // --- Permission requests the app answers (API 59) ----------------------------
 
 // A process-unique permission request id (never 0, never reused). Any thread.
