@@ -271,7 +271,8 @@ class WKWebViewBackend : public LaufeyBackend {
     return LAUFEY_MENU_CAP_APP_MENU | LAUFEY_MENU_CAP_ACCELERATORS |
            LAUFEY_MENU_CAP_CONTEXT_MENU | LAUFEY_MENU_CAP_CONTEXT_CLOSED |
            LAUFEY_MENU_CAP_ICONS | LAUFEY_MENU_CAP_TOOLTIPS |
-           LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT;
+           LAUFEY_MENU_CAP_DESTRUCTIVE | LAUFEY_MENU_CAP_SNAPSHOT |
+           LAUFEY_MENU_CAP_DOCK_MENU;
   }
   std::string MenuSnapshot(int32_t kind, uint32_t id) override {
     return laufey_common::MenuSnapshotMac(kind, id);

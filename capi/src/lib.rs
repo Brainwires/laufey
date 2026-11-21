@@ -2739,9 +2739,10 @@ pub fn bounce_dock(kind: DockBounceType) {
   }
 }
 
-/// Set a custom right-click menu on the app's dock icon (macOS only).
-/// `on_click` is called with the `id` of the clicked item.
-/// Windows and Linux: no-op.
+/// Set a custom menu on the app's dock icon: the macOS Dock menu, or the
+/// Windows taskbar button's jump list "Tasks" (see
+/// [`MenuCapabilities::jump_list`] for what a jump list leaves out).
+/// `on_click` is called with the `id` of the clicked item. Linux: no-op.
 pub fn set_dock_menu<F>(template: &[MenuItem], on_click: F)
 where
   F: Fn(&str) + Send + Sync + 'static,
@@ -2767,7 +2768,8 @@ where
   }
 }
 
-/// Remove the custom dock menu set by [`set_dock_menu`] (macOS only).
+/// Remove the custom dock menu set by [`set_dock_menu`] (the jump list's
+/// tasks on Windows).
 pub fn clear_dock_menu() {
   {
     let mut handler = dock_menu_handler().lock().unwrap();

@@ -44,6 +44,7 @@ set(LAUFEY_COMMON_SRCS
   src/cef_sandbox.cc
   src/cef_network_quiet.cc
   src/single_instance.cc
+  src/jump_list.cc
   src/passkey.cc
   src/window_state.cc
   src/io.cc
@@ -144,6 +145,7 @@ elseif(WIN32)
     src/io_win.cc
     src/shortcuts_win.cc
     src/login_item_win.cc
+    src/jump_list_win.cc
     src/title_bar_win.cc
     src/overlay_win.cc
     src/quit_request_win.cc
@@ -494,6 +496,14 @@ if(LAUFEY_BUILD_TESTS)
   )
   add_test(NAME laufey_single_instance_test
            COMMAND laufey_single_instance_test)
+
+  # The Windows jump list's portable half: the menu's flattening, the task's
+  # argument and its quoting, routing a forwarded task launch to the click.
+  add_executable(laufey_jump_list_test tests/jump_list_test.cc)
+  target_link_libraries(laufey_jump_list_test PRIVATE
+    laufey_backend_common
+  )
+  add_test(NAME laufey_jump_list_test COMMAND laufey_jump_list_test)
 
   # Passkey options parser, envelopes and ceremony lifecycle (no OS API).
   add_executable(laufey_passkey_test tests/passkey_test.cc)

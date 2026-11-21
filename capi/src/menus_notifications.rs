@@ -24,6 +24,8 @@ pub const LAUFEY_MENU_CAP_ICONS: u32 = 1 << 4;
 pub const LAUFEY_MENU_CAP_TOOLTIPS: u32 = 1 << 5;
 pub const LAUFEY_MENU_CAP_DESTRUCTIVE: u32 = 1 << 6;
 pub const LAUFEY_MENU_CAP_SNAPSHOT: u32 = 1 << 7;
+pub const LAUFEY_MENU_CAP_DOCK_MENU: u32 = 1 << 8;
+pub const LAUFEY_MENU_CAP_JUMP_LIST: u32 = 1 << 9;
 pub const LAUFEY_MENU_KIND_APPLICATION: i32 = 0;
 pub const LAUFEY_MENU_KIND_DOCK: i32 = 1;
 
@@ -82,6 +84,18 @@ impl MenuCapabilities {
   pub fn snapshot(&self) -> bool {
     self.bits & LAUFEY_MENU_CAP_SNAPSHOT != 0
   }
+  /// [`crate::set_dock_menu`] shows the menu: the macOS Dock menu, or the
+  /// Windows jump list's Tasks.
+  pub fn dock_menu(&self) -> bool {
+    self.bits & LAUFEY_MENU_CAP_DOCK_MENU != 0
+  }
+  /// The dock menu is a Windows jump list: flat, without disabled items,
+  /// roles or checkmarks; a click starts the app with
+  /// `--laufey-dock-item=<id>` ([`dock_item_from_args`]), which the
+  /// single-instance lock turns into the click.
+  pub fn jump_list(&self) -> bool {
+    self.bits & LAUFEY_MENU_CAP_JUMP_LIST != 0
+  }
 }
 
 /// Which menu [`menu_snapshot`] reads (API 59).
@@ -126,6 +140,29 @@ pub fn menu_capabilities() -> MenuCapabilities {
     None => 0,
   };
   MenuCapabilities { bits }
+}
+
+/// The argument a Windows jump-list task starts the app with, before the
+/// dock menu item's id (`LAUFEY_MENU_CAP_JUMP_LIST`).
+pub const DOCK_ITEM_ARG_PREFIX: &str = "--laufey-dock-item=";
+
+/// The longest id a jump-list task carries, in bytes.
+pub const DOCK_ITEM_MAX_ID_BYTES: usize = 512;
+
+/// The dock menu item a Windows jump-list task's launch carries: `args`
+/// (argv after the program) are exactly one argument,
+/// [`DOCK_ITEM_ARG_PREFIX`] followed by a non-empty id of at most
+/// [`DOCK_ITEM_MAX_ID_BYTES`]. With the single-instance lock on and a dock
+/// menu set, laufey turns a forwarded one into the menu's click itself; an
+/// embedder checks its own launch arguments (the app started from a task)
+/// and the second-instance launches that reach it (a task from before the
+/// app set its menu) with this.
+pub fn dock_item_from_args(args: &[String]) -> Option<&str> {
+  let [arg] = args else {
+    return None;
+  };
+  let id = arg.strip_prefix(DOCK_ITEM_ARG_PREFIX)?;
+  (!id.is_empty() && id.len() <= DOCK_ITEM_MAX_ID_BYTES).then_some(id)
 }
 
 type MenuClosedHandler = Box<dyn FnOnce() + Send>;
@@ -771,6 +808,42 @@ fn parse_list(text: &str) -> Vec<ScheduledNotification> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn dock_item_args() {
+    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+      dock_item_from_args(&a(&["--laufey-dock-item=new"])),
+      Some("new")
+    );
+    assert_eq!(
+      dock_item_from_args(&a(&["--laufey-dock-item=a b"])),
+      Some("a b")
+    );
+    assert_eq!(dock_item_from_args(&a(&["--laufey-dock-item="])), None);
+    assert_eq!(
+      dock_item_from_args(&a(&["--laufey-dock-item=a", "b"])),
+      None
+    );
+    assert_eq!(
+      dock_item_from_args(&a(&["--", "--laufey-dock-item=a"])),
+      None
+    );
+    assert_eq!(dock_item_from_args(&a(&[])), None);
+    let long = format!("--laufey-dock-item={}", "a".repeat(513));
+    assert_eq!(dock_item_from_args(&[long]), None);
+    let max = format!("--laufey-dock-item={}", "a".repeat(512));
+    assert!(dock_item_from_args(&[max]).is_some());
+  }
+
+  #[test]
+  fn dock_menu_capability_bits() {
+    let caps = MenuCapabilities {
+      bits: LAUFEY_MENU_CAP_DOCK_MENU | LAUFEY_MENU_CAP_JUMP_LIST,
+    };
+    assert!(caps.dock_menu() && caps.jump_list());
+    assert!(!MenuCapabilities::default().dock_menu());
+  }
 
   #[test]
   fn parses_responses() {
