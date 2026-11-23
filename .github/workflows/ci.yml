@@ -42,6 +42,13 @@ on:
         description: Minutes each stress shard's launches may take
         type: number
         default: 30
+      only:
+        description: >-
+          Run one job group only (with full=true: all three OS legs). build-gpui
+          runs just the GPUI host build and self-test and skips every other job
+        type: choice
+        options: [all, build-gpui]
+        default: all
       macos_runner:
         description: >-
           Runner of the macOS arm64 legs (native-e2e, test-winit-common, the
@@ -94,6 +101,7 @@ jobs:
           vars: ${{ toJSON(vars) }}
 
   lint:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: lint
     # Stays on GitHub-hosted: sudo apt-get (inert in the self-hosted Linux containers).
     runs-on: ubuntu-latest
@@ -164,6 +172,7 @@ jobs:
   # cargo_audit.yml on main only sees main's lockfile). Fails on any
   # vulnerability; unmaintained/unsound/yanked warnings are printed only.
   cargo-audit:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: cargo audit
     # Stays on GitHub-hosted: the trigger (see the jobs: header).
     runs-on: ubuntu-latest
@@ -181,6 +190,7 @@ jobs:
         run: cargo audit --file webauthn-linux/Cargo.lock
 
   test:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: cargo test (capi)
     # Stays on GitHub-hosted: the trigger (see the jobs: header).
     runs-on: ubuntu-latest
@@ -393,7 +403,7 @@ jobs:
   test-winit-common:
     name: cargo test (backend-winit-common) / ${{ matrix.os }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
@@ -431,6 +441,7 @@ jobs:
   # destroyed its condition variable is reported as a data race on the first
   # call it happens to, where a plain run only hangs now and then.
   tsan:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: ThreadSanitizer (backend-common)
     # Stays on GitHub-hosted: sudo sysctl / apt-get (no capability, sudo inert in the self-hosted Linux containers).
     runs-on: ubuntu-24.04
@@ -539,6 +550,7 @@ jobs:
   # reads, reads over max_bytes, INCR, the session lock). Neither may skip
   # here: exit 77 fails the step.
   clipboard-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: clipboard (headless sway + Xvfb)
     # Stays on GitHub-hosted: a `container:` job (no Docker socket in the self-hosted Linux containers).
     runs-on: ubuntu-latest
@@ -581,6 +593,7 @@ jobs:
   # backend-common's passkey_linux_test running whole ceremonies through the
   # backend against the library built with `virt-test` (required here).
   passkeys-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: passkeys (libwebauthn) / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -635,7 +648,7 @@ jobs:
   build-winit:
     name: winit / ${{ matrix.target }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
@@ -713,7 +726,7 @@ jobs:
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     # Backstop; each e2e step below has its own, much shorter, timeout.
     timeout-minutes: 90
@@ -1350,7 +1363,7 @@ jobs:
   build-webview:
     name: webview / ${{ matrix.target }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     # Keep the macOS minimum in sync with LSMinimumSystemVersion in
     # webview/macos/Info.plist.in (denoland/deno#35764). Ignored on non-macOS
@@ -1557,6 +1570,7 @@ jobs:
   # turns the sandbox off instead of Chromium aborting). Each run checks the
   # host's `laufey: sandbox: <mode>` line and, from outside, the renderers.
   sandbox-modes-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: native-e2e / cef sandbox modes / ubuntu-24.04
     # Stays on GitHub-hosted: sudo sysctl (AppArmor userns) and a root-owned setuid chrome-sandbox.
     runs-on: ubuntu-24.04
@@ -1646,6 +1660,7 @@ jobs:
           scripts/native-e2e-run.sh cef --sandbox
 
   e2e-cef-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: e2e / cef / x86_64-unknown-linux-gnu (Xvfb)
     # Stays on GitHub-hosted: sudo apt-get (inert in the self-hosted Linux containers).
     runs-on: ubuntu-latest
@@ -1712,7 +1727,7 @@ jobs:
   build-cef:
     name: cef / ${{ matrix.target }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
@@ -1830,7 +1845,7 @@ jobs:
   #     -f storage_stress_launches=1300 -f storage_stress_timeout=200
   storage-stress-cef-macos-x64:
     name: storage stress / cef / x86_64-apple-darwin (${{ matrix.shard }})
-    if: github.event_name == 'workflow_dispatch' && inputs.storage_stress_shards != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.storage_stress_shards != '' && inputs.only != 'build-gpui'
     # Stays on GitHub-hosted: brew install llvm ninja (no Homebrew on the self-hosted macOS pools).
     runs-on: macos-15-intel
     strategy:
