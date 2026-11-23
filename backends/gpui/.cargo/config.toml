@@ -1,0 +1,11 @@
+# Read only when cargo runs from backends/gpui (build.sh does).
+
+[net]
+git-fetch-with-cli = true
+
+[env]
+# The same guard as the fork's .cargo/config.toml (DENEXT.md item 226): the `v8` crate's build
+# script must never download a prebuilt V8 by itself. Without a verified RUSTY_V8_ARCHIVE
+# (build.sh sets it) the build fails instead of linking whatever a release of that name holds.
+RUSTY_V8_MIRROR = { value = "denext-refused-unverified-v8/run-backends/gpui/build.sh/{file}", force = true }
+RUSTY_V8_MIRROR_FALLBACK = { value = "0", force = true }

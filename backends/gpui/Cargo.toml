@@ -1,0 +1,51 @@
+[workspace]
+# Its own workspace, not a member of laufey's root workspace: GPUI's dependency tree and the
+# Brainwires/deno git dependency stay out of the root Cargo.lock (see SPIKE.md).
+
+[package]
+name = "laufey-gpui-spike"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "B0 spike: a GPUI window and a deno_core (Brainwires/deno fork) isolate in one process"
+
+[[bin]]
+name = "laufey-gpui-spike"
+path = "src/main.rs"
+
+[dependencies]
+# GPUI: ParolNet's exact pins (parol-social/apps/desktop). gpui-pre is the snapshot of zed@main
+# that gpui-component publishes against; never mix it with the official `gpui` crate.
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit", "x11", "wayland"] }
+
+# deno_core 0.413.0 from the Brainwires/deno fork, tip of train/denext30 on 2026-11-23.
+# Features as the fork's root Cargo.toml sets them (`reactor-tokio`, `v8_use_custom_libcxx`),
+# plus `v8`: the fork leaves the engine choice (V8 or QuickJS) to each top-level binary.
+deno_core = { git = "https://github.com/Brainwires/deno", rev = "65ff17c86f75a3d4be53bc6100c77a880cd2918f", default-features = false, features = ["v8", "reactor-tokio", "v8_use_custom_libcxx"] }
+deno_error = "=0.7.1"
+
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[features]
+# Compile GPUI's Metal shaders at launch instead of with Xcode's `metal` tool at build time
+# (for machines with only the Command Line Tools, or Xcode 26 without the Metal toolchain).
+runtime-shaders = ["gpui-platform/runtime_shaders"]
+
+# The fork's own [patch.crates-io] entries do not travel with a git dependency, so the ones
+# deno_core's graph uses are repeated here, at the same sources the fork's Cargo.lock has.
+[patch.crates-io]
+# Brainwires/rusty_v8 156.0.0+denext.6 (V8 15.6.75.63): the same rev as the pinned deno rev.
+# Linked from the prebuilt static library only; build.sh hands it over verified.
+v8 = { git = "https://github.com/Brainwires/rusty_v8", rev = "f72a5f53280688d3101ab6f82e4f7b5ccf528ecd" }
+# The fork's vendored url 2.5.7 (RUSTSEC-2026-0592 backport) and sys_traits 0.1.28.
+url = { git = "https://github.com/Brainwires/deno", rev = "65ff17c86f75a3d4be53bc6100c77a880cd2918f" }
+sys_traits = { git = "https://github.com/Brainwires/deno", rev = "65ff17c86f75a3d4be53bc6100c77a880cd2918f" }
+
+# Release profile: cargo's defaults (opt-level 3, no LTO). The fork ships with fat LTO,
+# opt-level "z" and panic = "abort"; the size that gives is a B2 packaging question.
