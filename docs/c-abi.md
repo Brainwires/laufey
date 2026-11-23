@@ -6,7 +6,7 @@ It defines the boundary between a **backend** (a native executable embedding a
 browser engine) and a **runtime** (a shared library holding the application
 logic). The backend implements the ABI; the runtime consumes it.
 
-`LAUFEY_API_VERSION` (currently `55`) versions the contract. The `version` field
+`LAUFEY_API_VERSION` (currently `61`) versions the contract. The `version` field
 on the API table names the version the backend was built against, and the match
 is **exact**: the `laufey` crate's `init_api` refuses a backend whose `version`
 differs from its own `LAUFEY_API_VERSION` (`laufey_runtime_init` then fails), so
@@ -134,6 +134,12 @@ The pointers group into:
 - **Menu read-back** (API ≥ 59) — `menu_snapshot` (`LAUFEY_MENU_KIND_*`,
   `LAUFEY_MENU_CAP_SNAPSHOT`): the application menu or the Dock menu as JSON,
   read from the native menu objects. `NULL` on Winit. See [menus.md](menus.md).
+- **Native tree** (API ≥ 61) — `native_tree_version`, `native_tree_commit`,
+  `set_native_tree_event_handler`, `native_tree_snapshot`
+  (`LAUFEY_WINDOW_CAP_NATIVE_TREE`, `LAUFEY_NATIVE_TREE_*`): a window hosts a
+  retained tree of native primitives that the runtime mutates in batches. The
+  GPUI backend; `NULL` on CEF, WebView and Winit. See
+  [below](#native-tree-api--61) and [native-tree.md](native-tree.md).
 - **Drag and drop** (API ≥ 39) — `set_file_drop_handler` (files dragged over and
   dropped on a window, with native paths; the page keeps its DOM drag events),
   `start_file_drag` (drag files out to other apps), and the
@@ -627,6 +633,50 @@ sent. `set_will_navigate_handler` / `answer_will_navigate`: see
 [window-management.md](window-management.md#will-navigate-api-56).
 `set_app_menu`: see [menus.md](menus.md#the-apps-own-application-menu-api-56);
 macOS only (false elsewhere).
+
+## Native tree (API ≥ 61)
+
+```c
+#define LAUFEY_WINDOW_CAP_NATIVE_TREE (1u << 27)
+typedef void (*laufey_native_tree_event_fn)(void* user_data, uint32_t window_id,
+                                            const char* json, size_t len);
+uint32_t (*native_tree_version)(void* backend_data);
+int32_t (*native_tree_commit)(void* backend_data, uint32_t window_id,
+                              const uint8_t* data, size_t len);
+void (*set_native_tree_event_handler)(void* backend_data,
+                                      laufey_native_tree_event_fn handler,
+                                      void* user_data);
+char* (*native_tree_snapshot)(void* backend_data, uint32_t window_id);
+```
+
+A window's native tree: views, text, images, scroll views, text inputs and
+pressables that the runtime creates and mutates with batches ("NTB1"), drawn by
+the backend's own toolkit. `native_tree_commit` copies the batch, answers
+`LAUFEY_NATIVE_TREE_OK`, `_MALFORMED` (it does not decode; nothing is applied),
+`_NO_WINDOW` or `_UNSUPPORTED`, and applies the batch whole on the UI thread
+before the next frame, a window's batches in commit order. Events (presses,
+layout, scroll, focus, text, keys, images, and `batchError` for a batch that
+decoded but did not fit the tree) reach the one handler as JSON on the UI
+thread; `json` is `len` bytes, not NUL-terminated, valid for the call.
+`native_tree_version` is the batch format (1), `native_tree_snapshot` the tree
+as JSON for self-tests. Commit, version and snapshot may be called from any
+thread.
+
+The entries were appended to the end of the table and are `NULL` on every
+backend without a renderer for them, where the `laufey` crate's
+`NativeTree::commit` answers `Unsupported` and
+`window_capabilities().native_tree()` is `None`:
+
+| Backend | `native_tree_*`                                      |
+| ------- | ---------------------------------------------------- |
+| GPUI    | implemented, version 1                               |
+| CEF     | `NULL` (the table is zeroed before it is filled)     |
+| WebView | `NULL` (the table is zeroed before it is filled)     |
+| Winit   | `NULL` (`create_api_base`, checked by the layout test) |
+
+The format, the id tables and the events are in
+[native-tree.md](native-tree.md); what the GPUI backend implements of the rest
+of the table is in [backends.md](backends.md#gpui).
 
 ## UI-thread tasks (API ≥ 42)
 
