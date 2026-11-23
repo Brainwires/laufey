@@ -88,7 +88,7 @@ jobs:
           # e2e leg on a full run (our denext-windows-arm64 pool, else GitHub's windows-11-arm).
           jobs: >-
             ${{ format('{0} {1} {2}',
-            ((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && inputs.macos_runner != 'macos-15-intel') && 'e2e_macos_cef=macos-arm64@macos-15 e2e_macos_webview=macos-arm64@macos-15 e2e_macos_winit=macos-arm64@macos-15 cef_macos_arm64=macos-arm64@macos-15 webview_macos_arm64=macos-arm64@macos-15 winit_macos_arm64=macos-arm64@macos-15 winit_common_macos=macos-arm64@macos-15' || '',
+            ((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && inputs.macos_runner != 'macos-15-intel') && 'e2e_macos_cef=macos-arm64@macos-15 e2e_macos_webview=macos-arm64@macos-15 e2e_macos_winit=macos-arm64@macos-15 cef_macos_arm64=macos-arm64@macos-15 webview_macos_arm64=macos-arm64@macos-15 winit_macos_arm64=macos-arm64@macos-15 winit_common_macos=macos-arm64@macos-15 gpui_macos_arm64=macos-arm64@macos-15' || '',
             startsWith(github.ref, 'refs/tags/v') && 'release=linux-x64' || '',
             (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && 'e2e_windows_arm64_webview=windows-arm64@windows-11-arm' || '') }}
           vars: ${{ toJSON(vars) }}
@@ -1446,6 +1446,108 @@ jobs:
           path: |
             laufey-webview-${{ matrix.target }}.tar.gz
             laufey-webview-${{ matrix.target }}.zip
+
+  # The B0 spike in backends/gpui (its own cargo workspace, backends/gpui/SPIKE.md): a GPUI
+  # window and a deno_core isolate from the Brainwires/deno fork in one process, linked
+  # against the fork's prebuilt rusty_v8 (fetched by build.sh and checked against
+  # backends/gpui/rusty_v8.sha256; V8 is never built from source). Clippy, a release build and
+  # the binary's --self-test (20 presses through JS and back; a `b0-result` line and exit 0),
+  # whose output and the binary's size are uploaded. macOS arm64, Windows x64 and Linux x64 on
+  # a full run (a dispatch with macos_runner=macos-15-intel builds x86_64-apple-darwin
+  # instead), Linux x64 only otherwise (see the top of the file). It does not gate `release`.
+  build-gpui:
+    name: gpui spike / ${{ matrix.target }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
+    # A cold cache clones the fork with its submodules (about 3.5 min) and builds about 380
+    # crates.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-apple-darwin","os":"macos-15","pick":"gpui_macos_arm64"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # GPUI's Linux platform (gpui-pre-linux, x11 + wayland features) and its wgpu renderer:
+      # xkbcommon, wayland, xcb, fontconfig/freetype (font-kit), and Vulkan with Mesa's
+      # software driver (lavapipe) so the window renders under Xvfb. ParolNet's
+      # desktop-spike.yml list, less its media packages (libvpx, ALSA, clang for V4L2).
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers \
+            xvfb xauth
+
+      - name: Toolchain (backends/gpui/rust-toolchain.toml)
+        working-directory: backends/gpui
+        run: rustup toolchain install && rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: gpui
+          # Keys on backends/gpui's Cargo.lock and toolchain file; pinned per image as in
+          # build-winit.
+          workspaces: backends/gpui -> target
+          key: ${{ matrix.os }}-${{ matrix.target }}
+
+      # Downloads the target's rusty_v8 static library (.a.gz; .lib.gz on Windows) and
+      # binding from the release rusty_v8.sha256 names, checks both hashes, and unpacks the
+      # library where the v8 build script leaves it (a restored cache can keep the script's
+      # fingerprint without gn_out).
+      - name: Fetch the prebuilt V8
+        run: backends/gpui/build.sh fetch --seed backends/gpui/target/release
+
+      - name: cargo clippy
+        run: backends/gpui/build.sh clippy --release --locked -- -D warnings
+
+      - name: Build
+        run: backends/gpui/build.sh build --release --locked
+
+      # The self-test needs a window: Xvfb on Linux, the runner's desktop elsewhere. It fails
+      # by itself (exit 1) when a tree is wrong or nothing comes back within 30 s.
+      - name: Self-test
+        timeout-minutes: 5
+        run: |
+          bin=backends/gpui/target/release/laufey-gpui-spike
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          out=gpui-spike-${{ matrix.target }}
+          mkdir -p "$out"
+          wc -c <"$bin" | tr -d ' ' >"$out/binary-size-bytes.txt"
+          echo "binary: $bin, $(cat "$out/binary-size-bytes.txt") bytes"
+          status=0
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            xvfb-run -a -s "-screen 0 1280x800x24" "$bin" --self-test \
+              >"$out/self-test.stdout.txt" 2>"$out/self-test.stderr.txt" || status=$?
+          else
+            "$bin" --self-test >"$out/self-test.stdout.txt" 2>"$out/self-test.stderr.txt" || status=$?
+          fi
+          echo "exit code: $status" | tee "$out/exit-code.txt"
+          echo "--- stdout"; cat "$out/self-test.stdout.txt"
+          echo "--- stderr"; cat "$out/self-test.stderr.txt"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::laufey-gpui-spike --self-test exited $status"
+            exit 1
+          fi
+          if ! grep -Eq '^b0-result presses=20 counter=20 ' "$out/self-test.stdout.txt"; then
+            echo "::error::no 'b0-result presses=20 counter=20' line in the self-test output"
+            exit 1
+          fi
+          grep '^b0-result ' "$out/self-test.stdout.txt" >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: gpui-spike-${{ matrix.target }}
+          path: gpui-spike-${{ matrix.target }}/
+          if-no-files-found: warn
 
   # The Linux CEF host's three sandbox modes (docs/backends.md, "The Chromium
   # sandbox"), on one Ubuntu 24.04 runner: user namespaces allowed

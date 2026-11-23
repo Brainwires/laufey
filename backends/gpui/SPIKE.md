@@ -13,8 +13,8 @@ attempt, with no link-level workaround.
 Conditions (details below):
 
 1. **Windows and Linux are unproven.** Only macOS arm64 was built. The link risk is highest on
-   Windows (static CRT). A train CI job must build and self-test all targets before B1 depends
-   on them.
+   Windows (static CRT). The CI job `build-gpui` (see "CI job") builds and self-tests macOS
+   arm64, Windows x64 and Linux x64; B1 should not depend on a target before it passes there.
 2. **Do not consume deno_core as a git dependency on the whole fork** beyond the spike. It
    works, but cargo checks out every submodule of the fork (WPT included): 3.5 minutes and
    2.3 GB for the first resolve. See "Proposed DENEXT.md items".
@@ -177,24 +177,42 @@ b0-result presses=20 counter=20 first_commit_ms=1739.0 first_frame_ms=1815.0 rou
 - The self-test ran once and passed. No other tests exist.
 - No separate incremental-rebuild measurement (the figure above is incidental).
 
-### CI job needed
+### CI job
 
-A laufey CI job for `backends/gpui`, on the train, should do the following for
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`:
+`build-gpui` in laufey's `.github/workflows/ci.yml` ("gpui spike / <target>") now does this. It
+needs the `runners` job like `build-winit` and `build-webview`, and its matrix follows theirs:
 
-1. Install Rust 1.99.1 with clippy and rustfmt.
-2. Linux: install GPUI's system packages (the list in ParolNet's `desktop-spike.yml`) and run
-   under Xvfb. macOS: the runner's Xcode with the Metal toolchain, or `--features
-   runtime-shaders`.
-3. Cache `~/.cargo/git` (the fork checkout is 2.3 GB until the dependency is slimmed down).
-4. `backends/gpui/build.sh build --release --locked`. It downloads the target's V8 archive and
-   binding and checks them against `rusty_v8.sha256`. `build.sh` uses bash, so Windows needs
-   Git Bash, or the step is rewritten to call the fork's `fetch_rusty_v8.py`.
-5. `backends/gpui/build.sh clippy --release --locked -- -D warnings` and `cargo fmt --check`.
-6. `target/release/laufey-gpui-spike --self-test`; require exit 0 and a `b0-result` line with
-   `counter=20`.
-7. Report the binary size, and fail if the root `Cargo.lock` changed.
+| Target | Runner | When |
+| --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | every run |
+| `x86_64-pc-windows-msvc` | `windows-latest` | full runs |
+| `aarch64-apple-darwin` | pick key `gpui_macos_arm64` (our macOS arm64 pool, else `macos-15`) | full runs |
+| `x86_64-apple-darwin` | `macos-15-intel` | full runs dispatched with `macos_runner=macos-15-intel`, instead of arm64 |
+
+Each leg:
+
+1. Installs the toolchain from `rust-toolchain.toml` (1.99.1 with clippy and rustfmt).
+2. Linux: installs GPUI's system packages (ParolNet's `desktop-spike.yml` list less its media
+   packages: xkbcommon, wayland, xcb, fontconfig, Vulkan with Mesa's lavapipe, Xvfb). macOS:
+   `build.sh` adds `runtime-shaders` when the runner's Xcode has no `metal`.
+3. Caches cargo and `backends/gpui/target` with `Swatinem/rust-cache`, keyed on this
+   workspace's `Cargo.lock` and the runner image. `~/.cargo/git/checkouts` is not cached, so
+   every run still checks the fork out with its submodules from the cached git database.
+4. `build.sh fetch --seed target/release`: downloads the target's V8 library
+   (`librusty_v8_release_<target>.a.gz`, `rusty_v8_release_<target>.lib.gz` on Windows) and
+   binding from the release `rusty_v8.sha256` names, checks both hashes and that the release tag
+   matches `Cargo.lock`'s `v8` version, and unpacks the library to `gn_out/obj`, as the fork's
+   `fetch_rusty_v8.py --seed-dir` does. `build.sh` runs under Git Bash on Windows.
+5. `build.sh clippy --release --locked -- -D warnings`.
+6. `build.sh build --release --locked`.
+7. `laufey-gpui-spike --self-test` (under `xvfb-run` on Linux, on the runner's desktop
+   elsewhere). The leg fails unless the exit code is 0 and stdout has a
+   `b0-result presses=20 counter=20` line. Stdout, stderr, the exit code and the binary's size in
+   bytes are uploaded as the artifact `gpui-spike-<target>`.
+
+Not in the job yet: `cargo fmt --check` for this workspace (the `lint` job runs it for the root
+workspace only), aarch64 Linux and Windows, a check that the root `Cargo.lock` is unchanged,
+and the job does not gate `release`.
 
 ## Unverified, to check later
 
@@ -202,9 +220,13 @@ A laufey CI job for `backends/gpui`, on the train, should do the following for
 - The fork builds with `-C target-feature=+crt-static` and V8's custom libc++. GPUI's Windows
   dependencies (DirectX, DirectWrite, and any C code built by `cc`) must then also link the
   static CRT. A CRT mismatch (`/MT` against `/MD`) is the most likely link failure of the whole
-  plan. This workspace's `.cargo/config.toml` does not set `crt-static` yet.
-- The fork also sets `/STACK:4194304` for the main thread. Here the isolate is on a spawned
-  thread with Rust's default 2 MiB stack; B1 should set the js thread's stack size explicitly.
+  plan. This workspace's `.cargo/config.toml` now sets the fork's rustflags for
+  `x86_64-pc-windows-msvc` (`+crt-static` and `symbol-mangling-version=v0`). **Unverified until
+  the `build-gpui` CI job runs on Windows.** `aarch64-pc-windows-msvc` has no entry yet.
+- The fork also sets `/STACK:4194304` for the main thread, where its isolate runs. Here the
+  isolate is on the "js" thread, which `src/js.rs` now spawns with a 4 MiB stack
+  (`std::thread::Builder::stack_size`) instead of Rust's default 2 MiB; the main thread keeps
+  the linker's default. **Unverified until the CI job runs on Windows.**
 
 **Linux**
 - GPUI renders through wgpu and links system libraries (xkbcommon, wayland, x11, fontconfig).

@@ -59,6 +59,13 @@ extension!(
     },
 );
 
+/// The js thread's stack: 4 MiB, the reserve the fork gives the thread its isolate runs on
+/// (`/STACK:4194304` in its `.cargo/config.toml`). Rust's default for a spawned thread is
+/// 2 MiB, which leaves little headroom below V8's own JS stack limit (about 1 MB), so deep JS
+/// could overflow the thread instead of raising `RangeError`. Address space only; pages are
+/// committed on demand.
+const JS_THREAD_STACK: usize = 4 * 1024 * 1024;
+
 /// The UI thread's handle on the JS thread.
 pub struct JsHost {
   events: RefCell<Option<UnboundedSender<UiEvent>>>,
@@ -73,6 +80,7 @@ impl JsHost {
     let (events, event_receiver) = unbounded_channel();
     let thread = std::thread::Builder::new()
       .name("js".into())
+      .stack_size(JS_THREAD_STACK)
       .spawn(move || {
         if let Err(err) = run(commits, event_receiver) {
           eprintln!("js thread: {err:#}");
