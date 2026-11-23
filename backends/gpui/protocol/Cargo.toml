@@ -1,0 +1,13 @@
+[package]
+name = "laufey-ntb1"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "NTB1: the batch format of laufey's native tree, its id tables, and the retained tree it mutates"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+serde_json = "1"

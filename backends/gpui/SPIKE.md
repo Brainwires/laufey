@@ -1,5 +1,11 @@
 # B0 spike: GPUI and a deno_core isolate in one process
 
+> **History.** This is the record of the B0 spike. B1 replaced its code: `backends/gpui` is
+> now the `laufey_gpui` host (docs/backends.md, "GPUI"), which embeds no JavaScript engine
+> (V8 lives in the runtime library the host loads) and draws the native tree
+> (docs/native-tree.md). The files, ops, V8 pins and `build.sh` behaviour described below
+> are the spike's, and are gone.
+
 Date: 2026-11-23. Branch `spike/gpui-b0`. Plan: thalora-web-browser `docs/GPUI_PLAN.md`, phase B0.
 
 ## Verdict: GO for B1, with conditions

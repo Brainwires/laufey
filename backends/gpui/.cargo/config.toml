@@ -1,21 +1,10 @@
 # Read only when cargo runs from backends/gpui (build.sh does).
 
-[net]
-git-fetch-with-cli = true
-
-[env]
-# The same guard as the fork's .cargo/config.toml (DENEXT.md item 226): the `v8` crate's build
-# script must never download a prebuilt V8 by itself. Without a verified RUSTY_V8_ARCHIVE
-# (build.sh sets it) the build fails instead of linking whatever a release of that name holds.
-RUSTY_V8_MIRROR = { value = "denext-refused-unverified-v8/run-backends/gpui/build.sh/{file}", force = true }
-RUSTY_V8_MIRROR_FALLBACK = { value = "0", force = true }
-
-# Windows x64: the fork's rustflags for this target (its .cargo/config.toml at the pinned rev).
-# Its prebuilt rusty_v8.lib is built against the static CRT (/MT), so everything linked next to
-# it, GPUI's Windows crates and any C built by `cc` included, must use the static CRT too; a
-# /MT against /MD mismatch is a link failure. symbol-mangling-version=v0 is the fork's as well.
-# The fork's /STACK:4194304 is not repeated: it sizes the main thread, where the fork runs its
-# isolate; here the isolate runs on the "js" thread, which src/js.rs gives 4 MiB itself.
-# Unverified until the CI job `build-gpui` runs on Windows.
+# Windows: the static CRT, as laufey's other hosts (docs/backends.md: the CEF and WebView
+# backends link /MT) and the runtime they load (the Brainwires/deno fork builds libdenort
+# with +crt-static). A host that needs no VC++ redistributable starts on a clean machine.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static", "-C", "symbol-mangling-version=v0"]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

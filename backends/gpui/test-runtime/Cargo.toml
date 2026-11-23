@@ -1,0 +1,16 @@
+[package]
+name = "laufey-gpui-test-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "The stub runtime of `laufey_gpui --self-test`: drives a native tree through the real C ABI"
+
+[lib]
+name = "laufey_gpui_test_runtime"
+crate-type = ["cdylib"]
+
+[dependencies]
+laufey = { path = "../../../capi" }
+laufey-ntb1 = { path = "../protocol" }
+serde_json = "1"
