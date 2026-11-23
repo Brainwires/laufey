@@ -49,19 +49,22 @@ char* (*native_tree_snapshot)(void* backend_data, uint32_t window_id);
 - `native_tree_snapshot`: the tree read back as JSON, for self-tests (free with
   `string_free`).
 
-In the `laufey` crate: `NativeTree::version()`, `NativeTree::commit(&window,
-&bytes) -> Result<(), NativeTreeError>`, `NativeTree::on_event(|window_id, json|
-...)`, `NativeTree::snapshot(&window)`, and
+In the `laufey` crate: `NativeTree::version()`,
+`NativeTree::commit(&window,
+&bytes) -> Result<(), NativeTreeError>`,
+`NativeTree::on_event(|window_id, json|
+...)`, `NativeTree::snapshot(&window)`,
+and
 `window_capabilities().native_tree() -> Option<NativeTreeCapability { version }>`.
 
 ### What a commit answers
 
-| Answer            | Meaning                                                                         |
-| ----------------- | ------------------------------------------------------------------------------- |
-| `OK` (0)          | The batch decoded and is queued for the UI thread.                              |
-| `UNSUPPORTED` (-1) | The backend has no native tree (in the `laufey` crate: the entry is `NULL`).    |
-| `MALFORMED` (-2)  | The batch does not decode. Nothing of it is applied.                            |
-| `NO_WINDOW` (-3)  | No such window.                                                                 |
+| Answer             | Meaning                                                                      |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `OK` (0)           | The batch decoded and is queued for the UI thread.                           |
+| `UNSUPPORTED` (-1) | The backend has no native tree (in the `laufey` crate: the entry is `NULL`). |
+| `MALFORMED` (-2)   | The batch does not decode. Nothing of it is applied.                         |
+| `NO_WINDOW` (-3)   | No such window.                                                              |
 
 A batch is checked twice. What needs no tree is checked on the calling thread,
 and a fault there is `MALFORMED`: the header, every opcode, kind, prop id, value
@@ -88,20 +91,20 @@ header:  magic "NTB1" (4 bytes) | version u16 = 1 | flags u16 = 0 | seq u32 | op
 op:      opcode u8 | payload
 ```
 
-| Opcode | Name       | Payload                                    | Notes                                                                                                                 |
-| ------ | ---------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| 1      | CREATE     | id u32, kind u16                           | The id is not in use. Ids are never reused in a window's lifetime (an id destroyed earlier in the batch is still in use). |
-| 2      | INSERT     | parent u32, child u32, before u32          | `before` 0 appends, else it is another child of the parent. Inserting an attached child moves it.                     |
-| 3      | REMOVE     | parent u32, child u32                      | Detaches; the node stays alive.                                                                                       |
-| 4      | DESTROY    | id u32                                     | Frees the node and its whole subtree. An attached node is detached first; the root is cleared when it was destroyed.  |
-| 5      | SET_ROOT   | id u32                                     | The window's root: a node with no parent, or 0 for none.                                                              |
-| 6      | SET_STYLE  | id u32, n u16, n × (prop u16, value)       | Sets only the listed props; `unset` resets one to its default.                                                        |
-| 7      | SET_PROP   | id u32, prop u16, value                    | A non-style prop.                                                                                                     |
-| 8      | SET_TEXT   | id u32, string                             | A RawText's content.                                                                                                  |
-| 9      | LISTEN     | id u32, mask u32                           | Replaces the node's event mask.                                                                                       |
-| 10     | SET_IMAGE  | id u32, image_id u32                       | Points an Image node at an image (0: none). The image may arrive later.                                               |
-| 11     | IMAGE_DATA | image_id u32, mime string, bytes (u32 len + data) | The backend decodes off the UI thread and keeps the image until IMAGE_FREE. The same id again replaces it.     |
-| 12     | IMAGE_FREE | image_id u32                               |                                                                                                                       |
+| Opcode | Name       | Payload                                           | Notes                                                                                                                     |
+| ------ | ---------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 1      | CREATE     | id u32, kind u16                                  | The id is not in use. Ids are never reused in a window's lifetime (an id destroyed earlier in the batch is still in use). |
+| 2      | INSERT     | parent u32, child u32, before u32                 | `before` 0 appends, else it is another child of the parent. Inserting an attached child moves it.                         |
+| 3      | REMOVE     | parent u32, child u32                             | Detaches; the node stays alive.                                                                                           |
+| 4      | DESTROY    | id u32                                            | Frees the node and its whole subtree. An attached node is detached first; the root is cleared when it was destroyed.      |
+| 5      | SET_ROOT   | id u32                                            | The window's root: a node with no parent, or 0 for none.                                                                  |
+| 6      | SET_STYLE  | id u32, n u16, n × (prop u16, value)              | Sets only the listed props; `unset` resets one to its default.                                                            |
+| 7      | SET_PROP   | id u32, prop u16, value                           | A non-style prop.                                                                                                         |
+| 8      | SET_TEXT   | id u32, string                                    | A RawText's content.                                                                                                      |
+| 9      | LISTEN     | id u32, mask u32                                  | Replaces the node's event mask.                                                                                           |
+| 10     | SET_IMAGE  | id u32, image_id u32                              | Points an Image node at an image (0: none). The image may arrive later.                                                   |
+| 11     | IMAGE_DATA | image_id u32, mime string, bytes (u32 len + data) | The backend decodes off the UI thread and keeps the image until IMAGE_FREE. The same id again replaces it.                |
+| 12     | IMAGE_FREE | image_id u32                                      |                                                                                                                           |
 
 Only View, Text, ScrollView and Pressable take children. The root cannot be
 inserted under a node, and a node cannot be inserted under itself or one of its
@@ -109,29 +112,29 @@ descendants.
 
 **Values:** a tag byte, then the payload.
 
-| Tag | Value   | Payload                           |
-| --- | ------- | --------------------------------- |
-| 0   | unset   | none                              |
+| Tag | Value   | Payload                            |
+| --- | ------- | ---------------------------------- |
+| 0   | unset   | none                               |
 | 1   | f32     | 4 bytes (a length: logical pixels) |
-| 2   | percent | f32 (`50.0` is 50%)               |
-| 3   | auto    | none                              |
-| 4   | enum    | u8, from the prop's table         |
-| 5   | color   | u32 `0xRRGGBBAA`, straight alpha  |
-| 6   | string  | string                            |
-| 7   | bool    | u8, 0 or 1                        |
-| 8   | f64     | 8 bytes                           |
+| 2   | percent | f32 (`50.0` is 50%)                |
+| 3   | auto    | none                               |
+| 4   | enum    | u8, from the prop's table          |
+| 5   | color   | u32 `0xRRGGBBAA`, straight alpha   |
+| 6   | string  | string                             |
+| 7   | bool    | u8, 0 or 1                         |
+| 8   | f64     | 8 bytes                            |
 
 Numbers must be finite. Which values a prop takes:
 
-| Props                                                                                                                              | Values                    |
-| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `display`, `flexDirection`, `flexWrap`, `justifyContent`, `alignItems`, `alignSelf`, `alignContent`, `position`, `overflow`, `fontStyle`, `textAlign`, `textDecorationLine`, `resizeMode` | enum |
-| `flex`, `flexGrow`, `flexShrink`, `aspectRatio`, `opacity`, `fontSize`, `fontWeight`, `lineHeight`, `letterSpacing`, `border*Width`, `border*Radius`, `eventCount` | f32 or f64 |
-| `flexBasis`, `top` / `right` / `bottom` / `left`, `width`, `height`, `min*` / `max*`, `margin*`                                    | f32, percent or auto      |
-| `gap`, `rowGap`, `columnGap`, `padding*`                                                                                           | f32 or percent            |
-| `backgroundColor`, `border*Color`, `color`, `placeholderTextColor`                                                                 | color                     |
-| `fontFamily`, `value`, `placeholder`, `accessibilityLabel`, `accessibilityRole`, `testID`                                          | string                    |
-| `editable`, `secureTextEntry`, `multiline`, `horizontal`, `scrollEnabled`, `disabled`                                              | bool                      |
+| Props                                                                                                                                                                                     | Values               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `display`, `flexDirection`, `flexWrap`, `justifyContent`, `alignItems`, `alignSelf`, `alignContent`, `position`, `overflow`, `fontStyle`, `textAlign`, `textDecorationLine`, `resizeMode` | enum                 |
+| `flex`, `flexGrow`, `flexShrink`, `aspectRatio`, `opacity`, `fontSize`, `fontWeight`, `lineHeight`, `letterSpacing`, `border*Width`, `border*Radius`, `eventCount`                        | f32 or f64           |
+| `flexBasis`, `top` / `right` / `bottom` / `left`, `width`, `height`, `min*` / `max*`, `margin*`                                                                                           | f32, percent or auto |
+| `gap`, `rowGap`, `columnGap`, `padding*`                                                                                                                                                  | f32 or percent       |
+| `backgroundColor`, `border*Color`, `color`, `placeholderTextColor`                                                                                                                        | color                |
+| `fontFamily`, `value`, `placeholder`, `accessibilityLabel`, `accessibilityRole`, `testID`                                                                                                 | string               |
+| `editable`, `secureTextEntry`, `multiline`, `horizontal`, `scrollEnabled`, `disabled`                                                                                                     | bool                 |
 
 Every prop also takes `unset`.
 
@@ -154,23 +157,23 @@ with its atomic `apply`; another backend's renderer can use it as is.
 One JSON object per event: `{"node": id, "type": ...}` plus the fields below. A
 node hears only the families its LISTEN mask names.
 
-| LISTEN bit | Type                                        | Extra fields                                             |
-| ---------- | ------------------------------------------- | -------------------------------------------------------- |
-| 1 press    | `pressIn`, `pressOut`, `press`, `longPress` | `x`, `y` (in the node)                                   |
-| 2 layout   | `layout`                                    | `x`, `y` (in the parent), `width`, `height`              |
-| 4 scroll   | `scroll`                                    | `x`, `y`, `contentWidth`, `contentHeight`                |
-| 8 focus    | `focus`, `blur`                             |                                                          |
-| 16 text    | `changeText`                                | `text`, `eventCount`                                     |
-| 16 text    | `submitEditing`                             |                                                          |
-| 16 text    | `selectionChange`                           | `start`, `end` (UTF-16 units)                            |
-| 32 key     | `key`                                       | `key`, `modifiers` (`LAUFEY_MOD_*`)                      |
-| 64 image   | `imageLoad`, `imageError`                   | `image_id`                                               |
-| (always)   | `batchError`                                | `seq`, `error`; `node` is 0                              |
+| LISTEN bit | Type                                        | Extra fields                                |
+| ---------- | ------------------------------------------- | ------------------------------------------- |
+| 1 press    | `pressIn`, `pressOut`, `press`, `longPress` | `x`, `y` (in the node)                      |
+| 2 layout   | `layout`                                    | `x`, `y` (in the parent), `width`, `height` |
+| 4 scroll   | `scroll`                                    | `x`, `y`, `contentWidth`, `contentHeight`   |
+| 8 focus    | `focus`, `blur`                             |                                             |
+| 16 text    | `changeText`                                | `text`, `eventCount`                        |
+| 16 text    | `submitEditing`                             |                                             |
+| 16 text    | `selectionChange`                           | `start`, `end` (UTF-16 units)               |
+| 32 key     | `key`                                       | `key`, `modifiers` (`LAUFEY_MOD_*`)         |
+| 64 image   | `imageLoad`, `imageError`                   | `image_id`                                  |
+| (always)   | `batchError`                                | `seq`, `error`; `node` is 0                 |
 
-- **Press** follows React Native: `pressIn` when the button goes down, `longPress`
-  after 500 ms held, `pressOut` on release, then `press` when the release is
-  inside the node and no long press fired. The innermost listening node takes
-  the press. A node with `disabled` hears none.
+- **Press** follows React Native: `pressIn` when the button goes down,
+  `longPress` after 500 ms held, `pressOut` on release, then `press` when the
+  release is inside the node and no long press fired. The innermost listening
+  node takes the press. A node with `disabled` hears none.
 - **Layout** is sent after a frame is laid out, only when the node's rectangle
   changed.
 - **Scroll** is coalesced to one event per node per frame. `x` and `y` are how
@@ -184,13 +187,13 @@ node hears only the families its LISTEN mask names.
 
 What `backends/gpui` does with each kind, and what version 1 leaves out:
 
-| Kind             | GPUI                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------ |
-| View, Pressable  | `div`                                                                                                  |
-| ScrollView       | `div` with a `ScrollHandle`; vertical, or horizontal with `horizontal`                                 |
-| Text, RawText    | one `StyledText` per outermost Text: its RawText descendants, with a run per nested Text               |
-| Image            | `img` over a `RenderImage` decoded from IMAGE_DATA (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, SVG)          |
-| TextInput        | a single-line field on GPUI's input handler: IME composition, the candidate window, clipboard, selection |
+| Kind            | GPUI                                                                                                     |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| View, Pressable | `div`                                                                                                    |
+| ScrollView      | `div` with a `ScrollHandle`; vertical, or horizontal with `horizontal`                                   |
+| Text, RawText   | one `StyledText` per outermost Text: its RawText descendants, with a run per nested Text                 |
+| Image           | `img` over a `RenderImage` decoded from IMAGE_DATA (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, SVG)           |
+| TextInput       | a single-line field on GPUI's input handler: IME composition, the candidate window, clipboard, selection |
 
 Styles are React Native's, with its defaults: every node is a flex container, a
 column, and does not shrink; `flex: n` is grow `n`, shrink 1, basis 0. Text

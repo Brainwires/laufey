@@ -667,11 +667,11 @@ backend without a renderer for them, where the `laufey` crate's
 `NativeTree::commit` answers `Unsupported` and
 `window_capabilities().native_tree()` is `None`:
 
-| Backend | `native_tree_*`                                      |
-| ------- | ---------------------------------------------------- |
-| GPUI    | implemented, version 1                               |
-| CEF     | `NULL` (the table is zeroed before it is filled)     |
-| WebView | `NULL` (the table is zeroed before it is filled)     |
+| Backend | `native_tree_*`                                        |
+| ------- | ------------------------------------------------------ |
+| GPUI    | implemented, version 1                                 |
+| CEF     | `NULL` (the table is zeroed before it is filled)       |
+| WebView | `NULL` (the table is zeroed before it is filled)       |
 | Winit   | `NULL` (`create_api_base`, checked by the layout test) |
 
 The format, the id tables and the events are in
