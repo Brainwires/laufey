@@ -529,7 +529,7 @@ impl TextInput {
   }
 
   /// A content offset as an offset in [`Self::display_text`].
-  fn to_display(&self, offset: usize) -> usize {
+  fn display_offset(&self, offset: usize) -> usize {
     if self.props.secure {
       self.content[..offset.min(self.content.len())]
         .chars()
@@ -540,8 +540,8 @@ impl TextInput {
     }
   }
 
-  /// The inverse of [`Self::to_display`].
-  fn from_display(&self, offset: usize) -> usize {
+  /// The inverse of [`Self::display_offset`].
+  fn content_offset(&self, offset: usize) -> usize {
     if self.props.secure {
       self
         .content
@@ -569,7 +569,7 @@ impl TextInput {
     if position.y > bounds.bottom() {
       return self.content.len();
     }
-    self.from_display(line.closest_index_for_x(position.x - bounds.left()))
+    self.content_offset(line.closest_index_for_x(position.x - bounds.left()))
   }
 
   /// Whether the laid-out line is the one for the text as it is now.
@@ -715,8 +715,10 @@ impl EntityInputHandler for TextInput {
       return None;
     }
     let range = self.range_from_utf16(&range_utf16);
-    let (start, end) =
-      (self.to_display(range.start), self.to_display(range.end));
+    let (start, end) = (
+      self.display_offset(range.start),
+      self.display_offset(range.end),
+    );
     let line = self.last_layout.as_ref()?;
     Some(Bounds::from_corners(
       point(bounds.left() + line.x_for_index(start), bounds.top()),
@@ -748,7 +750,7 @@ impl EntityInputHandler for TextInput {
       return None;
     }
     let index = self.last_layout.as_ref()?.closest_index_for_x(line_point.x);
-    Some(self.offset_to_utf16(self.from_display(index)))
+    Some(self.offset_to_utf16(self.content_offset(index)))
   }
 }
 
@@ -822,18 +824,17 @@ impl Element for TextElement {
     let selected = if empty {
       0..0
     } else {
-      input.to_display(input.selected_range.start)
-        ..input.to_display(input.selected_range.end)
+      input.display_offset(input.selected_range.start)
+        ..input.display_offset(input.selected_range.end)
     };
     let cursor = if empty {
       0
     } else {
-      input.to_display(input.cursor_offset())
+      input.display_offset(input.cursor_offset())
     };
-    let marked =
-      input.marked_range.as_ref().filter(|_| !empty).map(|range| {
-        input.to_display(range.start)..input.to_display(range.end)
-      });
+    let marked = input.marked_range.as_ref().filter(|_| !empty).map(|range| {
+      input.display_offset(range.start)..input.display_offset(range.end)
+    });
 
     let run = TextRun {
       len: display_text.len(),

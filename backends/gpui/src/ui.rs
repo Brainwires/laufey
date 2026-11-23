@@ -101,9 +101,8 @@ fn with_app<R, F: FnOnce(&mut App) -> R>(f: F) -> Result<R, F> {
 /// thread inside a runtime callback it runs at once.
 pub fn post(f: impl FnOnce(&mut App) + Send + 'static) {
   if is_ui_thread() {
-    match with_app(f) {
-      Ok(()) => {}
-      Err(f) => push(Job::Ui(Box::new(f))),
+    if let Err(f) = with_app(f) {
+      push(Job::Ui(Box::new(f)));
     }
     return;
   }

@@ -519,6 +519,7 @@ fn image_ops_are_handed_to_the_host() {
 
 /// Every fault leaves the tree exactly as it was, whatever came before it in the batch.
 #[test]
+#[allow(clippy::type_complexity)]
 fn a_batch_that_does_not_fit_changes_nothing() {
   let cases: Vec<(&str, Box<dyn Fn(&mut BatchBuilder)>, ApplyError)> = vec![
     (

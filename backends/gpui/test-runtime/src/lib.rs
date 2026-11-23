@@ -651,7 +651,9 @@ fn run(report: &mut Report) -> Vec<(&'static str, String)> {
     "scroll",
     scrolled
       && scroll_event.is_some_and(|(_, event)| {
-        event["y"].as_f64().is_some_and(|y| y > 0.0 && y <= 60.5)
+        event["y"]
+          .as_f64()
+          .is_some_and(|y| (0.5..=60.5).contains(&y))
           && event["x"] == 0.0
           && close_to(event["contentHeight"].as_f64().unwrap_or(-1.0), 400.0)
       }),
