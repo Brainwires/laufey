@@ -261,8 +261,7 @@ extern "C" {
 // A native tree event (see set_native_tree_event_handler): `json` is `len`
 // bytes of UTF-8 JSON, one object ({"node":id,"type":...}), not
 // NUL-terminated and valid only for the duration of the call. UI thread.
-typedef void (*laufey_native_tree_event_fn)(void* user_data,
-                                            uint32_t window_id,
+typedef void (*laufey_native_tree_event_fn)(void* user_data, uint32_t window_id,
                                             const char* json, size_t len);
 
 // --- Drag and drop (API >= 39) ----------------------------------------------
