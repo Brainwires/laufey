@@ -1,17 +1,18 @@
 # Backends
 
 A backend is the native executable that hosts a browser (or windowing) engine
-and implements the [C ABI](c-abi.md). laufey ships three; a fourth is on a
-branch. All implement the same `laufey_backend_api_t`, so a runtime is portable
-across them — the differences are in engine, process model, size, and a few
-features that a given engine can't express on a given OS (see
+and implements the [C ABI](c-abi.md). laufey ships four; a fifth is on a branch.
+All implement the same `laufey_backend_api_t`, so a runtime is portable across
+them — the differences are in engine, process model, size, and a few features
+that a given engine can't express on a given OS (see
 [the feature pages](window-management.md)).
 
-| Backend                                                           | Engine        | Process model | Bundled | JS bridge |
-| ----------------------------------------------------------------- | ------------- | ------------- | ------- | --------- |
-| [CEF](https://github.com/littledivy/laufey/tree/main/cef)         | Chromium 156  | multi-process | yes     | yes       |
-| [WebView](https://github.com/littledivy/laufey/tree/main/webview) | system native | single        | no      | yes       |
-| [Winit](https://github.com/littledivy/laufey/tree/main/winit)     | none          | single        | n/a     | no        |
+| Backend                                                              | Engine        | Process model | Bundled | JS bridge |
+| -------------------------------------------------------------------- | ------------- | ------------- | ------- | --------- |
+| [CEF](https://github.com/littledivy/laufey/tree/main/cef)            | Chromium 156  | multi-process | yes     | yes       |
+| [WebView](https://github.com/littledivy/laufey/tree/main/webview)    | system native | single        | no      | yes       |
+| [Winit](https://github.com/littledivy/laufey/tree/main/winit)        | none          | single        | n/a     | no        |
+| [GPUI](https://github.com/littledivy/laufey/tree/main/backends/gpui) | none (GPUI)   | single        | n/a     | no        |
 
 Platform support is x86_64 + aarch64 on macOS and Linux, x86_64 on Windows.
 There is also an **iOS** backend (UIKit + WKWebView, statically linked) — see
@@ -572,6 +573,155 @@ content — GPU surfaces, custom renderers — without loading a web engine. The
 is no JS bridge; `get_window_handle` / `get_display_handle` expose the raw
 handles needed to create a rendering surface. Sources in
 [`winit/`](https://github.com/littledivy/laufey/tree/main/winit).
+
+## GPUI
+
+Engine-free, like Winit, but it draws: `laufey_gpui` renders a window's
+[native tree](native-tree.md) with [GPUI](https://www.gpui.rs) (Zed's UI
+framework; the `gpui-pre` snapshot). The runtime sends batches of mutations
+through `native_tree_commit`, the host lays the tree out (Taffy) and paints it
+on the GPU, and input comes back as events. There is no web engine, no page and
+no JS bridge, and the host links no JavaScript engine: V8 lives in the runtime
+library it loads.
+
+Sources in
+[`backends/gpui/`](https://github.com/littledivy/laufey/tree/main/backends/gpui),
+a cargo workspace of its own (GPUI's dependency tree stays out of the root
+`Cargo.lock`): the host, the `laufey-ntb1` protocol crate (`protocol/`) and the
+self-test's runtime (`test-runtime/`). Build with `backends/gpui/build.sh`
+(`cargo build --release --workspace`; on a Mac without Xcode's Metal toolchain
+it adds the `runtime-shaders` feature). The host depends on the `laufey` crate
+for the API table's layout, so the build needs libclang (bindgen).
+
+Start-up: the host finds the runtime (`--runtime <path>`, then
+`LAUFEY_RUNTIME_PATH`, then a library beside the executable with its base name),
+loads it on the main thread, calls its optional
+`laufey_runtime_prestart(3,
+&exit_code)` there before any other thread exists
+(engine id 3 is this host; 1 is the OS web view and 2 CEF), then
+`laufey_runtime_init`, and runs `laufey_runtime_start` on a thread named
+`laufey-runtime`. GPUI owns the main thread. Every API table entry may be called
+from any thread: setters queue their work on the UI thread, getters wait for it,
+and runtime callbacks (event handlers, `dispatch_ui_task` tasks) are only ever
+made from the host's own queue on the UI thread, never from inside a GPUI
+callback.
+
+The app ends on `quit()`, `exit_app(code)` or the last window closing (unless
+`set_quit_on_last_window_closed(false)`): the host answers pending UI tasks,
+calls `laufey_runtime_shutdown`, waits up to 5 s for the runtime's thread (200
+ms after `exit_app`) and ends the process itself, with `exit_app`'s code or 0. A
+panic in the host ends the process with exit code 101.
+
+`laufey_gpui --self-test` loads the bundled test runtime (a `laufey::main!`
+library with no JS engine), which commits batches through `NativeTree`, injects
+input through `test_inject_input`, checks the events and the tree
+(`native_tree_snapshot`), prints one `b1-result status=pass|fail ...` line and
+exits 0 or 1. CI runs it on each target.
+
+### The API table
+
+What `laufey_gpui` implements. Every entry not listed is `NULL`, which is how a
+backend says "not supported"; the `laufey` crate null-checks each one, so those
+calls are no-ops or answer their defaults.
+
+| Entry                                                                                                | Support                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_window`, `create_window_ex`                                                                  | yes; flags `FRAMELESS`, `NO_ACTIVATE`, `HIDDEN`, the rest ignored. Never blocks: the id is returned at once and the window opens on the UI thread, ahead of every later call for it. 0 once the app is quitting.             |
+| `close_window`                                                                                       | yes                                                                                                                                                                                                                          |
+| `set_title`                                                                                          | yes                                                                                                                                                                                                                          |
+| `set_window_size`, `get_window_size`                                                                 | yes (the content size, logical pixels)                                                                                                                                                                                       |
+| `get_window_outer_size`, `get_window_position`                                                       | yes                                                                                                                                                                                                                          |
+| `get_window_scale_factor`                                                                            | yes                                                                                                                                                                                                                          |
+| `is_resizable`                                                                                       | yes                                                                                                                                                                                                                          |
+| `show`, `focus`, `is_visible`                                                                        | yes: both activate the window, GPUI's only way to put a window created hidden on screen. `is_visible` is whether the window was shown, not what the OS says. On Linux GPUI maps a window at creation whatever `HIDDEN` says. |
+| `quit`, `exit_app`, `set_quit_on_last_window_closed`                                                 | yes                                                                                                                                                                                                                          |
+| `post_ui_task`, `dispatch_ui_task`, `is_ui_thread`                                                   | yes, with `dispatch_ui_task`'s delivery guarantee                                                                                                                                                                            |
+| `window_capabilities`                                                                                | `LAUFEY_WINDOW_CAP_NATIVE_TREE` only                                                                                                                                                                                         |
+| `string_free`                                                                                        | yes                                                                                                                                                                                                                          |
+| `set_resize_handler`, `set_move_handler`, `set_focused_handler`                                      | yes                                                                                                                                                                                                                          |
+| `set_close_requested_handler`                                                                        | yes, with the defer-until-`close_window` contract                                                                                                                                                                            |
+| `set_keyboard_event_handler`                                                                         | yes: keys no focused node consumed; `key` / `code` as DOM names for letters, digits and the common named keys, `code` empty for the rest                                                                                     |
+| `set_mouse_click_handler`, `set_wheel_handler`                                                       | yes                                                                                                                                                                                                                          |
+| `set_mouse_move_handler`                                                                             | yes, coalesced to one call per frame                                                                                                                                                                                         |
+| `test_inject_input`                                                                                  | key, mouse move, mouse button and wheel, through GPUI's own event dispatch (hit testing included)                                                                                                                            |
+| `native_tree_version`, `native_tree_commit`, `set_native_tree_event_handler`, `native_tree_snapshot` | yes, version 1 ([native-tree.md](native-tree.md))                                                                                                                                                                            |
+
+Gaps in entries a windowed app would expect, because GPUI 0.3 has no call for
+them: `set_window_position`, `hide`, `set_resizable`, `set_always_on_top` /
+`is_always_on_top`, window state and size constraints, screens, opacity, window
+and display handles, `set_cursor_enter_leave_handler`. All `NULL`.
+
+`NULL` (217 entries): `navigate`, `execute_js`, `set_window_position`,
+`set_resizable`, `set_always_on_top`, `is_always_on_top`, `hide`,
+`value_is_null`, `value_is_bool`, `value_is_int`, `value_is_double`,
+`value_is_string`, `value_is_list`, `value_is_dict`, `value_is_binary`,
+`value_is_callback`, `value_get_bool`, `value_get_int`, `value_get_double`,
+`value_get_string`, `value_free_string`, `value_list_size`, `value_list_get`,
+`value_dict_get`, `value_dict_has`, `value_dict_size`, `value_dict_keys`,
+`value_free_keys`, `value_get_binary`, `value_get_callback_id`, `value_null`,
+`value_bool`, `value_int`, `value_double`, `value_string`, `value_list`,
+`value_dict`, `value_binary`, `value_list_append`, `value_list_set`,
+`value_dict_set`, `value_free`, `set_js_call_handler`, `js_call_respond`,
+`invoke_js_callback`, `release_js_callback`, `get_window_handle`,
+`get_display_handle`, `get_window_handle_type`,
+`set_cursor_enter_leave_handler`, `set_page_load_handler`, `poll_js_calls`,
+`set_js_call_notify`, `set_application_menu`, `show_context_menu`,
+`open_devtools`, `set_js_namespace`, `show_dialog`, `set_dock_badge`,
+`bounce_dock`, `set_dock_menu`, `set_dock_visible`, `set_dock_reopen_handler`,
+`create_tray_icon`, `destroy_tray_icon`, `set_tray_icon`, `set_tray_tooltip`,
+`set_tray_menu`, `set_tray_click_handler`, `set_tray_double_click_handler`,
+`set_tray_icon_dark`, `get_tray_icon_bounds`, `show_notification`,
+`close_notification`, `query_permission`, `request_permission`,
+`read_clipboard_text`, `write_clipboard_text`, `register_scheme_handler`,
+`scheme_request_read_body`, `scheme_response_begin`, `scheme_response_write`,
+`scheme_response_finish`, `set_window_opacity`, `get_window_opacity`,
+`test_click_menu_item`, `test_trigger_close_requested`, `print_to_pdf`,
+`set_click_passthrough`, `is_click_passthrough`,
+`set_click_passthrough_forward`, `is_click_passthrough_forward`,
+`set_open_url_handler`, `test_trigger_open_url`, `set_second_instance_handler`,
+`passkey_capabilities`, `passkey_request`, `get_window_inner_position`,
+`set_window_state`, `get_window_state`, `set_window_state_handler`,
+`set_window_size_constraints`, `get_window_size_constraints`, `get_screens`,
+`get_window_screen`, `set_display_changed_handler`, `set_window_titlebar_style`,
+`set_window_traffic_light_position`, `set_window_backdrop`,
+`get_window_normal_bounds`, `set_file_drop_handler`, `start_file_drag`,
+`test_trigger_file_drop`, `show_file_dialog`, `cancel_file_dialog`,
+`test_file_dialog_respond`, `clipboard_capabilities`, `read_clipboard_html`,
+`write_clipboard_html`, `read_clipboard_image`, `write_clipboard_image`,
+`read_clipboard_formats`, `set_clipboard_change_handler`, `buffer_free`,
+`system_capabilities`, `set_shortcut_handler`, `register_shortcut`,
+`unregister_shortcut`, `unregister_all_shortcuts`, `list_shortcuts`,
+`canonicalize_accelerator`, `test_trigger_shortcut`, `get_launch_at_login`,
+`set_launch_at_login`, `close_devtools`, `is_devtools_open`,
+`is_devtools_enabled`, `menu_capabilities`, `show_context_menu_ex`,
+`test_dismiss_context_menu`, `test_trigger_menu_accelerator`,
+`notification_capabilities`, `set_notification_response_handler`,
+`list_scheduled_notifications`, `cancel_notification`,
+`test_notification_respond`, `auth_session_capabilities`, `auth_session_start`,
+`test_cancel_auth_session`, `auth_session_cancel`, `set_js_call_handler_ex`,
+`platform_features`, `tray_unavailable_reason`,
+`set_platform_features_changed_handler`, `title_bar_preferences`,
+`set_title_bar_preferences_changed_handler`, `secret_lookup`, `secret_store`,
+`secret_delete`, `set_allowed_navigation_origins`,
+`test_capture_external_opens`, `test_take_external_opens`,
+`list_delivered_notifications`, `remove_delivered_notifications`, `share`,
+`set_user_activity`, `set_user_activity_handler`, `overlay_capabilities`,
+`set_input_region`, `set_skip_taskbar`, `set_visible_on_all_workspaces`,
+`set_window_level`, `set_activation_policy`, `get_activation_policy`,
+`set_tray_event_handler`, `tray_capabilities`, `pop_up_tray_menu`, `speak`,
+`stop_speaking`, `speech_voices`, `get_background_throttling`,
+`set_quit_requested_handler`, `answer_quit_request`, `quit_request_pending`,
+`set_media_capture_handler`, `answer_media_capture`, `show_message_dialog`,
+`set_app_menu_click_handler`, `scheme_request_frame`,
+`set_will_navigate_handler`, `answer_will_navigate`, `set_app_menu`,
+`set_window_title_visibility`, `set_window_toolbar_style`,
+`webview_capabilities`, `create_webview`, `webview_set_bounds`,
+`webview_set_visible`, `webview_navigate`, `webview_command`, `webview_state`,
+`webview_evaluate`, `webview_capture`, `webview_close`, `webview_set_z_order`,
+`webview_set_zoom`, `webview_get_zoom`, `webview_find`, `webview_stop_find`,
+`webview_open_devtools`, `webview_print`, `webview_set_forward_keys`,
+`webview_download_control`, `webview_permission_respond`, `menu_snapshot`,
+`get_window_z_order`, `get_pointer_state`.
 
 ## Servo (experimental)
 

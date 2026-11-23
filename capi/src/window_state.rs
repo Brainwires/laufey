@@ -72,6 +72,8 @@ pub const LAUFEY_WINDOW_CAP_TOOLBAR_STYLE: u32 = 1 << 24;
 // API 60: the stacking order of the app's windows, and the pointer.
 pub const LAUFEY_WINDOW_CAP_Z_ORDER: u32 = 1 << 25;
 pub const LAUFEY_WINDOW_CAP_POINTER_STATE: u32 = 1 << 26;
+// API 61: a window can host a native tree (native_tree.rs).
+pub const LAUFEY_WINDOW_CAP_NATIVE_TREE: u32 = 1 << 27;
 
 /// The button that clicks (the right one for a user who swapped them): a
 /// bit of [`PointerState::buttons`], as a DOM `MouseEvent.buttons`.

@@ -1,0 +1,5 @@
+# The same toolchain as laufey's root and the Brainwires/deno fork. gpui-pre needs 1.95+.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

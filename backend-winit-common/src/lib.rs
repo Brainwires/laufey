@@ -45,7 +45,7 @@ use winit::window::{Window, WindowLevel};
 // Bumping this in lockstep with the capi is mandatory: the capi's `init_api`
 // rejects any backend whose reported `version` differs, and the vtable layout
 // below must match the `laufey_backend_api` struct as of this version.
-pub const LAUFEY_API_VERSION: u32 = 60;
+pub const LAUFEY_API_VERSION: u32 = 61;
 
 /// Creation-time window style flags (mirror `LAUFEY_WINDOW_FLAG_*` in laufey.h).
 pub const LAUFEY_WINDOW_FLAG_FRAMELESS: u32 = 1 << 0;
@@ -1126,7 +1126,29 @@ pub struct LaufeyBackendApi {
     Option<unsafe extern "C" fn(*mut c_void, *mut u32, usize) -> usize>,
   pub get_pointer_state:
     Option<unsafe extern "C" fn(*mut c_void, *mut LaufeyPointerState) -> bool>,
+  // --- Native tree (API >= 61); NULL on Winit, which has no native tree
+  // renderer (LAUFEY_WINDOW_CAP_NATIVE_TREE is not reported).
+  pub native_tree_version: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+  pub native_tree_commit:
+    Option<unsafe extern "C" fn(*mut c_void, u32, *const u8, usize) -> i32>,
+  pub set_native_tree_event_handler: Option<
+    unsafe extern "C" fn(
+      *mut c_void,
+      Option<LaufeyNativeTreeEventFn>,
+      *mut c_void,
+    ),
+  >,
+  pub native_tree_snapshot:
+    Option<unsafe extern "C" fn(*mut c_void, u32) -> *mut c_char>,
 }
+
+/// `laufey_native_tree_event_fn` (API 61).
+pub type LaufeyNativeTreeEventFn = unsafe extern "C" fn(
+  *mut c_void,   // user_data
+  u32,           // window_id
+  *const c_char, // json (not NUL-terminated)
+  usize,         // len
+);
 
 /// `laufey_pointer_state_t` (API 60).
 #[repr(C)]
@@ -2144,6 +2166,11 @@ pub fn create_api_base() -> LaufeyBackendApi {
     menu_snapshot: None,
     get_window_z_order: None,
     get_pointer_state: None,
+    // API 61: Winit draws nothing of its own, so no native tree.
+    native_tree_version: None,
+    native_tree_commit: None,
+    set_native_tree_event_handler: None,
+    native_tree_snapshot: None,
   }
 }
 

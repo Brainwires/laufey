@@ -32,6 +32,7 @@
 - [Platform features](platform-features.md)
 - [Title bars](title-bar.md)
 - [Child web views](webviews.md)
+- [Native tree](native-tree.md)
 - [Secure store](secure-store.md)
 - [Passkeys](passkeys.md)
 - [Auth session](auth-session.md)

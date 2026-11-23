@@ -1,0 +1,10 @@
+# Read only when cargo runs from backends/gpui (build.sh does).
+
+# Windows: the static CRT, as laufey's other hosts (docs/backends.md: the CEF and WebView
+# backends link /MT) and the runtime they load (the Brainwires/deno fork builds libdenort
+# with +crt-static). A host that needs no VC++ redistributable starts on a clean machine.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

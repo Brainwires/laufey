@@ -1,6 +1,9 @@
 {
   "fmt": {
     "lineWidth": 80,
-    "indentWidth": 2
+    "indentWidth": 2,
+    "exclude": [
+      "backends/gpui/protocol/props.json"
+    ]
   }
 }

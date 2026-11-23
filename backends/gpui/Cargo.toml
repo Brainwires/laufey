@@ -1,0 +1,39 @@
+[workspace]
+# Its own workspace, not a member of laufey's root workspace: GPUI's dependency tree stays
+# out of the root Cargo.lock (see SPIKE.md).
+members = [".", "protocol", "test-runtime"]
+
+[package]
+name = "laufey-gpui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "laufey's GPUI backend: a host executable that draws a runtime's native tree with GPUI"
+
+[[bin]]
+name = "laufey_gpui"
+path = "src/main.rs"
+
+[dependencies]
+# The C ABI (the API table's layout, from laufey.h through bindgen).
+laufey = { path = "../../capi" }
+laufey-ntb1 = { path = "protocol" }
+
+# GPUI: ParolNet's exact pins (parol-social/apps/desktop). gpui-pre is the snapshot of zed@main
+# that gpui-component publishes against; never mix it with the official `gpui` crate.
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit", "x11", "wayland"] }
+
+futures = "0.3"
+libloading = "0.8"
+serde_json = "1"
+unicode-segmentation = "1"
+
+[features]
+# Compile GPUI's Metal shaders at launch instead of with Xcode's `metal` tool at build time
+# (for machines with only the Command Line Tools, or Xcode 26 without the Metal toolchain).
+runtime-shaders = ["gpui-platform/runtime_shaders"]
+
+# Release profile: cargo's defaults (opt-level 3, no LTO); the shipped size is a B2 packaging
+# question.

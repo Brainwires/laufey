@@ -42,6 +42,13 @@ on:
         description: Minutes each stress shard's launches may take
         type: number
         default: 30
+      only:
+        description: >-
+          Run one job group only (with full=true: all three OS legs). build-gpui
+          runs just the GPUI host build and self-test and skips every other job
+        type: choice
+        options: [all, build-gpui]
+        default: all
       macos_runner:
         description: >-
           Runner of the macOS arm64 legs (native-e2e, test-winit-common, the
@@ -88,12 +95,13 @@ jobs:
           # e2e leg on a full run (our denext-windows-arm64 pool, else GitHub's windows-11-arm).
           jobs: >-
             ${{ format('{0} {1} {2}',
-            ((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && inputs.macos_runner != 'macos-15-intel') && 'e2e_macos_cef=macos-arm64@macos-15 e2e_macos_webview=macos-arm64@macos-15 e2e_macos_winit=macos-arm64@macos-15 cef_macos_arm64=macos-arm64@macos-15 webview_macos_arm64=macos-arm64@macos-15 winit_macos_arm64=macos-arm64@macos-15 winit_common_macos=macos-arm64@macos-15' || '',
+            ((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && inputs.macos_runner != 'macos-15-intel') && 'e2e_macos_cef=macos-arm64@macos-15 e2e_macos_webview=macos-arm64@macos-15 e2e_macos_winit=macos-arm64@macos-15 cef_macos_arm64=macos-arm64@macos-15 webview_macos_arm64=macos-arm64@macos-15 winit_macos_arm64=macos-arm64@macos-15 winit_common_macos=macos-arm64@macos-15 gpui_macos_arm64=macos-arm64@macos-15' || '',
             startsWith(github.ref, 'refs/tags/v') && 'release=linux-x64' || '',
             (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && 'e2e_windows_arm64_webview=windows-arm64@windows-11-arm' || '') }}
           vars: ${{ toJSON(vars) }}
 
   lint:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: lint
     # Stays on GitHub-hosted: sudo apt-get (inert in the self-hosted Linux containers).
     runs-on: ubuntu-latest
@@ -164,6 +172,7 @@ jobs:
   # cargo_audit.yml on main only sees main's lockfile). Fails on any
   # vulnerability; unmaintained/unsound/yanked warnings are printed only.
   cargo-audit:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: cargo audit
     # Stays on GitHub-hosted: the trigger (see the jobs: header).
     runs-on: ubuntu-latest
@@ -181,6 +190,7 @@ jobs:
         run: cargo audit --file webauthn-linux/Cargo.lock
 
   test:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: cargo test (capi)
     # Stays on GitHub-hosted: the trigger (see the jobs: header).
     runs-on: ubuntu-latest
@@ -393,7 +403,7 @@ jobs:
   test-winit-common:
     name: cargo test (backend-winit-common) / ${{ matrix.os }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
@@ -431,6 +441,7 @@ jobs:
   # destroyed its condition variable is reported as a data race on the first
   # call it happens to, where a plain run only hangs now and then.
   tsan:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: ThreadSanitizer (backend-common)
     # Stays on GitHub-hosted: sudo sysctl / apt-get (no capability, sudo inert in the self-hosted Linux containers).
     runs-on: ubuntu-24.04
@@ -539,6 +550,7 @@ jobs:
   # reads, reads over max_bytes, INCR, the session lock). Neither may skip
   # here: exit 77 fails the step.
   clipboard-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: clipboard (headless sway + Xvfb)
     # Stays on GitHub-hosted: a `container:` job (no Docker socket in the self-hosted Linux containers).
     runs-on: ubuntu-latest
@@ -581,6 +593,7 @@ jobs:
   # backend-common's passkey_linux_test running whole ceremonies through the
   # backend against the library built with `virt-test` (required here).
   passkeys-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: passkeys (libwebauthn) / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -635,7 +648,7 @@ jobs:
   build-winit:
     name: winit / ${{ matrix.target }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
@@ -713,7 +726,7 @@ jobs:
   native-e2e:
     name: native-e2e / ${{ matrix.backend }} / ${{ matrix.os }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     # Backstop; each e2e step below has its own, much shorter, timeout.
     timeout-minutes: 90
@@ -1350,7 +1363,7 @@ jobs:
   build-webview:
     name: webview / ${{ matrix.target }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     # Keep the macOS minimum in sync with LSMinimumSystemVersion in
     # webview/macos/Info.plist.in (denoland/deno#35764). Ignored on non-macOS
@@ -1447,6 +1460,109 @@ jobs:
             laufey-webview-${{ matrix.target }}.tar.gz
             laufey-webview-${{ matrix.target }}.zip
 
+  # The GPUI backend in backends/gpui (its own cargo workspace; docs/backends.md, "GPUI"):
+  # the host laufey_gpui, the NTB1 protocol crate and the self-test's runtime. The protocol's
+  # unit tests, clippy, a release build and `laufey_gpui --self-test`, which loads the test
+  # runtime, drives a native tree through the real C ABI and must print
+  # `b1-result status=pass` and exit 0; its output and the binary's size are uploaded. The
+  # host links no JavaScript engine. macOS arm64, Windows x64 and Linux x64 on a full run (a
+  # dispatch with macos_runner=macos-15-intel builds x86_64-apple-darwin instead), Linux x64
+  # only otherwise (see the top of the file). It does not gate `release`.
+  build-gpui:
+    name: gpui / ${{ matrix.target }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) && (inputs.macos_runner == 'macos-15-intel' && '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-24.04"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"x86_64-apple-darwin","os":"macos-15-intel"}]' || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-24.04"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest"},{"target":"aarch64-apple-darwin","os":"macos-15","pick":"gpui_macos_arm64"}]') || '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-24.04"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # GPUI's Linux platform (gpui-pre-linux, x11 + wayland features) and its wgpu renderer:
+      # xkbcommon, wayland, xcb, fontconfig/freetype (font-kit), and Vulkan with Mesa's
+      # software driver (lavapipe) so the window renders under Xvfb. ParolNet's
+      # desktop-spike.yml list, less its media packages (libvpx, ALSA, clang for V4L2).
+      # libclang: the `laufey` crate binds laufey.h with bindgen.
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers \
+            libclang-dev xvfb xauth
+
+      - name: Toolchain (backends/gpui/rust-toolchain.toml)
+        working-directory: backends/gpui
+        run: rustup toolchain install && rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: gpui
+          # Keys on backends/gpui's Cargo.lock and toolchain file; pinned per image as in
+          # build-winit.
+          workspaces: backends/gpui -> target
+          key: ${{ matrix.os }}-${{ matrix.target }}
+
+      - name: cargo fmt
+        working-directory: backends/gpui
+        run: cargo fmt --check -p laufey-gpui -p laufey-ntb1 -p laufey-gpui-test-runtime
+
+      # The codec and the retained tree: decoding, every refusal, atomic apply.
+      - name: Protocol tests
+        run: backends/gpui/build.sh test -p laufey-ntb1 --locked
+
+      - name: cargo clippy
+        run: backends/gpui/build.sh clippy --release --workspace --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: backends/gpui/build.sh build --release --workspace --locked
+
+      # The self-test needs a window: Xvfb on Linux, the runner's desktop elsewhere. The host
+      # finds the test runtime beside itself in target/release. It fails by itself (exit 1)
+      # when a check fails, and after 60 s without a result.
+      - name: Self-test
+        timeout-minutes: 5
+        run: |
+          bin=backends/gpui/target/release/laufey_gpui
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          out=gpui-${{ matrix.target }}
+          mkdir -p "$out"
+          wc -c <"$bin" | tr -d ' ' >"$out/binary-size-bytes.txt"
+          echo "binary: $bin, $(cat "$out/binary-size-bytes.txt") bytes"
+          status=0
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            xvfb-run -a -s "-screen 0 1280x800x24" "$bin" --self-test \
+              >"$out/self-test.stdout.txt" 2>"$out/self-test.stderr.txt" || status=$?
+          else
+            "$bin" --self-test >"$out/self-test.stdout.txt" 2>"$out/self-test.stderr.txt" || status=$?
+          fi
+          echo "exit code: $status" | tee "$out/exit-code.txt"
+          echo "--- stdout"; cat "$out/self-test.stdout.txt"
+          echo "--- stderr"; cat "$out/self-test.stderr.txt"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::laufey_gpui --self-test exited $status"
+            exit 1
+          fi
+          if ! grep -Eq '^b1-result status=pass ' "$out/self-test.stdout.txt"; then
+            echo "::error::no 'b1-result status=pass' line in the self-test output"
+            exit 1
+          fi
+          grep '^b1-result ' "$out/self-test.stdout.txt" >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: gpui-${{ matrix.target }}
+          path: gpui-${{ matrix.target }}/
+          if-no-files-found: warn
+
   # The Linux CEF host's three sandbox modes (docs/backends.md, "The Chromium
   # sandbox"), on one Ubuntu 24.04 runner: user namespaces allowed
   # (namespace); restricted by AppArmor with chrome-sandbox installed root
@@ -1454,6 +1570,7 @@ jobs:
   # turns the sandbox off instead of Chromium aborting). Each run checks the
   # host's `laufey: sandbox: <mode>` line and, from outside, the renderers.
   sandbox-modes-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: native-e2e / cef sandbox modes / ubuntu-24.04
     # Stays on GitHub-hosted: sudo sysctl (AppArmor userns) and a root-owned setuid chrome-sandbox.
     runs-on: ubuntu-24.04
@@ -1543,6 +1660,7 @@ jobs:
           scripts/native-e2e-run.sh cef --sandbox
 
   e2e-cef-linux:
+    if: ${{ inputs.only != 'build-gpui' }}
     name: e2e / cef / x86_64-unknown-linux-gnu (Xvfb)
     # Stays on GitHub-hosted: sudo apt-get (inert in the self-hosted Linux containers).
     runs-on: ubuntu-latest
@@ -1609,7 +1727,7 @@ jobs:
   build-cef:
     name: cef / ${{ matrix.target }}
     needs: runners
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.only != 'build-gpui' }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
     strategy:
       fail-fast: false
@@ -1727,7 +1845,7 @@ jobs:
   #     -f storage_stress_launches=1300 -f storage_stress_timeout=200
   storage-stress-cef-macos-x64:
     name: storage stress / cef / x86_64-apple-darwin (${{ matrix.shard }})
-    if: github.event_name == 'workflow_dispatch' && inputs.storage_stress_shards != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.storage_stress_shards != '' && inputs.only != 'build-gpui'
     # Stays on GitHub-hosted: brew install llvm ninja (no Homebrew on the self-hosted macOS pools).
     runs-on: macos-15-intel
     strategy:
