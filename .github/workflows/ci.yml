@@ -1447,21 +1447,19 @@ jobs:
             laufey-webview-${{ matrix.target }}.tar.gz
             laufey-webview-${{ matrix.target }}.zip
 
-  # The B0 spike in backends/gpui (its own cargo workspace, backends/gpui/SPIKE.md): a GPUI
-  # window and a deno_core isolate from the Brainwires/deno fork in one process, linked
-  # against the fork's prebuilt rusty_v8 (fetched by build.sh and checked against
-  # backends/gpui/rusty_v8.sha256; V8 is never built from source). Clippy, a release build and
-  # the binary's --self-test (20 presses through JS and back; a `b0-result` line and exit 0),
-  # whose output and the binary's size are uploaded. macOS arm64, Windows x64 and Linux x64 on
-  # a full run (a dispatch with macos_runner=macos-15-intel builds x86_64-apple-darwin
-  # instead), Linux x64 only otherwise (see the top of the file). It does not gate `release`.
+  # The GPUI backend in backends/gpui (its own cargo workspace; docs/backends.md, "GPUI"):
+  # the host laufey_gpui, the NTB1 protocol crate and the self-test's runtime. The protocol's
+  # unit tests, clippy, a release build and `laufey_gpui --self-test`, which loads the test
+  # runtime, drives a native tree through the real C ABI and must print
+  # `b1-result status=pass` and exit 0; its output and the binary's size are uploaded. The
+  # host links no JavaScript engine. macOS arm64, Windows x64 and Linux x64 on a full run (a
+  # dispatch with macos_runner=macos-15-intel builds x86_64-apple-darwin instead), Linux x64
+  # only otherwise (see the top of the file). It does not gate `release`.
   build-gpui:
-    name: gpui spike / ${{ matrix.target }}
+    name: gpui / ${{ matrix.target }}
     needs: runners
     if: ${{ !cancelled() }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.pick] || matrix.os }}
-    # A cold cache clones the fork with its submodules (about 3.5 min) and builds about 380
-    # crates.
     timeout-minutes: 60
     defaults:
       run:
@@ -1477,6 +1475,7 @@ jobs:
       # xkbcommon, wayland, xcb, fontconfig/freetype (font-kit), and Vulkan with Mesa's
       # software driver (lavapipe) so the window renders under Xvfb. ParolNet's
       # desktop-spike.yml list, less its media packages (libvpx, ALSA, clang for V4L2).
+      # libclang: the `laufey` crate binds laufey.h with bindgen.
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -1484,7 +1483,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers \
-            xvfb xauth
+            libclang-dev xvfb xauth
 
       - name: Toolchain (backends/gpui/rust-toolchain.toml)
         working-directory: backends/gpui
@@ -1498,27 +1497,29 @@ jobs:
           workspaces: backends/gpui -> target
           key: ${{ matrix.os }}-${{ matrix.target }}
 
-      # Downloads the target's rusty_v8 static library (.a.gz; .lib.gz on Windows) and
-      # binding from the release rusty_v8.sha256 names, checks both hashes, and unpacks the
-      # library where the v8 build script leaves it (a restored cache can keep the script's
-      # fingerprint without gn_out).
-      - name: Fetch the prebuilt V8
-        run: backends/gpui/build.sh fetch --seed backends/gpui/target/release
+      - name: cargo fmt
+        working-directory: backends/gpui
+        run: cargo fmt --check -p laufey-gpui -p laufey-ntb1 -p laufey-gpui-test-runtime
+
+      # The codec and the retained tree: decoding, every refusal, atomic apply.
+      - name: Protocol tests
+        run: backends/gpui/build.sh test -p laufey-ntb1 --locked
 
       - name: cargo clippy
-        run: backends/gpui/build.sh clippy --release --locked -- -D warnings
+        run: backends/gpui/build.sh clippy --release --workspace --all-targets --locked -- -D warnings
 
       - name: Build
-        run: backends/gpui/build.sh build --release --locked
+        run: backends/gpui/build.sh build --release --workspace --locked
 
-      # The self-test needs a window: Xvfb on Linux, the runner's desktop elsewhere. It fails
-      # by itself (exit 1) when a tree is wrong or nothing comes back within 30 s.
+      # The self-test needs a window: Xvfb on Linux, the runner's desktop elsewhere. The host
+      # finds the test runtime beside itself in target/release. It fails by itself (exit 1)
+      # when a check fails, and after 60 s without a result.
       - name: Self-test
         timeout-minutes: 5
         run: |
-          bin=backends/gpui/target/release/laufey-gpui-spike
+          bin=backends/gpui/target/release/laufey_gpui
           [ -f "$bin.exe" ] && bin="$bin.exe"
-          out=gpui-spike-${{ matrix.target }}
+          out=gpui-${{ matrix.target }}
           mkdir -p "$out"
           wc -c <"$bin" | tr -d ' ' >"$out/binary-size-bytes.txt"
           echo "binary: $bin, $(cat "$out/binary-size-bytes.txt") bytes"
@@ -1533,20 +1534,20 @@ jobs:
           echo "--- stdout"; cat "$out/self-test.stdout.txt"
           echo "--- stderr"; cat "$out/self-test.stderr.txt"
           if [ "$status" -ne 0 ]; then
-            echo "::error::laufey-gpui-spike --self-test exited $status"
+            echo "::error::laufey_gpui --self-test exited $status"
             exit 1
           fi
-          if ! grep -Eq '^b0-result presses=20 counter=20 ' "$out/self-test.stdout.txt"; then
-            echo "::error::no 'b0-result presses=20 counter=20' line in the self-test output"
+          if ! grep -Eq '^b1-result status=pass ' "$out/self-test.stdout.txt"; then
+            echo "::error::no 'b1-result status=pass' line in the self-test output"
             exit 1
           fi
-          grep '^b0-result ' "$out/self-test.stdout.txt" >>"$GITHUB_STEP_SUMMARY"
+          grep '^b1-result ' "$out/self-test.stdout.txt" >>"$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
-          name: gpui-spike-${{ matrix.target }}
-          path: gpui-spike-${{ matrix.target }}/
+          name: gpui-${{ matrix.target }}
+          path: gpui-${{ matrix.target }}/
           if-no-files-found: warn
 
   # The Linux CEF host's three sandbox modes (docs/backends.md, "The Chromium
