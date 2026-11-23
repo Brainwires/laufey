@@ -290,7 +290,7 @@ fn snapshot(window: &Window) -> Option<Json> {
   serde_json::from_str(&NativeTree::snapshot(window)?).ok()
 }
 
-fn node<'a>(snapshot: &'a Json, id: u32) -> Option<&'a Json> {
+fn node(snapshot: &Json, id: u32) -> Option<&Json> {
   snapshot["nodes"]
     .as_array()?
     .iter()
