@@ -50,6 +50,16 @@ case "$backend" in
   *) echo "unknown backend: $backend"; exit 2 ;;
 esac
 [ -n "$bin" ] || { echo "backend binary for '$backend' not found (build it first)"; exit 1; }
+
+# The custom-scheme check fetches a loopback echo server from the
+# laufey-e2e:// page. Chromium's Local Network Access checks treat that as a
+# public origin reaching the local network and hold the request for a
+# permission prompt the CEF host never shows, so the fetch would hang; the
+# check is about the Origin header, not LNA, so switch LNA off for the run.
+args=()
+if [ "$backend" = "cef" ]; then
+  args+=(--disable-features=LocalNetworkAccessChecks)
+fi
 echo "== native-e2e: backend=$backend bin=$bin runtime=$rt =="
 
 is_linux() { [ "$(uname -s)" = "Linux" ]; }
@@ -59,12 +69,12 @@ if [ "$mode" = "--layer1" ]; then
   export LAUFEY_E2E_HOLD=1
   driver="$(ls target/release/native_e2e_driver 2>/dev/null | head -1 || true)"
   [ -n "$driver" ] || { echo "native_e2e_driver not built"; exit 1; }
-  exec xvfb-run -a dbus-run-session -- "$driver" "$bin"
+  exec xvfb-run -a dbus-run-session -- "$driver" "$bin" ${args[@]+"${args[@]}"}
 fi
 
 # Layer 0: run the backend directly. On Linux, headless via Xvfb + a private
 # session bus (some tray impls need a session bus to even initialize).
 if is_linux; then
-  exec xvfb-run -a dbus-run-session -- "$bin"
+  exec xvfb-run -a dbus-run-session -- "$bin" ${args[@]+"${args[@]}"}
 fi
-exec "$bin"
+exec "$bin" ${args[@]+"${args[@]}"}

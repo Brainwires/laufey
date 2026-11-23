@@ -67,6 +67,10 @@ class LaufeySchemeHandler : public CefResourceHandler {
   bool began_ = false;
   bool finished_ = false;
   bool cancelled_ = false;
+  // True while Open() is dispatching to the runtime. A handler that responds
+  // synchronously calls Begin() before Open() returns, when CEF does not yet
+  // accept open_callback_; Open() then reports the request as handled instead.
+  bool in_open_ = false;
 
   // Deferred CEF continuations. When a Read arrives with no body buffered, the
   // caller's output buffer (`pending_data_` / `pending_cap_`, valid until the

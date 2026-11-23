@@ -134,6 +134,8 @@ jobs:
   # known backend limitations under headless CI, tracked as follow-ups:
   #   - winit / linux : the winit backend doesn't support Linux menus and panics
   #                     building a muda menu with no GTK init.
+  #   - webview / linux: WebKitGTK/Xlib isn't thread-safe under the worker-thread
+  #                      runtime (xcb_xlib_threads_sequence_lost).
   #   - cef|webview / windows: CEF's Windows dist extraction and the WebView2
   #                            run are flaky in this job; need hands-on debugging.
   native-e2e:
@@ -148,7 +150,6 @@ jobs:
           - { os: macos-14, backend: cef }
           - { os: windows-latest, backend: winit }
           - { os: windows-latest, backend: webview }
-          - { os: ubuntu-22.04, backend: webview }
           - { os: ubuntu-22.04, backend: cef }
     steps:
       - uses: actions/checkout@v7

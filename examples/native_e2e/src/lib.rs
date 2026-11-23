@@ -887,8 +887,8 @@ fn e2e_main() {
       let backend = std::env::var("LAUFEY_E2E_BACKEND").unwrap_or_default();
       if cfg!(target_os = "linux") && backend == "webview" {
         eprintln!(
-          "[e2e] INFO WebKitGTK serves a scheme registered after the first \
-           window in that window too (fetch: {got:?})"
+          "[e2e] INFO WebKitGTK: scheme registered after the first window, \
+           fetched from it: {got:?}"
         );
       } else {
         check(
