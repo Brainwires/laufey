@@ -83,6 +83,9 @@ pub use background::*;
 mod webview;
 pub use webview::*;
 
+mod native_tree;
+pub use native_tree::*;
+
 // build.rs's target decisions, tested here (a build script has no tests).
 #[cfg(test)]
 #[path = "../build_support.rs"]
@@ -95,7 +98,7 @@ mod build_support_tests;
 /// (`github.com/denoland/laufey/releases/tag/v{VERSION}`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LAUFEY_API_VERSION: u32 = 60;
+pub const LAUFEY_API_VERSION: u32 = 61;
 
 /// Creation-time window style flags for [`Window::new_with_options`].
 /// Mirror the `LAUFEY_WINDOW_FLAG_*` constants in `laufey.h`.
@@ -120,6 +123,9 @@ pub type LaufeyBackendApi = ffi::laufey_backend_api_t;
 pub type TrayEventRaw = ffi::laufey_tray_event_t;
 /// `laufey_pointer_state_t` as the header lays it out (API 60).
 pub type PointerStateRaw = ffi::laufey_pointer_state_t;
+/// `laufey_test_input_t` as the header lays it out (API 38), for a backend
+/// written against this crate's binding of the header.
+pub type TestInputRaw = ffi::laufey_test_input_t;
 
 unsafe impl Send for LaufeyBackendApi {}
 unsafe impl Sync for LaufeyBackendApi {}

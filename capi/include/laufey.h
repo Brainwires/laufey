@@ -18,7 +18,7 @@ extern "C" {
 // records when an entry point appeared; a runtime that enforces the exact
 // match never meets such a backend, but entry points a backend does not
 // implement are still NULL and must be null-checked.
-#define LAUFEY_API_VERSION 60
+#define LAUFEY_API_VERSION 61
 
 // Window handle types for get_window_handle_type
 #define LAUFEY_WINDOW_HANDLE_UNKNOWN 0
@@ -245,6 +245,25 @@ extern "C" {
 // get_pointer_state answers (API 60): where the pointer is on the screen,
 // the buttons held and the app's window under it.
 #define LAUFEY_WINDOW_CAP_POINTER_STATE (1u << 26)
+// A window can host a native tree (API 61): native_tree_commit applies
+// batches to it and native_tree_version says which batch format. See
+// docs/native-tree.md.
+#define LAUFEY_WINDOW_CAP_NATIVE_TREE (1u << 27)
+
+// --- Native tree (API >= 61) -------------------------------------------------
+//
+// native_tree_commit answers.
+#define LAUFEY_NATIVE_TREE_OK 0
+#define LAUFEY_NATIVE_TREE_UNSUPPORTED (-1)  // no native tree on this backend
+#define LAUFEY_NATIVE_TREE_MALFORMED (-2)    // the batch was rejected whole
+#define LAUFEY_NATIVE_TREE_NO_WINDOW (-3)    // no such window
+
+// A native tree event (see set_native_tree_event_handler): `json` is `len`
+// bytes of UTF-8 JSON, one object ({"node":id,"type":...}), not
+// NUL-terminated and valid only for the duration of the call. UI thread.
+typedef void (*laufey_native_tree_event_fn)(void* user_data,
+                                            uint32_t window_id,
+                                            const char* json, size_t len);
 
 // --- Drag and drop (API >= 39) ----------------------------------------------
 //
@@ -3472,6 +3491,50 @@ struct laufey_backend_api {
   // a client learns the pointer's position only inside its own surfaces;
   // Winit). Any thread (it waits for the UI thread).
   bool (*get_pointer_state)(void* backend_data, laufey_pointer_state_t* out);
+
+  // --- Native tree (API >= 61) -----------------------------------------------
+  //
+  // A window can host a retained tree of native primitives (views, text,
+  // images, scroll views, text inputs, pressables) that the runtime mutates
+  // in batches, instead of or without a web page
+  // (LAUFEY_WINDOW_CAP_NATIVE_TREE). The batch format ("NTB1"), the id
+  // tables and the events are in docs/native-tree.md. NULL on every backend
+  // without a native tree renderer (CEF, WebView, Winit); callers must
+  // null-check, and the three are NULL or set together.
+  //
+  // The version of the batch format this backend takes (1), or 0 when it has
+  // no native tree. Any thread.
+  uint32_t (*native_tree_version)(void* backend_data);
+
+  // Apply one batch (`len` bytes at `data`) to window `window_id`'s tree. The
+  // backend copies the bytes before it returns and applies the whole batch
+  // on the UI thread before the next frame; batches of one window apply in
+  // the order they were committed. Returns LAUFEY_NATIVE_TREE_OK once the
+  // batch is taken, _MALFORMED when it does not decode (bad magic, version,
+  // opcode, id or value: nothing of it is applied), _NO_WINDOW for an unknown
+  // window, _UNSUPPORTED where there is no native tree. A batch that decodes
+  // but does not fit the tree it meets on the UI thread (an unknown node, a
+  // cycle) is rejected whole there, the tree stays at its last good state,
+  // and the event handler hears {"node":0,"type":"batchError","seq":...,
+  // "error":"..."}. Any thread.
+  int32_t (*native_tree_commit)(void* backend_data, uint32_t window_id,
+                                const uint8_t* data, size_t len);
+
+  // Register the (single, process-wide) handler for native tree events of
+  // every window; NULL clears it. Fires on the UI thread. Scroll events are
+  // coalesced to one per node per frame.
+  void (*set_native_tree_event_handler)(void* backend_data,
+                                        laufey_native_tree_event_fn handler,
+                                        void* user_data);
+
+  // Read window `window_id`'s tree back as JSON, for self-tests:
+  //   {"seq": last applied batch's seq, "root": id, "nodes": [{"id", "kind",
+  //    "parent", "children": [ids], "text"?: string, "listen": mask,
+  //    "bounds"?: [x, y, width, height] (window coordinates, of the last
+  //    frame, for the nodes the backend measured)}]}
+  // or NULL for an unknown window or where there is no native tree. Free
+  // with string_free. Any thread (it waits for the UI thread).
+  char* (*native_tree_snapshot)(void* backend_data, uint32_t window_id);
 };
 
 #ifdef __cplusplus

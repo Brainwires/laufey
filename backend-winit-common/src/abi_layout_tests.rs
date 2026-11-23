@@ -281,7 +281,11 @@ fn vtable_layout_matches_the_header() {
     webview_permission_respond,
     menu_snapshot,
     get_window_z_order,
-    get_pointer_state
+    get_pointer_state,
+    native_tree_version,
+    native_tree_commit,
+    set_native_tree_event_handler,
+    native_tree_snapshot
   );
   assert_eq!(
     size_of::<crate::LaufeyPointerState>(),
